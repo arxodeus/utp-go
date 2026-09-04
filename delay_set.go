@@ -22,6 +22,7 @@ type timeWheel[P any] struct {
 	maxDelay         time.Duration
 	handleExpireFunc expireFunc[P]
 	mu               sync.RWMutex
+	stopOnce         sync.Once
 }
 
 // 0.25s                   8
@@ -86,21 +87,29 @@ func (tw *timeWheel[P]) remove(key any) {
 }
 
 func (tw *timeWheel[P]) run() {
+	var expired []*timeWheelItem[P]
 	for {
 		select {
 		case <-tw.ticker.C:
+			// Collect the expired items under the lock, then dispatch them
+			// with the lock released. handleExpireFunc blocks (it hands the
+			// packet to the connection's event loop over a channel), and that
+			// same event loop calls put/remove/retain, which need this lock.
+			// Running the callback under the lock deadlocks the connection as
+			// soon as the timeout channel fills up.
+			expired = expired[:0]
 			tw.mu.Lock()
 			currentSlot := tw.slots[tw.current]
-			// clear current slot
-			if len(currentSlot) > 0 {
-				for key, item := range currentSlot {
-					// process expirations here
-					delete(currentSlot, key)
-					tw.handleExpireFunc(key, item.value)
-				}
+			for key, item := range currentSlot {
+				delete(currentSlot, key)
+				expired = append(expired, item)
 			}
 			tw.current = (tw.current + 1) % tw.slotNum
 			tw.mu.Unlock()
+
+			for _, item := range expired {
+				tw.handleExpireFunc(item.key, item.value)
+			}
 		case <-tw.stopped:
 			return
 		}
@@ -117,7 +126,12 @@ func (tw *timeWheel[P]) Len() int {
 	return length
 }
 
+// stop halts the wheel. It is safe to call more than once: Close on the
+// owning socket is expected to be idempotent, and a second close of the
+// stopped channel would panic.
 func (tw *timeWheel[P]) stop() {
-	tw.ticker.Stop()
-	close(tw.stopped)
+	tw.stopOnce.Do(func() {
+		tw.ticker.Stop()
+		close(tw.stopped)
+	})
 }

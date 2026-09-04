@@ -80,7 +80,20 @@ func genHash(connId *ConnectionId) string {
 	return hex.EncodeToString(bytes)
 }
 
+// Hash returns the key this connection is tracked under.
+//
+// The value is cached by NewConnectionId. ConnectionId is exported with
+// exported fields, so callers legitimately build one as a struct literal --
+// and such a value has an empty cached hash. Returning that empty string made
+// every literal-built ConnectionId hash to "" and therefore collide with
+// every other one, silently breaking connection lookup. Fall back to
+// computing it rather than handing back a key that is wrong.
+//
+// Prefer NewConnectionId: it caches, and this fallback does not.
 func (id *ConnectionId) Hash() string {
+	if id.hash == "" {
+		return genHash(id)
+	}
 	return id.hash
 }
 

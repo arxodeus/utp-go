@@ -214,8 +214,12 @@ func TestCloseErrorsIfAllPacketsDropped(t *testing.T) {
 	// Wait for send to complete
 	sendWg.Wait()
 
-	// Try to close stream with timeout
-	closeCtx, cancel := context.WithTimeout(ctx, expectedIdleTimeout)
+	// Try to close stream with timeout.
+	// The budget must exceed the connection's own idle timeout: Close waits
+	// for the event loop, which cannot exit until the idle timer fires at
+	// expectedIdleTimeout. Giving Close exactly that long was a dead heat the
+	// test always lost. The rest of this file already uses a 2x budget.
+	closeCtx, cancel := context.WithTimeout(ctx, expectedIdleTimeout*2)
 	defer cancel()
 
 	done := make(chan struct{}, 1)

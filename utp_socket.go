@@ -22,6 +22,9 @@ const (
 
 var (
 	ErrConnect = errors.New("utp_socket: connect error")
+	// ErrAcceptTimedOut is returned by Accept/AcceptWithCid when no matching
+	// SYN arrived within AWAITING_CONNECTION_TIMEOUT.
+	ErrAcceptTimedOut = errors.New("utp_socket: timed out waiting for incoming connection")
 )
 
 type PeerInfo interface {
@@ -100,14 +103,33 @@ type UtpSocket struct {
 	incomingConns            *syncMap[*IncomingPacket]
 	incomingConnsExpirations *timeWheel[*IncomingPacket]
 	socket                   Conn
+	closeOnce                sync.Once
 	readNextCh               chan struct{}
 	incomingBuf              chan *IncomingPacketRaw
 }
+
+// DefaultSocketBufferSize is the size requested for the underlying UDP
+// socket's send and receive buffers.
+//
+// A single readLoop goroutine drains the socket, so anything the kernel drops
+// before it gets there is invisible packet loss that uTP then has to recover
+// from with retransmits. At the OS default (~208 KiB on Linux) a few hundred
+// concurrent connections overflow the receive queue and handshakes start
+// failing outright. The kernel silently clamps this to net.core.rmem_max, so
+// requesting more than the system allows is harmless.
+const DefaultSocketBufferSize = 4 * 1024 * 1024
 
 func Bind(ctx context.Context, network string, addr *net.UDPAddr, logger log.Logger) (*UtpSocket, error) {
 	conn, err := net.ListenUDP(network, addr)
 	if err != nil {
 		return nil, err
+	}
+	// Best effort: a smaller buffer costs throughput but is not fatal.
+	if err := conn.SetReadBuffer(DefaultSocketBufferSize); err != nil && logger != nil {
+		logger.Debug("could not enlarge UDP read buffer", "err", err)
+	}
+	if err := conn.SetWriteBuffer(DefaultSocketBufferSize); err != nil && logger != nil {
+		logger.Debug("could not enlarge UDP write buffer", "err", err)
 	}
 	return WithSocket(ctx, &UdpConn{conn}, logger), nil
 }
@@ -121,6 +143,13 @@ func WithSocket(ctx context.Context, socket Conn, logger log.Logger) *UtpSocket 
 	awaitingMap := newSyncMap[*Accept]()
 	handleAwaitExpirations := func(key any, accReq *Accept) {
 		awaitingMap.remove(key)
+		// Tell the caller. Dropping the request silently left AcceptWithCid
+		// blocked on accReq.stream forever whenever the caller's own context
+		// had no deadline.
+		select {
+		case accReq.stream <- &StreamResult{err: ErrAcceptTimedOut}:
+		default:
+		}
 	}
 	awaitExpirations := newTimeWheel[*Accept](2*time.Second, 20, handleAwaitExpirations)
 
@@ -431,11 +460,16 @@ func (s *UtpSocket) NumConnections() int {
 	return len(s.conns)
 }
 
+// Close shuts the socket down. It is idempotent: `defer sock.Close()`
+// alongside an explicit Close is ordinary Go, and the second call used to
+// panic closing an already-closed channel.
 func (s *UtpSocket) Close() {
-	s.cancel()
-	s.sendShutdownEventToConns()
-	s.awaitingExpirations.stop()
-	s.incomingConnsExpirations.stop()
+	s.closeOnce.Do(func() {
+		s.cancel()
+		s.sendShutdownEventToConns()
+		s.awaitingExpirations.stop()
+		s.incomingConnsExpirations.stop()
+	})
 }
 
 func (s *UtpSocket) Cid(peer ConnectionPeer, isInitiator bool) *ConnectionId {
@@ -495,6 +529,9 @@ func (s *UtpSocket) Accept(ctx context.Context, config *ConnectionConfig) (*UtpS
 		if streamRes == nil {
 			return nil, fmt.Errorf("stream creation failed")
 		}
+		if streamRes.err != nil {
+			return nil, streamRes.err
+		}
 		return streamRes.stream, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -522,6 +559,9 @@ func (s *UtpSocket) AcceptWithCid(ctx context.Context, cid *ConnectionId, config
 	case streamRes := <-accept.stream:
 		if streamRes == nil {
 			return nil, fmt.Errorf("stream creation failed")
+		}
+		if streamRes.err != nil {
+			return nil, streamRes.err
 		}
 		return streamRes.stream, nil
 	case <-ctx.Done():
@@ -689,11 +729,22 @@ func (s *UtpSocket) putConnStream(key string, streamCh chan *streamEvent) {
 }
 
 func (s *UtpSocket) sendShutdownEventToConns() {
+	// Snapshot the channels rather than sending under the lock: a blocking
+	// send to one wedged connection would otherwise hold connsMutex and stall
+	// packet delivery for every other connection on this socket.
 	s.connsMutex.RLock()
-	defer s.connsMutex.RUnlock()
+	channels := make([]chan *streamEvent, 0, len(s.conns))
 	for _, ch := range s.conns {
-		ch <- &streamEvent{
-			Type: streamShutdown,
+		channels = append(channels, ch)
+	}
+	s.connsMutex.RUnlock()
+
+	for _, ch := range channels {
+		select {
+		case ch <- &streamEvent{Type: streamShutdown}:
+		default:
+			// The connection's queue is full; it is already being torn down
+			// by the cancelled socket context.
 		}
 	}
 }

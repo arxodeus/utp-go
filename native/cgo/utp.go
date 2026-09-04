@@ -1,3 +1,12 @@
+//go:build utp_cgo_harness
+
+// Package main is a differential-testing harness that links the C libutp.
+// It needs utp_lib.h and libutp_lib.a, which are not vendored in this
+// repository, so it is behind a build tag: without one `go build ./...`
+// and `go test ./...` fail for the whole module on a clean checkout.
+//
+// Build it with: go build -tags utp_cgo_harness ./native/cgo
+
 package main
 
 // #cgo LDFLAGS: -L${SRCDIR}/lib -lutp_lib

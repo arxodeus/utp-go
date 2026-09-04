@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"time"
 
@@ -138,6 +137,9 @@ type connection struct {
 	writable         chan struct{}
 	latestTimeout    *time.Time
 	synState         *packet
+	// readsTerminated records that the single end-of-stream marker has been
+	// handed to the reader. Readers block on c.reads until they see it.
+	readsTerminated bool
 }
 
 func newConnection(
@@ -348,9 +350,12 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 				c.logger.Trace("uTP conn closing...", "err", c.state.Err, "c.cid.Send", c.cid.Send, "c.cid.Recv", c.cid.Recv)
 			}
-			if !c.eof() {
-				c.processReads()
-			}
+			// Always drain and terminate the read side here. The previous
+			// `if !c.eof()` guard was inverted in effect: eof() is true by
+			// definition once stateType is ConnClosed, so processReads was
+			// never called and the end-of-stream marker was never delivered.
+			// Readers reaching this path blocked in ReadToEOF forever.
+			c.processReads()
 			c.processWrites(time.Now())
 			if c.state.RecvBuf != nil {
 				c.state.RecvBuf.close()
@@ -552,40 +557,66 @@ func (c *connection) onWrite(writeReq *queuedWrite) {
 }
 
 func (c *connection) processReads() {
-	var recvBuf *receiveBuffer
-	switch c.state.stateType {
-	case ConnConnecting:
-		return
-	case ConnConnected:
-		recvBuf = c.state.RecvBuf
-	case ConnClosed:
-		result := &readOrWriteResult{
-			Err: c.state.Err,
-		}
-		c.reads <- result
-		c.logger.Debug("read eof...")
+	if c.state.stateType == ConnConnecting {
 		return
 	}
+	recvBuf := c.state.RecvBuf
 
 	currentTime := time.Now()
 	if recvBuf != nil && c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 		c.logger.Trace("read data saving in the recvBuf, start...", "available", recvBuf.Available(), "isEmpty", recvBuf.IsEmpty())
 	}
+	// Drain contiguous data even once the connection is closed: bytes that
+	// arrived before teardown are still owed to the reader.
 	for recvBuf != nil && !recvBuf.IsEmpty() {
 		buf := make([]byte, c.config.MaxPacketSize)
 		n := recvBuf.Read(buf)
 		if n == 0 {
 			break
 		}
-		c.reads <- &readOrWriteResult{Data: buf, Len: n}
+		if !c.sendRead(&readOrWriteResult{Data: buf, Len: n}) {
+			return
+		}
 	}
 	if recvBuf != nil && c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 		c.logger.Trace("read data saving in the recvBuf, end...", "duration", time.Since(currentTime), "available", recvBuf.Available(), "isEmpty", recvBuf.IsEmpty())
 	}
 
-	// If we have reached eof, send an empty resultCh to all pending reads
+	// If we have reached eof, hand the reader the end-of-stream marker.
 	if c.eof() {
-		c.reads <- &readOrWriteResult{Err: io.EOF, Data: make([]byte, 0)}
+		c.deliverTerminalRead()
+	}
+}
+
+// deliverTerminalRead hands the reader the single end-of-stream marker: a
+// result with an empty Data slice, which is what UtpStream.ReadToEOF treats as
+// the end of the stream. It is delivered at most once.
+//
+// Every path that closes the connection must reach this, including idle
+// timeout, RESET and a locally-initiated close. A reader blocks on c.reads
+// forever if the marker never arrives.
+func (c *connection) deliverTerminalRead() {
+	if c.readsTerminated {
+		return
+	}
+	c.readsTerminated = true
+	// A clean end-of-stream reports no error, matching io.ReadAll: ReadToEOF
+	// reads to EOF by definition, so reaching it is success. Only an abnormal
+	// close (RESET, idle timeout) carries an error.
+	err := c.state.Err
+	c.logger.Debug("read eof...", "err", err)
+	c.sendRead(&readOrWriteResult{Err: err, Data: make([]byte, 0)})
+}
+
+// sendRead delivers a read result, giving up if the connection context is
+// cancelled. Without the context arm a reader that has already gone away
+// wedges the event loop permanently.
+func (c *connection) sendRead(res *readOrWriteResult) bool {
+	select {
+	case c.reads <- res:
+		return true
+	case <-c.ctx.Done():
+		return false
 	}
 }
 
@@ -761,7 +792,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	switch packet.Header.PacketType {
 	case st_syn:
 		if c.synState == nil {
-			// Teh synState is generated at the beginning of the eventLoop
+			// The synState is generated at the beginning of the eventLoop
 			c.logger.Warn("missing SYN STATE")
 			if statePacket := c.statePacket(); statePacket != nil {
 				c.synState = statePacket
@@ -771,6 +802,19 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 				resetPacket := NewPacketBuilder(st_reset, packet.Header.ConnectionId, uint32(time.Now().UnixMicro()), 100_000, randSeqNum).Build()
 				c.socketEvents <- newOutgoingSocketEvent(resetPacket, c.cid)
 			}
+		} else {
+			// A SYN for a connection we have already accepted is the initiator
+			// retransmitting because our SYN-ACK was lost. Re-send the same
+			// SYN-ACK: nothing else ever retransmits it, so dropping this
+			// duplicate silently strands the peer until it gives up.
+			// libutp does the same -- utp_internal.cpp:2549 acks a duplicate
+			// SYN on an already-established connection rather than ignoring it.
+			if c.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+				c.logger.Debug("re-sending SYN-ACK for retransmitted SYN",
+					"dst.peer", c.cid.Peer, "cid.send", c.cid.Send, "cid.recv", c.cid.Recv,
+					"seqNum", c.synState.Header.SeqNum, "ackNum", c.synState.Header.AckNum)
+			}
+			c.socketEvents <- newOutgoingSocketEvent(c.synState, c.cid)
 		}
 
 	case st_data, st_fin:

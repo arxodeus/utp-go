@@ -6,19 +6,13 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
-	"math"
 	"net"
-	"net/http"
-	_ "net/http/pprof"
 	"os"
-	"runtime/pprof"
-	"runtime/trace"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/felixge/fgprof"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	utp "github.com/zen-eth/utp-go"
@@ -30,21 +24,12 @@ const (
 )
 
 func TestManyConcurrentTransfers(t *testing.T) {
-	http.DefaultServeMux.Handle("/debug/fgprof", fgprof.Handler())
-	go func() {
-		addr := "localhost:6070"
-		log.Info(http.ListenAndServe(addr, nil).Error())
-	}()
-	// // 设置最大线程数为CPU核心数
-	//runtime.GOMAXPROCS(8)
-	traceFile, _ := os.Create("concurrency_trace.prof")
-	_ = trace.Start(traceFile)
-	defer trace.Stop()
-
-	// // CPU 分析
-	cpuFile, _ := os.Create("concurrency_cpu.prof")
-	_ = pprof.StartCPUProfile(cpuFile)
-	defer pprof.StopCPUProfile()
+	// NOTE: this test used to register an fgprof handler on
+	// http.DefaultServeMux, start an HTTP server on a fixed port, and write
+	// CPU/trace profiles into the source tree. TestManyTimeHugeData registered
+	// the same mux pattern, so running the package's tests together panicked
+	// with "multiple registrations for /debug/fgprof". Profiling belongs
+	// behind `go test -cpuprofile`, not baked into the test.
 
 	// profile name: allocs
 	// profile name: block
@@ -150,88 +135,103 @@ func TestManyConcurrentTransfers(t *testing.T) {
 		numTransfers, elapsed, transferRate)
 }
 
+// TestUdpTransfer performs a single large transfer over uTP carried on real
+// UDP sockets -- the path a BitTorrent client uses.
+//
+// NOTE: this test previously did not touch the uTP library at all. It opened
+// two net.UDPConns and blasted raw datagrams between them, and its send loop
+// never advanced `offset` (the increment was commented out), so it looped
+// forever and the test could only ever end at the timeout. It was a scratch
+// benchmark of UDP loopback, not a test of this package. It has been rewritten
+// to exercise what its name claims. See KNOWN-LIMITATIONS.md.
 func TestUdpTransfer(t *testing.T) {
+	handler := log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelCrit, false)
+	logger := log.NewLogger(handler)
+
 	recvAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3600}
-	recvConn, err := net.ListenUDP("udp", recvAddr)
-	require.NoError(t, err, "Failed to bind recv socket")
 	sendAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3601}
-	sendConn, err := net.ListenUDP("udp", sendAddr)
+
+	ctx := context.Background()
+	recvLink, err := utp.Bind(ctx, "udp4", recvAddr, logger)
+	require.NoError(t, err, "Failed to bind recv socket")
+	defer recvLink.Close()
+	sendLink, err := utp.Bind(ctx, "udp4", sendAddr, logger)
 	require.NoError(t, err, "Failed to bind send socket")
-	//sendConn.SetWriteBuffer()
+	defer sendLink.Close()
 
-	var wg sync.WaitGroup
-	hugeData := bytes.Repeat([]byte{0xa5}, 55*1024*1024)
+	hugeData := make([]byte, 16*1024*1024)
+	_, err = io.ReadFull(rand.Reader, hugeData)
+	require.NoError(t, err)
 	length := len(hugeData)
+
+	connConfig := utp.NewConnectionConfig()
+	const initiatorCid, responderCid = 3700, 3701
+	recvCid := utp.NewConnectionId(utp.NewUdpPeer(sendAddr), responderCid, initiatorCid)
+	sendCid := utp.NewConnectionId(utp.NewUdpPeer(recvAddr), initiatorCid, responderCid)
+
 	start := time.Now()
+	var wg sync.WaitGroup
 	wg.Add(2)
+
+	var recvErr error
+	var recvBuf []byte
 	go func() {
 		defer wg.Done()
-		recvBuf := make([]byte, math.MaxUint16)
-		startIndex := 0
-		for startIndex < length {
-			n, addr, err := recvConn.ReadFrom(recvBuf)
-			require.Equal(t, sendAddr.String(), addr.String(), "addr mismatch")
-			require.NoError(t, err, "Failed to recv data")
-			startIndex += n
-			//time.Sleep(2 * time.Millisecond)
-			//t.Logf("recv %d bytes, all %d", n, startIndex)
+		stream, err := recvLink.AcceptWithCid(ctx, recvCid, connConfig)
+		if err != nil {
+			recvErr = fmt.Errorf("accept: %w", err)
+			return
+		}
+		defer stream.Close()
+		buf := make([]byte, 0, length)
+		n, err := stream.ReadToEOF(ctx, &buf)
+		if err != nil && err != io.EOF {
+			recvErr = fmt.Errorf("read: %w", err)
+			return
+		}
+		if n != length {
+			recvErr = fmt.Errorf("short read: got %d want %d", n, length)
+			return
+		}
+		recvBuf = buf
+	}()
+
+	var sendErr error
+	go func() {
+		defer wg.Done()
+		stream, err := sendLink.ConnectWithCid(ctx, sendCid, connConfig)
+		if err != nil {
+			sendErr = fmt.Errorf("connect: %w", err)
+			return
+		}
+		defer stream.Close()
+		n, err := stream.Write(ctx, hugeData)
+		if err != nil {
+			sendErr = fmt.Errorf("write: %w", err)
+			return
+		}
+		if n != length {
+			sendErr = fmt.Errorf("short write: got %d want %d", n, length)
 		}
 	}()
 
-	go func() {
-		defer wg.Done()
-		offset := 0
-		const onceSize = 980
-		const batchCount = 64
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(120 * time.Second):
+		t.Fatal("transfer did not complete within 120s")
+	}
 
-		for offset < length {
-			// 每批发送batchCount个包
-			for i := 0; i < batchCount && offset < length; i++ {
-				endIndex := offset + onceSize
-				if endIndex > length {
-					endIndex = length
-				}
-
-				n, err := sendConn.WriteToUDP(hugeData[offset:endIndex], recvAddr)
-				require.NoError(t, err, "Failed to send data")
-				require.Equal(t, endIndex-offset, n, "Failed to send all data")
-				//t.Logf("send %d bytes, all %d", endIndex-offset, offset+n)
-				//offset += n
-				//time.Sleep(2 * time.Millisecond)
-				//t.Logf("send %d bytes, all %d", endIndex-offset, offset)
-			}
-
-			// 每批数据发送完后短暂休眠
-			//time.Sleep(time.Microsecond * 75)
-		}
-
-		//for offset < length {
-		//	startIndex := offset
-		//	endIndex := offset + onceSize
-		//	if endIndex > length {
-		//		endIndex = length
-		//	}
-		//	n, err := sendConn.WriteToUDP(hugeData[startIndex:endIndex], recvAddr)
-		//
-		//	require.Equal(t, endIndex-startIndex, n, "Failed to send all data")
-		//	offset = endIndex
-		//	if offset%(1024*1024) == 0 { // 每发送1MB检查一次
-		//		time.Sleep(time.Millisecond) // 给接收端处理时间
-		//	}
-		//time.Sleep(2 * time.Millisecond)
-		//t.Logf("send %d bytes, all %d", endIndex-startIndex, offset)
-		//}
-
-	}()
-	wg.Wait()
+	require.NoError(t, sendErr)
+	require.NoError(t, recvErr)
+	require.True(t, bytes.Equal(hugeData, recvBuf), "received data does not match sent data")
 
 	elapsed := time.Since(start)
 	megabytesSent := float64(length) / 1_000_000.0
-	megabitsSent := megabytesSent * 8.0
-	transferRate := megabitsSent / elapsed.Seconds()
-
+	transferRate := megabytesSent * 8.0 / elapsed.Seconds()
 	t.Logf(
-		"finished single large transfer test with %.0f MB, in %v, at a rate of %.1f Mbps",
+		"finished single large transfer test with %.0f MB, in %v, at a rate of %.1f Mbps (loopback)",
 		megabytesSent,
 		elapsed,
 		transferRate,
@@ -239,10 +239,6 @@ func TestUdpTransfer(t *testing.T) {
 }
 
 func TestManyTimeHugeData(t *testing.T) {
-	http.DefaultServeMux.Handle("/debug/fgprof", fgprof.Handler())
-	go func() {
-		t.Log(http.ListenAndServe(":6060", nil))
-	}()
 	//cpuFile, _ := os.Create("cpu.prof")
 	//pprof.StartCPUProfile(cpuFile)
 	//defer pprof.StopCPUProfile()
@@ -262,10 +258,6 @@ func OneHugeDataTransfer(t *testing.T, i int) {
 	//trace.Start(traceFile)
 	//defer trace.Stop()
 	// 内存分析
-	memFile, _ := os.Create("once_mem.prof")
-	defer func() {
-		pprof.WriteHeapProfile(memFile)
-	}()
 
 	// 创建50MB的测试数据
 	//hugeData := bytes.Repeat([]byte{0xf0}, 1024*1024*15)
