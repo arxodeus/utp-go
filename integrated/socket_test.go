@@ -117,7 +117,12 @@ func TestManyConcurrentTransfers(t *testing.T) {
 			data,
 			&wg)
 	}
-	timeoutCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	budget := 2 * time.Minute
+	if raceEnabled {
+		// The race detector costs roughly an order of magnitude here.
+		budget = 10 * time.Minute
+	}
+	timeoutCtx, cancel := context.WithTimeout(ctx, budget)
 	go func() {
 		// Wait for all transfers in a separate goroutine
 		wg.Wait()
@@ -219,8 +224,8 @@ func TestUdpTransfer(t *testing.T) {
 	go func() { wg.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(120 * time.Second):
-		t.Fatal("transfer did not complete within 120s")
+	case <-time.After(transferBudget()):
+		t.Fatalf("transfer did not complete within %v", transferBudget())
 	}
 
 	require.NoError(t, sendErr)
@@ -467,4 +472,12 @@ func initiateTransfer(
 			"sent wrong number of bytes: got %d, want %d", n, len(data))
 		stream.Close()
 	}()
+}
+
+// transferBudget is the wall-clock allowance for a single large transfer.
+func transferBudget() time.Duration {
+	if raceEnabled {
+		return 10 * time.Minute
+	}
+	return 120 * time.Second
 }

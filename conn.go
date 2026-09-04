@@ -164,8 +164,9 @@ func newConnection(
 			SynAck: synAck,
 		}
 
-		now := time.Now().UnixMicro()
-		peerTsDiff = time.Duration(now-syn.Header.Timestamp) * time.Microsecond
+		// uint32 wrapping arithmetic: the SYN's timestamp is a uint32 wire
+		// value, so it cannot be subtracted from a full-width int64 clock.
+		peerTsDiff = timestampDiffMicros(NowMicro(), uint32(syn.Header.Timestamp))
 		peerRecvWindow = syn.Header.WndSize
 	} else {
 		synNum := RandomUint16()
@@ -740,11 +741,26 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 			"packet.windowSize", packet.Header.WndSize,
 			"now", now)
 	}
-	nowMicros := time.Now().UnixMicro()
 	c.peerRecvWindow = packet.Header.WndSize
 
-	// Cap the diff to handle clock differences between machines
-	peerTsDiff := time.Microsecond * time.Duration(nowMicros-int64(packet.Header.TimestampDiff))
+	// Measure how long ago the peer stamped this packet. That value is what we
+	// echo back in timestamp_difference_microseconds, and it is the peer's
+	// only delay signal for congestion control.
+	//
+	// This used to subtract the packet's timestamp_difference field from our
+	// own full-width wall clock: the wrong field, and mixing an int64 epoch
+	// clock with a uint32 wire value. The result was ~1.79e15 microseconds on
+	// every packet, which the cap below then pinned to exactly 1 second -- so
+	// every packet we sent advertised a constant 1,000,000 us delay and the
+	// peer's LEDBAT controller was fed a constant. It had no delay signal at
+	// all. See KNOWN-LIMITATIONS.md.
+	//
+	// libutp computes reply_micro the same way, as a uint32 subtraction of the
+	// packet's timestamp from the current time (utp_internal.cpp, reply_micro
+	// assignment in UTP_ProcessIncoming).
+	peerTsDiff := timestampDiffMicros(NowMicro(), uint32(packet.Header.Timestamp))
+	// Cap absurd values, which mean the peer's clock is unusable rather than
+	// that the link is slow.
 	if peerTsDiff > c.config.MaxIdleTimeout {
 		c.peerTsDiff = time.Second
 	} else {

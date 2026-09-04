@@ -1,0 +1,28 @@
+--- utp_internal.cpp
+707c707
+< void send_to_addr(utp_context *ctx, const byte *p, size_t len, const PackedSockAddr &addr, int flags = 0)
+---
+> void send_to_addr(utp_context *ctx, utp_socket *socket, const byte *p, size_t len, const PackedSockAddr &addr, int flags = 0)
+712c712
+< 	utp_call_sendto(ctx, NULL, p, len, (const struct sockaddr *)&to, tolen, flags);
+---
+> 	utp_call_sendto(ctx, socket, p, len, (const struct sockaddr *)&to, tolen, flags);
+767c767
+< 	send_to_addr(ctx, b, length, addr, flags);
+---
+> 	send_to_addr(ctx, this, b, length, addr, flags);
+864c864
+< 	send_to_addr(ctx, (const byte*)&pf1, len, addr);
+---
+> 	send_to_addr(ctx, NULL, (const byte*)&pf1, len, addr);
+--- utp_internal.h
+79c79
+< 		memset(this, 0, sizeof(*this));
+---
+> 		memset((void*)this, 0, sizeof(*this));
+--- utp.h
+29a30,33
+> #ifdef _WIN32
+> #include <stdint.h>
+> #endif
+> 

@@ -103,9 +103,13 @@ type UtpSocket struct {
 	incomingConns            *syncMap[*IncomingPacket]
 	incomingConnsExpirations *timeWheel[*IncomingPacket]
 	socket                   Conn
-	closeOnce                sync.Once
-	readNextCh               chan struct{}
-	incomingBuf              chan *IncomingPacketRaw
+	// ownsSocket is true when this UtpSocket created the underlying Conn
+	// (via Bind) and is therefore responsible for closing it. A Conn handed
+	// in through WithSocket belongs to the caller.
+	ownsSocket  bool
+	closeOnce   sync.Once
+	readNextCh  chan struct{}
+	incomingBuf chan *IncomingPacketRaw
 }
 
 // DefaultSocketBufferSize is the size requested for the underlying UDP
@@ -131,7 +135,9 @@ func Bind(ctx context.Context, network string, addr *net.UDPAddr, logger log.Log
 	if err := conn.SetWriteBuffer(DefaultSocketBufferSize); err != nil && logger != nil {
 		logger.Debug("could not enlarge UDP write buffer", "err", err)
 	}
-	return WithSocket(ctx, &UdpConn{conn}, logger), nil
+	sock := WithSocket(ctx, &UdpConn{conn}, logger)
+	sock.ownsSocket = true
+	return sock, nil
 }
 
 func WithSocket(ctx context.Context, socket Conn, logger log.Logger) *UtpSocket {
@@ -264,12 +270,25 @@ func (s *UtpSocket) writeLoop() {
 
 func (s *UtpSocket) eventLoop() {
 	for {
+		// Serve pending accept requests before incoming packets.
+		//
+		// This priority used to be the other way round: the loop drained
+		// incomingBuf first and only looked at the accept channels when no
+		// packet was queued. Under load incomingBuf is never empty, so accepts
+		// starved completely and expired after AWAITING_CONNECTION_TIMEOUT --
+		// with hundreds of concurrent connections, AcceptWithCid failed on
+		// connections whose SYN had already arrived and was sitting in the
+		// incoming-conns map.
+		//
+		// Accepts are safe to prefer: they are driven by the application, at
+		// most one per connection, and handling one is a map lookup. Packets
+		// are the high-volume side and cannot be starved by them.
 		select {
-		case incomingRaw := <-s.incomingBuf:
-			if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-				s.logger.Trace("will handle a packet from remote", "s.incomingBuf.len", len(s.incomingBuf))
-			}
-			s.handleIncomingBuf(incomingRaw)
+		case acceptWithCid := <-s.acceptsWithCidCh:
+			s.handleNewAcceptWithCidEvent(acceptWithCid)
+			continue
+		case accept := <-s.accepts:
+			s.handleNewAcceptEvent(accept)
 			continue
 		default:
 		}
@@ -469,6 +488,16 @@ func (s *UtpSocket) Close() {
 		s.sendShutdownEventToConns()
 		s.awaitingExpirations.stop()
 		s.incomingConnsExpirations.stop()
+		// Close the underlying socket when we opened it. Without this the UDP
+		// port stayed bound for the life of the process and readLoop stayed
+		// parked in ReadFrom, which cancelling the context does not interrupt
+		// -- an fd and goroutine leak, and the reason two runs of the same
+		// test in one process failed with "address already in use".
+		if s.ownsSocket {
+			if err := s.socket.Close(); err != nil {
+				s.logger.Debug("error closing underlying socket", "err", err)
+			}
+		}
 	})
 }
 
