@@ -84,9 +84,35 @@ while in `CS_SYN_SENT`, which works out to three transmissions of the SYN.
 This implementation counts transmissions directly, so the equivalent default
 is `MaxConnAttempts: 3`.
 
-The SYN retransmission *schedule* still differs: this implementation uses
-`InitialTimeout * 1.5^attempts` where libutp doubles. Not yet reconciled --
-recorded here so it is not mistaken for agreement.
+The SYN retransmission *schedule* now matches: the timeout doubles from its
+current value on each attempt, starting at 3000 ms, as libutp does
+(`utp_internal.cpp:1179` applied at `:1203`, initial value at `:2762`). The
+only addition is a cap at `MaxTimeout`, which libutp does not have because its
+own two-timeout limit bounds the backoff; it is unreachable at the default
+`MaxConnAttempts` and only matters if a caller raises it.
+
+## Unreconciled differences
+
+Real differences from libutp, found but not yet decided. Listed separately
+from the deliberate deviations above so they are not mistaken for choices.
+
+### `MinTimeout` floor is 500 ms; libutp's is 1000 ms
+
+Both compute the RTO the same way -- `max(rtt + rtt_var * 4, floor)` -- but
+libutp's floor is 1000 ms (`utp_internal.cpp:1380`) against 500 ms here. A
+lower floor means faster loss recovery and more spurious retransmissions on
+paths with an RTT near the floor.
+
+### Initial `rtt_var` is 0; libutp's is 800
+
+libutp starts `rtt_var` at 800 (`utp_internal.cpp:2610`), which inflates the
+first few RTO computations until the estimate settles. Starting from zero
+makes the first RTO after an ack shorter than libutp's.
+
+Both of these affect only how fast this implementation retransmits, not what
+it puts on the wire, so neither is an interoperability problem. They are worth
+reconciling before any M5 congestion measurement is taken as comparable to
+libutp's.
 
 ## Not a deviation: LEDBAT++
 

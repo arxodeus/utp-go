@@ -37,6 +37,8 @@ const DefaultWindowSize = 1024 * 1024
 const DefaultBufferSize = 1024 * 1024
 
 var (
+	// ErrEmptyDataPayload is no longer returned: a zero-length ST_DATA is
+	// accepted, as libutp accepts it. Retained because it is exported.
 	ErrEmptyDataPayload  = errors.New("empty data payload")
 	ErrConnInvalidAckNum = errors.New("invalid ack number")
 	ErrInvalidFin        = errors.New("invalid fin")
@@ -181,7 +183,10 @@ type connection struct {
 	// retransmitCount is consecutive retransmission timeouts with no
 	// intervening ack. libutp calls this retransmit_count.
 	retransmitCount int
-	lastMetricsAt   time.Time
+	// synTimeout is the current retransmission timeout for the SYN, doubled
+	// on each attempt. libutp calls this retransmit_timeout.
+	synTimeout    time.Duration
+	lastMetricsAt time.Time
 }
 
 func newConnection(
@@ -312,7 +317,8 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			c.logger.Trace("put a initial syn packet to delay map", "socketEvents.len", len(c.socketEvents), "dst.peer", c.cid.Peer, "synSeqNum", synSeqNum)
 		}
-		c.armRetransmit(synPkt, c.config.InitialTimeout)
+		c.synTimeout = c.config.InitialTimeout
+		c.armRetransmit(synPkt, c.synTimeout)
 
 		c.endpoint.Attempts = 1
 	} else {
@@ -820,10 +826,23 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 			}
 			c.endpoint.Attempts += 1
 
-			// Double previous timeout for exponential backoff on each attempt
-			timeout := c.config.InitialTimeout * time.Duration(math.Pow(1.5, float64(c.endpoint.Attempts)))
+			// Double the previous timeout, which is what libutp does on every
+			// retransmission timeout: `retransmit_timeout * 2`
+			// (utp_internal.cpp:1179, applied at :1203). This previously
+			// computed InitialTimeout * 1.5^attempts, which grows from the
+			// initial value rather than the current one and uses a different
+			// factor.
+			//
+			// The cap is defensive rather than libutp's behaviour: libutp has
+			// none, because its own give-up limit of two timeouts in
+			// CS_SYN_SENT bounds the backoff. It is unreachable at the
+			// default MaxConnAttempts and only matters if a caller raises it.
+			c.synTimeout *= 2
+			if c.synTimeout > c.config.MaxTimeout {
+				c.synTimeout = c.config.MaxTimeout
+			}
 
-			c.armRetransmit(originPacket, timeout)
+			c.armRetransmit(originPacket, c.synTimeout)
 
 			// Re-send SYN packet
 			c.socketEvents <- newOutgoingSocketEvent(c.synPacket(seq), c.cid)
@@ -1187,10 +1206,11 @@ func (c *connection) onData(seqNum uint16, data []byte) error {
 	if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 		c.logger.Trace("on data packet", "seqNum", seqNum, "data.len", len(data))
 	}
-	// If the data payload is empty, then reset the connection
-	if len(data) == 0 {
-		c.reset(ErrEmptyDataPayload)
-	}
+	// An empty payload is not an error. libutp delivers only non-empty data
+	// to the application but still advances ack_nr, so the packet is acked
+	// and the sequence space moves on (utp_internal.cpp:2342-2355). The
+	// receive buffer below does the same: a zero-length write advances the
+	// ack number without copying anything.
 
 	switch c.state.stateType {
 	case ConnConnecting:

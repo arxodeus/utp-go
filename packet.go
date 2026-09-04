@@ -283,9 +283,14 @@ func DecodePacket(b []byte) (*packet, error) {
 	} else {
 		payload = b[payloadStartIndex:]
 	}
-	if header.PacketType == st_data && len(payload) == 0 {
-		return nil, ErrEmptyDataPayload
-	}
+	// A zero-length ST_DATA is accepted, not rejected.
+	//
+	// libutp guards only the delivery to the application with `count > 0`
+	// and advances ack_nr unconditionally (utp_internal.cpp:2342-2355), so it
+	// acks such a packet like any other. Rejecting it here dropped the packet
+	// before the connection ever saw it, which meant it was never acked and
+	// the peer retransmitted it forever -- a silent stall against any peer
+	// that sends one.
 	p.Header = header
 	p.Eack = ack
 	p.Body = payload

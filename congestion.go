@@ -9,8 +9,10 @@ import (
 )
 
 const (
-	defaultTargetMicros       = 100000 * time.Microsecond
-	defaultInitialTimeout     = 4 * time.Second
+	defaultTargetMicros = 100000 * time.Microsecond
+	// defaultInitialTimeout matches libutp's initial rto and its connect
+	// timer, both 3000ms (utp_internal.cpp:2609 and :2762).
+	defaultInitialTimeout     = 3 * time.Second
 	defaultMinTimeout         = 500 * time.Millisecond
 	defaultMaxTimeout         = 60 * time.Second
 	defaultMaxPacketSizeBytes = 1024

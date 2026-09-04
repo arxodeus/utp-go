@@ -738,12 +738,21 @@ func (s *UtpSocket) ConnectWithCid(
 		connected,
 		s.retransmitTimers,
 	)
-	err := <-connected
-	if err == nil {
-		return stream, nil
-	} else {
+	// Honour the caller's context, as Connect does. A bare receive here meant
+	// that cancelling the context during connection setup never returned: the
+	// connection's event loop exits on the same cancellation without
+	// signalling this channel, so the caller waited forever.
+	select {
+	case err := <-connected:
+		if err == nil {
+			return stream, nil
+		}
 		s.logger.Error("failed to open connection", "cid.send", cid.Send, "cid.recv", cid.Recv, "cid.peer", cid.Peer.Hash())
 		return nil, fmt.Errorf("connection timed out")
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.ctx.Done():
+		return nil, s.ctx.Err()
 	}
 }
 

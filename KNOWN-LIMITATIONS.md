@@ -221,6 +221,34 @@ attempt once `retransmit_count` reaches 2 while in `CS_SYN_SENT`, which is
 three transmissions of the SYN in total (`utp_internal.cpp:1191`). This is a
 default, still overridable per connection.
 
+## A zero-length ST_DATA was silently dropped
+
+**Fixed.**
+
+`DecodePacket` rejected any `ST_DATA` carrying no payload, so such a packet
+never reached the connection at all: it was logged as undecodable and
+discarded. Because it was never acked, a peer that sent one would retransmit
+it forever and the connection would stall. A second, unreachable check in
+`onData` reset the connection on the same condition.
+
+libutp accepts it. In-order delivery guards only the hand-off to the
+application with `count > 0` and advances `ack_nr` unconditionally
+(`utp_internal.cpp:2342-2355`), so the packet is acked and the sequence space
+moves on like any other. Both checks are removed, and the receive buffer
+already did the right thing: a zero-length write advances the ack number
+without copying anything.
+
+`libutp_conformance_test.go` covers the decoder accepting it, the ack number
+advancing, and data after an empty packet still being delivered.
+
+## ConnectWithCid ignored its own context
+
+**Fixed.** It waited on a bare channel receive with no context arm, so
+cancelling the context during connection setup never returned -- the
+connection's event loop exits on that same cancellation without signalling the
+channel, leaving the caller blocked forever. `Connect` already had the arm;
+`ConnectWithCid` simply lacked it. Found by a test that cancelled mid-handshake.
+
 ## Root causes of the M3 failures
 
 The brief asked for a written explanation of each. Both named tests failed,

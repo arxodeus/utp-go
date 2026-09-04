@@ -31,8 +31,9 @@ type recordingConn struct {
 	closed chan struct{}
 	once   sync.Once
 
-	mu   sync.Mutex
-	sent []*packet
+	mu     sync.Mutex
+	sent   []*packet
+	stamps []time.Time
 }
 
 func newRecordingConn() *recordingConn {
@@ -58,6 +59,7 @@ func (c *recordingConn) WriteTo(b []byte, _ ConnectionPeer) (int, error) {
 	if err == nil {
 		c.mu.Lock()
 		c.sent = append(c.sent, pkt)
+		c.stamps = append(c.stamps, time.Now())
 		c.mu.Unlock()
 	}
 	return len(b), nil
@@ -80,6 +82,19 @@ func (c *recordingConn) countType(t PacketType) int {
 		}
 	}
 	return n
+}
+
+// stampsOfType returns when each packet of the given type was written.
+func (c *recordingConn) stampsOfType(t PacketType) []time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []time.Time
+	for i, p := range c.sent {
+		if p.Header.PacketType == t {
+			out = append(out, c.stamps[i])
+		}
+	}
+	return out
 }
 
 func testSocketLogger() log.Logger {

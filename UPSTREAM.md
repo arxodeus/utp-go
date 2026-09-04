@@ -5,7 +5,7 @@ BitTorrent-specific slant, and it would be poor form to keep it here silently.
 Upstream is built for the Portal Network, where uTP runs over discv5 rather
 than raw UDP, but none of these defects are specific to either transport.
 
-Suggested as **seven separate pull requests**, smallest and least arguable
+Suggested as **eight separate pull requests**, smallest and least arguable
 first, so none of them is held up by the others.
 
 ## PR 1 — the transfer-path hangs
@@ -73,7 +73,7 @@ Measured: 6.18% to 0.00% spurious retransmits, +53% goodput on an emulated
 measurable cost at a thousand concurrent connections.
 
 Depends on nothing else in this fork, but the numbers come from the harness in
-PR 7, so send that first or quote the figures.
+PR 8, so send that first or quote the figures.
 
 ## PR 4 — RESET rate limiting
 
@@ -106,7 +106,22 @@ guard. Counting raw callbacks kills healthy connections under load.
 Also changes the default `MaxConnAttempts` from 6 to 3, which is what libutp's
 two-timeout limit in `CS_SYN_SENT` works out to.
 
-## PR 6 — the test suite
+## PR 6 — zero-length ST_DATA, SYN backoff, and a context leak
+
+Three small conformance fixes, each independently checkable against
+`utp_internal.cpp`:
+
+- **A zero-length `ST_DATA` was rejected by the decoder**, so it never reached
+  the connection, was never acked, and the peer retransmitted it forever.
+  libutp accepts and acks one (`utp_internal.cpp:2342-2355`).
+- **SYN retransmission backed off by `InitialTimeout * 1.5^attempts`**, which
+  grows from the initial value rather than the current one. libutp doubles the
+  current timeout each time, starting at 3000 ms (`:1179`, `:1203`, `:2762`).
+- **`ConnectWithCid` ignored its own context**: a bare channel receive with no
+  context arm, so cancelling during setup blocked the caller forever.
+  `Connect` already had the arm.
+
+## PR 7 — the test suite
 
 Independent of the library. On a clean checkout upstream's suite cannot pass:
 
@@ -127,7 +142,7 @@ Also in this PR: profiling scaffolding removed from tests, `-race`-aware time
 budgets, and `UTP_TEST_TRANSFERS` to run the concurrency test where 1000
 simultaneous transfers do not fit in memory.
 
-## PR 7 — the network harness
+## PR 8 — the network harness
 
 `netem/`, the in-process emulated network, plus the `Controller.Stats()` and
 `ConnectionConfig.Metrics` hooks it reads. Upstream has no way to measure
@@ -149,7 +164,7 @@ interface methods.
 
 ## Order of operations
 
-PR 1, PR 4 and PR 6 are close to unarguable and should go first.
+PR 1, PR 4, PR 6 and PR 7 are close to unarguable and should go first.
 
 PR 2 and PR 3 both need a conversation, for the same reason: any tuning or
 measurement upstream has done was taken against a controller with a constant
@@ -157,5 +172,5 @@ delay signal and a timer that fired at random within a one-second window.
 Both will move once these land, and that is the point, but it should not be a
 surprise.
 
-PR 5 needs review of the per-packet-timer subtlety above. PR 7 is optional
+PR 5 needs review of the per-packet-timer subtlety above. PR 8 is optional
 for upstream and the most invasive; offer it last.
