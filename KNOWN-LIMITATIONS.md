@@ -163,6 +163,8 @@ Gates that pass:
 - `go test ./...` — green.
 - `go test ./integrated/ -run 'TestUdpTransfer|TestManyConcurrentTransfers' -count=10` — green, at the full default of 1000 concurrent transfers.
 - `go test -race .` — green.
+- `go test -race ./...` — green, whole suite, no data races, at
+  `UTP_TEST_TRANSFERS=150 REPRO_N=120` (283 s for the integrated package).
 - `go test -race ./integrated/ -run 'TestUdpTransfer|TestManyConcurrentTransfers' -count=3` — green, **but at `UTP_TEST_TRANSFERS=150`, not the default 1000.** See "Memory" below: the full 1000 does not fit under the race detector on a 16 GB machine.
 - `scripts/check-libutp-reference.sh` — pass.
 
