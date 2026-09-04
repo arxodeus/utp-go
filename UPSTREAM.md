@@ -5,7 +5,7 @@ BitTorrent-specific slant, and it would be poor form to keep it here silently.
 Upstream is built for the Portal Network, where uTP runs over discv5 rather
 than raw UDP, but none of these defects are specific to either transport.
 
-Suggested as **five separate pull requests**, smallest and least arguable
+Suggested as **six separate pull requests**, smallest and least arguable
 first, so none of them is held up by the others.
 
 ## PR 1 — the transfer-path hangs
@@ -73,9 +73,24 @@ Measured: 6.18% to 0.00% spurious retransmits, +53% goodput on an emulated
 measurable cost at a thousand concurrent connections.
 
 Depends on nothing else in this fork, but the numbers come from the harness in
-PR 5, so send that first or quote the figures.
+PR 6, so send that first or quote the figures.
 
-## PR 4 — the test suite
+## PR 4 — RESET rate limiting
+
+A socket answered every packet addressed to a connection it did not have,
+unconditionally: a 300-connection run emitted over 3000 RESETs. That is an
+amplification vector as well as an incompatibility -- a peer that keeps
+sending to a torn-down connection draws one RESET per packet.
+
+libutp keys on `(connection id, address, seq nr)`, stays quiet for repeats
+within `RST_INFO_TIMEOUT`, and stops answering entirely past
+`RST_INFO_LIMIT` stored entries. This implements the same policy, citing
+`utp_internal.cpp` line numbers throughout.
+
+Small, self-contained, and matches the reference implementation exactly, so
+it should be among the easier ones to land.
+
+## PR 5 — the test suite
 
 Independent of the library. On a clean checkout upstream's suite cannot pass:
 
@@ -96,7 +111,7 @@ Also in this PR: profiling scaffolding removed from tests, `-race`-aware time
 budgets, and `UTP_TEST_TRANSFERS` to run the concurrency test where 1000
 simultaneous transfers do not fit in memory.
 
-## PR 5 — the network harness
+## PR 6 — the network harness
 
 `netem/`, the in-process emulated network, plus the `Controller.Stats()` and
 `ConnectionConfig.Metrics` hooks it reads. Upstream has no way to measure
@@ -118,7 +133,7 @@ interface methods.
 
 ## Order of operations
 
-PR 1 and PR 4 are close to unarguable and should go first.
+PR 1, PR 4 and PR 5 are close to unarguable and should go first.
 
 PR 2 and PR 3 both need a conversation, for the same reason: any tuning or
 measurement upstream has done was taken against a controller with a constant
@@ -126,4 +141,4 @@ delay signal and a timer that fired at random within a one-second window.
 Both will move once these land, and that is the point, but it should not be a
 surprise.
 
-PR 5 is optional for upstream and the most invasive. Offer it last.
+PR 6 is optional for upstream and the most invasive. Offer it last.

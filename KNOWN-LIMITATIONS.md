@@ -155,6 +155,38 @@ helps.
 `netem/utp_test.go:TestSpuriousRetransmitsOnLosslessLink` asserts the rate
 stays at zero.
 
+## RESET storms
+
+**Fixed.**
+
+Any packet arriving for a connection this socket does not have produced a
+RESET, unconditionally. A 300-connection run emitted over 3000 of them. That
+is both an incompatibility and an amplification vector: a peer that keeps
+sending to a torn-down connection drew one RESET per packet.
+
+libutp remembers what it has already answered, keyed on
+`(connection id, address, seq nr)`, and stays quiet for repeats
+(`RST_INFO_TIMEOUT`, 10 s). Past `RST_INFO_LIMIT` (1000) stored entries it
+stops answering entirely rather than let the table grow
+(`utp_internal.cpp:2907-2945`, constants at `utp_internal.cpp:71-72`). The
+same policy is now implemented here, with those line numbers cited in the
+code.
+
+Checked at the same time and found already correct: an unmatched RESET is
+dropped and never answered, which is what libutp does in its own `ST_RESET`
+branch (`utp_internal.cpp:2850-2881`). Replying to a reset with a reset would
+let two hosts trade them indefinitely.
+
+Measured by `reset_limit_test.go`, which counts what a socket actually puts on
+the wire:
+
+| Injected | RESETs before | after |
+| --- | --- | --- |
+| 50 repeats of one unknown packet | 50 | **1** |
+| 20 distinct unknown packets | 20 | 20 (unchanged: suppression must not silence a genuinely new peer) |
+| 20 unknown RESETs | 0 | 0 |
+| 1500 distinct unknown packets | 1500 | **1001** (capped at the limit) |
+
 ## Root causes of the M3 failures
 
 The brief asked for a written explanation of each. Both named tests failed,
@@ -310,10 +342,6 @@ risks making things worse.
   aggregate, so this has not been observed, but the shape is wrong. I did not
   change it because I have no way to measure whether reordering those cases
   helps or hurts.
-- **RESET storms.** Any packet arriving for a connection that has just been
-  torn down produces a RESET. A 300-connection run emitted over 3000 of them.
-  Whether libutp resets as readily in the same situations is exactly the kind
-  of question M4b is meant to answer; it has not been checked.
 - **Packets are dropped when a connection's event channel is full**
   (`handleIncomingBuf` falls through to `default`). This is silent loss that
   uTP then has to recover from with retransmits.

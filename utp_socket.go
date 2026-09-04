@@ -18,7 +18,26 @@ const (
 	MAX_UDP_PAYLOAD_SIZE         = math.MaxUint16
 	CidGenerationTryWarningCount = 10
 	AWAITING_CONNECTION_TIMEOUT  = time.Second * 20
+
+	// rstInfoTimeout is how long a sent RESET is remembered, so a peer that
+	// keeps sending packets for a connection we do not have receives one
+	// RESET rather than one per packet. Matches libutp's RST_INFO_TIMEOUT
+	// (utp_internal.cpp:71).
+	rstInfoTimeout = 10 * time.Second
+	// rstInfoLimit is the number of remembered RESETs past which we stop
+	// answering unknown packets at all. Matches libutp's RST_INFO_LIMIT
+	// (utp_internal.cpp:72).
+	rstInfoLimit = 1000
 )
+
+// rstInfoKey identifies one unanswerable packet, so a repeat of the same one
+// is not answered twice. libutp keys on the same triple
+// (utp_internal.cpp:2913-2917).
+type rstInfoKey struct {
+	peer   string
+	connID uint16
+	ackNr  uint16
+}
 
 var (
 	ErrConnect = errors.New("utp_socket: connect error")
@@ -107,6 +126,9 @@ type UtpSocket struct {
 	// socket. Per-connection wheels cost a ticker each; see
 	// retransmit_timer.go.
 	retransmitTimers *retransmitTimers
+	// rstInfo remembers RESETs recently sent for connections we do not have.
+	rstInfo            *syncMap[struct{}]
+	rstInfoExpirations *timeWheel[rstInfoKey]
 	// ownsSocket is true when this UtpSocket created the underlying Conn
 	// (via Bind) and is therefore responsible for closing it. A Conn handed
 	// in through WithSocket belongs to the caller.
@@ -169,10 +191,17 @@ func WithSocket(ctx context.Context, socket Conn, logger log.Logger) *UtpSocket 
 	}
 	incomingExpirations := newTimeWheel[*IncomingPacket](2*time.Second, 20, handleIncomingExpirations)
 
+	rstInfo := newSyncMap[struct{}]()
+	rstExpirations := newTimeWheel[rstInfoKey](time.Second, 16, func(key any, _ rstInfoKey) {
+		rstInfo.remove(key)
+	})
+
 	utp := &UtpSocket{
 		ctx:                      ctx,
 		cancel:                   cancel,
 		retransmitTimers:         newRetransmitTimers(defaultRetransmitTickInterval, defaultRetransmitSlots),
+		rstInfo:                  rstInfo,
+		rstInfoExpirations:       rstExpirations,
 		logger:                   logger,
 		conns:                    make(map[string]chan *streamEvent),
 		accepts:                  make(chan *Accept, 1000),
@@ -369,11 +398,12 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
 			"accCID", cids[2])
 	}
 	if packetPtr.Header.PacketType != st_syn {
+		// An unmatched RESET is dropped, never answered: replying to a reset
+		// with a reset lets two hosts trade them forever. libutp handles
+		// ST_RESET in its own branch and returns without responding
+		// (utp_internal.cpp:2850-2881).
 		if packetPtr.Header.PacketType != st_reset {
-			randSeqNum := RandomUint16()
-			resetPacket := NewPacketBuilder(st_reset, packetPtr.Header.ConnectionId, uint32(time.Now().UnixMicro()), 100_000, randSeqNum).Build()
-
-			s.socketEvents <- newOutgoingSocketEvent(resetPacket, incomingRaw.peer)
+			s.maybeSendReset(packetPtr, incomingRaw.peer)
 		}
 		return
 	}
@@ -401,6 +431,44 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
 		s.logger.Debug("put a new syn packet to incomingConns...")
 		s.putIncomingConn(cidHash, &IncomingPacket{pkt: packetPtr, cid: cid})
 	}
+}
+
+// maybeSendReset answers a packet addressed to a connection this socket does
+// not have, subject to the same rate limiting libutp applies.
+//
+// Answering every such packet is both an incompatibility and an amplification
+// vector: a peer that keeps sending to a torn-down connection draws one RESET
+// per packet. A 300-connection test run emitted over 3000 of them. libutp
+// remembers what it has already answered and stays quiet
+// (utp_internal.cpp:2907-2945).
+func (s *UtpSocket) maybeSendReset(pkt *packet, peer ConnectionPeer) {
+	key := rstInfoKey{
+		peer:   peer.Hash(),
+		connID: pkt.Header.ConnectionId,
+		ackNr:  pkt.Header.SeqNum,
+	}
+
+	if _, seen := s.rstInfo.get(key); seen {
+		// Already answered this one. Refresh its expiry and stay quiet, as
+		// libutp does at utp_internal.cpp:2918.
+		s.rstInfoExpirations.put(key, key, rstInfoTimeout)
+		return
+	}
+	if s.rstInfo.len() > rstInfoLimit {
+		// Past this point libutp stops answering entirely rather than let the
+		// table grow without bound (utp_internal.cpp:2928).
+		if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+			s.logger.Debug("not sending RESET, too many already outstanding", "stored", s.rstInfo.len())
+		}
+		return
+	}
+
+	s.rstInfo.put(key, struct{}{})
+	s.rstInfoExpirations.put(key, key, rstInfoTimeout)
+
+	randSeqNum := RandomUint16()
+	resetPacket := NewPacketBuilder(st_reset, pkt.Header.ConnectionId, uint32(time.Now().UnixMicro()), 100_000, randSeqNum).Build()
+	s.socketEvents <- newOutgoingSocketEvent(resetPacket, peer)
 }
 
 func (s *UtpSocket) handleNewAcceptWithCidEvent(acceptWithCid *Accept) {
@@ -494,6 +562,7 @@ func (s *UtpSocket) Close() {
 		s.awaitingExpirations.stop()
 		s.incomingConnsExpirations.stop()
 		s.retransmitTimers.stop()
+		s.rstInfoExpirations.stop()
 		// Close the underlying socket when we opened it. Without this the UDP
 		// port stayed bound for the life of the process and readLoop stayed
 		// parked in ReadFrom, which cancelling the context does not interrupt

@@ -32,6 +32,13 @@ func (m *syncMap[P]) remove(key any) {
 	delete(m.inner, key)
 }
 
+// len reports how many entries the map holds.
+func (m *syncMap[P]) len() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.inner)
+}
+
 func (m *syncMap[P]) Range(f func(key any, value P) bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
