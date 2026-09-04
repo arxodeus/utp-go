@@ -22,6 +22,16 @@ func (sb *sendBuffer) Available() int {
 	return sb.size + sb.offset - used
 }
 
+// Pending reports how many bytes of application data are buffered but not
+// yet handed to the connection for transmission.
+func (sb *sendBuffer) Pending() int {
+	used := 0
+	for _, data := range sb.pending {
+		used += len(data)
+	}
+	return used - sb.offset
+}
+
 func (sb *sendBuffer) IsEmpty() bool {
 	return len(sb.pending) == 0
 }

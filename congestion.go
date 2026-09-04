@@ -75,6 +75,36 @@ type Controller interface {
 	OnTimeout()
 	Timeout() time.Duration
 	BytesAvailableInWindow() uint32
+	// Stats returns a snapshot of the controller's internal state.
+	//
+	// It exists so a test harness can plot the congestion window and RTT
+	// estimate over time. A controller that can only be observed through its
+	// effect on throughput cannot be told apart from one that is doing
+	// nothing -- which is not hypothetical here; see KNOWN-LIMITATIONS.md.
+	Stats() ControllerStats
+}
+
+// ControllerStats is a snapshot of a congestion controller's state.
+type ControllerStats struct {
+	// WindowSizeBytes is the volume currently considered in flight.
+	WindowSizeBytes uint32
+	// MaxWindowSizeBytes is the congestion window: what the controller
+	// currently believes the path will carry.
+	MaxWindowSizeBytes uint32
+	// MinWindowSizeBytes is the floor the window will not drop below.
+	MinWindowSizeBytes uint32
+	// RTT is the smoothed round-trip time estimate.
+	RTT time.Duration
+	// RTTVarianceMicros is the RTT variance estimate, in microseconds.
+	RTTVarianceMicros int64
+	// Timeout is the current retransmission timeout.
+	Timeout time.Duration
+	// BaseDelay is the lowest one-way delay observed in the delay window --
+	// LEDBAT's estimate of the path with no queue. Queueing delay is the
+	// difference between the current delay and this.
+	BaseDelay time.Duration
+	// TargetDelayMicros is the standing queue the controller aims for.
+	TargetDelayMicros uint32
 }
 
 type defaultController struct {
@@ -109,6 +139,22 @@ func newDefaultController(config *ctrlConfig) *defaultController {
 		rttVarianceMicros:     0,
 		transmissions:         make(map[uint16]*packetRecord),
 		delayAcc:              newDelayAccumulator(config.DelayWindow),
+	}
+}
+
+// Stats returns a snapshot of this controller's state.
+func (c *defaultController) Stats() ControllerStats {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return ControllerStats{
+		WindowSizeBytes:    c.windowSizeBytes,
+		MaxWindowSizeBytes: c.maxWindowSizeBytes,
+		MinWindowSizeBytes: c.minWindowSizeBytes,
+		RTT:                c.rtt,
+		RTTVarianceMicros:  c.rttVarianceMicros,
+		Timeout:            c.timeout,
+		BaseDelay:          c.delayAcc.BaseDelay(),
+		TargetDelayMicros:  c.targetDelayMicros,
 	}
 }
 
@@ -201,7 +247,14 @@ func (c *defaultController) OnAck(seqNum uint16, ack Ack) error {
 
 		rttAdjustment := computeRTTAdjustment(c.rtt.Microseconds(), ack.RTT.Microseconds())
 
-		c.rtt = time.Duration(maxInt64(c.rtt.Milliseconds()+rttAdjustment, 0))
+		// computeRTTAdjustment works in microseconds, so the running estimate
+		// must be read and rebuilt in microseconds too.
+		//
+		// This previously added the microsecond adjustment to c.rtt.Milliseconds()
+		// and handed the sum to time.Duration, which counts nanoseconds. Three
+		// units in two lines: the estimate converged to about 5us on every
+		// path regardless of its real RTT, so it tracked nothing.
+		c.rtt = time.Duration(maxInt64(c.rtt.Microseconds()+rttAdjustment, 0)) * time.Microsecond
 
 		c.applyTimeoutAdjustment()
 	}
@@ -246,9 +299,22 @@ func (c *defaultController) applyMaxWindowSizeAdjustment(adjustment int64) {
 	))
 }
 
+// applyTimeoutAdjustment recomputes the retransmission timeout from the RTT
+// estimate, as libutp does: rto = max(rtt + rtt_var * 4, min), capped at max.
+//
+// rttVarianceMicros is a microsecond count, so it has to be scaled before
+// being added to a Duration. It was previously passed to time.Duration
+// directly, which reads it as nanoseconds -- understating the variance term
+// by a factor of 1000 and leaving the timeout pinned to minTimeout.
 func (c *defaultController) applyTimeoutAdjustment() {
-	c.timeout = time.Duration(math.Max(float64(c.rtt+time.Duration(c.rttVarianceMicros*4)), float64(c.minTimeout)))
-	c.timeout = time.Duration(math.Min(float64(c.timeout), float64(c.maxTimeout)))
+	rto := c.rtt + time.Duration(c.rttVarianceMicros*4)*time.Microsecond
+	if rto < c.minTimeout {
+		rto = c.minTimeout
+	}
+	if rto > c.maxTimeout {
+		rto = c.maxTimeout
+	}
+	c.timeout = rto
 }
 
 // computeMaxWindowSizeAdjustment returns the adjustment in bytes to the maximum window (i.e. congestion window) size

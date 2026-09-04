@@ -13,6 +13,7 @@ do. See:
 
 | Document | What it covers |
 | --- | --- |
+| [HARNESS.md](HARNESS.md) | The emulated network harness: what it models, what it measures, and the numbers proving it is sound. |
 | [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) | **Read this first.** Root cause of every defect fixed, what has and has not been measured, and everything found but not fixed. |
 | [REFERENCE.md](REFERENCE.md) | Which copy of libutp is normative, and proof the copy used for differential testing is protocol-identical to it. |
 | [DEVIATIONS.md](DEVIATIONS.md) | Every intentional difference from libutp. |
@@ -30,6 +31,7 @@ Two things to be aware of before depending on this:
 
 ```sh
 go test ./...                                  # full suite
+go test ./netem/                               # the network harness gate
 go test -race ./...                            # race detector
 scripts/check-libutp-reference.sh              # verify the pinned libutp reference
 ```

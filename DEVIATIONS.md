@@ -62,6 +62,21 @@ that **have not been re-verified** against `utp_internal.cpp` in this fork:
 Both are inherited from the upstream port of `ethereum/utp`. Verifying them is
 M4b work.
 
+### 3. `Controller` exposes a `Stats()` snapshot
+
+The `Controller` interface gained `Stats() ControllerStats`, and
+`ConnectionConfig` gained an optional `Metrics` observer. libutp has no
+equivalent; it exposes state through `utp_get_stats` and its logging callback.
+
+**Reason:** a controller that can only be observed through its effect on
+throughput cannot be told apart from one doing nothing. That is not a
+hypothetical concern here -- see the delay-signal and RTT findings in
+[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md), both of which were invisible
+until the window and RTT could be plotted.
+
+Observers are called from the connection's own event-loop goroutine, so they
+add no locking to the data path and nothing to the wire.
+
 ## Not a deviation: LEDBAT++
 
 The brief anticipates LEDBAT++ being nearly the only entry in this file.

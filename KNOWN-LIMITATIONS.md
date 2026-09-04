@@ -11,7 +11,7 @@ all.
 | Milestone | State |
 | --- | --- |
 | **M0** — pin the reference, prove the two libutp copies agree | **Done.** See [REFERENCE.md](REFERENCE.md) and `scripts/check-libutp-reference.sh`. |
-| **M1** — emulated network harness | **Not done.** |
+| **M1** — emulated network harness | **Done.** See [HARNESS.md](HARNESS.md) and `netem/`. |
 | **M2** — conformance harness against real libutp | **Not done.** |
 | **M3** — fix the failing transfer tests | **Done.** Root causes below; gates in "Verification". |
 | **M4** — audit transfer paths against libutp | **Not done** (needs M2). |
@@ -65,6 +65,87 @@ varies between roughly 88 and 229 µs.
 
 The fix matches libutp, which computes `reply_micro` as a `uint32` subtraction
 of the packet's timestamp from the current time.
+
+## The RTT estimate tracked nothing
+
+Found by the M1 harness within minutes of it first carrying a flow, which is
+the entire argument for building the harness first.
+
+`defaultController.OnAck` updated its smoothed RTT like this:
+
+```go
+rttAdjustment := computeRTTAdjustment(c.rtt.Microseconds(), ack.RTT.Microseconds())
+c.rtt = time.Duration(maxInt64(c.rtt.Milliseconds()+rttAdjustment, 0))
+```
+
+Three units in two lines. `computeRTTAdjustment` takes and returns
+microseconds, but its result was added to `c.rtt.Milliseconds()`, and the sum
+was handed to `time.Duration`, which counts nanoseconds.
+
+The estimate converges to about 5 µs on any path, whatever its real RTT.
+Measured over the emulated network:
+
+| Path RTT | RTT estimate before | after |
+| --- | --- | --- |
+| 20 ms | 3 µs | 22.0 ms |
+| 40 ms | 5 µs | 43.1 ms |
+
+`applyTimeoutAdjustment` had the same class of error: `rttVarianceMicros` is a
+microsecond count and was passed to `time.Duration` directly, understating the
+variance term by 1000x and leaving the retransmission timeout pinned at
+`minTimeout`.
+
+Both are fixed. The consequence of the old behaviour is that the RTO could
+never adapt to the path: on any link with an RTT above `minTimeout` (500 ms),
+uTP would have retransmitted continuously.
+
+## Retransmission timing is quantised to one second
+
+**Not fixed. This is the largest known defect in the library and it needs a
+design decision.**
+
+On a link that drops nothing, this implementation retransmits about **6% of
+packets**. Measured over the emulated network on an 8 Mbps / 40 ms path with
+`LossRate: 0`, confirmed by the link's own counters reporting zero drops.
+
+The cause is the retransmission timer wheel. It is constructed with
+`interval = InitialTimeout/4`, which is **one second**, and the retransmission
+timeout is 500 ms. A wheel with a one-second tick cannot represent "500 ms
+from now": the timer lands on the next tick, uniformly 0-1000 ms away. A
+packet inserted shortly before a tick is declared lost long before its ack
+could possibly have arrived.
+
+The expected spurious rate is roughly `RTT / interval` = 43/1000 ≈ 4.3%,
+against 6.1% measured.
+
+Rebuilding the wheel with a 25 ms interval and a rounds counter was tested and
+removes it entirely:
+
+| | current (1 s wheel) | 25 ms wheel + rounds |
+| --- | --- | --- |
+| Retransmits, lossless 8 Mbps / 40 ms path | 6.12% | **0.00%** |
+| Timeouts | 2 | **0** |
+| Goodput | 2.43 Mbps | **3.73 Mbps** (+53%) |
+| Mean cwnd | 14.5 KB | 26.4 KB |
+| `TestUdpTransfer`, loopback | 217.6 Mbps | **284.7 Mbps** (+31%) |
+| `TestManyConcurrentTransfers`, 1000 conns | 614 Mbps | **460 Mbps** (-25%) |
+
+The regression at 1000 connections is the reason this is not merged: each
+connection owns its own ticker, so a 25 ms interval means 40,000 timer
+wake-ups per second across the socket. The fix worth having is **one shared
+timer wheel per socket** rather than one per connection, which gets the
+resolution without the per-connection cost. That is a real refactor and it
+belongs in M4, not smuggled into the harness work.
+
+Two things follow from this:
+
+- **Every M5 measurement will be contaminated until it is fixed.** A
+  controller being fed 6% phantom loss is not being measured on its merits.
+- The related upper-bound defect recorded below (the wheel silently clamping
+  delays above `slotNum * interval`) has the same root cause and the same fix.
+
+`netem/utp_test.go:TestSpuriousRetransmitsOnLosslessLink` measures and logs
+this rate on every run, with a loose regression ceiling. The target is zero.
 
 ## Root causes of the M3 failures
 
@@ -166,6 +247,8 @@ Gates that pass:
 - `go test -race ./...` — green, whole suite, no data races, at
   `UTP_TEST_TRANSFERS=150 REPRO_N=120` (283 s for the integrated package).
 - `go test -race ./integrated/ -run 'TestUdpTransfer|TestManyConcurrentTransfers' -count=3` — green, **but at `UTP_TEST_TRANSFERS=150`, not the default 1000.** See "Memory" below: the full 1000 does not fit under the race detector on a 16 GB machine.
+- `go test ./netem/ -count=3` — green. The M1 gate; figures in [HARNESS.md](HARNESS.md).
+- `go test -race ./netem/` — green, no data races.
 - `scripts/check-libutp-reference.sh` — pass.
 
 The `-race` gate is therefore met at 150 concurrent transfers and **unmet at

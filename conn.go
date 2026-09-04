@@ -79,6 +79,13 @@ type ConnectionConfig struct {
 	TargetDelay     time.Duration
 	WindowSize      uint32
 	BufferSize      int
+
+	// Metrics, when set, receives periodic snapshots of this connection.
+	// See MetricsObserver for the constraints on the callback.
+	Metrics MetricsObserver
+	// MetricsInterval is the minimum gap between snapshots. Defaults to
+	// DefaultMetricsInterval.
+	MetricsInterval time.Duration
 }
 
 func NewConnectionConfig() *ConnectionConfig {
@@ -140,6 +147,17 @@ type connection struct {
 	// readsTerminated records that the single end-of-stream marker has been
 	// handed to the reader. Readers block on c.reads until they see it.
 	readsTerminated bool
+
+	// Counters, read and written only from the event-loop goroutine.
+	packetsSent          uint64
+	bytesSent            uint64
+	packetsRetransmitted uint64
+	bytesRetransmitted   uint64
+	packetsReceived      uint64
+	bytesReceived        uint64
+	timeouts             uint64
+	fastRetransmits      uint64
+	lastMetricsAt        time.Time
 }
 
 func newConnection(
@@ -343,6 +361,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			return c.ctx.Err()
 		}
 	afterSelect:
+		c.sampleMetrics(time.Now(), false)
 		if stream.shutdown.Load() && c.state.stateType != ConnClosed {
 			c.shutdown()
 		}
@@ -361,6 +380,9 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			if c.state.RecvBuf != nil {
 				c.state.RecvBuf.close()
 			}
+			// A final sample, so the last state of a connection is always
+			// observed rather than lost to the throttle.
+			c.sampleMetrics(time.Now(), true)
 			c.socketEvents <- newShutdownSocketEvent(c.cid)
 			return c.state.Err
 		}
@@ -589,6 +611,61 @@ func (c *connection) processReads() {
 	}
 }
 
+// sampleMetrics hands a snapshot to the configured observer, throttled to
+// MetricsInterval.
+//
+// It runs on the event-loop goroutine, which is the whole point: the
+// connection's state is owned by that goroutine, so reading it from anywhere
+// else would be a race.
+func (c *connection) sampleMetrics(now time.Time, force bool) {
+	if c.config.Metrics == nil {
+		return
+	}
+	interval := c.config.MetricsInterval
+	if interval <= 0 {
+		interval = DefaultMetricsInterval
+	}
+	if !force && !c.lastMetricsAt.IsZero() && now.Sub(c.lastMetricsAt) < interval {
+		return
+	}
+	c.lastMetricsAt = now
+
+	m := ConnectionMetrics{
+		At:                   now,
+		Cid:                  c.cid,
+		PeerRecvWindow:       c.peerRecvWindow,
+		PeerTsDiff:           c.peerTsDiff,
+		PacketsSent:          c.packetsSent,
+		BytesSent:            c.bytesSent,
+		PacketsRetransmitted: c.packetsRetransmitted,
+		BytesRetransmitted:   c.bytesRetransmitted,
+		PacketsReceived:      c.packetsReceived,
+		BytesReceived:        c.bytesReceived,
+		Timeouts:             c.timeouts,
+		FastRetransmits:      c.fastRetransmits,
+		PendingWrites:        len(c.pendingWrites),
+		State:                connStateName(c.state.stateType),
+	}
+	if c.state.SentPackets != nil {
+		cs := c.state.SentPackets.ControllerStats()
+		m.CwndBytes = cs.MaxWindowSizeBytes
+		m.InFlightBytes = cs.WindowSizeBytes
+		m.MinCwndBytes = cs.MinWindowSizeBytes
+		m.RTT = cs.RTT
+		m.RTTVarianceMicros = cs.RTTVarianceMicros
+		m.Timeout = cs.Timeout
+		m.BaseDelay = cs.BaseDelay
+		m.TargetDelayMicros = cs.TargetDelayMicros
+	}
+	if c.state.SendBuf != nil {
+		m.SendBufferPending = c.state.SendBuf.Pending()
+	}
+	if c.state.RecvBuf != nil {
+		m.RecvBufferPending = c.state.RecvBuf.Pending()
+	}
+	c.config.Metrics(m)
+}
+
 // deliverTerminalRead hands the reader the single end-of-stream marker: a
 // result with an empty Data slice, which is what UtpStream.ReadToEOF treats as
 // the end of the stream. It is delivered at most once.
@@ -692,9 +769,12 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 
 		if isTimeout {
 			c.state.SentPackets.OnTimeout()
+			c.timeouts++
 			currentTime := time.Now()
 			c.latestTimeout = &currentTime
 		}
+		c.packetsRetransmitted++
+		c.bytesRetransmitted += uint64(len(originPacket.Body))
 
 		retransmissionPacket := &packet{
 			Header: &PacketHeaderV1{
@@ -742,6 +822,8 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 			"now", now)
 	}
 	c.peerRecvWindow = packet.Header.WndSize
+	c.packetsReceived++
+	c.bytesReceived += uint64(len(packet.Body))
 
 	// Measure how long ago the peer stamped this packet. That value is what we
 	// echo back in timestamp_difference_microseconds, and it is the peer's
@@ -1183,6 +1265,9 @@ func (c *connection) retransmitLostPackets(now time.Time) {
 			WithAckNum(c.state.RecvBuf.AckNum()).
 			WithSelectiveAck(c.state.RecvBuf.SelectiveAck()).
 			Build()
+		c.packetsRetransmitted++
+		c.bytesRetransmitted += uint64(len(payload))
+		c.fastRetransmits++
 		if c.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
 			c.logger.Debug("will retransmit lost packet",
 				"packet.type", packetInst.Header.PacketType,
@@ -1213,6 +1298,9 @@ func (c *connection) transmit(packet *packet, now time.Time) {
 			"innerMap.key", packet.Header.SeqNum,
 			"packet.body.len", len(packet.Body))
 	}
+
+	c.packetsSent++
+	c.bytesSent += uint64(len(packet.Body))
 
 	c.state.SentPackets.OnTransmit(packet.Header.SeqNum, packet.Header.PacketType, payload, length, now)
 	c.unacked.put(packet.Header.SeqNum, packet, c.state.SentPackets.Timeout())

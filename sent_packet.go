@@ -101,6 +101,11 @@ func (s *sentPackets) Timeout() time.Duration {
 	return s.congestionCtrl.Timeout()
 }
 
+// ControllerStats returns a snapshot of the congestion controller's state.
+func (s *sentPackets) ControllerStats() ControllerStats {
+	return s.congestionCtrl.Stats()
+}
+
 func (s *sentPackets) Window() uint32 {
 	return s.congestionCtrl.BytesAvailableInWindow()
 }

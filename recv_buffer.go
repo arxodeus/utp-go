@@ -62,6 +62,17 @@ func (rb *receiveBuffer) Available() int {
 	return available
 }
 
+// Pending reports how many bytes have been received -- contiguous or held
+// out of order -- but not yet read by the application.
+func (rb *receiveBuffer) Pending() int {
+	pending := rb.offset
+	rb.pending.Ascend(func(i btree.Item) bool {
+		pending += len(i.(*pendingItem).data)
+		return true
+	})
+	return pending
+}
+
 func (rb *receiveBuffer) IsEmpty() bool {
 	return rb.offset == 0 && rb.pending.Len() == 0
 }
