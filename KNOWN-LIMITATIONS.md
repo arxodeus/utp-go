@@ -187,6 +187,40 @@ the wire:
 | 20 unknown RESETs | 0 | 0 |
 | 1500 distinct unknown packets | 1500 | **1001** (capped at the limit) |
 
+## A connection had no death condition of its own
+
+**Fixed.**
+
+An established connection retransmitted forever. There was no limit on
+consecutive timeouts, so the only thing that could end a connection whose peer
+had stopped acking was the 60-second idle timer -- and that timer is reset by
+*any* inbound packet. A half-broken peer that keeps sending anything at all
+held a connection open indefinitely while our data went unacked. For a
+BitTorrent client with many peers, that is a lot of dead connections held
+open.
+
+libutp kills the connection once `retransmit_count` reaches 4, resetting that
+counter whenever a packet is acked (`utp_internal.cpp:1191`, reset at
+`:1398`). The same rule is now implemented here.
+
+One subtlety worth recording, because the first attempt was wrong: libutp has
+a single connection-wide RTO and counts one event per expiry, while this
+implementation arms one timer per outstanding packet, so a single RTO delivers
+one callback per packet in flight. Counting those directly killed healthy
+connections under load -- ten packets in flight meant ten "consecutive
+timeouts" from one RTO. The counter belongs inside the existing
+timeout-amplification guard, which is what collapses per-packet callbacks into
+one event per RTO.
+
+Measured with the harness: a write to a blackholed peer now fails with
+`ErrTimedOut` after about 10 seconds, rather than hanging until the 60-second
+idle timer. `netem/utp_test.go:TestConnectionGivesUpWhenPeerGoesSilent`.
+
+`MaxConnAttempts` also changed, from 6 to 3. libutp gives up on a connection
+attempt once `retransmit_count` reaches 2 while in `CS_SYN_SENT`, which is
+three transmissions of the SYN in total (`utp_internal.cpp:1191`). This is a
+default, still overridable per connection.
+
 ## Root causes of the M3 failures
 
 The brief asked for a written explanation of each. Both named tests failed,
@@ -334,14 +368,37 @@ These are real and unresolved. Each needs a measurement harness (M1) or a
 conformance corpus (M2) to change safely, and guessing at them without one
 risks making things worse.
 
-- **The per-connection event loop has the same starvation shape** as the
-  socket loop did: it drains `stream.streamEvents` in a non-blocking select
-  before considering writes, reads, or `unackTimeoutCh`. Under sustained
-  inbound traffic on one connection, retransmission timeouts could be delayed
-  indefinitely. Per-connection packet rates are much lower than the socket
-  aggregate, so this has not been observed, but the shape is wrong. I did not
-  change it because I have no way to measure whether reordering those cases
-  helps or hurts.
+- **The per-connection event loop drains incoming packets ahead of everything
+  else**, in a non-blocking select, before considering writes, reads or
+  `unackTimeoutCh`. In principle a peer that keeps the inbound queue non-empty
+  could defer this connection's retransmissions and writes indefinitely.
+
+  **Measured, and deliberately left alone.** Three variants, on the loopback
+  large-transfer test, which is library-bound rather than link-bound:
+
+  | Variant | Throughput |
+  | --- | --- |
+  | As it stands (unbounded priority drain) | 333 Mbps (mean of 5) |
+  | Priority drain removed entirely | **14 Mbps** (mean of 3) |
+  | Drain bounded to 32 consecutive packets | 289 Mbps (mean of 9) |
+  | Retransmission timeouts polled ahead of packets | 314 Mbps (mean of 6) |
+
+  Removing the priority costs a factor of more than twenty. Processing acks
+  is what opens the send window, so deprioritising them stalls the sender,
+  and the loop then spends its time on `writable` signals with no window to
+  use. This is load-bearing code, not an oversight, and anyone tempted to
+  tidy it should read this table first.
+
+  The two bounded variants cost somewhere between 6% and 13%, but this
+  machine's run-to-run spread on that test is around +/-20%, so neither
+  difference is resolvable without far more samples than the question
+  deserves. The starvation they guard against is also self-limiting in
+  practice: to keep receiving acks you must keep sending, which requires
+  reaching the blocking select. It is a concern for an adversarial peer, not
+  a well-behaved one.
+
+  Revisit if an adversarial-peer scenario is ever tested (M8), with a
+  measurement rig that can resolve 10%.
 - **Packets are dropped when a connection's event channel is full**
   (`handleIncomingBuf` falls through to `default`). This is silent loss that
   uTP then has to recover from with retransmits.

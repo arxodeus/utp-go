@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
+	utp "github.com/zen-eth/utp-go"
 )
 
 func quiet() log.Logger {
@@ -304,5 +305,102 @@ func TestSpuriousRetransmitsOnLosslessLink(t *testing.T) {
 	// systematic mistiming this test was written to catch.
 	if sum.RetransmitRate > 0.01 {
 		t.Errorf("retransmit rate %.2f%% on a lossless link, want ~0%%", sum.RetransmitRate*100)
+	}
+}
+
+// TestConnectionGivesUpWhenPeerGoesSilent covers libutp's give-up rule: a
+// connection dies after a few consecutive retransmission timeouts with
+// nothing acked, rather than lingering until the idle timer.
+//
+// Without it a connection has no death condition of its own. The idle timer
+// is reset by *any* inbound packet, so a half-broken peer that keeps sending
+// anything at all holds the connection open indefinitely while data goes
+// unacked -- and for a BitTorrent client with many peers, that is a lot of
+// dead connections held open.
+func TestConnectionGivesUpWhenPeerGoesSilent(t *testing.T) {
+	n := NewNetwork(27)
+	defer n.Close()
+	a := n.MustAddEndpoint("sender")
+	b := n.MustAddEndpoint("receiver")
+	linkCfg := Config{Delay: 10 * time.Millisecond}
+	n.ConnectAsymmetric(a, b, linkCfg, linkCfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	pair := NewUtpPair(ctx, n, a, b, quiet())
+
+	cfg := utp.NewConnectionConfig()
+	// Shorten the RTO so the four retransmissions do not take ten seconds.
+	// The idle timeout stays at its 60s default: the point is that the
+	// give-up rule fires long before it.
+	cfg.InitialTimeout = 200 * time.Millisecond
+	cfg.MinTimeout = 100 * time.Millisecond
+	idleTimeout := cfg.MaxIdleTimeout
+
+	accCid := utp.NewConnectionId(a.Addr(), 801, 800)
+	iniCid := utp.NewConnectionId(b.Addr(), 800, 801)
+
+	accepted := make(chan error, 1)
+	go func() {
+		s, err := pair.SockB.AcceptWithCid(ctx, accCid, cfg)
+		if err != nil {
+			accepted <- err
+			return
+		}
+		accepted <- nil
+		buf := make([]byte, 0)
+		_, _ = s.ReadToEOF(ctx, &buf)
+	}()
+
+	stream, err := pair.SockA.ConnectWithCid(ctx, iniCid, cfg)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := <-accepted; err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+
+	// Blackhole the path in both directions: the peer is now unreachable but
+	// the connection is fully established.
+	dead := Config{LossRate: 1.0, Delay: 10 * time.Millisecond}
+	if err := n.SetConfig("sender", "receiver", dead); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.SetConfig("receiver", "sender", dead); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write more than the send buffer holds, so the call blocks waiting for
+	// window rather than returning as soon as the buffer accepts it. That is
+	// the case a caller actually notices: a write that can never complete
+	// must fail, not hang until the idle timer.
+	payload := make([]byte, 4*int(cfg.BufferSize))
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		_, err := stream.Write(ctx, payload)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		elapsed := time.Since(start)
+		t.Logf("write returned after %v with err=%v (idle timeout is %v)",
+			elapsed.Round(time.Millisecond), err, idleTimeout)
+		if err == nil {
+			t.Error("write to an unreachable peer reported success")
+		}
+		if elapsed >= idleTimeout {
+			t.Errorf("took %v to give up, which is the idle timeout (%v) rather than the retransmission limit",
+				elapsed, idleTimeout)
+		}
+		// Four retransmissions with the configured backoff is a couple of
+		// seconds at most; anything near the idle timeout means the give-up
+		// rule is not what ended it.
+		if elapsed > 30*time.Second {
+			t.Errorf("took %v to give up, far longer than the retransmission limit implies", elapsed)
+		}
+	case <-time.After(idleTimeout):
+		t.Fatalf("connection had not given up after %v; it is relying on the idle timer, not the retransmission limit", idleTimeout)
 	}
 }

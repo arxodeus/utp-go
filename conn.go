@@ -21,6 +21,17 @@ const (
 	ConnClosed
 )
 
+// maxConsecutiveTimeouts is how many retransmission timeouts may pass without
+// an intervening ack before the connection is given up as dead.
+//
+// libutp kills the connection once retransmit_count reaches 4, and resets
+// that counter whenever a packet is acked (utp_internal.cpp:1191, reset at
+// :1398). Without this a connection has no death condition of its own: it
+// relies entirely on the idle timer, which any inbound packet resets, so a
+// half-broken peer that keeps sending anything at all holds the connection
+// open indefinitely while our data goes unacked.
+const maxConsecutiveTimeouts = 4
+
 const DefaultMaxIdleTimeout = 60 * time.Second
 const DefaultWindowSize = 1024 * 1024
 const DefaultBufferSize = 1024 * 1024
@@ -90,7 +101,10 @@ type ConnectionConfig struct {
 
 func NewConnectionConfig() *ConnectionConfig {
 	return &ConnectionConfig{
-		MaxConnAttempts: 6,
+		// libutp gives up on a connection attempt once retransmit_count
+		// reaches 2 while in CS_SYN_SENT, which is three transmissions of the
+		// SYN in total (utp_internal.cpp:1191).
+		MaxConnAttempts: 3,
 		MaxIdleTimeout:  DefaultMaxIdleTimeout,
 		MaxPacketSize:   defaultMaxPacketSizeBytes,
 		InitialTimeout:  defaultInitialTimeout,
@@ -164,7 +178,10 @@ type connection struct {
 	bytesReceived        uint64
 	timeouts             uint64
 	fastRetransmits      uint64
-	lastMetricsAt        time.Time
+	// retransmitCount is consecutive retransmission timeouts with no
+	// intervening ack. libutp calls this retransmit_count.
+	retransmitCount int
+	lastMetricsAt   time.Time
 }
 
 func newConnection(
@@ -257,13 +274,19 @@ func (c *connection) disarmRetransmit(seq uint16) {
 // Only this connection's own armed set is scanned. The wheel is shared with
 // every other connection on the socket, so scanning it would be O(all
 // outstanding packets on the socket) on every ack.
-func (c *connection) disarmAcked(acked *circularRangeInclusive) {
+//
+// It returns how many timers it cancelled, which is how many packets this ack
+// newly retired.
+func (c *connection) disarmAcked(acked *circularRangeInclusive) int {
+	n := 0
 	for seq := range c.armed {
 		if acked.Contains(seq) {
 			delete(c.armed, seq)
 			c.timers.disarm(retransmitKey{scope: c.timerScope, seq: seq})
+			n++
 		}
 	}
+	return n
 }
 
 // disarmAll cancels every timer this connection holds. The shared wheel
@@ -812,7 +835,14 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 			return
 		}
 
-		// Handle timeout amplification prevention
+		// Handle timeout amplification prevention.
+		//
+		// This connection arms one timer per outstanding packet, so a single
+		// RTO expiry delivers one callback per packet in flight. libutp has a
+		// single connection-wide RTO, and counts one event per expiry. This
+		// guard is what distinguishes the two, so everything that must happen
+		// once per RTO -- backing off, counting, and the give-up check --
+		// belongs inside it.
 		var isTimeout bool
 		if c.latestTimeout != nil {
 			isTimeout = time.Since(*c.latestTimeout) > c.state.SentPackets.Timeout()
@@ -821,6 +851,19 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 		}
 
 		if isTimeout {
+			// Give up once enough consecutive RTOs have passed with the peer
+			// acking nothing, as libutp does (utp_internal.cpp:1191). The
+			// check precedes the increment there, so the connection dies on
+			// the RTO after the fourth retransmission.
+			if c.retransmitCount >= maxConsecutiveTimeouts {
+				c.logger.Warn("giving up on connection",
+					"consecutiveTimeouts", c.retransmitCount,
+					"cid.send", c.cid.Send, "cid.recv", c.cid.Recv)
+				c.state.stateType = ConnClosed
+				c.state.Err = ErrTimedOut
+				return
+			}
+			c.retransmitCount++
 			c.state.SentPackets.OnTimeout()
 			c.timeouts++
 			currentTime := time.Now()
@@ -1063,7 +1106,7 @@ func (c *connection) processAck(
 			"fullAcked.start", fullAcked.start,
 			"fullAcked.end", fullAcked.end)
 	}
-	c.disarmAcked(fullAcked)
+	retired := c.disarmAcked(fullAcked)
 	for _, selectedAck := range selectedAcks {
 		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			c.logger.Trace("process ack, will remove acked num from innerMap",
@@ -1071,7 +1114,22 @@ func (c *connection) processAck(
 				"cid.recv", c.cid.Recv,
 				"ackNum", selectedAck)
 		}
+		if _, armed := c.armed[selectedAck]; armed {
+			retired++
+		}
 		c.disarmRetransmit(selectedAck)
+	}
+
+	if retired > 0 {
+		// The peer retired something we were still timing, so the path is
+		// alive: reset the consecutive-timeout count. libutp resets
+		// retransmit_count in ack_packet for the same reason
+		// (utp_internal.cpp:1398).
+		//
+		// Selective acks count. Under reordering or loss the only progress
+		// may be a SACK, and ignoring those would kill a connection that is
+		// in fact delivering.
+		c.retransmitCount = 0
 	}
 
 	return nil

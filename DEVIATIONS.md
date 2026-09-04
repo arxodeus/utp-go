@@ -77,6 +77,17 @@ until the window and RTT could be plotted.
 Observers are called from the connection's own event-loop goroutine, so they
 add no locking to the data path and nothing to the wire.
 
+### 4. `MaxConnAttempts` counts transmissions, not timeouts
+
+libutp gives up on a connection attempt when `retransmit_count` reaches 2
+while in `CS_SYN_SENT`, which works out to three transmissions of the SYN.
+This implementation counts transmissions directly, so the equivalent default
+is `MaxConnAttempts: 3`.
+
+The SYN retransmission *schedule* still differs: this implementation uses
+`InitialTimeout * 1.5^attempts` where libutp doubles. Not yet reconciled --
+recorded here so it is not mistaken for agreement.
+
 ## Not a deviation: LEDBAT++
 
 The brief anticipates LEDBAT++ being nearly the only entry in this file.
