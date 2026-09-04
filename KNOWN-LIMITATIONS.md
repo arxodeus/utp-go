@@ -161,9 +161,14 @@ against another implementation.
 Gates that pass:
 
 - `go test ./...` — green.
-- `go test ./integrated/ -run 'TestUdpTransfer|TestManyConcurrentTransfers' -count=10` — green.
+- `go test ./integrated/ -run 'TestUdpTransfer|TestManyConcurrentTransfers' -count=10` — green, at the full default of 1000 concurrent transfers.
 - `go test -race .` — green.
+- `go test -race ./integrated/ -run 'TestUdpTransfer|TestManyConcurrentTransfers' -count=3` — green, **but at `UTP_TEST_TRANSFERS=150`, not the default 1000.** See "Memory" below: the full 1000 does not fit under the race detector on a 16 GB machine.
 - `scripts/check-libutp-reference.sh` — pass.
+
+The `-race` gate is therefore met at 150 concurrent transfers and **unmet at
+1000**. That is a limit of the environment rather than a known defect, but it
+does mean the highest-concurrency path has not been proven race-free.
 
 Throughput figures observed on loopback, for scale only — these are not
 congestion-control results and say nothing about behaviour on a real path:
@@ -171,6 +176,28 @@ congestion-control results and say nothing about behaviour on a real path:
 - `TestManyConcurrentTransfers`: 1000 concurrent 1 MB transfers in ~11 s.
   Previously this test failed after its 120 s budget.
 - `TestUdpTransfer`: 16 MB single transfer in ~0.65 s.
+
+### Memory
+
+`TestManyConcurrentTransfers` at its default 1000 concurrent 1 MB transfers
+peaks at approximately **5 GB RSS** without the race detector (sampled from
+`/proc/<pid>/status` `VmHWM`). Under `-race` the same run reached 13.9 GB and
+was OOM-killed by the container's cgroup at ~507 s.
+
+Roughly 1-2 GB of that is the test's own buffers, and `ReadToEOF` grows its
+result with `append` from zero capacity, so it transiently holds about twice
+the final size per connection. The rest is the library's: `processReads`
+allocates a full `MaxPacketSize` buffer for every read and hands the whole
+buffer to the reader regardless of how many bytes were used, `readLoop`
+allocates per packet, and each socket holds `socketEvents` and `incomingBuf`
+channels with capacity 1,000,000 each.
+
+This is not unbounded growth — the run completes and the memory is reclaimed —
+but it is far more than the workload needs, and the M8 gate asks specifically
+about memory behaviour. It has not been profiled properly.
+
+`numTransfers` is overridable via `UTP_TEST_TRANSFERS` so the test can be run
+where the default does not fit.
 
 **Not measured at all:** goodput under loss, queueing delay, fairness against
 TCP or against a second uTP flow, recovery from loss, behaviour at any RTT
@@ -212,11 +239,15 @@ risks making things worse.
   processing the packet rather than returning.
 - **An intermittent data race was observed once**, in an early `-race` run of
   `TestManyConcurrentTransfers` under conditions where many connections were
-  hitting the 60 s idle timeout. It has not reproduced in any run since,
-  including runs specifically targeting the teardown paths, so I could not
-  capture the report and cannot say what it was. It may have been fixed
-  incidentally by the time-wheel or shutdown-fan-out changes. **Treat this
-  package as not proven race-free under teardown-heavy load.**
+  hitting the 60 s idle timeout. It has not reproduced in any run since —
+  including runs specifically targeting the teardown paths, three runs at 150
+  concurrent transfers, and a full-suite `-race` pass — so I could not capture
+  the report and cannot say what it was. It may have been fixed incidentally
+  by the time-wheel or shutdown-fan-out changes. **Treat this package as not
+  proven race-free under teardown-heavy load at high concurrency.**
+- **Per-read allocation.** `processReads` allocates `MaxPacketSize` bytes per
+  read and passes the entire buffer to the reader with a separate length,
+  rather than a right-sized slice. See "Memory" above.
 
 ## API notes
 

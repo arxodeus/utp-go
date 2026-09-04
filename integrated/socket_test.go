@@ -20,8 +20,17 @@ import (
 
 const (
 	test_socket_data_len = 1_000_000
-	numTransfers         = 1000
+	defaultNumTransfers  = 1000
 )
+
+// numTransfers is the concurrency this test runs at. It is overridable
+// because the default does not fit everywhere: 1000 concurrent 1 MB transfers
+// peak at roughly 5 GB RSS without the race detector, and the race detector's
+// shadow memory puts that well past what a typical CI container allows. Set
+// UTP_TEST_TRANSFERS to run the same test at a size that fits.
+func numTransfers() int {
+	return envInt("UTP_TEST_TRANSFERS", defaultNumTransfers)
+}
 
 func TestManyConcurrentTransfers(t *testing.T) {
 	// NOTE: this test used to register an fgprof handler on
@@ -105,7 +114,8 @@ func TestManyConcurrentTransfers(t *testing.T) {
 	_, _ = io.ReadFull(rand.Reader, data)
 
 	// Start transfers
-	for i := 0; i < numTransfers; i++ {
+	n := numTransfers()
+	for i := 0; i < n; i++ {
 		wg.Add(2) // One for sender, one for receiver
 		initiateTransfer(
 			t, ctx,
@@ -133,11 +143,11 @@ func TestManyConcurrentTransfers(t *testing.T) {
 	require.ErrorIs(t, timeoutCtx.Err(), context.Canceled, "Timed out waiting for transfer to complete")
 
 	elapsed := time.Since(start)
-	megabitsSent := float64(numTransfers) * float64(test_socket_data_len) * 8.0 / 1_000_000.0
+	megabitsSent := float64(n) * float64(test_socket_data_len) * 8.0 / 1_000_000.0
 	transferRate := megabitsSent / elapsed.Seconds()
 
 	t.Logf("finished high concurrency load test of %d simultaneous transfers, in %v, at a rate of %.0f Mbps",
-		numTransfers, elapsed, transferRate)
+		n, elapsed, transferRate)
 }
 
 // TestUdpTransfer performs a single large transfer over uTP carried on real
