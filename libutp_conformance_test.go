@@ -172,3 +172,112 @@ func relativeStamps(stamps []time.Time) []time.Duration {
 	}
 	return out
 }
+
+// --- RTT estimator and RTO ---------------------------------------------------
+//
+// libutp, at utp_internal.cpp:1362-1380:
+//
+//	if (pkt->transmissions == 1) {
+//	    ertt = (now_micros - pkt->time_sent) / 1000;   // milliseconds
+//	    if (rtt == 0) { rtt = ertt; rtt_var = ertt / 2; }
+//	    else {
+//	        delta   = rtt - ertt;
+//	        rtt_var = rtt_var + (abs(delta) - rtt_var) / 4;
+//	        rtt     = rtt - rtt/8 + ertt/8;
+//	    }
+//	    rto = max(rtt + rtt_var * 4, 1000);
+//	}
+//
+// This implementation keeps the same quantities in microseconds.
+
+func ackAfter(seqNum uint16, rtt time.Duration) Ack {
+	return Ack{Delay: 10 * time.Millisecond, RTT: rtt, ReceivedAt: time.Now()}
+}
+
+func TestFirstRTTSampleIsAdoptedDirectly(t *testing.T) {
+	ctrl := newDefaultController(defaultCtrlConfig())
+
+	const ertt = 400 * time.Millisecond
+	require.NoError(t, ctrl.OnTransmit(1, Initial, 500))
+	require.NoError(t, ctrl.OnAck(1, ackAfter(1, ertt)))
+
+	st := ctrl.Stats()
+	require.Equal(t, ertt, st.RTT,
+		"the first sample should be adopted outright, not eased up from zero (utp_internal.cpp:1365)")
+	require.Equal(t, ertt.Microseconds()/2, st.RTTVarianceMicros,
+		"first-sample variance should be ertt/2 (utp_internal.cpp:1366)")
+
+	// rto = max(400ms + 4*200ms, 1000ms) = 1200ms
+	require.Equal(t, 1200*time.Millisecond, st.Timeout,
+		"rto should be rtt + rtt_var*4 when that exceeds the floor")
+}
+
+func TestRTOFloorIsOneSecond(t *testing.T) {
+	ctrl := newDefaultController(defaultCtrlConfig())
+
+	// A fast path: rtt + rtt_var*4 = 20ms + 40ms = 60ms, well under the floor.
+	const ertt = 20 * time.Millisecond
+	require.NoError(t, ctrl.OnTransmit(1, Initial, 500))
+	require.NoError(t, ctrl.OnAck(1, ackAfter(1, ertt)))
+
+	st := ctrl.Stats()
+	require.Equal(t, ertt, st.RTT)
+	require.Equal(t, time.Second, st.Timeout,
+		"libutp floors the rto at 1000ms (utp_internal.cpp:1380)")
+}
+
+func TestSubsequentRTTSamplesFollowLibutp(t *testing.T) {
+	ctrl := newDefaultController(defaultCtrlConfig())
+
+	const first = 400 * time.Millisecond
+	require.NoError(t, ctrl.OnTransmit(1, Initial, 500))
+	require.NoError(t, ctrl.OnAck(1, ackAfter(1, first)))
+
+	// rtt = 400ms, rtt_var = 200ms.
+	const second = 480 * time.Millisecond
+	require.NoError(t, ctrl.OnTransmit(2, Initial, 500))
+	require.NoError(t, ctrl.OnAck(2, ackAfter(2, second)))
+
+	// delta   = 400 - 480 = -80ms
+	// rtt_var = 200 + (80 - 200)/4 = 200 - 30 = 170ms
+	// rtt     = 400 - 50 + 60 = 410ms
+	st := ctrl.Stats()
+	require.Equal(t, 410*time.Millisecond, st.RTT)
+	require.Equal(t, (170 * time.Millisecond).Microseconds(), st.RTTVarianceMicros)
+
+	// rto = max(410 + 4*170, 1000) = max(1090, 1000) = 1090ms
+	require.Equal(t, 1090*time.Millisecond, st.Timeout)
+}
+
+// A retransmitted packet's ack cannot be attributed to a particular
+// transmission, so it must not move the estimate. libutp guards on
+// `pkt->transmissions == 1` (utp_internal.cpp:1362); this is Karn's algorithm.
+func TestRetransmittedPacketDoesNotUpdateRTT(t *testing.T) {
+	ctrl := newDefaultController(defaultCtrlConfig())
+
+	const ertt = 400 * time.Millisecond
+	require.NoError(t, ctrl.OnTransmit(1, Initial, 500))
+	require.NoError(t, ctrl.OnAck(1, ackAfter(1, ertt)))
+	before := ctrl.Stats()
+
+	// A packet sent twice, then acked with a wildly different measurement.
+	require.NoError(t, ctrl.OnTransmit(2, Initial, 500))
+	require.NoError(t, ctrl.OnTransmit(2, Retransmission, 500))
+	require.NoError(t, ctrl.OnAck(2, ackAfter(2, 5*time.Second)))
+
+	after := ctrl.Stats()
+	require.Equal(t, before.RTT, after.RTT,
+		"an ack for a retransmitted packet must not move the RTT estimate")
+	require.Equal(t, before.RTTVarianceMicros, after.RTTVarianceMicros)
+	require.Equal(t, before.Timeout, after.Timeout)
+}
+
+func TestInitialRTTVarianceMatchesLibutp(t *testing.T) {
+	ctrl := newDefaultController(defaultCtrlConfig())
+	st := ctrl.Stats()
+	require.Equal(t, time.Duration(0), st.RTT)
+	require.Equal(t, (800 * time.Millisecond).Microseconds(), st.RTTVarianceMicros,
+		"libutp starts rtt_var at 800ms (utp_internal.cpp:2610)")
+	require.Equal(t, 3*time.Second, st.Timeout,
+		"the initial timeout should be libutp's 3000ms (utp_internal.cpp:2762)")
+}

@@ -12,8 +12,11 @@ const (
 	defaultTargetMicros = 100000 * time.Microsecond
 	// defaultInitialTimeout matches libutp's initial rto and its connect
 	// timer, both 3000ms (utp_internal.cpp:2609 and :2762).
-	defaultInitialTimeout     = 3 * time.Second
-	defaultMinTimeout         = 500 * time.Millisecond
+	defaultInitialTimeout = 3 * time.Second
+	// defaultMinTimeout is the RTO floor. libutp computes
+	// rto = max(rtt + rtt_var * 4, 1000) in milliseconds
+	// (utp_internal.cpp:1380), so the floor is one second.
+	defaultMinTimeout         = 1000 * time.Millisecond
 	defaultMaxTimeout         = 60 * time.Second
 	defaultMaxPacketSizeBytes = 1024
 	defaultGain               = 1.0
@@ -138,9 +141,14 @@ func newDefaultController(config *ctrlConfig) *defaultController {
 		maxWindowSizeIncBytes: config.MaxWindowSizeIncBytes,
 		gain:                  config.Gain,
 		rtt:                   0,
-		rttVarianceMicros:     0,
-		transmissions:         make(map[uint16]*packetRecord),
-		delayAcc:              newDelayAccumulator(config.DelayWindow),
+		// libutp starts rtt_var at 800 (utp_internal.cpp:2610). Its rtt and
+		// rtt_var are milliseconds -- the RTT sample is computed as
+		// microseconds/1000 at utp_internal.cpp:1364 -- so that is 800ms.
+		// It is superseded by the first RTT sample below, and exists so a
+		// timeout computed before any ack is conservative rather than zero.
+		rttVarianceMicros: (800 * time.Millisecond).Microseconds(),
+		transmissions:     make(map[uint16]*packetRecord),
+		delayAcc:          newDelayAccumulator(config.DelayWindow),
 	}
 }
 
@@ -239,24 +247,28 @@ func (c *defaultController) OnAck(seqNum uint16, ack Ack) error {
 
 	c.windowSizeBytes -= packetInst.SizeBytes
 
+	// Only unretransmitted packets update the RTT estimate: an ack for a
+	// packet sent more than once cannot be attributed to a particular
+	// transmission. libutp applies the same rule
+	// (`if (pk->transmissions == 1)`, utp_internal.cpp:1362).
 	if packetInst.NumTransmissions == 1 {
-		rttVarAdjustment := computeRTTVarianceAdjustment(
-			c.rtt.Microseconds(),
-			c.rttVarianceMicros,
-			ack.RTT.Microseconds(),
-		)
-		c.rttVarianceMicros = maxInt64(0, c.rttVarianceMicros+rttVarAdjustment)
+		ertt := ack.RTT.Microseconds()
 
-		rttAdjustment := computeRTTAdjustment(c.rtt.Microseconds(), ack.RTT.Microseconds())
-
-		// computeRTTAdjustment works in microseconds, so the running estimate
-		// must be read and rebuilt in microseconds too.
-		//
-		// This previously added the microsecond adjustment to c.rtt.Milliseconds()
-		// and handed the sum to time.Duration, which counts nanoseconds. Three
-		// units in two lines: the estimate converged to about 5us on every
-		// path regardless of its real RTT, so it tracked nothing.
-		c.rtt = time.Duration(maxInt64(c.rtt.Microseconds()+rttAdjustment, 0)) * time.Microsecond
+		if c.rtt == 0 {
+			// First sample: adopt it outright rather than easing an average
+			// up from zero, which would take about twenty samples to
+			// converge and leave the RTO wrong for all of them
+			// (utp_internal.cpp:1364-1367).
+			c.rtt = time.Duration(ertt) * time.Microsecond
+			c.rttVarianceMicros = ertt / 2
+		} else {
+			// utp_internal.cpp:1370-1372.
+			rttMicros := c.rtt.Microseconds()
+			delta := rttMicros - ertt
+			c.rttVarianceMicros = maxInt64(0, c.rttVarianceMicros+(absInt64(delta)-c.rttVarianceMicros)/4)
+			rttMicros = rttMicros - rttMicros/8 + ertt/8
+			c.rtt = time.Duration(maxInt64(rttMicros, 0)) * time.Microsecond
+		}
 
 		c.applyTimeoutAdjustment()
 	}
@@ -343,17 +355,12 @@ func computeMaxWindowSizeAdjustment(
 	return int64(scaledGain)
 }
 
-// computeRTTAdjustment returns the adjustment to the round trip time (RTT) estimate in microseconds
-// based on the packet RTT and the current RTT estimate.
-func computeRTTAdjustment(rttMicros, packetRTTMicros int64) int64 {
-	return int64((float64(packetRTTMicros) - float64(rttMicros)) / 8.0)
-}
-
-// computeRTTVarianceAdjustment returns the adjustment to round trip time (RTT) variance in microseconds
-// based on the packet RTT, current RTT estimate, and current RTT variance.
-func computeRTTVarianceAdjustment(rttMicros, rttVarianceMicros, packetRTTMicros int64) int64 {
-	absDeltaMicros := math.Abs(float64(rttMicros - packetRTTMicros))
-	return int64((absDeltaMicros - float64(rttVarianceMicros)) / 4.0)
+// absInt64 returns the absolute value of x.
+func absInt64(x int64) int64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 // Additional methods for handling acknowledgments, lost packets, and timeouts would follow...

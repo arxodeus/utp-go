@@ -96,8 +96,26 @@ variance term by 1000x and leaving the retransmission timeout pinned at
 `minTimeout`.
 
 Both are fixed. The consequence of the old behaviour is that the RTO could
-never adapt to the path: on any link with an RTT above `minTimeout` (500 ms),
-uTP would have retransmitted continuously.
+never adapt to the path: on any link with an RTT above the floor, uTP would
+have retransmitted continuously.
+
+The estimator now matches libutp's arithmetic exactly
+(`utp_internal.cpp:1362-1380`), including three things it previously lacked:
+
+- **The first sample is adopted outright** -- `rtt = ertt`,
+  `rtt_var = ertt/2` -- rather than easing an average up from zero, which
+  took about twenty samples to converge and left the RTO wrong throughout.
+- **The RTO floor is 1000 ms**, not 500 ms. On the emulated 2% loss path this
+  moved recovery entirely onto duplicate-ack fast retransmit (58 fast
+  retransmits, zero timeouts, against 57 and one before), which is the
+  healthier path: an RTO firing while dup-acks would have recovered the loss
+  is a lost round trip.
+- **Initial `rtt_var` is 800 ms**, matching libutp, so a timeout computed
+  before any ack is conservative rather than zero.
+
+`libutp_conformance_test.go` pins each of these, including Karn's algorithm --
+an ack for a retransmitted packet must not move the estimate, since it cannot
+be attributed to a particular transmission.
 
 ## Retransmission timing was quantised to one second
 

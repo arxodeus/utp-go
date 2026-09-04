@@ -45,23 +45,6 @@ Not a wire behaviour — a Go API choice, matching `io.ReadAll`. Abnormal
 closes still return their error. Noted because the previous behaviour was
 inconsistent between code paths rather than a considered deviation.
 
-## Inherited notes that claim consistency with the reference
-
-Two comments in `conn.go` describe behaviour as matching the reference
-implementation. They are recorded here because they are load-bearing claims
-that **have not been re-verified** against `utp_internal.cpp` in this fork:
-
-- The initiator initialises its ACK number to the sequence number of the
-  SYN-ACK minus one, described in the source as "a deviation from the
-  specification ... consistent with the reference implementation and the
-  libtorrent implementation" (`connection.onState`).
-- STATE packets always carry the next sequence number, described as
-  "[c]onsistent with the reference implementation and the libtorrent
-  implementation" (`connection.statePacket`).
-
-Both are inherited from the upstream port of `ethereum/utp`. Verifying them is
-M4b work.
-
 ### 3. `Controller` exposes a `Stats()` snapshot
 
 The `Controller` interface gained `Stats() ControllerStats`, and
@@ -91,28 +74,22 @@ only addition is a cap at `MaxTimeout`, which libutp does not have because its
 own two-timeout limit bounds the backoff; it is unreachable at the default
 `MaxConnAttempts` and only matters if a caller raises it.
 
-## Unreconciled differences
+## Inherited notes that claim consistency with the reference
 
-Real differences from libutp, found but not yet decided. Listed separately
-from the deliberate deviations above so they are not mistaken for choices.
+Two comments in `conn.go` describe behaviour as matching the reference
+implementation. They are recorded here because they are load-bearing claims
+that **have not been re-verified** against `utp_internal.cpp` in this fork:
 
-### `MinTimeout` floor is 500 ms; libutp's is 1000 ms
+- The initiator initialises its ACK number to the sequence number of the
+  SYN-ACK minus one, described in the source as "a deviation from the
+  specification ... consistent with the reference implementation and the
+  libtorrent implementation" (`connection.onState`).
+- STATE packets always carry the next sequence number, described as
+  "[c]onsistent with the reference implementation and the libtorrent
+  implementation" (`connection.statePacket`).
 
-Both compute the RTO the same way -- `max(rtt + rtt_var * 4, floor)` -- but
-libutp's floor is 1000 ms (`utp_internal.cpp:1380`) against 500 ms here. A
-lower floor means faster loss recovery and more spurious retransmissions on
-paths with an RTT near the floor.
-
-### Initial `rtt_var` is 0; libutp's is 800
-
-libutp starts `rtt_var` at 800 (`utp_internal.cpp:2610`), which inflates the
-first few RTO computations until the estimate settles. Starting from zero
-makes the first RTO after an ack shorter than libutp's.
-
-Both of these affect only how fast this implementation retransmits, not what
-it puts on the wire, so neither is an interoperability problem. They are worth
-reconciling before any M5 congestion measurement is taken as comparable to
-libutp's.
+Both are inherited from the upstream port of `ethereum/utp`. Verifying them is
+M4b work.
 
 ## Not a deviation: LEDBAT++
 

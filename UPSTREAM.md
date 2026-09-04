@@ -5,7 +5,7 @@ BitTorrent-specific slant, and it would be poor form to keep it here silently.
 Upstream is built for the Portal Network, where uTP runs over discv5 rather
 than raw UDP, but none of these defects are specific to either transport.
 
-Suggested as **eight separate pull requests**, smallest and least arguable
+Suggested as **nine separate pull requests**, smallest and least arguable
 first, so none of them is held up by the others.
 
 ## PR 1 — the transfer-path hangs
@@ -73,7 +73,7 @@ Measured: 6.18% to 0.00% spurious retransmits, +53% goodput on an emulated
 measurable cost at a thousand concurrent connections.
 
 Depends on nothing else in this fork, but the numbers come from the harness in
-PR 8, so send that first or quote the figures.
+PR 9, so send that first or quote the figures.
 
 ## PR 4 — RESET rate limiting
 
@@ -121,7 +121,22 @@ Three small conformance fixes, each independently checkable against
   context arm, so cancelling during setup blocked the caller forever.
   `Connect` already had the arm.
 
-## PR 7 — the test suite
+## PR 7 — the RTT estimator and RTO
+
+Builds on PR 2, which fixed the unit errors that made the estimate track
+nothing. This makes the arithmetic match libutp exactly
+(`utp_internal.cpp:1362-1380`):
+
+- the first RTT sample is adopted outright (`rtt = ertt`, `rtt_var = ertt/2`)
+  rather than eased up from zero over about twenty samples;
+- the RTO floor is 1000 ms, not 500 ms;
+- initial `rtt_var` is 800 ms, matching `utp_internal.cpp:2610`.
+
+On an emulated 2% loss path this moved recovery entirely onto duplicate-ack
+fast retransmit -- zero RTO-driven timeouts, against one before -- which is
+the healthier path.
+
+## PR 8 — the test suite
 
 Independent of the library. On a clean checkout upstream's suite cannot pass:
 
@@ -142,7 +157,7 @@ Also in this PR: profiling scaffolding removed from tests, `-race`-aware time
 budgets, and `UTP_TEST_TRANSFERS` to run the concurrency test where 1000
 simultaneous transfers do not fit in memory.
 
-## PR 8 — the network harness
+## PR 9 — the network harness
 
 `netem/`, the in-process emulated network, plus the `Controller.Stats()` and
 `ConnectionConfig.Metrics` hooks it reads. Upstream has no way to measure
@@ -164,7 +179,7 @@ interface methods.
 
 ## Order of operations
 
-PR 1, PR 4, PR 6 and PR 7 are close to unarguable and should go first.
+PR 1, PR 4, PR 6 and PR 8 are close to unarguable and should go first.
 
 PR 2 and PR 3 both need a conversation, for the same reason: any tuning or
 measurement upstream has done was taken against a controller with a constant
@@ -172,5 +187,5 @@ delay signal and a timer that fired at random within a one-second window.
 Both will move once these land, and that is the point, but it should not be a
 surprise.
 
-PR 5 needs review of the per-packet-timer subtlety above. PR 8 is optional
+PR 5 needs review of the per-packet-timer subtlety above. PR 9 is optional
 for upstream and the most invasive; offer it last.
