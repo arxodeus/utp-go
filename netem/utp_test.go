@@ -255,21 +255,15 @@ func TestLinkConfigCanChangeMidFlight(t *testing.T) {
 // that drops nothing. The correct answer is zero: with no loss and no
 // reordering, nothing should ever need resending.
 //
-// It is not zero. On an 8 Mbps / 40 ms path this implementation retransmits
-// roughly 6% of packets, because the retransmission timer wheel has a
-// one-second resolution (interval = InitialTimeout/4) and cannot represent
-// the 500 ms RTO. A timer set for "500 ms" lands on the next tick, uniformly
-// 0-1000 ms away, so a packet inserted shortly before a tick is declared lost
-// long before its ack could have arrived.
+// It was not zero. On an 8 Mbps / 40 ms path this implementation retransmitted
+// about 6% of packets, because each connection owned a retransmission timer
+// wheel with a one-second resolution (interval = InitialTimeout/4) which
+// cannot represent the 500 ms RTO -- a timer set for "500 ms" landed on the
+// next tick, uniformly 0-1000 ms away, so packets were declared lost long
+// before their ack could arrive.
 //
-// Rebuilding the wheel with a 25 ms interval and a rounds counter removes it
-// entirely -- measured 0% retransmits and +53% goodput on this path -- but
-// costs about 33% at 1000 concurrent connections, because each connection
-// owns its own ticker. The fix worth having is one shared wheel per socket.
-// See KNOWN-LIMITATIONS.md.
-//
-// The assertion here is a loose regression ceiling, not the target. The
-// target is zero.
+// The wheel is now shared across the socket at 25 ms resolution, which buys
+// the accuracy without a ticker per connection. Measured: 0.00%.
 func TestSpuriousRetransmitsOnLosslessLink(t *testing.T) {
 	n := NewNetwork(26)
 	defer n.Close()
@@ -305,8 +299,10 @@ func TestSpuriousRetransmitsOnLosslessLink(t *testing.T) {
 		t.Fatalf("this link is meant to be lossless but dropped %d packets; the measurement is invalid",
 			linkStats.PacketsDropped)
 	}
-	if sum.RetransmitRate > 0.15 {
-		t.Errorf("retransmit rate %.2f%% on a lossless link exceeds the 15%% regression ceiling",
-			sum.RetransmitRate*100)
+	// A lossless link should need no retransmissions at all. The small
+	// allowance covers a genuinely late ack under scheduler noise, not the
+	// systematic mistiming this test was written to catch.
+	if sum.RetransmitRate > 0.01 {
+		t.Errorf("retransmit rate %.2f%% on a lossless link, want ~0%%", sum.RetransmitRate*100)
 	}
 }

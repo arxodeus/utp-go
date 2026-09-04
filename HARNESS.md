@@ -137,6 +137,23 @@ fmt.Println(res.Sender.Summary())     // cwnd, RTT, queueing delay, retransmits
 fmt.Println(n.Link("sender", "receiver").Stats())
 ```
 
+## What it has found so far
+
+Two defects, both invisible to the unit tests and to loopback, both caught
+within minutes of the harness first carrying a flow:
+
+- **The RTT estimate tracked nothing** -- it converged to about 5 µs on every
+  path, because `OnAck` mixed milliseconds, microseconds and nanoseconds in
+  two lines. Fixed; a 40 ms path now estimates 43.1 ms.
+- **6% of packets were retransmitted on a link that drops nothing**, because
+  the retransmission timer wheel could not represent an RTO shorter than its
+  one-second tick. Fixed by sharing one 25 ms wheel across the socket;
+  measured 0.00% after, with goodput up 53% on the emulated path.
+
+Both are written up in [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md). Neither
+would have been visible in a throughput number alone, which is the argument
+for recording cwnd and RTT rather than just goodput.
+
 ## What it does not do
 
 - **No TCP model.** The M5 gate "yields to a greedy TCP flow" cannot be run

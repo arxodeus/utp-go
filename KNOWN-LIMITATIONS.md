@@ -99,53 +99,61 @@ Both are fixed. The consequence of the old behaviour is that the RTO could
 never adapt to the path: on any link with an RTT above `minTimeout` (500 ms),
 uTP would have retransmitted continuously.
 
-## Retransmission timing is quantised to one second
+## Retransmission timing was quantised to one second
 
-**Not fixed. This is the largest known defect in the library and it needs a
-design decision.**
+**Fixed.** Recorded in full because it was the largest defect in the library
+and because the measurement is the point: it was invisible until the M1
+harness existed, and it contaminated everything downstream of it.
 
-On a link that drops nothing, this implementation retransmits about **6% of
-packets**. Measured over the emulated network on an 8 Mbps / 40 ms path with
-`LossRate: 0`, confirmed by the link's own counters reporting zero drops.
+On a link that dropped nothing, this implementation retransmitted about **6%
+of packets**. Measured on an 8 Mbps / 40 ms emulated path with `LossRate: 0`,
+confirmed by the link's own counters reporting zero drops.
 
-The cause is the retransmission timer wheel. It is constructed with
-`interval = InitialTimeout/4`, which is **one second**, and the retransmission
-timeout is 500 ms. A wheel with a one-second tick cannot represent "500 ms
-from now": the timer lands on the next tick, uniformly 0-1000 ms away. A
-packet inserted shortly before a tick is declared lost long before its ack
-could possibly have arrived.
+The cause was the retransmission timer wheel. Each connection owned one,
+constructed with `interval = InitialTimeout/4` -- **one second** -- while the
+retransmission timeout is 500 ms. A wheel with a one-second tick cannot
+represent "500 ms from now": the timer landed on the next tick, uniformly
+0-1000 ms away, so a packet inserted shortly before a tick was declared lost
+long before its ack could arrive. The expected spurious rate is roughly
+`RTT / interval` = 43/1000 ≈ 4.3%, against 6.1% measured.
 
-The expected spurious rate is roughly `RTT / interval` = 43/1000 ≈ 4.3%,
-against 6.1% measured.
+Simply adding a rounds counter at the same interval did **not** help (6.25%
+measured): with a one-second tick there is no way to express 500 ms at all.
+The resolution itself had to change.
 
-Rebuilding the wheel with a 25 ms interval and a rounds counter was tested and
-removes it entirely:
+Raising the resolution on a per-connection wheel fixed the timing but cost
+about 25% at a thousand connections, because 25 ms per connection means
+40,000 timer wake-ups per second. The fix is therefore **one wheel per
+socket**, at 25 ms, with:
 
-| | current (1 s wheel) | 25 ms wheel + rounds |
+- delays rounded **up** to whole ticks, so a timer never fires early;
+- a rounds counter, so delays beyond one revolution are scheduled rather than
+  clamped -- which also fixes RTO backoff, previously capped at
+  `slotNum * interval`;
+- O(1) removal via a key-to-slot index, since scanning every slot is no longer
+  acceptable when the wheel holds every connection's packets;
+- per-connection key scoping, and a per-connection set of armed sequence
+  numbers so acking a range disarms only that connection's timers instead of
+  scanning the whole socket's wheel.
+
+Measured before and after:
+
+| | before | after |
 | --- | --- | --- |
-| Retransmits, lossless 8 Mbps / 40 ms path | 6.12% | **0.00%** |
-| Timeouts | 2 | **0** |
-| Goodput | 2.43 Mbps | **3.73 Mbps** (+53%) |
+| Retransmits, lossless 8 Mbps / 40 ms path | 6.18% | **0.00%** |
+| Timeouts on that path | 2 | **0** |
+| Goodput on that path | 2.43 Mbps | **3.73 Mbps** (+53%) |
 | Mean cwnd | 14.5 KB | 26.4 KB |
-| `TestUdpTransfer`, loopback | 217.6 Mbps | **284.7 Mbps** (+31%) |
-| `TestManyConcurrentTransfers`, 1000 conns | 614 Mbps | **460 Mbps** (-25%) |
+| `TestUdpTransfer`, loopback | 257 Mbps (mean of 2) | **350 Mbps** (mean of 2) |
+| `TestManyConcurrentTransfers`, 1000 conns | 560 Mbps (mean of 4: 547/662/412/621) | **587 Mbps** (mean of 4: 613/601/654/479) |
 
-The regression at 1000 connections is the reason this is not merged: each
-connection owns its own ticker, so a 25 ms interval means 40,000 timer
-wake-ups per second across the socket. The fix worth having is **one shared
-timer wheel per socket** rather than one per connection, which gets the
-resolution without the per-connection cost. That is a real refactor and it
-belongs in M4, not smuggled into the harness work.
+The 1000-connection figure is noisy on this machine -- the spread is wider
+than the difference between the two configurations -- so the honest reading is
+that the shared wheel costs nothing measurable at that scale, not that it
+helps.
 
-Two things follow from this:
-
-- **Every M5 measurement will be contaminated until it is fixed.** A
-  controller being fed 6% phantom loss is not being measured on its merits.
-- The related upper-bound defect recorded below (the wheel silently clamping
-  delays above `slotNum * interval`) has the same root cause and the same fix.
-
-`netem/utp_test.go:TestSpuriousRetransmitsOnLosslessLink` measures and logs
-this rate on every run, with a loose regression ceiling. The target is zero.
+`netem/utp_test.go:TestSpuriousRetransmitsOnLosslessLink` asserts the rate
+stays at zero.
 
 ## Root causes of the M3 failures
 
@@ -302,12 +310,6 @@ risks making things worse.
   aggregate, so this has not been observed, but the shape is wrong. I did not
   change it because I have no way to measure whether reordering those cases
   helps or hurts.
-- **The time wheel silently clamps any delay above `slotNum * interval`.**
-  With the defaults that is `8 * (InitialTimeout/4)` = `2 * InitialTimeout`.
-  The connection's exponential backoff computes `InitialTimeout * 1.5^attempts`,
-  which exceeds the clamp from the second retry onward, so RTO backoff
-  effectively stops growing. libutp backs off without such a ceiling. Fixing
-  this properly means adding a rounds counter to the wheel.
 - **RESET storms.** Any packet arriving for a connection that has just been
   torn down produces a RESET. A 300-connection run emitted over 3000 of them.
   Whether libutp resets as readily in the same situations is exactly the kind

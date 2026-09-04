@@ -5,7 +5,7 @@ BitTorrent-specific slant, and it would be poor form to keep it here silently.
 Upstream is built for the Portal Network, where uTP runs over discv5 rather
 than raw UDP, but none of these defects are specific to either transport.
 
-Suggested as **three separate pull requests**, smallest and least arguable
+Suggested as **five separate pull requests**, smallest and least arguable
 first, so none of them is held up by the others.
 
 ## PR 1 — the transfer-path hangs
@@ -49,7 +49,33 @@ benchmarked upstream's congestion control has measured a controller with a
 constant input.** Evidence and before/after loopback numbers are in
 [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
 
-## PR 3 — the test suite
+## PR 3 — the retransmission timer
+
+The largest single performance defect found so far, and entirely
+transport-agnostic: it costs Portal Network users exactly what it costs
+BitTorrent users.
+
+Each connection owned a timer wheel built with `interval = InitialTimeout/4`
+-- one second -- while the RTO is 500 ms. A one-second tick cannot represent
+500 ms: the timer landed on the next tick, uniformly 0-1000 ms away, so
+packets were declared lost before their ack could arrive. On a link dropping
+nothing, about 6% of packets were retransmitted.
+
+The change makes the wheel socket-wide at 25 ms resolution, rounds delays up
+so a timer never fires early, adds a rounds counter so long delays are
+scheduled instead of clamped (which also un-caps RTO backoff), and makes
+removal O(1). Sharing is what makes the finer resolution affordable: a 25 ms
+wheel per connection would mean 40,000 timer wake-ups per second at a thousand
+connections.
+
+Measured: 6.18% to 0.00% spurious retransmits, +53% goodput on an emulated
+8 Mbps / 40 ms path, +36% on the loopback large-transfer test, and no
+measurable cost at a thousand concurrent connections.
+
+Depends on nothing else in this fork, but the numbers come from the harness in
+PR 5, so send that first or quote the figures.
+
+## PR 4 — the test suite
 
 Independent of the library. On a clean checkout upstream's suite cannot pass:
 
@@ -70,6 +96,17 @@ Also in this PR: profiling scaffolding removed from tests, `-race`-aware time
 budgets, and `UTP_TEST_TRANSFERS` to run the concurrency test where 1000
 simultaneous transfers do not fit in memory.
 
+## PR 5 — the network harness
+
+`netem/`, the in-process emulated network, plus the `Controller.Stats()` and
+`ConnectionConfig.Metrics` hooks it reads. Upstream has no way to measure
+congestion behaviour at all today, and both defects above were invisible
+without it.
+
+This is the largest and least urgent of the five. It is also the one upstream
+may reasonably want to shape differently, since it adds a package and two
+interface methods.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it
@@ -81,7 +118,12 @@ simultaneous transfers do not fit in memory.
 
 ## Order of operations
 
-PR 1 and PR 3 are close to unarguable and should go first. PR 2 is the one
-that needs a conversation, because upstream may have tuning or measurements
-that were taken against the broken delay signal and will move once it is
-fixed.
+PR 1 and PR 4 are close to unarguable and should go first.
+
+PR 2 and PR 3 both need a conversation, for the same reason: any tuning or
+measurement upstream has done was taken against a controller with a constant
+delay signal and a timer that fired at random within a one-second window.
+Both will move once these land, and that is the point, but it should not be a
+surprise.
+
+PR 5 is optional for upstream and the most invasive. Offer it last.

@@ -103,6 +103,10 @@ type UtpSocket struct {
 	incomingConns            *syncMap[*IncomingPacket]
 	incomingConnsExpirations *timeWheel[*IncomingPacket]
 	socket                   Conn
+	// retransmitTimers is one timer wheel for every connection on this
+	// socket. Per-connection wheels cost a ticker each; see
+	// retransmit_timer.go.
+	retransmitTimers *retransmitTimers
 	// ownsSocket is true when this UtpSocket created the underlying Conn
 	// (via Bind) and is therefore responsible for closing it. A Conn handed
 	// in through WithSocket belongs to the caller.
@@ -168,6 +172,7 @@ func WithSocket(ctx context.Context, socket Conn, logger log.Logger) *UtpSocket 
 	utp := &UtpSocket{
 		ctx:                      ctx,
 		cancel:                   cancel,
+		retransmitTimers:         newRetransmitTimers(defaultRetransmitTickInterval, defaultRetransmitSlots),
 		logger:                   logger,
 		conns:                    make(map[string]chan *streamEvent),
 		accepts:                  make(chan *Accept, 1000),
@@ -390,7 +395,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
 		connected := make(chan error, 1)
 		newConnStream := make(chan *streamEvent, 1000)
 		s.putConnStream(cidHash, newConnStream)
-		stream := NewUtpStream(s.ctx, s.logger, cid, accept.config, packetPtr, s.socketEvents, newConnStream, connected)
+		stream := NewUtpStream(s.ctx, s.logger, cid, accept.config, packetPtr, s.socketEvents, newConnStream, connected, s.retransmitTimers)
 		go s.awaitConnected(stream, accept, connected)
 	} else {
 		s.logger.Debug("put a new syn packet to incomingConns...")
@@ -488,6 +493,7 @@ func (s *UtpSocket) Close() {
 		s.sendShutdownEventToConns()
 		s.awaitingExpirations.stop()
 		s.incomingConnsExpirations.stop()
+		s.retransmitTimers.stop()
 		// Close the underlying socket when we opened it. Without this the UDP
 		// port stayed bound for the life of the process and readLoop stayed
 		// parked in ReadFrom, which cancelling the context does not interrupt
@@ -617,6 +623,7 @@ func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *Co
 		s.socketEvents,
 		streamEvents,
 		connectedCh,
+		s.retransmitTimers,
 	)
 
 	// Wait for connection result
@@ -660,6 +667,7 @@ func (s *UtpSocket) ConnectWithCid(
 		s.socketEvents,
 		streamEvents,
 		connected,
+		s.retransmitTimers,
 	)
 	err := <-connected
 	if err == nil {
@@ -727,6 +735,7 @@ func (s *UtpSocket) selectAcceptHelper(
 		socketEvents,
 		streamEvents,
 		connected,
+		s.retransmitTimers,
 	)
 
 	go s.awaitConnected(stream, accept, connected)

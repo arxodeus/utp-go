@@ -126,24 +126,31 @@ type readOrWriteResult struct {
 }
 
 type connection struct {
-	ctx              context.Context
-	logger           log.Logger
-	state            *ConnState
-	cid              *ConnectionId
-	config           *ConnectionConfig
-	endpoint         *Endpoint
-	peerTsDiff       time.Duration
-	peerRecvWindow   uint32
-	socketEvents     chan *socketEvent
-	unacked          *timeWheel[*packet]
-	unackTimeoutCh   chan *packet
-	handleExpiration expireFunc[*packet]
-	reads            chan *readOrWriteResult
-	readable         chan struct{}
-	pendingWrites    []*queuedWrite
-	writable         chan struct{}
-	latestTimeout    *time.Time
-	synState         *packet
+	ctx            context.Context
+	logger         log.Logger
+	state          *ConnState
+	cid            *ConnectionId
+	config         *ConnectionConfig
+	endpoint       *Endpoint
+	peerTsDiff     time.Duration
+	peerRecvWindow uint32
+	socketEvents   chan *socketEvent
+	// timers is the socket-wide retransmission wheel; timerScope namespaces
+	// this connection's keys within it.
+	timers     *retransmitTimers
+	timerScope uint64
+	// armed tracks which sequence numbers this connection currently has
+	// scheduled. It exists so acking a range can disarm only this
+	// connection's timers instead of scanning a wheel shared by every
+	// connection on the socket. Touched only from the event-loop goroutine.
+	armed          map[uint16]struct{}
+	unackTimeoutCh chan *packet
+	reads          chan *readOrWriteResult
+	readable       chan struct{}
+	pendingWrites  []*queuedWrite
+	writable       chan struct{}
+	latestTimeout  *time.Time
+	synState       *packet
 	// readsTerminated records that the single end-of-stream marker has been
 	// handed to the reader. Readers block on c.reads until they see it.
 	readsTerminated bool
@@ -169,6 +176,7 @@ func newConnection(
 	connected chan error,
 	socketEvents chan *socketEvent,
 	reads chan *readOrWriteResult,
+	timers *retransmitTimers,
 ) *connection {
 	var endpoint *Endpoint
 	var peerTsDiff time.Duration
@@ -198,12 +206,6 @@ func newConnection(
 	}
 
 	unackTimeoutCh := make(chan *packet, 1000)
-	handleExpiration := func(key any, pkt *packet) {
-		select {
-		case unackTimeoutCh <- pkt:
-		case <-ctx.Done():
-		}
-	}
 
 	return &connection{
 		ctx:            ctx,
@@ -215,7 +217,9 @@ func newConnection(
 		peerTsDiff:     peerTsDiff,
 		peerRecvWindow: peerRecvWindow,
 		socketEvents:   socketEvents,
-		unacked:        newTimeWheel[*packet](config.InitialTimeout/4, 8, handleExpiration),
+		timers:         timers,
+		timerScope:     timers.newScope(),
+		armed:          make(map[uint16]struct{}),
 		unackTimeoutCh: unackTimeoutCh,
 		reads:          reads,
 		readable:       make(chan struct{}, 3),
@@ -225,8 +229,55 @@ func newConnection(
 	}
 }
 
+// armRetransmit schedules a retransmission timer for one packet.
+func (c *connection) armRetransmit(pkt *packet, delay time.Duration) {
+	seq := pkt.Header.SeqNum
+	c.armed[seq] = struct{}{}
+	c.timers.arm(
+		retransmitKey{scope: c.timerScope, seq: seq},
+		&retransmitTimer{packet: pkt, deliver: c.unackTimeoutCh, ctx: c.ctx},
+		delay,
+	)
+}
+
+// disarmRetransmit cancels one packet's retransmission timer.
+//
+// Unconditional on purpose. A timer that has already fired is out of the
+// wheel but still in the armed set until the event loop drains it, so
+// skipping the wheel when the set does not hold the key could leave a stale
+// entry behind. Both operations are no-ops when the key is absent.
+func (c *connection) disarmRetransmit(seq uint16) {
+	delete(c.armed, seq)
+	c.timers.disarm(retransmitKey{scope: c.timerScope, seq: seq})
+}
+
+// disarmAcked cancels the timers for every sequence number this connection
+// still has armed that falls inside acked.
+//
+// Only this connection's own armed set is scanned. The wheel is shared with
+// every other connection on the socket, so scanning it would be O(all
+// outstanding packets on the socket) on every ack.
+func (c *connection) disarmAcked(acked *circularRangeInclusive) {
+	for seq := range c.armed {
+		if acked.Contains(seq) {
+			delete(c.armed, seq)
+			c.timers.disarm(retransmitKey{scope: c.timerScope, seq: seq})
+		}
+	}
+}
+
+// disarmAll cancels every timer this connection holds. The shared wheel
+// outlives the connection, so anything left armed would linger until it
+// expired and then be delivered to a dead event loop.
+func (c *connection) disarmAll() {
+	for seq := range c.armed {
+		c.timers.disarm(retransmitKey{scope: c.timerScope, seq: seq})
+	}
+	clear(c.armed)
+}
+
 func (c *connection) eventLoop(stream *UtpStream) error {
-	defer c.unacked.stop()
+	defer c.disarmAll()
 	if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 		c.logger.Trace("uTP conn starting", "dst.peer", c.cid.Peer, "cid.Send", c.cid.Send, "cid.Recv", c.cid.Recv)
 	}
@@ -238,7 +289,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			c.logger.Trace("put a initial syn packet to delay map", "socketEvents.len", len(c.socketEvents), "dst.peer", c.cid.Peer, "synSeqNum", synSeqNum)
 		}
-		c.unacked.put(synSeqNum, synPkt, c.config.InitialTimeout)
+		c.armRetransmit(synPkt, c.config.InitialTimeout)
 
 		c.endpoint.Attempts = 1
 	} else {
@@ -301,6 +352,8 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	}
 
 	handleTimeout := func(timeoutPkt *packet) {
+		// The wheel has already removed this one; keep the armed set in step.
+		delete(c.armed, timeoutPkt.Header.SeqNum)
 		c.logger.Debug("unack timeout",
 			"seq", timeoutPkt.Header.SeqNum,
 			"ack", timeoutPkt.Header.AckNum,
@@ -747,7 +800,7 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 			// Double previous timeout for exponential backoff on each attempt
 			timeout := c.config.InitialTimeout * time.Duration(math.Pow(1.5, float64(c.endpoint.Attempts)))
 
-			c.unacked.put(seq, originPacket, timeout)
+			c.armRetransmit(originPacket, timeout)
 
 			// Re-send SYN packet
 			c.socketEvents <- newOutgoingSocketEvent(c.synPacket(seq), c.cid)
@@ -1010,10 +1063,7 @@ func (c *connection) processAck(
 			"fullAcked.start", fullAcked.start,
 			"fullAcked.end", fullAcked.end)
 	}
-	c.unacked.retain(func(key any) bool {
-		// return true to remove
-		return fullAcked.Contains(key.(uint16))
-	})
+	c.disarmAcked(fullAcked)
 	for _, selectedAck := range selectedAcks {
 		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			c.logger.Trace("process ack, will remove acked num from innerMap",
@@ -1021,7 +1071,7 @@ func (c *connection) processAck(
 				"cid.recv", c.cid.Recv,
 				"ackNum", selectedAck)
 		}
-		c.unacked.remove(selectedAck)
+		c.disarmRetransmit(selectedAck)
 	}
 
 	return nil
@@ -1303,7 +1353,7 @@ func (c *connection) transmit(packet *packet, now time.Time) {
 	c.bytesSent += uint64(len(packet.Body))
 
 	c.state.SentPackets.OnTransmit(packet.Header.SeqNum, packet.Header.PacketType, payload, length, now)
-	c.unacked.put(packet.Header.SeqNum, packet, c.state.SentPackets.Timeout())
+	c.armRetransmit(packet, c.state.SentPackets.Timeout())
 
 	c.socketEvents <- newOutgoingSocketEvent(packet, c.cid)
 }

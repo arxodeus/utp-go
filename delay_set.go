@@ -10,30 +10,51 @@ type expireFunc[P any] func(key any, value P)
 type timeWheelItem[P any] struct {
 	value P
 	key   any
+	// rounds is how many further full revolutions of the wheel must pass
+	// before this item expires. It is what lets the wheel schedule delays
+	// longer than one revolution instead of silently clamping them.
+	rounds int
 }
 
+// timeWheel is a hashed timing wheel.
+//
+// Two properties matter for retransmission timing, and the original
+// implementation had neither:
+//
+//   - Resolution. A delay shorter than one tick used to land in the slot
+//     being processed next, so it fired somewhere in [0, interval) rather
+//     than at the requested time. With a one-second interval and a 500 ms
+//     RTO, that declared packets lost long before their ack could arrive --
+//     about 6% of them on a lossless path. A delay is now rounded up to a
+//     whole number of ticks and never fires early.
+//   - Range. Delays beyond slotNum*interval used to be clamped to that
+//     ceiling, so exponential RTO backoff stopped growing. The rounds
+//     counter removes the ceiling.
+//
+// Removal is O(1): an index maps each key to the slot holding it. Scanning
+// every slot was acceptable for a per-connection wheel but not for one shared
+// across a whole socket.
 type timeWheel[P any] struct {
 	stopped          chan struct{}
 	interval         time.Duration
 	slots            []map[any]*timeWheelItem[P]
+	index            map[any]int
 	ticker           *time.Ticker
 	current          int
 	slotNum          int
-	maxDelay         time.Duration
 	handleExpireFunc expireFunc[P]
 	mu               sync.RWMutex
 	stopOnce         sync.Once
 }
 
-// 0.25s                   8
 func newTimeWheel[P any](interval time.Duration, slotNum int, handleExpireFunc expireFunc[P]) *timeWheel[P] {
 	tw := &timeWheel[P]{
 		stopped:          make(chan struct{}),
 		interval:         interval,
 		slots:            make([]map[any]*timeWheelItem[P], slotNum),
+		index:            make(map[any]int),
 		current:          0,
 		slotNum:          slotNum,
-		maxDelay:         time.Duration(slotNum) * interval,
 		handleExpireFunc: handleExpireFunc,
 	}
 
@@ -46,44 +67,57 @@ func newTimeWheel[P any](interval time.Duration, slotNum int, handleExpireFunc e
 	return tw
 }
 
+// put schedules value to expire after delay. Re-putting an existing key
+// reschedules it.
+//
+// The delay is rounded up to a whole number of ticks, so an item never fires
+// early. It may fire up to one interval late, which is the wheel's
+// resolution.
 func (tw *timeWheel[P]) put(key any, value P, delay time.Duration) {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
 
-	if delay > tw.maxDelay {
-		delay = tw.maxDelay
+	if old, exists := tw.index[key]; exists {
+		delete(tw.slots[old], key)
+		delete(tw.index, key)
 	}
 
-	slots := int(delay / tw.interval)
-	index := (tw.current + slots) % tw.slotNum
-	tw.slots[index][key] = &timeWheelItem[P]{
-		key:   key,
-		value: value,
+	ticks := int(delay / tw.interval)
+	if delay%tw.interval != 0 {
+		ticks++
 	}
-}
+	if ticks < 1 {
+		// Never schedule into the slot about to be processed: that would fire
+		// immediately rather than after the requested delay.
+		ticks = 1
+	}
 
-func (tw *timeWheel[P]) retain(shouldRemove func(key any) bool) {
-	tw.mu.Lock()
-	defer tw.mu.Unlock()
-	for i := 0; i < tw.slotNum; i++ {
-		for key := range tw.slots[i] {
-			if shouldRemove(key) {
-				delete(tw.slots[i], key)
-			}
-		}
+	// The next tick processes slots[current], so an item due in n ticks
+	// belongs at current+n-1.
+	idx := (tw.current + ticks - 1) % tw.slotNum
+	tw.slots[idx][key] = &timeWheelItem[P]{
+		key:    key,
+		value:  value,
+		rounds: (ticks - 1) / tw.slotNum,
 	}
+	tw.index[key] = idx
 }
 
 func (tw *timeWheel[P]) remove(key any) {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
-
-	for i := 0; i < tw.slotNum; i++ {
-		if _, exists := tw.slots[i][key]; exists {
-			delete(tw.slots[i], key)
-			return
-		}
+	if idx, exists := tw.index[key]; exists {
+		delete(tw.slots[idx], key)
+		delete(tw.index, key)
 	}
+}
+
+// contains reports whether key is currently scheduled.
+func (tw *timeWheel[P]) contains(key any) bool {
+	tw.mu.RLock()
+	defer tw.mu.RUnlock()
+	_, exists := tw.index[key]
+	return exists
 }
 
 func (tw *timeWheel[P]) run() {
@@ -93,15 +127,20 @@ func (tw *timeWheel[P]) run() {
 		case <-tw.ticker.C:
 			// Collect the expired items under the lock, then dispatch them
 			// with the lock released. handleExpireFunc blocks (it hands the
-			// packet to the connection's event loop over a channel), and that
-			// same event loop calls put/remove/retain, which need this lock.
+			// packet to a connection's event loop over a channel), and that
+			// same event loop calls put/remove, which need this lock.
 			// Running the callback under the lock deadlocks the connection as
 			// soon as the timeout channel fills up.
 			expired = expired[:0]
 			tw.mu.Lock()
 			currentSlot := tw.slots[tw.current]
 			for key, item := range currentSlot {
+				if item.rounds > 0 {
+					item.rounds--
+					continue
+				}
 				delete(currentSlot, key)
+				delete(tw.index, key)
 				expired = append(expired, item)
 			}
 			tw.current = (tw.current + 1) % tw.slotNum
@@ -119,11 +158,7 @@ func (tw *timeWheel[P]) run() {
 func (tw *timeWheel[P]) Len() int {
 	tw.mu.RLock()
 	defer tw.mu.RUnlock()
-	length := 0
-	for i := 0; i < tw.slotNum; i++ {
-		length += len(tw.slots[i])
-	}
-	return length
+	return len(tw.index)
 }
 
 // stop halts the wheel. It is safe to call more than once: Close on the

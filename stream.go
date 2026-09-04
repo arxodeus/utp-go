@@ -38,6 +38,7 @@ func NewUtpStream(
 	socketEvents chan *socketEvent,
 	streamEvents chan *streamEvent,
 	connected chan error,
+	timers *retransmitTimers,
 ) *UtpStream {
 	if logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 		logger.Trace("new a utp stream", "dst.peer", cid.Peer, "dst.send", cid.Send, "dst.recv", cid.Recv)
@@ -58,7 +59,7 @@ func NewUtpStream(
 		shutdown:     &atomic.Bool{},
 	}
 
-	utpStream.conn = newConnection(streamCtx, logger, cid, config, syn, connected, socketEvents, utpStream.reads)
+	utpStream.conn = newConnection(streamCtx, logger, cid, config, syn, connected, socketEvents, utpStream.reads, timers)
 	go utpStream.start()
 	return utpStream
 }

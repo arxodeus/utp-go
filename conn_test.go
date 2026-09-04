@@ -1,6 +1,7 @@
 package utp_go
 
 import (
+	"context"
 	"math"
 	"net"
 	"testing"
@@ -36,9 +37,7 @@ func CreateTestConnection(endpoint Endpoint) *connection {
 	}
 
 	unackTimeoutCh := make(chan *packet, 1000)
-	handleExpiration := func(key any, pkt *packet) {
-		unackTimeoutCh <- pkt
-	}
+	timers := newRetransmitTimers(TEST_INITIAL_TIMEOUT/4, 8)
 	conn := &connection{
 		logger:         log.Root(),
 		state:          NewConnState(make(chan error, 1)),
@@ -48,7 +47,11 @@ func CreateTestConnection(endpoint Endpoint) *connection {
 		peerTsDiff:     100 * time.Millisecond,
 		peerRecvWindow: math.MaxUint32,
 		socketEvents:   socketEvents,
-		unacked:        newTimeWheel[*packet](TEST_INITIAL_TIMEOUT/4, 8, handleExpiration),
+		timers:         timers,
+		timerScope:     timers.newScope(),
+		armed:          make(map[uint16]struct{}),
+		unackTimeoutCh: unackTimeoutCh,
+		ctx:            context.Background(),
 		reads:          reads,
 		readable:       make(chan struct{}, 1),
 		pendingWrites:  make([]*queuedWrite, 0),
