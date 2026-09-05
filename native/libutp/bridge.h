@@ -19,14 +19,7 @@
 extern "C" {
 #endif
 
-enum {
-	LIBUTP_STATE_IDLE = 0,
-	LIBUTP_STATE_CONNECTING = 1,
-	LIBUTP_STATE_CONNECTED = 2,
-	LIBUTP_STATE_EOF = 3,
-	LIBUTP_STATE_DESTROYED = 4,
-	LIBUTP_STATE_ERROR = 5
-};
+#include "bridge_state.h"
 
 typedef struct libutp_peer libutp_peer;
 

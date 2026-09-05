@@ -12,7 +12,7 @@ all.
 | --- | --- |
 | **M0** — pin the reference, prove the two libutp copies agree | **Done.** See [REFERENCE.md](REFERENCE.md) and `scripts/check-libutp-reference.sh`. |
 | **M1** — emulated network harness | **Done.** See [HARNESS.md](HARNESS.md) and `netem/`. |
-| **M2** — conformance harness against real libutp | **Not done.** |
+| **M2** — conformance harness against real libutp | **Partly done.** Nine-case corpus comparing emitted packets field by field; see [CONFORMANCE.md](CONFORMANCE.md). Responder role only, no timing comparison. |
 | **M3** — fix the failing transfer tests | **Done.** Root causes below; gates in "Verification". |
 | **M4** — audit transfer paths against libutp | **Not done** (needs M2). |
 | **M4b** — exhaustive libutp compatibility sweep | **Not done.** No `COMPATIBILITY.md` exists. |
@@ -326,6 +326,29 @@ seconds to 0 ms, and `TestCloseReturnsPromptly` guards it.
 For a BitTorrent client, which opens and closes connections constantly, this
 was the more consequential of the two.
 
+## The selective-ack bitfield was bit-reversed
+
+**Fixed.** Found by the M2 conformance corpus on its first run, and the best
+argument in this repository for building one.
+
+Our encoder placed the first entry at the *most* significant bit of each byte
+(`1 << (7-j)`). BEP 29 specifies the least significant bit, and libutp builds
+its mask that way -- `m |= 1 << i` for the i'th packet past `ack_nr+2`, low
+byte first (`utp_internal.cpp:806-818`). The reordering case produced
+`ours=80000000` against `libutp=01000000`.
+
+The decoder reversed the bits identically, so the implementation agreed with
+itself perfectly. Every Go-to-Go transfer worked, every unit test passed, and
+**the M7 interoperability gate passed too** -- because a clean loopback path
+never drops a packet, and a selective ack is only sent when something is
+missing.
+
+Against a real peer under loss, every selective ack sent would have been
+misread and every one received misread in turn. Nothing that compares an
+implementation against itself can see a bug that is self-consistent, and
+nothing that tests only a lossless path can see one that only appears under
+loss.
+
 ## Root causes of the M3 failures
 
 The brief asked for a written explanation of each. Both named tests failed,
@@ -434,6 +457,7 @@ Gates that pass:
 - `go test -race ./integrated/ -run 'TestUdpTransfer|TestManyConcurrentTransfers' -count=3` — green, **but at `UTP_TEST_TRANSFERS=150`, not the default 1000.** See "Memory" below: the full 1000 does not fit under the race detector on a 16 GB machine.
 - `go test ./netem/ -count=3` — green. The M1 gate; figures in [HARNESS.md](HARNESS.md).
 - `go test -race ./netem/` — green, no data races.
+- `go test -run TestConformance .` — the M2 corpus, nine cases, green.
 - `scripts/check-libutp-reference.sh` — pass.
 
 The `-race` gate is therefore met at 150 concurrent transfers and **unmet at

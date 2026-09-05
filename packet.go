@@ -167,6 +167,20 @@ func (s *SelectiveAck) Acked() []bool {
 }
 
 // Encode encodes the SelectiveAck into a byte slice
+// Encode renders the selective-ack bitmask.
+//
+// Bit order is least-significant-first within each byte: the LSB of the first
+// byte represents ack_nr+2, the next bit ack_nr+3, and so on. That is what
+// BEP 29 specifies and what libutp emits -- it builds the mask with
+// `m |= 1 << i` for the i'th packet past ack_nr+2 and writes the low byte
+// first (utp_internal.cpp:806-818).
+//
+// This previously set `1 << (7-j)`, reversing the bits within every byte. The
+// decoder below reversed them the same way, so this implementation agreed
+// with itself and Go-to-Go transfers were unaffected -- but every selective
+// ack it sent was misread by any real peer, and every one it received was
+// misread in turn. Only a comparison against libutp surfaces a bug that is
+// self-consistent.
 func (s *SelectiveAck) Encode() []byte {
 	var bitmask []byte
 	for _, word := range s.acked {
@@ -174,7 +188,7 @@ func (s *SelectiveAck) Encode() []byte {
 			var byteVal uint8
 			for j := 0; j < 8; j++ {
 				if i+j < len(word) && word[i+j] {
-					byteVal |= 1 << (7 - j)
+					byteVal |= 1 << j
 				}
 			}
 			bitmask = append(bitmask, byteVal)
@@ -198,7 +212,8 @@ func DecodeSelectiveAck(data []byte) (*SelectiveAck, error) {
 		for j := 0; j < 4; j++ {
 			byteVal := data[i+j]
 			for k := 0; k < 8; k++ {
-				tmp[j*8+k] = (byteVal & (1 << (7 - k))) != 0
+				// Least-significant bit first, matching Encode and BEP 29.
+				tmp[j*8+k] = (byteVal & (1 << k)) != 0
 			}
 		}
 		acked[i/4] = tmp

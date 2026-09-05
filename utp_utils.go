@@ -70,6 +70,12 @@ func DurationBetween(earlier uint32, later uint32) time.Duration {
 	return time.Duration(wrappingSubUint32(later, earlier)) * time.Microsecond
 }
 
+// randomUint16Source is where random sequence numbers and connection ids come
+// from. It is a variable so the conformance corpus can pin it and compare
+// emitted packets against libutp byte for byte; nothing outside tests
+// reassigns it.
+var randomUint16Source = func() uint16 { return uint16(fastrand.Uint32n(65535)) }
+
 func RandomUint16() uint16 {
-	return uint16(fastrand.Uint32n(65535))
+	return randomUint16Source()
 }

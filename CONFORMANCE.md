@@ -1,0 +1,121 @@
+# Conformance against libutp (M2)
+
+Two implementations, driven with identical packet sequences, with every
+emitted packet compared field by field.
+
+This is the difference between agreeing with libutp *in the parts someone
+thought to read* and agreeing with it in the parts nobody did. It found a
+wire-format bug on its first run that neither the interoperability gate nor
+several thousand lines of hand-comparison had caught.
+
+## How it works
+
+libutp is driven through `native/libutp`'s **deterministic driver**: virtual
+clock, scripted random source, packets in and out by explicit call, nothing
+running on its own. libutp reads time and randomness only through callbacks,
+so both can be supplied, and the same script produces the same bytes every
+run.
+
+Our side is driven through a **scripted transport** — a `Conn` whose input the
+test injects and whose output it captures.
+
+Sequence numbers and connection ids are pinned on both sides, so the
+comparison is exact rather than structural.
+
+Run it with `go test -run TestConformance .` (needs cgo).
+
+## What is compared, and what is not
+
+Every header field, the body, and the selective-ack bitfield. Three fields are
+exempt, named in `allowedToDiffer` so the corpus reports when one actually
+differs rather than silently skipping it:
+
+| Field | Why |
+| --- | --- |
+| `Timestamp` | libutp reads a virtual clock here and we read the real one. Cannot be equalised without an injectable clock in our connection. |
+| `TimestampDiff` | Derived from the peer's timestamp, so it inherits the above. |
+| `WndSize` | The advertised receive window is a local buffer-size choice, not a protocol requirement. |
+
+## The corpus
+
+| Case | Covers |
+| --- | --- |
+| `Handshake` | incoming SYN, the SYN-ACK's fields |
+| `DataAndAck` | in-order data, ack generation |
+| `DuplicateData` | the same packet arriving twice |
+| `Reordering` | a gap in the sequence space, then the gap filled — this is what exercises selective acks |
+| `IncomingFin` | FIN, and the ack sequence around it |
+| `IncomingReset` | RESET terminates without a reply |
+| `ZeroWindow` | a peer advertising a zero receive window |
+| `InvalidAckNumIsIgnored` | a packet acking a sequence number never sent |
+| `WildlyInvalidAckNumIsIgnored` | the same, thousands out of range |
+
+## What it found
+
+### The selective-ack bitfield was bit-reversed
+
+**Fixed.** The first run of the reordering case produced `ours=80000000`
+against `libutp=01000000`.
+
+Our encoder set the first entry at the *most* significant bit of each byte
+(`1 << (7-j)`). BEP 29 specifies the least significant bit, and libutp builds
+its mask accordingly — `m |= 1 << i` for the i'th packet past `ack_nr+2`,
+low byte written first (`utp_internal.cpp:806-818`).
+
+The decoder reversed the bits the same way. So the implementation agreed with
+itself perfectly: every Go-to-Go transfer was unaffected, every unit test
+passed, and the M7 interoperability gate passed too — because a clean
+loopback path never loses a packet, and a selective ack is only sent when
+something is missing.
+
+Against a real peer under loss, every selective ack we sent would have been
+misread, and every one we received misread in turn. A self-consistent bug is
+invisible to any test that compares an implementation only against itself.
+
+### Packets acking unsent data
+
+Checked, and we already match: libutp drops any packet whose `ack_nr` acks a
+sequence number it has not sent, calling it "a spoofed address or a malicious
+attempt to attach the uTP implementation" (`utp_internal.cpp:1795-1806`). We
+emit nothing for such a packet either.
+
+Finding this was incidental — the first version of the corpus used
+`ack_nr = seq_nr`, libutp silently dropped every packet, and the resulting
+confusion led to the check.
+
+## Deliberate divergences
+
+One, asserted explicitly in the corpus rather than absorbed into a tolerance:
+
+**libutp acks twice on reaching a FIN.** Once immediately
+(`utp_internal.cpp:2370`, *"if the other end wants to close, ack"*) and once
+from the deferred-ack list it also schedules at `:2404`. We send one. The
+second carries no information the first did not; emitting a gratuitous
+duplicate would cost a packet and change nothing a peer depends on. The corpus
+asserts libutp emits exactly one extra packet and that it is byte-identical
+to the one before it — if it ever carried new information, the case fails.
+
+## Limits
+
+Stated plainly, because a conformance harness that overclaims is worse than
+none.
+
+- **Only the responder role is covered.** Every case drives both
+  implementations as the side accepting a connection. The initiator role —
+  where we send the SYN and libutp answers — is not in the corpus.
+- **Timing is not compared.** The brief asks for retransmit schedules and ack
+  timing within a stated tolerance. libutp's side is fully deterministic here,
+  but ours runs on the real clock with real goroutines, so the runner can only
+  wait for our side to go quiet. Comparing schedules would need an injectable
+  clock in our connection. Nothing in this corpus asserts *when* a packet was
+  sent, only what it contained and in what order.
+- **State is compared only through the wire.** Terminal outcomes are inferred
+  from emitted packets, not read out of either implementation. Notably, a
+  packet with an invalid `ack_nr` produces silence from both — but ours resets
+  the connection internally where libutp merely ignores the packet, and this
+  corpus cannot see that difference.
+- **Malformed headers are barely covered.** Truncated packets, bad version
+  nibbles, unknown extension types and malformed extension chains are not in
+  the corpus. That is the gap most likely to hide another finding, and it is
+  where M8's fuzzing should start.
+- The corpus is nine cases. It proves what it covers and nothing else.

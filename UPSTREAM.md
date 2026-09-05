@@ -5,7 +5,7 @@ BitTorrent-specific slant, and it would be poor form to keep it here silently.
 Upstream is built for the Portal Network, where uTP runs over discv5 rather
 than raw UDP, but none of these defects are specific to either transport.
 
-Suggested as **ten separate pull requests**, smallest and least arguable
+Suggested as **eleven separate pull requests**, smallest and least arguable
 first, so none of them is held up by the others.
 
 ## PR 1 — the transfer-path hangs
@@ -73,7 +73,7 @@ Measured: 6.18% to 0.00% spurious retransmits, +53% goodput on an emulated
 measurable cost at a thousand concurrent connections.
 
 Depends on nothing else in this fork, but the numbers come from the harness in
-PR 10, so send that first or quote the figures.
+PR 11, so send that first or quote the figures.
 
 ## PR 4 — RESET rate limiting
 
@@ -154,7 +154,22 @@ pointing a real libutp peer at this implementation:
   uses. For a client that opens and closes connections constantly this is the
   more consequential of the two.
 
-## PR 9 — the test suite
+## PR 9 — the selective-ack bit order
+
+A one-line wire-format fix, and the most consequential single change in this
+fork.
+
+The selective-ack bitmask was built least-significant-bit-last: the first
+entry went to bit 7 of each byte where BEP 29 and libutp put it at bit 0
+(`utp_internal.cpp:806-818`). The decoder reversed it the same way, so the
+implementation agreed with itself and nothing Go-to-Go could detect it --
+but every selective ack exchanged with a real peer was misread in both
+directions.
+
+Only shows up under loss, and only against another implementation. Worth
+sending on its own so it is not lost in a larger diff.
+
+## PR 10 — the test suite
 
 Independent of the library. On a clean checkout upstream's suite cannot pass:
 
@@ -177,7 +192,7 @@ Also in this PR: profiling scaffolding removed from tests, `-race`-aware time
 budgets, and `UTP_TEST_TRANSFERS` to run the concurrency test where 1000
 simultaneous transfers do not fit in memory.
 
-## PR 10 — the network harness and libutp interop
+## PR 11 — the harnesses: emulated network, libutp interop, conformance corpus
 
 `netem/`, the in-process emulated network, plus the `Controller.Stats()` and
 `ConnectionConfig.Metrics` hooks it reads. Upstream has no way to measure
@@ -199,7 +214,7 @@ interface methods.
 
 ## Order of operations
 
-PR 1, PR 4, PR 6, PR 8 and PR 9 are close to unarguable and should go first.
+PR 1, PR 4, PR 6, PR 8, PR 9 and PR 10 are close to unarguable and should go first.
 
 PR 2 and PR 3 both need a conversation, for the same reason: any tuning or
 measurement upstream has done was taken against a controller with a constant
@@ -207,4 +222,4 @@ delay signal and a timer that fired at random within a one-second window.
 Both will move once these land, and that is the point, but it should not be a
 surprise.
 
-PR 5 needs review of the per-packet-timer subtlety above. PR 10 is optional for upstream and the most invasive; offer it last.
+PR 5 needs review of the per-packet-timer subtlety above. PR 11 is optional for upstream and the most invasive; offer it last.
