@@ -126,6 +126,10 @@ type UtpSocket struct {
 	// socket. Per-connection wheels cost a ticker each; see
 	// retransmit_timer.go.
 	retransmitTimers *retransmitTimers
+	// pendingAccepts holds Accept calls that named no connection id and are
+	// waiting for any incoming SYN. Touched only from the socket event loop,
+	// so it needs no lock.
+	pendingAccepts []*Accept
 	// rstInfo remembers RESETs recently sent for connections we do not have.
 	rstInfo            *syncMap[struct{}]
 	rstInfoExpirations *timeWheel[rstInfoKey]
@@ -427,6 +431,12 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
 		s.putConnStream(cidHash, newConnStream)
 		stream := NewUtpStream(s.ctx, s.logger, cid, accept.config, packetPtr, s.socketEvents, newConnStream, connected, s.retransmitTimers)
 		go s.awaitConnected(stream, accept, connected)
+	} else if accept := s.takePendingAccept(); accept != nil {
+		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+			s.logger.Trace("handing a new SYN to a waiting Accept",
+				"cid.Send", cid.Send, "cid.Recv", cid.Recv)
+		}
+		s.selectAcceptHelper(accept.ctx, cid, packetPtr, accept, s.socketEvents)
 	} else {
 		s.logger.Debug("put a new syn packet to incomingConns...")
 		s.putIncomingConn(cidHash, &IncomingPacket{pkt: packetPtr, cid: cid})
@@ -493,14 +503,37 @@ func (s *UtpSocket) handleNewAcceptWithCidEvent(acceptWithCid *Accept) {
 }
 
 func (s *UtpSocket) handleNewAcceptEvent(accept *Accept) {
-	incomingAccept := s.nextIncomingConn()
-	if incomingAccept != nil {
+	// A SYN that already arrived satisfies this immediately.
+	if incomingAccept := s.nextIncomingConn(); incomingAccept != nil {
 		s.selectAcceptHelper(accept.ctx, incomingAccept.cid, incomingAccept.pkt, accept, s.socketEvents)
-	} else {
-		accept.stream <- &StreamResult{
-			err: errors.New("no incoming conn"),
-		}
+		return
 	}
+	// Otherwise wait for one.
+	//
+	// This used to fail outright with "no incoming conn" when nothing had
+	// arrived yet, which made Accept unusable for the ordinary server
+	// pattern: call Accept, then have a client connect. The SYN that arrived
+	// a moment later was parked in incomingConns with nobody left to claim
+	// it, and the peer retried until it gave up. The cid-specific path has
+	// always queued the request; this one now does too.
+	s.pendingAccepts = append(s.pendingAccepts, accept)
+}
+
+// takePendingAccept returns the oldest waiting cid-less Accept whose caller
+// has not already given up, or nil.
+func (s *UtpSocket) takePendingAccept() *Accept {
+	for len(s.pendingAccepts) > 0 {
+		accept := s.pendingAccepts[0]
+		s.pendingAccepts = s.pendingAccepts[1:]
+		// Skip callers that have already returned via their own context.
+		select {
+		case <-accept.ctx.Done():
+			continue
+		default:
+		}
+		return accept
+	}
+	return nil
 }
 
 func (s *UtpSocket) getAwaiting(key string) (*Accept, bool) {
@@ -761,23 +794,28 @@ func (s *UtpSocket) awaitConnected(
 	accept *Accept,
 	connected chan error,
 ) {
-	s.logger.Debug("waiting for answering the new connections", "dst.peer", accept.cid.Peer.Hash(), "cid.Send", accept.cid.Send, "cid.Recv", accept.cid.Recv)
+	// Report against the stream's connection id, not the accept's. A cid-less
+	// Accept has no cid of its own, and reading accept.cid here crashed the
+	// moment anyone used that path.
+	cid := stream.Cid()
+
+	s.logger.Debug("waiting for answering the new connections", "dst.peer", cid.Peer.Hash(), "cid.Send", cid.Send, "cid.Recv", cid.Recv)
 	err, ok := <-connected
 	if err == nil && ok {
 		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-			s.logger.Trace("new connection created", "src", accept.cid.Peer.Hash(), "src.cid.Send", accept.cid.Send, "src.cid.Recv", accept.cid.Recv)
+			s.logger.Trace("new connection created", "src", cid.Peer.Hash(), "src.cid.Send", cid.Send, "src.cid.Recv", cid.Recv)
 		}
 		accept.stream <- &StreamResult{stream: stream}
 		return
 	} else if err != nil {
 		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-			s.logger.Trace("connected failed", "peer", accept.cid.Peer.Hash(), "cid.Send", accept.cid.Send, "cid.Recv", accept.cid.Recv, "err", err)
+			s.logger.Trace("connected failed", "peer", cid.Peer.Hash(), "cid.Send", cid.Send, "cid.Recv", cid.Recv, "err", err)
 		}
 		accept.stream <- &StreamResult{err: fmt.Errorf("connection failed")}
 		return
 	}
 
-	s.logger.Warn("connected failed", "peer", accept.cid.Peer.Hash(), "cid.Send", accept.cid.Send, "cid.Recv", accept.cid.Recv)
+	s.logger.Warn("connected failed", "peer", cid.Peer.Hash(), "cid.Send", cid.Send, "cid.Recv", cid.Recv)
 	accept.stream <- &StreamResult{err: fmt.Errorf("connection aborted")}
 }
 

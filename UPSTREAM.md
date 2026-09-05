@@ -5,7 +5,7 @@ BitTorrent-specific slant, and it would be poor form to keep it here silently.
 Upstream is built for the Portal Network, where uTP runs over discv5 rather
 than raw UDP, but none of these defects are specific to either transport.
 
-Suggested as **nine separate pull requests**, smallest and least arguable
+Suggested as **ten separate pull requests**, smallest and least arguable
 first, so none of them is held up by the others.
 
 ## PR 1 — the transfer-path hangs
@@ -73,7 +73,7 @@ Measured: 6.18% to 0.00% spurious retransmits, +53% goodput on an emulated
 measurable cost at a thousand concurrent connections.
 
 Depends on nothing else in this fork, but the numbers come from the harness in
-PR 9, so send that first or quote the figures.
+PR 10, so send that first or quote the figures.
 
 ## PR 4 — RESET rate limiting
 
@@ -136,7 +136,25 @@ On an emulated 2% loss path this moved recovery entirely onto duplicate-ack
 fast retransmit -- zero RTO-driven timeouts, against one before -- which is
 the healthier path.
 
-## PR 8 — the test suite
+## PR 8 — Accept, and Close
+
+Two defects on paths nothing in the repository exercised, both found by
+pointing a real libutp peer at this implementation:
+
+- **`Accept` could not accept.** The cid-less path -- the only one usable
+  against a peer that picks its own connection id -- polled once for an
+  already-arrived SYN and failed with "no incoming conn" if none had come yet,
+  so the ordinary server pattern could never work. Behind that,
+  `awaitConnected` dereferenced the accept's connection id, which is nil on
+  that path, and panicked once the first fix let it get that far.
+- **`Close` took up to the idle timeout.** It set its shutdown flag and waited
+  on the event loop, but the loop blocks in a select that the flag is not part
+  of, so it only noticed when an unrelated packet or timer arrived. Measured
+  at 29 seconds; now 0. It sends the `streamShutdown` event the socket already
+  uses. For a client that opens and closes connections constantly this is the
+  more consequential of the two.
+
+## PR 9 — the test suite
 
 Independent of the library. On a clean checkout upstream's suite cannot pass:
 
@@ -150,14 +168,16 @@ Independent of the library. On a clean checkout upstream's suite cannot pass:
 - `TestManyConcurrentTransfers` and `TestManyTimeHugeData` both registered
   `/debug/fgprof` on `http.DefaultServeMux`, so `go test ./integrated/`
   panicked on a duplicate registration.
-- `native/cgo` needs a C library that is not vendored, so `go build ./...`
-  failed for the whole module. Now behind the `utp_cgo_harness` build tag.
+- `native/cgo` needed a C library that was not vendored, so `go build ./...`
+  failed for the whole module. Removed rather than fixed: despite its name it
+  wrapped the Rust `ethereum/utp` FFI, not libutp, and could never have tested
+  interoperability with the C library. See PR 10.
 
 Also in this PR: profiling scaffolding removed from tests, `-race`-aware time
 budgets, and `UTP_TEST_TRANSFERS` to run the concurrency test where 1000
 simultaneous transfers do not fit in memory.
 
-## PR 9 — the network harness
+## PR 10 — the network harness and libutp interop
 
 `netem/`, the in-process emulated network, plus the `Controller.Stats()` and
 `ConnectionConfig.Metrics` hooks it reads. Upstream has no way to measure
@@ -179,7 +199,7 @@ interface methods.
 
 ## Order of operations
 
-PR 1, PR 4, PR 6 and PR 8 are close to unarguable and should go first.
+PR 1, PR 4, PR 6, PR 8 and PR 9 are close to unarguable and should go first.
 
 PR 2 and PR 3 both need a conversation, for the same reason: any tuning or
 measurement upstream has done was taken against a controller with a constant
@@ -187,5 +207,4 @@ delay signal and a timer that fired at random within a one-second window.
 Both will move once these land, and that is the point, but it should not be a
 surprise.
 
-PR 5 needs review of the per-packet-timer subtlety above. PR 9 is optional
-for upstream and the most invasive; offer it last.
+PR 5 needs review of the per-packet-timer subtlety above. PR 10 is optional for upstream and the most invasive; offer it last.

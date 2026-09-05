@@ -18,20 +18,23 @@ do. See:
 | [REFERENCE.md](REFERENCE.md) | Which copy of libutp is normative, and proof the copy used for differential testing is protocol-identical to it. |
 | [DEVIATIONS.md](DEVIATIONS.md) | Every intentional difference from libutp. |
 | [UPSTREAM.md](UPSTREAM.md) | What should go back to `zen-eth/utp-go`, and in what order. |
+| [native/libutp/VENDOR.md](native/libutp/VENDOR.md) | The vendored libutp: provenance, what was taken, and how the bridge works. |
 
 Two things to be aware of before depending on this:
 
-- **No interoperability testing against real libutp has been done.** Nothing
-  here has been shown to talk to a real BitTorrent peer.
-- Every measurement in these documents is **loopback on one machine**. There
-  is no emulated-network harness, and the congestion controller's behaviour
-  under loss, delay or competition has not been measured.
+- **Interoperability with real libutp is tested** -- see `native/libutp/`,
+  which vendors libutp at the pinned commit and transfers verified payloads
+  in both directions over real UDP sockets. What is *not* tested is a real
+  torrent transfer through `anacrolix/torrent`.
+- Every measurement in these documents is **on one machine**, over loopback or
+  the in-process emulated network. Nothing has run over a real wide-area path.
 
 ## Testing
 
 ```sh
 go test ./...                                  # full suite
 go test ./netem/                               # the network harness gate
+go test ./native/libutp/                       # interop against real libutp (needs cgo)
 go test -race ./...                            # race detector
 scripts/check-libutp-reference.sh              # verify the pinned libutp reference
 ```
@@ -40,12 +43,9 @@ scripts/check-libutp-reference.sh              # verify the pinned libutp refere
 and peaks at roughly 5 GB RSS. Set `UTP_TEST_TRANSFERS` to run it smaller —
 which is necessary under `-race`.
 
-The cgo differential-testing harness in `native/cgo` needs a C libutp that is
-not vendored here, and is behind a build tag:
-
-```sh
-go build -tags utp_cgo_harness ./native/cgo
-```
+The interop tests link a vendored copy of libutp and so need cgo and a C++
+compiler. With `CGO_ENABLED=0` the package builds as an empty stub and the
+rest of the module is unaffected.
 
 ## Licence
 

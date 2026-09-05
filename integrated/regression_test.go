@@ -319,3 +319,140 @@ func TestConnectionIdHashFromStructLiteral(t *testing.T) {
 		t.Fatalf("literal and constructor disagree: %s vs %s", got, want)
 	}
 }
+
+// TestAcceptWithoutCidWaitsForIncomingSyn covers the defect where Accept --
+// the path that takes no connection id, and the only one usable against a
+// peer that picks its own -- polled once for an already-arrived SYN and
+// failed outright with "no incoming conn" if none had come yet.
+//
+// That made it unusable for the ordinary server pattern: call Accept, then
+// have a client connect. The SYN arriving a moment later was parked with
+// nobody left to claim it, and the peer retried until it gave up.
+//
+// The same path also dereferenced the accept's connection id, which is nil
+// when none was given, so it panicked as soon as it got that far.
+func TestAcceptWithoutCidWaitsForIncomingSyn(t *testing.T) {
+	logger := quietLogger()
+	srvAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5100}
+	cliAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5101}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	srv, err := utp.Bind(ctx, "udp4", srvAddr, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	cli, err := utp.Bind(ctx, "udp4", cliAddr, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Close()
+
+	payload := bytes.Repeat([]byte{0x2c}, 32*1024)
+	got := make(chan int, 1)
+	failed := make(chan error, 1)
+	go func() {
+		// Accept is called first, before any SYN exists.
+		stream, err := srv.Accept(ctx, utp.NewConnectionConfig())
+		if err != nil {
+			failed <- err
+			return
+		}
+		defer stream.Close()
+		buf := make([]byte, 0, len(payload))
+		n, err := stream.ReadToEOF(ctx, &buf)
+		if err != nil && err != io.EOF {
+			failed <- err
+			return
+		}
+		got <- n
+	}()
+
+	time.Sleep(150 * time.Millisecond) // let the accept register
+
+	cid := utp.NewConnectionId(utp.NewUdpPeer(srvAddr), 7100, 7101)
+	stream, err := cli.ConnectWithCid(ctx, cid, utp.NewConnectionConfig())
+	if err != nil {
+		t.Fatalf("connect to a listening Accept failed: %v", err)
+	}
+	if _, err := stream.Write(ctx, payload); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	stream.Close()
+
+	select {
+	case n := <-got:
+		if n != len(payload) {
+			t.Errorf("Accept path delivered %d bytes, want %d", n, len(payload))
+		}
+	case err := <-failed:
+		t.Fatalf("Accept path failed: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("Accept path never completed")
+	}
+}
+
+// TestCloseReturnsPromptly covers the defect where UtpStream.Close set its
+// shutdown flag and then waited, without waking the connection's event loop.
+//
+// The loop was blocked in a select on cases the flag is not one of, so it only
+// noticed once some unrelated packet or timer happened to arrive. Close took
+// anywhere from about a second to the idle timeout depending on what was in
+// flight -- measured at 29 seconds against a peer that had gone quiet.
+func TestCloseReturnsPromptly(t *testing.T) {
+	logger := quietLogger()
+	aAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5200}
+	bAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5201}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	aLink, err := utp.Bind(ctx, "udp4", aAddr, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer aLink.Close()
+	bLink, err := utp.Bind(ctx, "udp4", bAddr, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bLink.Close()
+
+	cfg := utp.NewConnectionConfig()
+	accCid := utp.NewConnectionId(utp.NewUdpPeer(bAddr), 601, 600)
+	iniCid := utp.NewConnectionId(utp.NewUdpPeer(aAddr), 600, 601)
+
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		s, err := aLink.AcceptWithCid(ctx, accCid, cfg)
+		if err != nil {
+			return
+		}
+		buf := make([]byte, 0)
+		_, _ = s.ReadToEOF(ctx, &buf)
+		s.Close()
+	}()
+
+	stream, err := bLink.ConnectWithCid(ctx, iniCid, cfg)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if _, err := stream.Write(ctx, bytes.Repeat([]byte{7}, 16*1024)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Let the transfer settle so nothing is in flight to wake the loop
+	// incidentally -- that quiescent state is exactly when the defect bit.
+	time.Sleep(300 * time.Millisecond)
+
+	start := time.Now()
+	stream.Close()
+	elapsed := time.Since(start)
+	t.Logf("Close returned in %v", elapsed.Round(time.Millisecond))
+
+	if elapsed > 5*time.Second {
+		t.Errorf("Close took %v; it should not be waiting on an unrelated timer", elapsed)
+	}
+	<-readDone
+}

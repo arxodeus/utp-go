@@ -146,6 +146,21 @@ func (s *UtpStream) Close() {
 			s.logger.Trace("call close utp stream", "dst.Peer", s.cid.Peer, "dst.send", s.cid.Send, "dst.recv", s.cid.Recv)
 		}
 		s.shutdown.Store(true)
+		// Wake the event loop.
+		//
+		// Setting the flag alone is not enough: the loop is blocked in a
+		// select, and nothing here is one of the cases it waits on. It would
+		// only notice the shutdown when some unrelated packet or timer
+		// happened to arrive, so Close took anywhere from about a second to
+		// the full idle timeout depending on what else was in flight. The
+		// shutdown event is the channel the socket already uses to tell a
+		// connection to wind up.
+		select {
+		case s.streamEvents <- &streamEvent{Type: streamShutdown}:
+		default:
+			// The queue is full, so the loop has plenty to wake it and will
+			// see the flag on its next pass.
+		}
 		// wait to consume write buffer and recv buffer
 		s.connHandle.Wait()
 		s.streamCancel()

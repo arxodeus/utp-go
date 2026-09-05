@@ -18,13 +18,29 @@ all.
 | **M4b** — exhaustive libutp compatibility sweep | **Not done.** No `COMPATIBILITY.md` exists. |
 | **M5** — verify LEDBAT, add LEDBAT++ | **Not done.** But see "The congestion controller had no delay signal" — this milestone's premise has changed. |
 | **M6** — MTU path discovery | **Not done.** Not investigated. |
-| **M7** — anacrolix/torrent integration | **Not done.** No adapter, no interop test against libutp. |
+| **M7** — anacrolix/torrent integration | **Partly done.** The interop gate passes in both directions against real libutp; the `anacrolix/torrent` adapter is not written. |
 | **M8** — soak and hardening | **Not done.** |
 
-**No interoperability testing against real libutp has been done at all.** The
-M7 interop gate is described in the brief as non-negotiable, and it is
-unmet. Nothing here has been shown to talk to a real BitTorrent peer. Until
-that gate passes, treat this as a library that talks to itself correctly.
+**The interoperability gate now passes.** libutp is vendored at the pinned
+commit in `native/libutp/`, with a bridge that gives it a UDP socket and an
+event loop, and both directions transfer verified payloads over real sockets:
+
+| Direction | Result |
+| --- | --- |
+| our initiator to libutp responder | 512 KB verified, ~430 Mbps |
+| libutp initiator to our responder | 512 KB verified, ~374 Mbps |
+
+That is the difference between conformance by citation -- code read against
+`utp_internal.cpp` and matched by hand -- and evidence that the implementation
+every peer in the wild runs will actually complete a transfer with this one.
+
+What remains unmet in M7 is the `anacrolix/torrent` side: no adapter to its
+`utpSocket` interface, and no hash-verified torrent transfer. `CGO_ENABLED=0
+go build ./...` does succeed for the whole module.
+
+Writing the gate immediately found two defects that nothing else had, both
+described below: `Accept` could not accept, and `Close` took up to half a
+minute.
 
 ## The congestion controller had no delay signal
 
@@ -267,6 +283,49 @@ connection's event loop exits on that same cancellation without signalling the
 channel, leaving the caller blocked forever. `Connect` already had the arm;
 `ConnectWithCid` simply lacked it. Found by a test that cancelled mid-handshake.
 
+## Accept could not accept
+
+**Fixed.** Found by the M7 interop gate: libutp, as initiator, could not
+connect to us at all.
+
+`Accept` -- the path that takes no connection id, and therefore the only one
+usable against a peer that picks its own -- polled once for an
+already-arrived SYN and failed outright with "no incoming conn" if none had
+come yet. That made it unusable for the ordinary server pattern: call
+`Accept`, then have a client connect. The SYN arriving a moment later was
+parked in the incoming-connection map with nobody left to claim it, and the
+peer retried until it gave up.
+
+The cid-specific path had always queued such requests. This one now does too.
+
+Behind that sat a second defect on the same path: `awaitConnected`
+dereferenced the accept's connection id, which is nil when none was given, so
+it panicked as soon as the first fix let it get that far. It now reports
+against the stream's id, which always exists.
+
+Both were reachable by any caller of `Accept`. Nothing in the repository used
+it, so nothing had ever run them.
+
+## Close took up to half a minute
+
+**Fixed.** Also found by the interop gate: a transfer completing in 10 ms was
+followed by a 29-second `Close`.
+
+`UtpStream.Close` set its shutdown flag and then waited on the connection's
+event loop. But the loop blocks in a `select` on packet, write, read and timer
+channels, and an atomic flag is not one of them. It only noticed the shutdown
+when some unrelated packet or timer happened to arrive, so `Close` took
+anywhere from about a second to the full idle timeout depending on what was in
+flight. Trace logging perturbed the timing enough to hide it, which is what
+made it look intermittent.
+
+`Close` now sends the `streamShutdown` event -- the same one the socket
+already uses to wind a connection up -- which wakes the loop. Measured: 29
+seconds to 0 ms, and `TestCloseReturnsPromptly` guards it.
+
+For a BitTorrent client, which opens and closes connections constantly, this
+was the more consequential of the two.
+
 ## Root causes of the M3 failures
 
 The brief asked for a written explanation of each. Both named tests failed,
@@ -349,9 +408,15 @@ library defect:
   `/debug/fgprof` on `http.DefaultServeMux`, so running the package's tests
   together panicked with a duplicate registration.
 
-`native/cgo` also did not build: it needs `utp_lib.h` and `libutp_lib.a`,
-which are not vendored, so `go build ./...` failed for the whole module. It is
-now behind the `utp_cgo_harness` build tag.
+`native/cgo` also did not build: it needed `utp_lib.h` and `libutp_lib.a`,
+which were not vendored, so `go build ./...` failed for the whole module.
+
+That package has since been removed rather than fixed. Despite the name, it
+was not a libutp harness at all: its API (`udp_socket_create`,
+`udp_stream_write`) is the FFI of the Rust `ethereum/utp` implementation this
+codebase was ported from, not libutp's (`utp_init`, `utp_create_socket`,
+`utp_process_udp`). It could never have tested interoperability with the C
+library. `native/libutp/` replaces it and does.
 
 ## Verification, and what the numbers mean
 
