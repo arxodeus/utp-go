@@ -300,6 +300,24 @@ This is the largest and least urgent of the five. It is also the one upstream
 may reasonably want to shape differently, since it adds a package and two
 interface methods.
 
+
+
+## PR 13 — LEDBAT++
+
+New file, opt-in behind `ConnectionConfig.CongestionAlgorithm`, default
+unchanged. Implements draft-irtf-iccrg-ledbat-plus-plus-01: modified slow
+start (§4.1), a gain that scales with the base RTT (§4.2), multiplicative
+decrease (§4.3), periodic slowdowns (§4.4) and a 60 ms target (§4.5).
+
+Worth sending because of what measuring it revealed about the existing
+controller: on a sustained transfer over a 40 ms path, classic LEDBAT leaves
+33 ms of standing queue and reports causing 500µs, because its base-delay
+estimate has drifted up to include its own queue. LEDBAT++ leaves 1.55 ms.
+
+Comes with the standing-queue metric that shows it (see "Not for upstream"
+below on the harness), the latecomer experiment, and two documented readings
+of ambiguous parts of the draft.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

@@ -142,14 +142,60 @@ the pinned commit, and the citations sit next to them in the source:
 Neither is a deviation. They are left in this file as a record that the claims
 were checked rather than inherited.
 
-## Not a deviation: LEDBAT++
+## LEDBAT++
 
-The brief anticipates LEDBAT++ being nearly the only entry in this file.
-LEDBAT++ has **not been implemented**. The existing controller is classic
-LEDBAT.
+**Implemented, and opt-in.** `ConnectionConfig.CongestionAlgorithm =
+AlgorithmLEDBATPP` selects it; the default is `AlgorithmLEDBAT`, which is
+libutp's.
 
-Note that until commit `4a0f0ec` that controller was being fed a constant
-delay value and so was not performing delay-based control at all — see
-[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md). Any comparison between classic
-LEDBAT and LEDBAT++ has to start from a controller that actually works, and
-the classic baseline has never been measured.
+This is the largest deliberate divergence in the library and the only one the
+brief asks for. It implements
+[draft-irtf-iccrg-ledbat-plus-plus-01](https://datatracker.ietf.org/doc/html/draft-irtf-iccrg-ledbat-plus-plus-01):
+
+| Mechanism | Section | What it changes |
+| --- | --- | --- |
+| Modified slow start | §4.1 | Starts at two packets, grows scaled by the gain, exits at 3/4 of the delay target |
+| Gain scaled to the path | §4.2 | `GAIN = 1 / min(16, ceil(2*TARGET/base))` — six times slower than Reno on a 20 ms path, up to Reno's rate on a 120 ms one |
+| Multiplicative decrease | §4.3 | `W += max(GAIN - W*(delay/target - 1), -W/2)` when the delay is over target |
+| Periodic slowdowns | §4.4 | Drop to two packets for two round trips, then ramp back, once per ten slowdown-durations |
+| A 60 ms delay target | §4.5 | Against RFC 6817's and libutp's 100 ms |
+
+Reason: classic LEDBAT, as libutp implements it, is not less than best
+effort. Measured on a sustained transfer over a 40 ms path, it leaves **33 ms
+of standing queue** — its own base-delay estimate has drifted up to include
+that queue, so it reports causing 500µs and cannot see the rest. LEDBAT++
+leaves 1.55 ms on the same link. Full numbers in
+[BENCHMARKS.md](BENCHMARKS.md).
+
+### Two readings of an ambiguous specification
+
+Both are stated here because they are interpretations, not transcriptions,
+and a reader checking this implementation against the draft should know where
+it exercised judgement.
+
+**The §4.3 formula is applied only when the delay exceeds the target.** The
+draft introduces it as what replaces LEDBAT's adjustment "when delay exceeds
+target", but presents it as the whole rule. Read literally at *below* target
+it yields `GAIN + W*(1 - delay/target)` — for a hundred-packet window on an
+empty path, a hundred packets of growth in one round trip, which is far more
+aggressive than the LEDBAT it is meant to be a gentler version of and makes
+§4.2 meaningless. Below target this implementation uses RFC 6817's increase
+scaled by the §4.2 gain.
+
+**The ramp out of a slowdown is a full slow start, not a gain-scaled one.**
+§4.4 says only "ramp up the congestion window according to the slow start
+algorithm", and separately that a slowdown should cost "not more than a 10%
+drop in the utilization of the bottleneck". Those hold together only if the
+ramp doubles per round trip. Gain-scaled, on a 20 ms path where the gain is
+1/6, climbing back from two packets to fifty takes about twenty-one round
+trips; measured, that turned a 1.3 s transfer into 2.8 s. The initial slow
+start is gain-scaled per §4.1; the slowdown ramp is not, and it stops at a
+window this connection was using a moment earlier.
+
+## Not a deviation: nothing else in the congestion controller
+
+Apart from LEDBAT++ above, the controller now matches libutp's
+`apply_ccontrol` (`utp_internal.cpp:1615-1712`) and its timeout branch
+(`:1206-1228`). Seven differences were found and closed; they are listed in
+[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md), not here, because they were
+defects rather than choices.

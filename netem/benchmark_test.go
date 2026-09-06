@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 	"time"
+
+	utp "github.com/zen-eth/utp-go"
 )
 
 // The M5 benchmark suite: one fixed set of link profiles, run the same way
@@ -37,6 +40,21 @@ import (
 // reported. Three is enough to reject a single outlier and cheap enough to
 // run on every congestion-control change.
 const benchmarkRepeats = 3
+
+// benchmarkAlgorithms is the set of congestion controllers the suite runs.
+// Every profile runs under each, so the tables can be compared directly.
+func benchmarkAlgorithms() []struct {
+	name string
+	algo utp.CongestionAlgorithm
+} {
+	return []struct {
+		name string
+		algo utp.CongestionAlgorithm
+	}{
+		{"LEDBAT", utp.AlgorithmLEDBAT},
+		{"LEDBAT++", utp.AlgorithmLEDBATPP},
+	}
+}
 
 type linkProfile struct {
 	name    string
@@ -84,6 +102,16 @@ func benchmarkProfiles() []linkProfile {
 			payload: 512 * 1024,
 		},
 		{
+			// Long enough for several LEDBAT++ slowdown cycles. Everything
+			// above finishes in one or two, where a slowdown is a large
+			// fraction of the whole transfer and the measurement says more
+			// about the transfer's length than about the controller.
+			name:    "Long transfer (20ms, 10Mbps, 8MB)",
+			seed:    109,
+			cfg:     Config{Delay: 20 * time.Millisecond, BandwidthBps: 10_000_000, QueueBytes: 64 * 1024},
+			payload: 8 * 1024 * 1024,
+		},
+		{
 			name:    "Reordering (20ms, 10Mbps, 2% reordered)",
 			seed:    107,
 			cfg:     Config{Delay: 20 * time.Millisecond, ReorderRate: 0.02, BandwidthBps: 10_000_000, QueueBytes: 64 * 1024},
@@ -97,75 +125,84 @@ func TestBenchmarkSuite(t *testing.T) {
 		t.Skip("benchmark suite is not a -short test")
 	}
 
-	var rows []string
-	rows = append(rows, "| Profile | Goodput (median) | Range | Elapsed | Retx | cwnd mean | cwnd max | at floor | qdelay p50 | qdelay p95 |")
-	rows = append(rows, "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+	for _, alg := range benchmarkAlgorithms() {
+		alg := alg
+		t.Run(alg.name, func(t *testing.T) {
+			var rows []string
+			rows = append(rows, "| Profile | Goodput (median) | Range | Elapsed | Retx | cwnd mean | cwnd max | at floor | qdelay p50 | qdelay p95 | standing queue p50 |")
+			rows = append(rows, "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
 
-	for _, profile := range benchmarkProfiles() {
-		profile := profile
-		t.Run(profile.name, func(t *testing.T) {
-			var (
-				mbps      []float64
-				elapsed   []time.Duration
-				retx      []float64
-				cwndMean  []float64
-				cwndMax   []float64
-				atFloor   []float64
-				qdelayP50 []time.Duration
-				qdelayP95 []time.Duration
-			)
-			for run := 0; run < benchmarkRepeats; run++ {
-				res, sum := runProfileOnce(t, profile)
-				mbps = append(mbps, res.Goodput.Mbps())
-				elapsed = append(elapsed, res.Elapsed)
-				retx = append(retx, sum.RetransmitRate*100)
-				cwndMean = append(cwndMean, float64(sum.CwndMeanBytes))
-				cwndMax = append(cwndMax, float64(sum.CwndMaxBytes))
-				atFloor = append(atFloor, sum.CwndPinnedAtMin*100)
-				qdelayP50 = append(qdelayP50, sum.QueueingDelayP50)
-				qdelayP95 = append(qdelayP95, sum.QueueingDelayP95)
-				t.Logf("run %d: %s | %s", run+1, res, sum)
+			for _, profile := range benchmarkProfiles() {
+				profile := profile
+				t.Run(profile.name, func(t *testing.T) {
+					var (
+						mbps      []float64
+						elapsed   []time.Duration
+						retx      []float64
+						cwndMean  []float64
+						cwndMax   []float64
+						atFloor   []float64
+						qdelayP50 []time.Duration
+						qdelayP95 []time.Duration
+						queueP50  []time.Duration
+					)
+					for run := 0; run < benchmarkRepeats; run++ {
+						res, sum := runProfileOnce(t, profile, alg.algo)
+						mbps = append(mbps, res.Goodput.Mbps())
+						elapsed = append(elapsed, res.Elapsed)
+						retx = append(retx, sum.RetransmitRate*100)
+						cwndMean = append(cwndMean, float64(sum.CwndMeanBytes))
+						cwndMax = append(cwndMax, float64(sum.CwndMaxBytes))
+						atFloor = append(atFloor, sum.CwndPinnedAtMin*100)
+						qdelayP50 = append(qdelayP50, sum.QueueingDelayP50)
+						qdelayP95 = append(qdelayP95, sum.QueueingDelayP95)
+						queueP50 = append(queueP50, sum.StandingQueueP50)
+						t.Logf("run %d: %s | %s", run+1, res, sum)
+					}
+					lo, hi := minMaxFloat(mbps)
+					rows = append(rows, fmt.Sprintf("| %s | %.2f Mbps | %.2f-%.2f | %v | %.2f%% | %.0fB | %.0fB | %.1f%% | %v | %v | %v |",
+						profile.name, medianFloat(mbps), lo, hi,
+						medianDuration(elapsed).Round(time.Millisecond),
+						medianFloat(retx), medianFloat(cwndMean), medianFloat(cwndMax),
+						medianFloat(atFloor),
+						medianDuration(qdelayP50).Round(time.Microsecond),
+						medianDuration(qdelayP95).Round(time.Microsecond),
+						medianDuration(queueP50).Round(time.Microsecond)))
+				})
 			}
-			lo, hi := minMaxFloat(mbps)
-			rows = append(rows, fmt.Sprintf("| %s | %.2f Mbps | %.2f-%.2f | %v | %.2f%% | %.0fB | %.0fB | %.1f%% | %v | %v |",
-				profile.name, medianFloat(mbps), lo, hi,
-				medianDuration(elapsed).Round(time.Millisecond),
-				medianFloat(retx), medianFloat(cwndMean), medianFloat(cwndMax),
-				medianFloat(atFloor),
-				medianDuration(qdelayP50).Round(time.Microsecond),
-				medianDuration(qdelayP95).Round(time.Microsecond)))
+
+			// Two flows over one bottleneck: the fairness number LEDBAT is
+			// judged on.
+			t.Run("Two flows, 8Mbps bottleneck", func(t *testing.T) {
+				var totals, fairnesses []float64
+				for run := 0; run < benchmarkRepeats; run++ {
+					fairness, throughputs := runTwoFlowBottleneck(t, 108, alg.algo)
+					total := throughputs[0].Mbps() + throughputs[1].Mbps()
+					totals = append(totals, total)
+					fairnesses = append(fairnesses, fairness)
+					t.Logf("run %d: %.2f + %.2f Mbps, total %.2f, Jain fairness %.3f",
+						run+1, throughputs[0].Mbps(), throughputs[1].Mbps(), total, fairness)
+				}
+				lo, hi := minMaxFloat(totals)
+				rows = append(rows, fmt.Sprintf("| Two flows, 8Mbps bottleneck | %.2f Mbps total | %.2f-%.2f | | | | | | | | Jain %.3f |",
+					medianFloat(totals), lo, hi, medianFloat(fairnesses)))
+			})
+
+			t.Logf("%s:\n%s", alg.name, strings.Join(rows, "\n"))
+			if dir := os.Getenv("UTP_BENCHMARK_OUT_DIR"); dir != "" {
+				path := filepath.Join(dir, strings.ReplaceAll(alg.name, "+", "p")+".md")
+				if err := os.WriteFile(path, []byte(strings.Join(rows, "\n")+"\n"), 0o644); err != nil {
+					t.Fatalf("writing %s: %v", path, err)
+				}
+				t.Logf("wrote %s", path)
+			}
 		})
-	}
-
-	// Two flows over one bottleneck: the fairness number LEDBAT is judged on.
-	t.Run("Two flows, 8Mbps bottleneck", func(t *testing.T) {
-		var totals, fairnesses []float64
-		var detail string
-		for run := 0; run < benchmarkRepeats; run++ {
-			fairness, throughputs := runTwoFlowBottleneck(t, 108)
-			total := throughputs[0].Mbps() + throughputs[1].Mbps()
-			totals = append(totals, total)
-			fairnesses = append(fairnesses, fairness)
-			detail = fmt.Sprintf("%.2f + %.2f Mbps", throughputs[0].Mbps(), throughputs[1].Mbps())
-			t.Logf("run %d: %s, total %.2f Mbps, Jain fairness %.3f", run+1, detail, total, fairness)
-		}
-		lo, hi := minMaxFloat(totals)
-		rows = append(rows, fmt.Sprintf("| Two flows, 8Mbps bottleneck | %.2f Mbps total | %.2f-%.2f | | | | | | | Jain %.3f |",
-			medianFloat(totals), lo, hi, medianFloat(fairnesses)))
-	})
-
-	t.Logf("benchmark table:\n%s", strings.Join(rows, "\n"))
-	if path := os.Getenv("UTP_BENCHMARK_OUT"); path != "" {
-		if err := os.WriteFile(path, []byte(strings.Join(rows, "\n")+"\n"), 0o644); err != nil {
-			t.Fatalf("writing %s: %v", path, err)
-		}
-		t.Logf("wrote %s", path)
 	}
 }
 
 // runProfileOnce runs one transfer over one profile's link and returns what
 // it achieved.
-func runProfileOnce(t *testing.T, profile linkProfile) (*TransferResult, Summary) {
+func runProfileOnce(t *testing.T, profile linkProfile, algo utp.CongestionAlgorithm) (*TransferResult, Summary) {
 	t.Helper()
 	n := NewNetwork(profile.seed)
 	defer n.Close()
@@ -182,8 +219,12 @@ func runProfileOnce(t *testing.T, profile linkProfile) (*TransferResult, Summary
 		data[i] = byte(i * 31)
 	}
 
+	cfg := utp.NewConnectionConfig()
+	cfg.CongestionAlgorithm = algo
+
 	res, err := pair.RunTransfer(ctx, data, FlowOptions{
 		InitiatorCid:    400,
+		Config:          cfg,
 		MetricsInterval: 2 * time.Millisecond,
 		Verify:          true,
 	})
@@ -214,7 +255,7 @@ func medianDuration(values []time.Duration) time.Duration {
 	return sorted[len(sorted)/2]
 }
 
-func runTwoFlowBottleneck(t *testing.T, seed int64) (fairness float64, throughputs []Throughput) {
+func runTwoFlowBottleneck(t *testing.T, seed int64, algo utp.CongestionAlgorithm) (fairness float64, throughputs []Throughput) {
 	t.Helper()
 	n := NewNetwork(seed)
 	defer n.Close()
@@ -239,8 +280,11 @@ func runTwoFlowBottleneck(t *testing.T, seed int64) (fairness float64, throughpu
 	results := make(chan outcome, 2)
 	for i, cid := range []uint16{500, 520} {
 		go func(i int, cid uint16) {
+			cfg := utp.NewConnectionConfig()
+			cfg.CongestionAlgorithm = algo
 			res, err := pair.RunTransfer(ctx, data, FlowOptions{
 				InitiatorCid:    cid,
+				Config:          cfg,
 				MetricsInterval: 5 * time.Millisecond,
 			})
 			results <- outcome{res, err}

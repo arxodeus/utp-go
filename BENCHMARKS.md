@@ -1,8 +1,9 @@
 # Benchmarks
 
-Every number here came from `go test ./netem -run TestBenchmarkSuite -v`, on
-the emulated network described in [HARNESS.md](HARNESS.md). Nothing in this
-file is estimated, extrapolated, or carried over from a previous run.
+Every number here came from `go test ./netem -run TestBenchmarkSuite -v` and
+`go test ./netem -run TestLatecomerShare -v`, on the emulated network
+described in [HARNESS.md](HARNESS.md). Nothing in this file is estimated,
+extrapolated, or carried over from a previous run.
 
 ## How to read them
 
@@ -15,35 +16,132 @@ one -- a single retransmission timeout costs a full RTO and dominates a short
 transfer, and no amount of averaging hides that; the range is printed so it
 cannot be mistaken for precision.
 
-`Retx` is the fraction of packets sent that were retransmissions. On a link
-that drops 1%, a healthy sender retransmits about 1%; substantially more means
-it is resending packets that were not lost. `at floor` is the fraction of
-samples where the congestion window sat at its minimum -- a controller parked
-there has collapsed rather than backed off. `qdelay` is the standing queue,
-which is what LEDBAT exists to bound: throughput bought by filling a queue is
-not a win, and this column is where that would show.
+Two columns describe queueing, and they are not the same thing:
+
+- **`standing queue p50`** is the round trip above the lowest round trip this
+  flow ever saw. It is the delay this flow imposed on everyone else sharing
+  the path, and it is measured, not believed.
+- **`qdelay p50`** is what the congestion controller *thought* it was causing:
+  `PeerTsDiff - BaseDelay`, where `BaseDelay` is the controller's own estimate
+  of the empty path.
+
+They diverge, and the divergence is the point. On a 40 ms path carrying a
+sustained transfer, classic LEDBAT reported a `qdelay` of 500µs while its
+round trip sat at 80 ms. It was causing 38 ms of queue and could not see it,
+because it was subtracting its own queue from itself. Any judgement about
+"less than best effort" has to come from the standing-queue column.
 
 To regenerate:
 
 ```
 go test ./netem -run TestBenchmarkSuite -v
-UTP_BENCHMARK_OUT=/tmp/table.md go test ./netem -run TestBenchmarkSuite
+UTP_BENCHMARK_OUT_DIR=/tmp/bench go test ./netem -run TestBenchmarkSuite
+go test ./netem -run 'TestLatecomerShare|TestBaseDelayTracking' -v
 ```
 
-## Classic LEDBAT, after the M5 correction
+## Classic LEDBAT (the default)
 
-This is the current state of the library.
+This is what a connection gets unless it asks for something else. It matches
+libutp.
 
-| Profile | Goodput (median) | Range | Elapsed | Retx | cwnd mean | cwnd max | at floor | qdelay p50 | qdelay p95 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| LAN (1ms, 100Mbps, no loss) | 90.37 Mbps | 90.29-90.55 | 371ms | 0.00% | 97043B | 152628B | 0.7% | 229µs | 801µs |
-| Broadband (20ms, 10Mbps, no loss) | 6.35 Mbps | 6.34-6.35 | 1.321s | 0.00% | 50959B | 76225B | 0.3% | 210µs | 419µs |
-| Broadband, 1% loss | 3.29 Mbps | 3.28-3.29 | 1.277s | 1.34% | 21347B | 37545B | 0.5% | 379µs | 764µs |
-| Broadband, 5% loss | 1.84 Mbps | 0.68-1.88 | 1.141s | 5.03% | 12453B | 18968B | 0.9% | 397µs | 752µs |
-| High BDP (100ms, 20Mbps, no loss) | 2.09 Mbps | 2.09-2.09 | 8.021s | 0.00% | 72900B | 110362B | 0.2% | 526µs | 962µs |
-| Shallow queue (20ms, 10Mbps, 16KB queue) | 4.72 Mbps | 4.51-4.72 | 889ms | 0.00% | 36122B | 55430B | 0.5% | 239µs | 499µs |
-| Reordering (20ms, 10Mbps, 2% reordered) | 3.08 Mbps | 3.07-3.14 | 1.363s | 1.74% | 19128B | 28780B | 0.4% | 485µs | 19.873ms |
-| Two flows, 8Mbps bottleneck | 6.47 Mbps total | 6.47-6.47 | | | | | | | Jain 1.000 |
+| Profile | Goodput (median) | Range | Elapsed | Retx | cwnd mean | cwnd max | at floor | qdelay p50 | qdelay p95 | standing queue p50 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| LAN (1ms, 100Mbps, no loss) | 89.65 Mbps | 89.55-90.61 | 374ms | 0.00% | 96883B | 152622B | 0.7% | 209µs | 808µs | 5.467ms |
+| Broadband (20ms, 10Mbps, no loss) | 6.34 Mbps | 6.21-6.35 | 1.323s | 0.00% | 50692B | 76238B | 0.3% | 193µs | 445µs | 2.048ms |
+| Broadband, 1% loss | 3.27 Mbps | 3.10-3.28 | 1.281s | 1.34% | 21427B | 37362B | 0.5% | 422µs | 886µs | 1.139ms |
+| Broadband, 5% loss | 1.93 Mbps | 0.97-1.93 | 1.088s | 4.99% | 13321B | 22984B | 0.9% | 297µs | 771µs | 1.181ms |
+| High BDP (100ms, 20Mbps, no loss) | 2.09 Mbps | 2.09-2.09 | 8.017s | 0.00% | 72549B | 110444B | 0.2% | 501µs | 965µs | 952µs |
+| Shallow queue (20ms, 10Mbps, 16KB queue) | 4.70 Mbps | 4.70-4.71 | 893ms | 0.00% | 36643B | 55439B | 0.5% | 230µs | 388µs | 1.216ms |
+| Long transfer (20ms, 10Mbps, 8MB) | 8.80 Mbps | 8.73-8.87 | 7.63s | 0.06% | 85446B | 113659B | 0.0% | 510µs | 912µs | 32.992ms |
+| Reordering (20ms, 10Mbps, 2% reordered) | 3.06 Mbps | 3.06-3.11 | 1.37s | 1.82% | 19150B | 28358B | 0.4% | 480µs | 19.874ms | 769µs |
+| Two flows, 8Mbps bottleneck | 6.48 Mbps total | 6.46-6.48 | | | | | | | | Jain 1.000 |
+
+## LEDBAT++
+
+Opt in with `ConnectionConfig.CongestionAlgorithm = AlgorithmLEDBATPP`.
+
+| Profile | Goodput (median) | Range | Elapsed | Retx | cwnd mean | cwnd max | at floor | qdelay p50 | qdelay p95 | standing queue p50 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| LAN (1ms, 100Mbps, no loss) | 74.22 Mbps | 71.94-75.02 | 452ms | 0.00% | 104991B | 263900B | 0.6% | 234µs | 977µs | 4.227ms |
+| Broadband (20ms, 10Mbps, no loss) | 2.91 Mbps | 2.82-2.93 | 2.884s | 2.26% | 36134B | 139225B | 5.9% | 298µs | 727µs | 1.175ms |
+| Broadband, 1% loss | 0.92 Mbps | 0.92-1.12 | 4.539s | 1.26% | 8344B | 36519B | 8.9% | 438µs | 1.007ms | 852µs |
+| Broadband, 5% loss | 0.51 Mbps | 0.49-0.53 | 4.108s | 4.88% | 3129B | 5582B | 9.4% | 424µs | 982µs | 685µs |
+| High BDP (100ms, 20Mbps, no loss) | 4.09 Mbps | 4.09-4.09 | 4.102s | 0.00% | 252974B | 479261B | 22.2% | 395µs | 881µs | 7.698ms |
+| Shallow queue (20ms, 10Mbps, 16KB queue) | 2.07 Mbps | 2.06-2.12 | 2.022s | 3.62% | 26283B | 85459B | 5.9% | 235µs | 631µs | 2.233ms |
+| Long transfer (20ms, 10Mbps, 8MB) | 6.22 Mbps | 6.03-6.27 | 10.791s | 0.23% | 43871B | 139361B | 2.4% | 579µs | 1.104ms | 1.551ms |
+| Reordering (20ms, 10Mbps, 2% reordered) | 1.00 Mbps | 0.94-1.00 | 4.205s | 1.03% | 5866B | 21536B | 5.2% | 529µs | 2.041ms | 866µs |
+| Two flows, 8Mbps bottleneck | 3.66 Mbps total | 3.63-3.67 | | | | | | | | Jain 0.997 |
+
+## What LEDBAT++ costs, and what it buys
+
+Read as a throughput table, LEDBAT++ looks like a regression: it is slower on
+six of eight profiles, by as much as a factor of three. That reading is
+incomplete, and the two rows that matter tell the real story.
+
+**It wins where the window has to get large.** High BDP (100 ms, 20 Mbps):
+2.09 -> 4.09 Mbps, mean congestion window 72 KB -> 253 KB. Classic LEDBAT
+grows at a flat 3000 bytes per round trip whatever the path, so on a long fat
+link it never reaches the bandwidth-delay product; LEDBAT++'s gain scales with
+the base RTT (§4.2) and its slow start is exponential, so it does.
+
+**It leaves the path alone.** On the sustained 8 MB transfer:
+
+| | Goodput | Standing queue p50 |
+| --- | --- | --- |
+| LEDBAT | 8.80 Mbps | **32.99 ms** |
+| LEDBAT++ | 6.22 Mbps | **1.55 ms** |
+
+29% less throughput for 21x less queue. On the deeper-queue latecomer link
+(256 KB, ~200 ms of buffering) the gap is wider still: 38.1 ms against 1.1 ms.
+
+That is the entire proposition of a "less than best effort" protocol, and it
+is the one thing uTP exists to provide. Classic LEDBAT as libutp implements it
+does not provide it: 33 ms of standing queue is not deference, it is
+bufferbloat with extra steps. It is fast *because* it is not yielding.
+
+**It is slower on short paths on purpose.** §4.2 sets
+`GAIN = 1 / min(16, ceil(2*TARGET/base))`, which on a 20 ms path is 1/6 -- six
+times slower than Reno, where classic LEDBAT's 3000 bytes per round trip is
+about twice *faster* than Reno. A background protocol that outpaces TCP is not
+doing its job. The throughput this costs on an otherwise-empty link is the
+price of not taking it from someone else on a busy one.
+
+### The latecomer experiment
+
+`TestLatecomerShare`. One flow runs until it has filled the bottleneck queue;
+a second joins 1.5 s later, so every delay sample it will ever take begins
+against a full queue. Its idea of the empty path is wrong from its first
+packet -- this is the failure RFC 6817 acknowledges and LEDBAT++ §4.4 answers.
+
+| | Incumbent | Latecomer | Ratio | Jain |
+| --- | --- | --- | --- | --- |
+| LEDBAT | 7.30 Mbps | 5.69 Mbps | 0.78 | 0.985 |
+| LEDBAT++ | 3.77 Mbps | 3.89 Mbps | 1.03 | 1.000 |
+
+LEDBAT++ splits the link evenly; classic LEDBAT does not. But the honest
+reading of this table is that the fairness difference is small (0.985 against
+1.000) and the aggregate throughput difference is not: 12.99 Mbps against
+7.66. On this link, with only uTP flows competing, classic LEDBAT's unfairness
+costs less than LEDBAT++'s deference does.
+
+What would change that verdict is a TCP flow in the mix, because that is the
+traffic uTP is supposed to yield to, and 33 ms of standing queue is exactly
+what would hurt it. **There is no TCP model in the emulator, so that
+experiment has not been run.** It is the single most valuable thing missing
+from this file.
+
+### Why the default is still classic LEDBAT
+
+Matching libutp is the default everywhere else in this library, and LEDBAT++
+is measurably slower on most links here. Changing the default would halve some
+users' throughput to buy a property this harness cannot yet demonstrate the
+value of.
+
+For a BitTorrent client -- the case in the brief -- the argument runs the other
+way: yielding to the user's interactive traffic *is* the requirement, and 33 ms
+of self-inflicted queue is the thing uTP was invented to avoid. That is a
+choice for the integrator, made with the numbers above, not one to make
+silently in a default.
 
 ## Classic LEDBAT, before the M5 correction
 
@@ -62,32 +160,27 @@ fix, so the difference is the congestion control alone.
 | Reordering (20ms, 10Mbps, 2% reordered) | 1.76 Mbps | 1.74-1.86 | 2.377s | 1.70% | 10082B | 16217B | 0.6% | 541µs | 1.196ms |
 | Two flows, 8Mbps bottleneck | 5.70 Mbps total | 5.51-5.72 | | | | | | | Jain 1.000 |
 
-## What changed
+## What the M5 correction changed
 
-Medians, so the wide-range rows are compared like for like:
+The classic-LEDBAT table above is after seven defects were fixed against
+libutp's `apply_ccontrol`. Medians, before and after:
 
 | Profile | Before | After | |
 | --- | --- | --- | --- |
-| LAN (1ms, 100Mbps) | 82.83 Mbps | 90.37 Mbps | +9% |
-| Broadband (20ms, 10Mbps) | 4.47 Mbps | 6.35 Mbps | +42% |
-| Broadband, 1% loss | 1.84 Mbps | 3.29 Mbps | +79% |
-| Broadband, 5% loss | 1.02 Mbps | 1.84 Mbps | +80% |
+| LAN (1ms, 100Mbps) | 82.83 Mbps | 89.65 Mbps | +8% |
+| Broadband (20ms, 10Mbps) | 4.47 Mbps | 6.34 Mbps | +42% |
+| Broadband, 1% loss | 1.84 Mbps | 3.27 Mbps | +78% |
+| Broadband, 5% loss | 1.02 Mbps | 1.93 Mbps | +89% |
 | High BDP (100ms, 20Mbps) | 1.35 Mbps | 2.09 Mbps | +55% |
-| Shallow queue (16KB) | 3.11 Mbps | 4.72 Mbps | +52% |
-| Reordering (2%) | 1.76 Mbps | 3.08 Mbps | +75% |
-| Two flows, 8Mbps bottleneck | 5.70 Mbps total | 6.47 Mbps total | +14% |
+| Shallow queue (16KB) | 3.11 Mbps | 4.70 Mbps | +51% |
+| Reordering (2%) | 1.76 Mbps | 3.06 Mbps | +74% |
+| Two flows, 8Mbps bottleneck | 5.70 Mbps total | 6.48 Mbps total | +14% |
 
-Two things make these trustworthy rather than merely large.
-
-**The standing queue did not grow.** Broadband p95 queueing delay went from
-839µs to 419µs, and the shallow-queue profile from 432µs to 499µs -- flat
-within noise while its throughput went up by half. Throughput bought by
-building a queue would show here as a bigger number in this column, and it
-does not. That is the whole point of a delay-based controller.
-
-**Fairness held.** Two identical flows over one bottleneck still split it
-1.000 on Jain's index, and now carry 6.47 Mbps of an 8 Mbps link between them
-instead of 5.70.
+The believed queueing delay went down as throughput went up, which is what
+made this look unambiguously good at the time. The standing-queue column did
+not exist yet. It does now, and it says classic LEDBAT is parking 33 ms on a
+sustained transfer -- so the correct summary of the M5 correction is that it
+made classic LEDBAT substantially faster, not that it made it well-behaved.
 
 What each change was, and the libutp line it came from, is in
 [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
@@ -100,16 +193,14 @@ What each change was, and the libutp line it came from, is in
   vendored libutp driven over the same links, which the harness cannot do yet.
   Until that exists, "matches libutp's congestion control" is a claim about
   code read against `utp_internal.cpp`, not a measurement.
-- **Not a test of fairness against TCP.** LEDBAT exists to yield to TCP.
-  There is no TCP model in the emulator, so "less than best effort" is
-  unverified. Two uTP flows sharing a bottleneck is a much weaker claim than
-  that, and should not be read as the stronger one.
-- **Not long enough to reach steady state on a high-BDP path.** The High BDP
-  row is still 2.09 Mbps on a 20 Mbps link. That link's bandwidth-delay
-  product is about 500 KB; the window grows at 3000 bytes per round trip, so
-  reaching it would take roughly 170 round trips, or 17 seconds, and the
-  transfer is over in 8. This is not a divergence from libutp -- libutp grows
-  at exactly the same rate, `MAX_CWND_INCREASE_BYTES_PER_RTT`
-  (`utp_internal.cpp:43`), and its slow start adds only one packet per round
-  trip on top (`:1691`). It is the limitation LEDBAT++ exists to address, and
-  it is the reason the High BDP profile is in this suite.
+- **Not a test of fairness against TCP**, as above. This is the important gap.
+- **Not long enough to reach steady state on a high-BDP path** for classic
+  LEDBAT. Its High BDP row is 2.09 Mbps on a 20 Mbps link because a window
+  growing at 3000 bytes per round trip needs about 170 round trips to reach
+  that path's bandwidth-delay product, and the transfer is over in 8 seconds.
+  That is not a divergence from libutp -- libutp grows at exactly the same
+  rate, `MAX_CWND_INCREASE_BYTES_PER_RTT` (`utp_internal.cpp:43`). It is the
+  limitation LEDBAT++ addresses, and the High BDP row is where it shows.
+- **Not a soak.** The longest transfer here is eleven seconds. LEDBAT++'s
+  slowdown period grows with the measured slowdown duration, and nothing here
+  runs long enough to exercise many cycles of that.

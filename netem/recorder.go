@@ -81,6 +81,27 @@ type Summary struct {
 	RTTP50  time.Duration
 	RTTP95  time.Duration
 	RTTMax  time.Duration
+	// RTTMin is the lowest round trip seen over the whole flow. On a path
+	// this flow started on while it was empty, this is the path's real
+	// unloaded round trip.
+	RTTMin time.Duration
+
+	// StandingQueueP50 and StandingQueueP95 are the round trip above
+	// RTTMin -- the queue this flow actually left standing on the path.
+	//
+	// This exists because QueueingDelay below cannot be trusted for that
+	// question. QueueingDelay is `PeerTsDiff - BaseDelay`, and BaseDelay is
+	// the *controller's own estimate* of the empty path. A delay-based
+	// controller whose base-delay estimate has drifted upwards -- which is
+	// precisely the failure LEDBAT++ exists to fix -- reports a small
+	// queueing delay while sitting on a large queue, because it is
+	// subtracting the queue from itself.
+	//
+	// Measured on a 40ms path: classic LEDBAT reported 156µs of queueing
+	// delay while its round trip sat at 80ms. It was causing 40ms of queue
+	// and could not see it. StandingQueueP50 reports the 40ms.
+	StandingQueueP50 time.Duration
+	StandingQueueP95 time.Duration
 
 	// Queueing delay is the excess of measured one-way delay over the lowest
 	// seen: the standing queue LEDBAT exists to bound.
@@ -100,9 +121,11 @@ type Summary struct {
 // String renders the summary for a test log.
 func (s Summary) String() string {
 	return fmt.Sprintf(
-		"cwnd mean=%dB max=%dB min=%dB pinned=%.1f%% | rtt p50=%v p95=%v max=%v | qdelay p50=%v p95=%v max=%v | sent=%d pkts retx=%d (%.2f%%) timeouts=%d fastretx=%d over %v",
+		"cwnd mean=%dB max=%dB min=%dB pinned=%.1f%% | rtt min=%v p50=%v p95=%v max=%v | standing queue p50=%v p95=%v | qdelay(believed) p50=%v p95=%v max=%v | sent=%d pkts retx=%d (%.2f%%) timeouts=%d fastretx=%d over %v",
 		s.CwndMeanBytes, s.CwndMaxBytes, s.CwndMinBytes, s.CwndPinnedAtMin*100,
+		s.RTTMin.Round(time.Microsecond),
 		s.RTTP50.Round(time.Microsecond), s.RTTP95.Round(time.Microsecond), s.RTTMax.Round(time.Microsecond),
+		s.StandingQueueP50.Round(time.Microsecond), s.StandingQueueP95.Round(time.Microsecond),
 		s.QueueingDelayP50.Round(time.Microsecond), s.QueueingDelayP95.Round(time.Microsecond), s.QueueingDelayMax.Round(time.Microsecond),
 		s.PacketsSent, s.PacketsRetransmitted, s.RetransmitRate*100, s.Timeouts, s.FastRetransmits,
 		s.Span.Round(time.Millisecond))
@@ -161,6 +184,9 @@ func (r *Recorder) Summary() Summary {
 			if m.RTT > s.RTTMax {
 				s.RTTMax = m.RTT
 			}
+			if s.RTTMin == 0 || m.RTT < s.RTTMin {
+				s.RTTMin = m.RTT
+			}
 		}
 		if q := m.QueueingDelay(); q > 0 {
 			qdelays = append(qdelays, q)
@@ -184,6 +210,12 @@ func (r *Recorder) Summary() Summary {
 		sort.Slice(rtts, func(i, j int) bool { return rtts[i] < rtts[j] })
 		s.RTTP50 = percentileDur(rtts, 0.50)
 		s.RTTP95 = percentileDur(rtts, 0.95)
+		if s.RTTP50 > s.RTTMin {
+			s.StandingQueueP50 = s.RTTP50 - s.RTTMin
+		}
+		if s.RTTP95 > s.RTTMin {
+			s.StandingQueueP95 = s.RTTP95 - s.RTTMin
+		}
 	}
 
 	if len(qdelays) > 0 {

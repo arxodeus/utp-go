@@ -62,6 +62,7 @@ type ctrlConfig struct {
 	MaxPacketSizeBytes    uint32
 	MaxWindowSizeIncBytes uint32
 	Gain                  float32
+	Algorithm             CongestionAlgorithm
 	DelayWindow           time.Duration
 	WindowSize            uint32
 }
@@ -76,6 +77,11 @@ func defaultCtrlConfig() *ctrlConfig {
 		MaxWindowSizeIncBytes: defaultMaxWindowSizeIncBytes,
 		Gain:                  defaultGain,
 		DelayWindow:           defaultDelayWindow,
+		// The window ceiling, libutp's opt_sndbuf, whose default is also
+		// 1 MB (utp_api.cpp:91). This was absent, which was harmless while
+		// nothing read the field and a zero ceiling the moment something
+		// did.
+		WindowSize: DefaultWindowSize,
 	}
 }
 
@@ -85,6 +91,9 @@ type Controller interface {
 	OnLostPacket(seqNum uint16, retransmitting bool, now time.Time) error
 	OnTimeout(hasPacketsInFlight bool)
 	OnWindowFull(now time.Time)
+	// OnTick lets a controller act on the passage of time when no acks are
+	// arriving. Only LEDBAT++ needs it, for its slowdowns.
+	OnTick(now time.Time)
 	Timeout() time.Duration
 	BytesAvailableInWindow() uint32
 	// Stats returns a snapshot of the controller's internal state.
@@ -157,11 +166,26 @@ type defaultController struct {
 	// application rather than the path, and growing the window further would
 	// be measuring nothing.
 	lastMaxedOutWindow time.Time
-	mu                 sync.Mutex
+
+	// algorithm selects the congestion controller. Everything above is
+	// shared; the LEDBAT++ state below is used only when it is selected.
+	algorithm CongestionAlgorithm
+	// minRTT is the lowest round trip seen -- LEDBAT++'s `base`, which its
+	// gain is computed from (draft-irtf-iccrg-ledbat-plus-plus-01 §4.2).
+	minRTT time.Duration
+	// ppPhase and the four fields after it drive the periodic slowdowns that
+	// keep the base-delay estimate honest (§4.4).
+	ppPhase             ledbatPPPhase
+	ppSlowdownStartedAt time.Time
+	ppFreezeUntil       time.Time
+	ppNextSlowdownAt    time.Time
+	ppSlowdownSsthresh  uint32
+
+	mu sync.Mutex
 }
 
 func newDefaultController(config *ctrlConfig) *defaultController {
-	return &defaultController{
+	ctrl := &defaultController{
 		targetDelayMicros:     config.TargetDelayMicros,
 		timeout:               config.InitialTimeout,
 		minTimeout:            config.MinTimeout,
@@ -187,7 +211,33 @@ func newDefaultController(config *ctrlConfig) *defaultController {
 		slowStart:           true,
 		ssthreshBytes:       config.WindowSize,
 		maxWindowUpperBytes: config.WindowSize,
+		algorithm:           config.Algorithm,
 	}
+	// A ceiling below the floor pins the window shut on the first ack, which
+	// is what an unset WindowSize used to produce.
+	if ctrl.maxWindowUpperBytes == 0 {
+		ctrl.maxWindowUpperBytes = DefaultWindowSize
+		ctrl.ssthreshBytes = DefaultWindowSize
+	}
+	if ctrl.maxWindowUpperBytes < ctrl.minWindowSizeBytes {
+		// A caller asking for a window smaller than two packets gets two
+		// packets: below that nothing can be sent at all. Their intent to be
+		// small is respected rather than replaced with the default.
+		ctrl.maxWindowUpperBytes = ctrl.minWindowSizeBytes
+		if ctrl.ssthreshBytes < ctrl.minWindowSizeBytes {
+			ctrl.ssthreshBytes = ctrl.minWindowSizeBytes
+		}
+	}
+	if config.Algorithm == AlgorithmLEDBATPP {
+		// draft §4.5: LEDBAT++ targets 60ms of queueing delay where RFC 6817
+		// and libutp use 100ms.
+		ctrl.targetDelayMicros = uint32(ledbatPPTargetDelay.Microseconds())
+		// draft §4.1: "LEDBAT++ sender limits the initial window to 2
+		// packets" -- which is already minWindowSizeBytes here.
+		ctrl.maxWindowSizeBytes = ctrl.minWindowSizeBytes
+		ctrl.ppPhase = ppSlowStart
+	}
+	return ctrl
 }
 
 // Stats returns a snapshot of this controller's state.
@@ -272,7 +322,11 @@ func (c *defaultController) OnAck(seqNum uint16, ack Ack) error {
 
 	baseDelayMicros := uint32(c.delayAcc.BaseDelay().Microseconds())
 	packetDelayMicros := uint32(ack.Delay.Microseconds())
-	c.applyCongestionControl(baseDelayMicros, packetDelayMicros, packetInst.SizeBytes, ack.RTT, ack.ReceivedAt)
+	if c.algorithm == AlgorithmLEDBATPP {
+		c.applyLedbatPP(baseDelayMicros, packetDelayMicros, packetInst.SizeBytes, ack.RTT, ack.ReceivedAt)
+	} else {
+		c.applyCongestionControl(baseDelayMicros, packetDelayMicros, packetInst.SizeBytes, ack.RTT, ack.ReceivedAt)
+	}
 
 	c.windowSizeBytes -= packetInst.SizeBytes
 
@@ -332,9 +386,15 @@ func (c *defaultController) OnLostPacket(seqNum uint16, retransmitting bool, now
 		c.maxWindowSizeBytes = uint32(math.Max(float64(c.maxWindowSizeBytes/2), float64(c.minWindowSizeBytes)))
 		c.lastWindowDecay = now
 		// libutp leaves slow start on any decay and sets the threshold to
-		// where the window ended up (utp_internal.cpp:616-617).
+		// where the window ended up (utp_internal.cpp:616-617). LEDBAT++
+		// leaves its own slow start on the same signal: a loss is congestion
+		// however the delay looked.
 		c.slowStart = false
 		c.ssthreshBytes = c.maxWindowSizeBytes
+		if c.algorithm == AlgorithmLEDBATPP &&
+			(c.ppPhase == ppSlowStart || c.ppPhase == ppSlowdownRamp) {
+			c.exitLedbatPPSlowStart(now)
+		}
 	}
 
 	if !retransmitting {
@@ -368,6 +428,12 @@ func (c *defaultController) OnTimeout(hasPacketsInFlight bool) {
 		// start over again" (:1223-1228). libutp re-enters slow start here.
 		c.maxWindowSizeBytes = packetSize
 		c.slowStart = true
+		if c.algorithm == AlgorithmLEDBATPP {
+			// Back to the start of the cycle: ramp up again, and let the
+			// slowdown schedule be set when that ramp ends.
+			c.ppPhase = ppSlowStart
+			c.ppNextSlowdownAt = time.Time{}
+		}
 	}
 	if c.maxWindowSizeBytes < c.minWindowSizeBytes {
 		c.maxWindowSizeBytes = c.minWindowSizeBytes

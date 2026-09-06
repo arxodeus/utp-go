@@ -135,6 +135,11 @@ func (s *sentPackets) OnWindowFull(now time.Time) {
 	s.congestionCtrl.OnWindowFull(now)
 }
 
+// OnTick lets a time-driven controller advance without an ack.
+func (s *sentPackets) OnTick(now time.Time) {
+	s.congestionCtrl.OnTick(now)
+}
+
 func (s *sentPackets) HasUnackedPackets() bool {
 	_, err := s.FirstUnackedSeqNum()
 	return err == nil

@@ -99,6 +99,13 @@ type ConnectionConfig struct {
 	// MetricsInterval is the minimum gap between snapshots. Defaults to
 	// DefaultMetricsInterval.
 	MetricsInterval time.Duration
+	// CongestionAlgorithm selects the congestion controller.
+	//
+	// The zero value is AlgorithmLEDBAT: classic LEDBAT, matching libutp.
+	// AlgorithmLEDBATPP selects LEDBAT++, which is a deliberate divergence
+	// from the reference implementation -- see DEVIATIONS.md and
+	// BENCHMARKS.md for what it changes and what it measures.
+	CongestionAlgorithm CongestionAlgorithm
 }
 
 func NewConnectionConfig() *ConnectionConfig {
@@ -115,6 +122,9 @@ func NewConnectionConfig() *ConnectionConfig {
 		TargetDelay:     defaultTargetMicros,
 		WindowSize:      DefaultWindowSize,
 		BufferSize:      DefaultBufferSize,
+		// Classic LEDBAT by default, because matching libutp is the default
+		// everywhere else in this library.
+		CongestionAlgorithm: AlgorithmLEDBAT,
 	}
 }
 
@@ -126,6 +136,7 @@ func fromConnConfig(config *ConnectionConfig) *ctrlConfig {
 	ctrlConfigPtr.MaxTimeout = config.MaxTimeout
 	ctrlConfigPtr.TargetDelayMicros = uint32(config.TargetDelay.Microseconds())
 	ctrlConfigPtr.WindowSize = config.WindowSize
+	ctrlConfigPtr.Algorithm = config.CongestionAlgorithm
 	return ctrlConfigPtr
 }
 
@@ -538,6 +549,12 @@ func (c *connection) shutdown() {
 }
 
 func (c *connection) processWrites(now time.Time) {
+	if c.state.SentPackets != nil {
+		// LEDBAT++'s slowdowns are driven by the clock, not by acks. Without
+		// this, a connection whose application goes quiet mid-slowdown would
+		// stay pinned at two packets until an ack happened to arrive.
+		c.state.SentPackets.OnTick(now)
+	}
 	switch c.state.stateType {
 	case ConnConnecting:
 		return

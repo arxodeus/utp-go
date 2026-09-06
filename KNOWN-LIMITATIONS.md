@@ -16,7 +16,7 @@ all.
 | **M3** — fix the failing transfer tests | **Done.** Root causes below; gates in "Verification". |
 | **M4** — audit transfer paths against libutp | **Started.** The ack path and the loss-recovery path are audited: selective-ack construction, fast retransmission, window decay, the two inherited "consistent with the reference" claims, and the RESET for an unknown connection. Findings below. The send path and the timers are not yet audited. |
 | **M4b** — exhaustive libutp compatibility sweep | **Not done.** No `COMPATIBILITY.md` exists. |
-| **M5** — verify LEDBAT, add LEDBAT++ | **Half done.** Classic LEDBAT is verified against `apply_ccontrol` and corrected: seven defects, +42% to +80% goodput depending on the link, with the standing queue unchanged. See [BENCHMARKS.md](BENCHMARKS.md). LEDBAT++ itself is not implemented. |
+| **M5** — verify LEDBAT, add LEDBAT++ | **Done, with one gap.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft and opt-in, with the latecomer experiment and a standing-queue measurement. The gap: no TCP model in the emulator, so "yields to TCP" is still unmeasured. See [BENCHMARKS.md](BENCHMARKS.md). |
 | **M6** — MTU path discovery | **Not done.** Not investigated. |
 | **M7** — anacrolix/torrent integration | **Partly done.** The interop gate passes in both directions against real libutp; the `anacrolix/torrent` adapter is not written. |
 | **M8** — soak and hardening | **Not done.** |
@@ -720,6 +720,31 @@ aggressive about resetting the congestion window."
 We collapsed to the floor in both cases. An application that paused long
 enough to hit an RTO — routine — restarted from two packets, and with no slow
 start took hundreds of round trips to recover.
+
+## The queueing-delay metric was measuring the controller's opinion
+
+**Fixed, and it changed a conclusion.**
+
+`ConnectionMetrics.QueueingDelay()` is `PeerTsDiff - BaseDelay`, where
+`BaseDelay` is the congestion controller's own estimate of the empty path. So
+the metric asks the controller how much queue it is causing.
+
+A delay-based controller whose base-delay estimate has drifted upwards --
+which is precisely the failure LEDBAT++ exists to fix -- answers "almost
+none", because it is subtracting its own standing queue from itself. Measured
+on a 40 ms path carrying a sustained transfer, classic LEDBAT reported 500µs
+of queueing delay while its round trip sat at 80 ms.
+
+`Summary` now also carries `RTTMin`, `StandingQueueP50` and
+`StandingQueueP95`, computed as the round trip above the lowest round trip
+seen. That is measured rather than believed, and it is what
+[BENCHMARKS.md](BENCHMARKS.md) judges "less than best effort" on.
+
+This matters beyond the metric. The M5 correction's write-up originally said
+the classic-LEDBAT improvements were free because "queueing delay went down".
+They were not free and the queueing delay did not go down; the number that
+said so was the controller marking its own homework. The corrected reading is
+in BENCHMARKS.md.
 
 ## Things found but deliberately not fixed
 
