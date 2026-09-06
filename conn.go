@@ -1397,7 +1397,7 @@ func (c *connection) retransmitLostPackets(now time.Time) {
 	recvWindow := uint32(c.state.RecvBuf.Available())
 	tsDiffMicros := uint32(c.peerTsDiff.Microseconds())
 
-	for _, lostPacket := range c.state.SentPackets.LostPackets() {
+	for _, lostPacket := range c.state.SentPackets.TakeLostPackets() {
 		seqNum := lostPacket.SeqNum
 		packetType := lostPacket.PacketType
 		payload := lostPacket.Data

@@ -14,7 +14,7 @@ all.
 | **M1** — emulated network harness | **Done.** See [HARNESS.md](HARNESS.md) and `netem/`. |
 | **M2** — conformance harness against real libutp | **Partly done.** Twenty-one-case corpus comparing emitted packets field by field, including malformed and hostile headers; see [CONFORMANCE.md](CONFORMANCE.md). Responder role only, no timing comparison. |
 | **M3** — fix the failing transfer tests | **Done.** Root causes below; gates in "Verification". |
-| **M4** — audit transfer paths against libutp | **Started.** The ack path is audited: selective-ack construction, the two inherited "consistent with the reference" claims, and the RESET for an unknown connection. Findings below. The send path, congestion window and timers are not yet audited. |
+| **M4** — audit transfer paths against libutp | **Started.** The ack path and the loss-recovery path are audited: selective-ack construction, fast retransmission, window decay, the two inherited "consistent with the reference" claims, and the RESET for an unknown connection. Findings below. The send path and the timers are not yet audited. |
 | **M4b** — exhaustive libutp compatibility sweep | **Not done.** No `COMPATIBILITY.md` exists. |
 | **M5** — verify LEDBAT, add LEDBAT++ | **Not done.** But see "The congestion controller had no delay signal" — this milestone's premise has changed. |
 | **M6** — MTU path discovery | **Not done.** Not investigated. |
@@ -567,6 +567,79 @@ one that should be made deliberately rather than as a drive-by.
 
 `TestConformanceDataAfterReachedFin` pins the current behaviour and fails if
 either side changes, so this cannot drift unnoticed.
+
+## The loss-recovery path, audited against libutp (M4)
+
+Four defects, all fixed, all on the same path: what happens after a selective
+ack reveals a hole. Together they cost 48% of the goodput on a 2%-loss link.
+
+### A packet declared lost was fast retransmitted on every subsequent ack
+
+**Fixed.** libutp keeps `fast_resend_seq_nr` (`utp_internal.cpp:470`),
+advances it past each packet as it resends it (`:1603`) and past the
+cumulative ack (`:2186-2188`), and refuses to fast retransmit anything below
+it (`:1537`, `:1560`). This fork had no equivalent: a packet went into
+`lostPackets` and stayed there until its own ack came back, so every ack that
+arrived in the meantime resent it again — and, because `DetectLostPackets`
+kept returning it, halved the congestion window again each time.
+
+Measured on the 2%-loss emulated link before the fix:
+
+> fast resends: 52 total, 7 distinct sequence numbers, worst single packet
+> resent 16 times
+
+After: 8 total, 8 distinct, worst 1.
+
+### One ack could fast retransmit an unbounded number of packets
+
+**Fixed.** libutp resends at most four per ack — "Re-send max 4 packets"
+(`utp_internal.cpp:1605-1606`). We resent every packet in the lost set, so a
+single ack revealing a burst of losses answered with a burst of
+retransmissions, onto a path that had just demonstrated it could not carry
+one.
+
+### The congestion window was halved once per lost packet
+
+**Fixed.** libutp halves at most once per `MAX_WINDOW_DECAY` = 100 ms
+(`utp_internal.cpp:51`, `:602-605`), and once per ack that resent anything
+rather than once per packet resent (`:1609-1610`). We halved on every
+`OnLostPacket` call, so four losses in one event — one queue overflow — took
+the window to a sixteenth, and with the window pinned at its floor the
+connection then crawled.
+
+The metric that shows it: the fraction of the transfer spent with the window
+at its minimum fell from 11.2% to 1.6%.
+
+### A selective ack that acked nothing new was discarded entirely
+
+**Fixed.** `sentPackets.onAck` skipped all processing when the packet's
+`ack_nr` equalled the connection's initial sequence number — the guard exists
+because that number names no packet we sent, so acking it would index out of
+range. But the *selective* ack in the same packet names packets that did
+arrive, and those are exactly what declares the first packet lost.
+
+So when the very first data packet of a connection was lost, every selective
+ack the peer sent about it was thrown away: nothing was ever declared lost,
+no fast retransmit happened, and recovery waited for the retransmission
+timeout. libutp processes the extension whatever `ack_nr` says
+(`utp_internal.cpp:2289`).
+
+### Together
+
+On the 2%-loss emulated link (seed 23, deterministic, 256 KB):
+
+| | Goodput | Elapsed | Retransmit rate | Window at floor |
+| --- | --- | --- | --- | --- |
+| Before | 1.88 Mbps | 1.118 s | 12.84% | 11.2% |
+| After | 2.78 Mbps | 0.754 s | 2.03% | 1.6% |
+
+The retransmit rate is the clearest of these: the link drops 2% of packets,
+and the sender now retransmits 2.03% of what it sends. Before, it retransmitted
+six times more than the link lost.
+
+The loss-free link is unchanged (6.38 Mbps against 6.33 before, within
+run-to-run noise), as it must be — none of this code runs when nothing is
+lost. Both libutp interoperability directions still pass.
 
 ## Things found but deliberately not fixed
 

@@ -76,7 +76,7 @@ func defaultCtrlConfig() *ctrlConfig {
 type Controller interface {
 	OnTransmit(seqNum uint16, transmit Transmit, dataLen uint32) error
 	OnAck(seqNum uint16, ack Ack) error
-	OnLostPacket(seqNum uint16, retransmitting bool) error
+	OnLostPacket(seqNum uint16, retransmitting bool, now time.Time) error
 	OnTimeout()
 	Timeout() time.Duration
 	BytesAvailableInWindow() uint32
@@ -126,7 +126,10 @@ type defaultController struct {
 	rttVarianceMicros     int64
 	transmissions         map[uint16]*packetRecord
 	delayAcc              *delayAccumulator
-	mu                    sync.Mutex
+	// lastWindowDecay is when the congestion window was last halved for
+	// loss. libutp's `last_rwin_decay` (utp_internal.cpp:461).
+	lastWindowDecay time.Time
+	mu              sync.Mutex
 }
 
 func newDefaultController(config *ctrlConfig) *defaultController {
@@ -276,13 +279,33 @@ func (c *defaultController) OnAck(seqNum uint16, ack Ack) error {
 	return nil
 }
 
-func (c *defaultController) OnLostPacket(seqNum uint16, retransmitting bool) error {
+// maxWindowDecayInterval is the shortest gap between two halvings of the
+// congestion window.
+//
+// libutp: `MAX_WINDOW_DECAY 100 // ms` (utp_internal.cpp:51), enforced by
+// `can_decay_win` (:602-605) and applied once per ack that resent anything,
+// not once per packet resent (:1609-1610).
+const maxWindowDecayInterval = 100 * time.Millisecond
+
+func (c *defaultController) OnLostPacket(seqNum uint16, retransmitting bool, now time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	packetInst, exists := c.transmissions[seqNum]
 	if !exists {
 		return ErrUnknownSeqNum
 	}
 
-	c.maxWindowSizeBytes = uint32(math.Max(float64(c.maxWindowSizeBytes/2), float64(c.minWindowSizeBytes)))
+	// Halve the window at most once per maxWindowDecayInterval.
+	//
+	// This was halving once for every packet declared lost. A burst of four
+	// losses -- one queue overflow -- took the window to a sixteenth in a
+	// single event, and with the window already at its floor the connection
+	// then crawled. libutp decays once per ack that resent anything, and not
+	// again for 100 ms however many acks arrive in between.
+	if c.lastWindowDecay.IsZero() || now.Sub(c.lastWindowDecay) >= maxWindowDecayInterval {
+		c.maxWindowSizeBytes = uint32(math.Max(float64(c.maxWindowSizeBytes/2), float64(c.minWindowSizeBytes)))
+		c.lastWindowDecay = now
+	}
 
 	if !retransmitting {
 		c.windowSizeBytes -= packetInst.SizeBytes

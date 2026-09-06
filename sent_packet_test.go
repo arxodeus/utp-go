@@ -322,3 +322,101 @@ func TestSeqNumIndex(t *testing.T) {
 		t.Errorf("expected index 0, got %d", sentPackets.SeqNumIndex(zero))
 	}
 }
+
+// A packet is fast retransmitted once. Every further ack that still shows it
+// missing leaves it alone; only the retransmission timer sends it again.
+//
+// libutp advances fast_resend_seq_nr past each packet as it resends it
+// (utp_internal.cpp:1603) and refuses to fast resend anything below it
+// (:1537). Without that, a packet declared lost was resent on every ack until
+// its own ack came back: measured on a 2%-loss link, 52 fast retransmissions
+// for 7 distinct lost packets, one packet sent 16 extra times.
+func TestFastRetransmitHappensOncePerPacket(t *testing.T) {
+	ctrl := newDefaultController(fromConnConfig(NewConnectionConfig()))
+	initSeqNum := uint16(100)
+	sent := newSentPacketsWithoutLogger(initSeqNum, ctrl)
+
+	data := []byte{0}
+	for i := 0; i < 8; i++ {
+		sent.OnTransmit(sent.NextSeqNum(), st_data, data, uint32(len(data)), time.Now())
+	}
+
+	// 101 is missing; 102 through 105 arrive. That is four acks past the
+	// gap, so 101 is declared lost.
+	acked := make([]bool, 4)
+	for i := range acked {
+		acked[i] = true
+	}
+	sack := NewSelectiveAck(acked)
+
+	if _, _, err := sent.onAck(initSeqNum, sack, 10*time.Millisecond, time.Now()); err != nil {
+		t.Fatalf("first ack: %v", err)
+	}
+	first := sent.TakeLostPackets()
+	if len(first) != 1 || first[0].SeqNum != 101 {
+		t.Fatalf("first ack should have declared 101 lost, got %v", describeLost(first))
+	}
+
+	// The same ack again, and again. 101 is still missing, and must not be
+	// resent.
+	for round := 0; round < 3; round++ {
+		if _, _, err := sent.onAck(initSeqNum, sack, 10*time.Millisecond, time.Now()); err != nil {
+			t.Fatalf("repeat ack %d: %v", round, err)
+		}
+		if again := sent.TakeLostPackets(); len(again) != 0 {
+			t.Fatalf("repeat ack %d fast retransmitted %v again; it was already resent once",
+				round, describeLost(again))
+		}
+	}
+}
+
+// One ack fast retransmits at most four packets, however many it reveals as
+// lost. libutp: "Re-send max 4 packets" (utp_internal.cpp:1605-1606).
+func TestFastRetransmitIsCappedPerAck(t *testing.T) {
+	ctrl := newDefaultController(fromConnConfig(NewConnectionConfig()))
+	ctrl.maxWindowSizeBytes = 1 << 20
+	initSeqNum := uint16(100)
+	sent := newSentPacketsWithoutLogger(initSeqNum, ctrl)
+
+	data := []byte{0}
+	for i := 0; i < 40; i++ {
+		sent.OnTransmit(sent.NextSeqNum(), st_data, data, uint32(len(data)), time.Now())
+	}
+
+	// Ten missing packets with acked packets above all of them: 102, 104,
+	// 106 ... are acked, the odd ones are not.
+	acked := make([]bool, 30)
+	for i := range acked {
+		acked[i] = i%2 == 0
+	}
+	sack := NewSelectiveAck(acked)
+
+	if _, _, err := sent.onAck(initSeqNum, sack, 10*time.Millisecond, time.Now()); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+
+	batch := sent.TakeLostPackets()
+	if len(batch) > maxFastResendsPerAck {
+		t.Fatalf("one ack fast retransmitted %d packets, cap is %d: %v",
+			len(batch), maxFastResendsPerAck, describeLost(batch))
+	}
+	if len(batch) != maxFastResendsPerAck {
+		t.Fatalf("expected the cap of %d packets to be reached with ten losses, got %d",
+			maxFastResendsPerAck, len(batch))
+	}
+
+	// The rest are still pending, and come out on the next round rather than
+	// being forgotten.
+	next := sent.TakeLostPackets()
+	if len(next) == 0 {
+		t.Error("packets held back by the cap were dropped instead of resent on the next round")
+	}
+}
+
+func describeLost(packets []*LostPacket) []uint16 {
+	seqNums := make([]uint16, 0, len(packets))
+	for _, p := range packets {
+		seqNums = append(seqNums, p.SeqNum)
+	}
+	return seqNums
+}

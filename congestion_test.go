@@ -172,7 +172,7 @@ func TestOnLostPacketRetransmitting(t *testing.T) {
 		"expected window size %d, got %d", bytes, ctrl.windowSizeBytes)
 
 	// Register packet loss with retransmission
-	err = ctrl.OnLostPacket(seqNum, true)
+	err = ctrl.OnLostPacket(seqNum, true, time.Now())
 	require.NoError(t, err, "lost packet registration failed")
 
 	require.Equal(t, bytes, ctrl.windowSizeBytes,
@@ -195,7 +195,7 @@ func TestOnLostPacketUnknownSeqNum(t *testing.T) {
 
 	// Try to register loss for unknown sequence number
 	seqNum := uint16(1)
-	err := ctrl.OnLostPacket(seqNum, false)
+	err := ctrl.OnLostPacket(seqNum, false, time.Now())
 	// Check error
 	require.ErrorIs(t, err, ErrUnknownSeqNum, "lost packet registration failed")
 
@@ -297,4 +297,47 @@ func TestBaseDelayEmpty(t *testing.T) {
 	acc := newDelayAccumulator(window)
 	baseDelay := acc.BaseDelay()
 	require.Equal(t, time.Duration(0), baseDelay, "expected base delay 0, got %v", baseDelay)
+}
+
+// The congestion window is halved at most once per maxWindowDecayInterval,
+// however many packets are declared lost in that span.
+//
+// libutp: MAX_WINDOW_DECAY, guarded by can_decay_win
+// (utp_internal.cpp:51, :602-605). Without the guard a burst of four losses
+// -- one queue overflow -- took the window to a sixteenth in a single event.
+func TestWindowDecaysAtMostOncePerInterval(t *testing.T) {
+	ctrl := newDefaultController(defaultCtrlConfig())
+	initial := ctrl.minWindowSizeBytes * 64
+	ctrl.maxWindowSizeBytes = initial
+
+	now := time.Now()
+	for seqNum := uint16(1); seqNum <= 4; seqNum++ {
+		require.NoError(t, ctrl.OnTransmit(seqNum, Initial, 32))
+	}
+
+	// Four losses in the same instant.
+	for seqNum := uint16(1); seqNum <= 4; seqNum++ {
+		require.NoError(t, ctrl.OnLostPacket(seqNum, true, now))
+	}
+	require.Equal(t, initial/2, ctrl.maxWindowSizeBytes,
+		"four losses in one instant halved the window %d times, not once",
+		func() int {
+			n := 0
+			for w := initial; w > ctrl.maxWindowSizeBytes; w /= 2 {
+				n++
+			}
+			return n
+		}())
+
+	// Still inside the interval: no further decay.
+	require.NoError(t, ctrl.OnTransmit(uint16(5), Initial, 32))
+	require.NoError(t, ctrl.OnLostPacket(uint16(5), true, now.Add(maxWindowDecayInterval-time.Millisecond)))
+	require.Equal(t, initial/2, ctrl.maxWindowSizeBytes,
+		"a loss inside the decay interval halved the window again")
+
+	// Past the interval: decay again.
+	require.NoError(t, ctrl.OnTransmit(uint16(6), Initial, 32))
+	require.NoError(t, ctrl.OnLostPacket(uint16(6), true, now.Add(maxWindowDecayInterval)))
+	require.Equal(t, initial/4, ctrl.maxWindowSizeBytes,
+		"a loss past the decay interval did not halve the window")
 }

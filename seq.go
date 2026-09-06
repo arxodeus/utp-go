@@ -51,3 +51,17 @@ func (r *circularRangeInclusive) Next() (uint16, bool) {
 		return current, true
 	}
 }
+
+// wrappingLessThan reports whether a precedes b in the uint16 sequence space,
+// where "precedes" means the forward distance from a to b is less than half
+// the space. It is the analogue of libutp's `wrapping_compare_less`
+// (utp_utils.cpp), which this fork needs wherever two sequence numbers are
+// ordered without knowing which side of a wrap either is on.
+//
+// Equal values are not less than one another, and a pair exactly half the
+// space apart is not ordered either -- there is no correct answer for
+// (0, 32768), so it reports false in both directions rather than pretending.
+func wrappingLessThan(a, b uint16) bool {
+	const half = 1 << 15
+	return a != b && uint16(b-a) < half
+}

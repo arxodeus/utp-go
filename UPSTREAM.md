@@ -207,6 +207,36 @@ packets sent 451 -> 436, fast retransmits 56 either way. No recovery lost.
 Also in this PR: the selective ack is suppressed once the peer's FIN has been
 reached, as libutp does (`utp_internal.cpp:786-788`).
 
+## PR 9d — loss recovery
+
+The largest throughput defect found so far, and four separate causes on one
+path: what happens after a selective ack reveals a hole.
+
+- No `fast_resend_seq_nr`. A packet declared lost was fast retransmitted on
+  every subsequent ack until its own ack arrived, and the window was halved
+  again each time. libutp advances the counter past each resent packet
+  (`utp_internal.cpp:1603`) and refuses to resend below it (`:1537`, `:1560`).
+  Measured: 52 fast retransmissions for 7 distinct lost packets, one packet
+  sent 16 extra times.
+- No cap on retransmissions per ack. libutp resends at most four
+  (`utp_internal.cpp:1605-1606`).
+- The congestion window was halved once per lost packet, with no rate limit.
+  libutp halves at most once per 100 ms (`MAX_WINDOW_DECAY`,
+  `utp_internal.cpp:51`, `:602-605`) and once per ack, not once per packet
+  (`:1609-1610`).
+- A selective ack whose `ack_nr` equalled the connection's initial sequence
+  number was discarded whole. That is exactly the case where the first data
+  packet was lost, so that loss was never detected and recovery waited for the
+  RTO.
+
+On a deterministic 2%-loss emulated link: goodput 1.88 -> 2.78 Mbps, elapsed
+1.118 -> 0.754 s, retransmit rate 12.84% -> 2.03% against a link that drops
+2%, time spent with the window pinned at its floor 11.2% -> 1.6%. The
+loss-free path is unchanged.
+
+This one needs review rather than a rubber stamp: it changes when the window
+decays, and any tuning upstream has done was taken against the old behaviour.
+
 ## PR 10 — the test suite
 
 Independent of the library. On a clean checkout upstream's suite cannot pass:
@@ -253,6 +283,8 @@ interface methods.
 ## Order of operations
 
 PR 1, PR 4, PR 6, PR 8, PR 9, PR 9b, PR 9c and PR 10 are close to unarguable and should go first.
+
+PR 9d is the largest throughput win and the one most worth reviewing carefully.
 
 PR 2 and PR 3 both need a conversation, for the same reason: any tuning or
 measurement upstream has done was taken against a controller with a constant
