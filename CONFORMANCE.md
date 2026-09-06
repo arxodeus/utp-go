@@ -60,6 +60,8 @@ differs rather than silently skipping it:
 | `MalformedZeroLengthSelectiveAck` | a selective ack of length zero |
 | `MalformedSelectiveAckLength` | a selective ack of 1, 3, 5, 7 bytes (a divergence — see below) |
 | `MalformedUnknownConnectionId` | a non-SYN packet for a connection neither side has |
+| `WideReordering` | a gap, then a packet 40 past it — the selective-ack window's width |
+| `DataAfterReachedFin` | data arriving past a FIN already reached in order (a divergence — see below) |
 
 ## What it found
 
@@ -116,6 +118,17 @@ The practical difference is small — both ends stop parsing — but the
 malformed corpus is exactly where "small" needs to be demonstrated rather than
 assumed, and matching the reference costs one comparison.
 
+### The selective-ack bitfield had no width limit
+
+**Fixed** (`recv_buffer.go`). The mask grew until it covered every pending
+packet — up to 252 bytes. libutp scans a fixed 30-entry window and writes
+exactly four bytes (`utp_internal.cpp:797`, `:805-818`). `WideReordering`
+produced `ours=0300000080000000` against `libutp=03000000`.
+
+Measured before and after on the 2%-loss emulated link: goodput 1.82 → 1.84
+Mbps, packets sent 451 → 436, fast retransmits 56 in both. Full numbers in
+[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
+
 ### Our RESET for an unknown connection was missing two fields
 
 **Fixed** (`utp_socket.go`). libutp's `send_rst`
@@ -127,7 +140,7 @@ byte comparison only because both sides do answer such a packet.
 
 ## Deliberate divergences
 
-Two, asserted explicitly in the corpus rather than absorbed into a tolerance:
+Three, asserted explicitly in the corpus rather than absorbed into a tolerance:
 
 **libutp acks twice on reaching a FIN.** Once immediately
 (`utp_internal.cpp:2370`, *"if the other end wants to close, ack"*) and once
@@ -152,6 +165,17 @@ acting on one means guessing which packets the peer meant to ack.
 `TestMalformedSelectiveAckLength` asserts the divergence in both directions:
 that we stay silent, *and* that libutp still answers. If libutp ever tightens
 this, the case fails rather than quietly agreeing.
+
+**We have no half-close; libutp does.** On reaching the peer's FIN we tear the
+connection down, where libutp keeps the socket in `CS_GOT_FIN` until the local
+application closes it too. Data arriving after that point draws a RESET from
+us and nothing from libutp.
+
+This is the one M4 finding recorded rather than fixed: supporting a half-close
+means a new connection state and a write path that survives the peer's FIN.
+`TestConformanceDataAfterReachedFin` pins the current behaviour — it asserts
+that we emit exactly one RESET and that libutp emits nothing, so it fails both
+if libutp changes and if half-close lands here.
 
 ## Limits
 

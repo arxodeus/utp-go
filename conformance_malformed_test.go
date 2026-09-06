@@ -182,6 +182,15 @@ func TestMalformedUnknownConnectionId(t *testing.T) {
 // that they agree. It is for cases where they deliberately do not.
 func runDivergenceCase(t *testing.T, raw []byte) (ours, libutpOut [][]byte) {
 	t.Helper()
+	return runDivergenceSteps(t, [][]byte{raw})
+}
+
+// runDivergenceSteps drives both implementations through a handshake and then
+// the given raw packets, and returns what each emitted in response to the
+// last one, without asserting that they agree. It is for cases where they
+// deliberately do not.
+func runDivergenceSteps(t *testing.T, raws [][]byte) (ours, libutpOut [][]byte) {
+	t.Helper()
 
 	drv, err := libutpNewDriverForCorpus()
 	if err != nil {
@@ -191,9 +200,11 @@ func runDivergenceCase(t *testing.T, raw []byte) (ours, libutpOut [][]byte) {
 	drv.Listen()
 	drv.Inject(synPacketFor(corpusSynConnID, corpusSynSeq).Encode())
 	drv.IssueAcks()
-	drv.ClearEmitted()
-	drv.Inject(raw)
-	drv.IssueAcks()
+	for _, raw := range raws {
+		drv.ClearEmitted()
+		drv.Inject(raw)
+		drv.IssueAcks()
+	}
 	libutpOut = drv.Emitted()
 
 	restore := pinRandom(corpusPinnedSeq)
@@ -203,9 +214,11 @@ func runDivergenceCase(t *testing.T, raw []byte) (ours, libutpOut [][]byte) {
 	defer sock.Close()
 	conn.inject(synPacketFor(corpusSynConnID, corpusSynSeq).Encode())
 	conn.settle()
-	conn.takeEmitted()
-	conn.inject(raw)
-	conn.settle()
+	for _, raw := range raws {
+		conn.takeEmitted()
+		conn.inject(raw)
+		conn.settle()
+	}
 	ours = conn.takeEmitted()
 
 	return ours, libutpOut

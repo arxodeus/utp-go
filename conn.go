@@ -1353,7 +1353,26 @@ func (c *connection) statePacket() *packet {
 		seqNum := c.state.SentPackets.NextSeqNum()
 		ackNum := c.state.RecvBuf.AckNum()
 		recvWindow := uint32(c.state.RecvBuf.Available())
-		selectiveAck := c.state.RecvBuf.SelectiveAck()
+
+		// No selective ack once the peer's FIN has been reached in order.
+		//
+		// libutp: "we never need to send EACK for connections that are
+		// shutting down" (utp_internal.cpp:786-788, the `!got_fin_reached`
+		// term). `eof()` is our equivalent of `got_fin_reached`. Anything
+		// still pending past a reached FIN is data the peer sent after
+		// declaring it had none left; naming it in a selective ack invites a
+		// retransmission of data neither side will deliver.
+		//
+		// This is close to unreachable as the connection stands: `eof()` only
+		// becomes true when the receive buffer has caught up to the FIN, and
+		// the same event loop then tears the connection down (the RemoteFin
+		// branch below). It is kept because it matches the reference and
+		// because it becomes load-bearing the moment a half-close exists --
+		// see TestConformanceDataAfterReachedFin.
+		var selectiveAck *SelectiveAck
+		if !c.eof() {
+			selectiveAck = c.state.RecvBuf.SelectiveAck()
+		}
 
 		return NewPacketBuilder(st_state, c.cid.Send, uint32(now), recvWindow, seqNum).
 			WithTsDiffMicros(tsDiffMicros).

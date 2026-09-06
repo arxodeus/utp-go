@@ -99,22 +99,48 @@ with the interoperability risk shown to be empty. It is asserted explicitly by
 `TestMalformedSelectiveAckLength` in the M2 corpus, which fails if either side
 changes: if we start accepting these, or if libutp starts rejecting them.
 
+## No half-close
+
+**We tear the connection down when the peer's FIN is reached. libutp keeps it
+alive.**
+
+libutp moves the socket to `CS_GOT_FIN` and waits for the local application to
+close as well. `connection.eventLoop` moves to `ConnClosed` as soon as the
+remote FIN is reached and everything we sent is acked, so a peer that closes
+its sending side while still expecting to receive from us loses the connection.
+
+Reason: none that justifies it. This is a gap, not a choice — recorded here
+because it is a live behavioural difference, and in
+[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) as work still to do. It is pinned
+by `TestConformanceDataAfterReachedFin` so it cannot drift.
+
+## The selective-ack window
+
+Matched to libutp as of the M4 ack-path audit: a fixed 30-entry window from
+`ack_nr + 2`, encoded as exactly four bytes
+(`utp_internal.cpp:797`, `:805-818`). The one detail not reproduced is
+libutp's `min(14+16, inbuf.size())` — the second term is the capacity of its
+circular reorder buffer, which has no equivalent here, so our window is 30
+entries always. That makes ours at least as wide as libutp's and never wider.
+
 ## Inherited notes that claim consistency with the reference
 
 Two comments in `conn.go` describe behaviour as matching the reference
-implementation. They are recorded here because they are load-bearing claims
-that **have not been re-verified** against `utp_internal.cpp` in this fork:
+implementation. **Both have now been verified** against `utp_internal.cpp` at
+the pinned commit, and the citations sit next to them in the source:
 
 - The initiator initialises its ACK number to the sequence number of the
-  SYN-ACK minus one, described in the source as "a deviation from the
-  specification ... consistent with the reference implementation and the
-  libtorrent implementation" (`connection.onState`).
-- STATE packets always carry the next sequence number, described as
-  "[c]onsistent with the reference implementation and the libtorrent
-  implementation" (`connection.statePacket`).
+  SYN-ACK minus one (`connection.onState`). libutp does exactly this:
+  `conn->ack_nr = (pk_seq_nr - 1) & SEQ_NR_MASK` on receiving a SYN-ACK in
+  `CS_SYN_SENT` (`utp_internal.cpp:1871-1874`).
+- STATE packets always carry the next sequence number
+  (`connection.statePacket`). libutp's `send_ack` writes `pfa.pf.seq_nr =
+  seq_nr` (`utp_internal.cpp:781`), and `seq_nr` is the number the next data
+  packet will take — assigned and then incremented in `send_packet`
+  (`:1088-1089`) — so a STATE packet never consumes a sequence number.
 
-Both are inherited from the upstream port of `ethereum/utp`. Verifying them is
-M4b work.
+Neither is a deviation. They are left in this file as a record that the claims
+were checked rather than inherited.
 
 ## Not a deviation: LEDBAT++
 

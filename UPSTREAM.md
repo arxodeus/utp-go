@@ -189,6 +189,24 @@ direction. None of them can be triggered by a well-behaved peer, which is why
 nothing caught them; all three were found by comparing against libutp on
 malformed input.
 
+## PR 9c — the selective-ack window
+
+The bitfield had no width limit: it grew until every pending packet was
+covered, `MAX_SELECTIVE_ACK_COUNT = 32 * 63`, so up to a 252-byte extension.
+libutp scans a fixed 30-entry window and writes exactly four bytes
+(`utp_internal.cpp:797`, `:805-818`).
+
+A peer that leaves a gap open and then delivers a packet far past it made this
+fork answer every subsequent packet with a 254-byte extension where libutp
+answers with six bytes -- on the ack path, exactly when the path is already in
+trouble.
+
+Measured on a deterministic 2%-loss emulated link: goodput 1.82 -> 1.84 Mbps,
+packets sent 451 -> 436, fast retransmits 56 either way. No recovery lost.
+
+Also in this PR: the selective ack is suppressed once the peer's FIN has been
+reached, as libutp does (`utp_internal.cpp:786-788`).
+
 ## PR 10 — the test suite
 
 Independent of the library. On a clean checkout upstream's suite cannot pass:
@@ -234,7 +252,7 @@ interface methods.
 
 ## Order of operations
 
-PR 1, PR 4, PR 6, PR 8, PR 9, PR 9b and PR 10 are close to unarguable and should go first.
+PR 1, PR 4, PR 6, PR 8, PR 9, PR 9b, PR 9c and PR 10 are close to unarguable and should go first.
 
 PR 2 and PR 3 both need a conversation, for the same reason: any tuning or
 measurement upstream has done was taken against a controller with a constant

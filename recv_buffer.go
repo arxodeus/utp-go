@@ -7,7 +7,17 @@ import (
 )
 
 const (
-	MAX_SELECTIVE_ACK_COUNT int = 32 * 63
+	// SELECTIVE_ACK_WINDOW is how many sequence numbers past `ack_nr + 1` a
+	// selective ack reports on, and so how wide the bitfield is.
+	//
+	// libutp scans `min(14+16, inbuf.size())` entries and always writes
+	// exactly one 4-byte word (utp_internal.cpp:797, :805-818). 30 is the
+	// constant it uses; the `inbuf.size()` term is the capacity of its
+	// circular reorder buffer, an implementation detail we have no equivalent
+	// of -- our pending set is a btree with no fixed capacity -- so we always
+	// use 30. That makes our window at least as wide as libutp's, never
+	// wider, and the extension is the same four bytes either way.
+	SELECTIVE_ACK_WINDOW int = 14 + 16
 )
 
 type receiveBuffer struct {
@@ -157,29 +167,36 @@ func (rb *receiveBuffer) SelectiveAck() *SelectiveAck {
 		return nil
 	}
 
-	lastAck := rb.AckNum() + 2
-	acked := make([]bool, 0)
+	// The bitfield starts at `ack_nr + 2`: `ack_nr + 1` is by definition the
+	// packet we are waiting for, so reporting on it would say nothing
+	// (utp_internal.cpp:802-807).
+	base := rb.AckNum() + 2
 
 	pendingSeqs := make(map[uint16]bool, rb.pending.Len())
-	// todo
 	rb.pending.Ascend(func(i btree.Item) bool {
 		item := i.(*pendingItem)
 		pendingSeqs[item.seqNum] = true
 		return true
 	})
 
-	for len(pendingSeqs) != 0 && len(acked) < MAX_SELECTIVE_ACK_COUNT {
-		if _, ok := pendingSeqs[lastAck]; ok {
-			acked = append(acked, true)
-			delete(pendingSeqs, lastAck)
-		} else {
-			acked = append(acked, false)
-		}
-		lastAck++
+	// A fixed window, as libutp uses, rather than one sized to reach the
+	// highest pending sequence number.
+	//
+	// This previously grew until every pending packet was covered, up to 2016
+	// bits. A peer that leaves a gap open and then delivers a packet far past
+	// it -- reordering, or deliberately -- made us answer every subsequent
+	// packet with a 254-byte extension where libutp answers with six bytes.
+	// The extra bits carry real information, but libutp does not send them
+	// and recovers by letting the window slide forward as the gap fills, so
+	// sending them buys nothing against a libutp peer and costs bandwidth on
+	// the ack path exactly when the path is already in trouble.
+	acked := make([]bool, SELECTIVE_ACK_WINDOW)
+	for i := 0; i < SELECTIVE_ACK_WINDOW; i++ {
+		acked[i] = pendingSeqs[base+uint16(i)]
 	}
 
 	if rb.logger != nil && rb.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-		rb.logger.Trace("will new selective ack", "endSeq", lastAck, "acked.len", len(acked))
+		rb.logger.Trace("will new selective ack", "base", base, "acked.len", len(acked))
 	}
 
 	return NewSelectiveAck(acked)

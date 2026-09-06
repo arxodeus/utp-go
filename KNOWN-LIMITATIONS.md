@@ -12,9 +12,9 @@ all.
 | --- | --- |
 | **M0** — pin the reference, prove the two libutp copies agree | **Done.** See [REFERENCE.md](REFERENCE.md) and `scripts/check-libutp-reference.sh`. |
 | **M1** — emulated network harness | **Done.** See [HARNESS.md](HARNESS.md) and `netem/`. |
-| **M2** — conformance harness against real libutp | **Partly done.** Nine-case corpus comparing emitted packets field by field; see [CONFORMANCE.md](CONFORMANCE.md). Responder role only, no timing comparison. |
+| **M2** — conformance harness against real libutp | **Partly done.** Twenty-one-case corpus comparing emitted packets field by field, including malformed and hostile headers; see [CONFORMANCE.md](CONFORMANCE.md). Responder role only, no timing comparison. |
 | **M3** — fix the failing transfer tests | **Done.** Root causes below; gates in "Verification". |
-| **M4** — audit transfer paths against libutp | **Not done** (needs M2). |
+| **M4** — audit transfer paths against libutp | **Started.** The ack path is audited: selective-ack construction, the two inherited "consistent with the reference" claims, and the RESET for an unknown connection. Findings below. The send path, congestion window and timers are not yet audited. |
 | **M4b** — exhaustive libutp compatibility sweep | **Not done.** No `COMPATIBILITY.md` exists. |
 | **M5** — verify LEDBAT, add LEDBAT++ | **Not done.** But see "The congestion controller had no delay signal" — this milestone's premise has changed. |
 | **M6** — MTU path discovery | **Not done.** Not investigated. |
@@ -496,6 +496,77 @@ where the default does not fit.
 **Not measured at all:** goodput under loss, queueing delay, fairness against
 TCP or against a second uTP flow, recovery from loss, behaviour at any RTT
 above loopback. Those are the M1/M5 gates and they have not been built.
+
+## The ack path, audited against libutp (M4)
+
+Four findings, three fixed. Each was found by reading `send_ack`
+(`utp_internal.cpp:770-830`) against `receiveBuffer.SelectiveAck` and
+`connection.statePacket` line by line, then pinning the difference with a
+corpus case.
+
+### The selective-ack bitfield had no width limit
+
+**Fixed.** `MAX_SELECTIVE_ACK_COUNT` was `32 * 63`, and the loop that built
+the bitfield ran until every pending packet was covered — up to 2016 bits, a
+252-byte extension.
+
+libutp scans a fixed 30-entry window and always writes exactly one 4-byte word
+(`utp_internal.cpp:797`, `:805-818`). A peer that leaves a gap open and then
+delivers a packet far past it made us answer *every* subsequent packet with a
+254-byte extension where libutp answers with six bytes.
+
+`TestConformanceWideReordering` is the case: with a gap at `seq+1` and packets
+at `seq+2`, `seq+3` and `seq+41`, we emitted `0300000080000000` against
+libutp's `03000000`.
+
+Measured on the 2%-loss emulated link (seed 23, deterministic), before and
+after:
+
+| | Goodput | Packets sent | Fast retransmits |
+| --- | --- | --- | --- |
+| Unbounded window | 1.82 Mbps | 451 | 56 |
+| 30-entry window | 1.84 Mbps | 436 | 56 |
+
+Identical recovery, fifteen fewer packets. The extra bits carried real
+information; libutp does without them and lets the window slide forward as the
+gap fills.
+
+### Selective acks were still sent after the peer's FIN was reached
+
+**Fixed**, though barely reachable — see the comment in
+`connection.statePacket`. libutp suppresses the extension once
+`got_fin_reached` is set: "we never need to send EACK for connections that are
+shutting down" (`utp_internal.cpp:786-788`).
+
+### The two inherited "consistent with the reference" claims
+
+**Both verified**, and the citations now sit next to them. They had been
+carried from the upstream port of `ethereum/utp` without anyone checking them
+against `utp_internal.cpp` in this fork.
+
+- The initiator initialises its ACK number to the SYN-ACK's sequence number
+  minus one. libutp: `conn->ack_nr = (pk_seq_nr - 1) & SEQ_NR_MASK` on
+  receiving a SYN-ACK in `CS_SYN_SENT` (`utp_internal.cpp:1871-1874`).
+- STATE packets carry the next sequence number. libutp: `pfa.pf.seq_nr =
+  seq_nr` in `send_ack` (`:781`), where `seq_nr` is the number the next data
+  packet will take — it is assigned and then incremented in `send_packet`
+  (`:1088-1089`), so a STATE never consumes one.
+
+### No half-close: we tear the connection down on the peer's FIN
+
+**Found, not fixed.** libutp keeps the socket in `CS_GOT_FIN` when the peer
+closes its sending side; the connection stays alive until the local
+application closes it too. We move straight to `ConnClosed` once the remote
+FIN is reached and everything we sent is acked. Data arriving after that
+point reaches a socket with no connection for it and draws a RESET, where
+libutp stays silent.
+
+Supporting a half-close means a new connection state and a write path that
+survives the peer's FIN — a larger change than the audit that found it, and
+one that should be made deliberately rather than as a drive-by.
+
+`TestConformanceDataAfterReachedFin` pins the current behaviour and fails if
+either side changes, so this cannot drift unnoticed.
 
 ## Things found but deliberately not fixed
 

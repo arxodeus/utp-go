@@ -4,6 +4,7 @@ package utp_go
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -393,4 +394,69 @@ func goResponderForCorpus(t *testing.T) (*scriptedConn, *UtpSocket, context.Canc
 	}()
 	time.Sleep(100 * time.Millisecond)
 	return conn, sock, cancel
+}
+
+// A reorder gap wider than the 30-packet window libutp scans when it builds a
+// selective ack. This is the case that distinguishes a bounded mask from an
+// unbounded one: with a packet pending far past the gap, an implementation
+// that sizes the mask to reach it emits a much larger extension than libutp,
+// which always emits exactly four bytes (utp_internal.cpp:797, :805).
+func TestConformanceWideReordering(t *testing.T) {
+	steps := []step{{name: "handshake", inject: synPacketFor(corpusSynConnID, corpusSynSeq)}}
+	// Leave seq+1 missing, then deliver a packet 40 past it.
+	for _, offset := range []uint16{2, 3, 41} {
+		steps = append(steps, step{
+			name: "data at seq+" + strconv.Itoa(int(offset)) + ", gap still open",
+			inject: NewPacketBuilder(st_data, corpusSynConnID+1, 200000+uint32(offset), corpusWindow, corpusSynSeq+offset).
+				WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("x")).Build(),
+		})
+	}
+	runResponderCorpus(t, steps)
+}
+
+// Data arriving after the peer's FIN has already been reached in order.
+//
+// A deliberate divergence, and the one M4 finding too large to fix in place.
+//
+// libutp keeps the socket in CS_GOT_FIN and answers nothing: the peer has
+// closed its sending side, but the connection is alive until the local
+// application closes it too. We have no half-close -- once the remote FIN is
+// reached and everything we sent is acked, `connection.eventLoop` moves
+// straight to ConnClosed (conn.go, the RemoteFin branch). The late packet
+// then reaches a socket with no connection for it, and draws a RESET.
+//
+// Recorded rather than fixed: supporting a half-close means a new connection
+// state and a write path that survives the peer's FIN, which is a larger
+// change than the audit that found it. See KNOWN-LIMITATIONS.md.
+func TestConformanceDataAfterReachedFin(t *testing.T) {
+	raws := [][]byte{
+		NewPacketBuilder(st_data, corpusSynConnID+1, 200000, corpusWindow, corpusSynSeq+1).
+			WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("bye")).Build().Encode(),
+		NewPacketBuilder(st_fin, corpusSynConnID+1, 210000, corpusWindow, corpusSynSeq+2).
+			WithAckNum(corpusPinnedSeq - 1).Build().Encode(),
+		NewPacketBuilder(st_data, corpusSynConnID+1, 220000, corpusWindow, corpusSynSeq+4).
+			WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("late")).Build().Encode(),
+	}
+	ours, libutpOut := runDivergenceSteps(t, raws)
+
+	if len(libutpOut) != 0 {
+		t.Errorf("libutp emitted %d packet(s) for data past a reached FIN; it is expected to "+
+			"stay silent in CS_GOT_FIN, so this case no longer documents the divergence it "+
+			"was written for", len(libutpOut))
+	}
+	if len(ours) != 1 {
+		t.Fatalf("we emitted %d packets, want exactly 1 (the RESET our lack of half-close "+
+			"produces); if this is now 0, half-close has landed and this case should become "+
+			"an ordinary corpus entry", len(ours))
+	}
+	pkt, err := DecodePacket(ours[0])
+	if err != nil {
+		t.Fatalf("decoding our own emission: %v", err)
+	}
+	if pkt.Header.PacketType != st_reset {
+		t.Errorf("we emitted packet type %d for data past a reached FIN; the documented divergence is a RESET",
+			pkt.Header.PacketType)
+	}
+	t.Logf("deliberate divergence: data past a reached FIN -- libutp stays silent (CS_GOT_FIN), " +
+		"we have already torn the connection down and the socket answers with a RESET")
 }

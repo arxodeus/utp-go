@@ -277,3 +277,63 @@ func TestSelectiveACKOverflow(t *testing.T) {
 	require.True(t, reflect.DeepEqual(notNilSelectiveAck.Acked(), expected),
 		"Expected acked %v, got %v", expected, notNilSelectiveAck.Acked())
 }
+
+// The selective-ack bitfield is a fixed 30-entry window starting at
+// `ack_nr + 2`, and encodes to exactly four bytes, whatever is pending.
+// libutp: utp_internal.cpp:797 (`ext_len = 4`), :805 (`min(14+16, ...)`).
+func TestSelectiveAckWindowIsBounded(t *testing.T) {
+	buf := newReceiveBuffer(2*1024*1024, 100)
+
+	// A gap at 101, one packet just past it, and one far past the window.
+	for _, seq := range []uint16{102, 100 + 2 + uint16(SELECTIVE_ACK_WINDOW) + 5} {
+		if err := buf.Write([]byte("x"), seq); err != nil {
+			t.Fatalf("write seq %d: %v", seq, err)
+		}
+	}
+
+	ack := buf.SelectiveAck()
+	if ack == nil {
+		t.Fatal("no selective ack with packets pending past a gap")
+	}
+	if got := ack.EncodedLen(); got != 4 {
+		t.Errorf("selective ack encoded to %d bytes, want 4: libutp always writes one 4-byte word", got)
+	}
+
+	acked := ack.Acked()
+	if len(acked) != 32 {
+		t.Fatalf("bitfield holds %d entries, want 32", len(acked))
+	}
+	// Entry i reports on ack_nr + 2 + i, so 102 is entry 0.
+	if !acked[0] {
+		t.Error("102 is pending but entry 0 is clear; the bitfield does not start at ack_nr+2")
+	}
+	for i := 1; i < len(acked); i++ {
+		if acked[i] {
+			t.Errorf("entry %d is set, but only 102 is pending inside the window", i)
+		}
+	}
+}
+
+// A packet pending beyond the window produces an all-zero bitfield rather
+// than a wider one. libutp does the same: it scans a fixed window and emits
+// four bytes regardless of what lies past it.
+func TestSelectiveAckIgnoresPacketsPastTheWindow(t *testing.T) {
+	buf := newReceiveBuffer(2*1024*1024, 100)
+	far := 100 + 2 + uint16(SELECTIVE_ACK_WINDOW) + 1
+	if err := buf.Write([]byte("x"), far); err != nil {
+		t.Fatalf("write seq %d: %v", far, err)
+	}
+
+	ack := buf.SelectiveAck()
+	if ack == nil {
+		t.Fatal("a pending packet past the window should still produce a selective ack")
+	}
+	if got := ack.EncodedLen(); got != 4 {
+		t.Errorf("selective ack encoded to %d bytes, want 4", got)
+	}
+	for i, set := range ack.Acked() {
+		if set {
+			t.Errorf("entry %d is set for a packet outside the %d-entry window", i, SELECTIVE_ACK_WINDOW)
+		}
+	}
+}
