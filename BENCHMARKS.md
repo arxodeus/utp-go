@@ -37,6 +37,7 @@ To regenerate:
 go test ./netem -run TestBenchmarkSuite -v
 UTP_BENCHMARK_OUT_DIR=/tmp/bench go test ./netem -run TestBenchmarkSuite
 go test ./netem -run 'TestLatecomerShare|TestBaseDelayTracking' -v
+go test ./netem -run TestDeferenceToLossBasedFlow -v
 ```
 
 ## Classic LEDBAT (the default)
@@ -106,42 +107,84 @@ about twice *faster* than Reno. A background protocol that outpaces TCP is not
 doing its job. The throughput this costs on an otherwise-empty link is the
 price of not taking it from someone else on a busy one.
 
+### Deference to a loss-based flow
+
+`TestDeferenceToLossBasedFlow`. This is the experiment uTP is actually judged
+on, and until now this harness could not run it.
+
+The competitor is `netem.RunRenoFlow`: TCP Reno's congestion control exactly --
+slow start, one segment per round trip in congestion avoidance, fast
+retransmit on three duplicate acknowledgements, fast recovery, RFC 6298
+timers with Karn's algorithm -- and none of TCP's protocol. It is not TCP and
+`netem/reno.go` says so at length; what matters here is the property that
+makes TCP the thing uTP must defer to, which is that it fills the bottleneck
+queue and only backs off on loss.
+
+Both flows share one bottleneck (`Network.ConnectShared`, added for this),
+20 ms each way, 10 Mbps, a 256 KB queue. The competitor starts first and is
+given 1.5 s to fill the queue, so the uTP flow arrives at a link that is
+already busy. Baseline: the competitor alone gets **5.67 Mbps**.
+
+| | uTP | Competitor | Competitor kept | uTP's share | Bottleneck queue p50 |
+| --- | --- | --- | --- | --- | --- |
+| LEDBAT | 5.79 Mbps | 3.94 Mbps | 69% | **60%** | **24.6 ms** |
+| LEDBAT++ | 3.37 Mbps | 4.34 Mbps | 77% | **44%** | **2.5 ms** |
+
+Classic LEDBAT does not yield. It takes 60% of a shared link from a
+loss-based flow -- more than an equal share, against the traffic it is
+supposed to defer to -- and costs that flow nearly a third of its throughput,
+while leaving 25 ms of queue for anything else on the path.
+
+LEDBAT++ takes 44%, leaves the competitor 77% of what it had alone, and
+leaves a tenth of the queue.
+
+This is the measurement that was missing, and it reverses the reading of the
+throughput tables. Classic LEDBAT is faster in those tables *because it is not
+doing the one thing the protocol exists to do*.
+
 ### The latecomer experiment
 
-`TestLatecomerShare`. One flow runs until it has filled the bottleneck queue;
-a second joins 1.5 s later, so every delay sample it will ever take begins
-against a full queue. Its idea of the empty path is wrong from its first
-packet -- this is the failure RFC 6817 acknowledges and LEDBAT++ §4.4 answers.
+`TestLatecomerShare`. One uTP flow runs until it has filled the bottleneck
+queue; a second joins 1.5 s later, so every delay sample it will ever take
+begins against a full queue. Its idea of the empty path is wrong from its
+first packet -- the failure RFC 6817 acknowledges and LEDBAT++ §4.4 answers.
 
 | | Incumbent | Latecomer | Ratio | Jain |
 | --- | --- | --- | --- | --- |
 | LEDBAT | 7.30 Mbps | 5.69 Mbps | 0.78 | 0.985 |
 | LEDBAT++ | 3.77 Mbps | 3.89 Mbps | 1.03 | 1.000 |
 
-LEDBAT++ splits the link evenly; classic LEDBAT does not. But the honest
-reading of this table is that the fairness difference is small (0.985 against
-1.000) and the aggregate throughput difference is not: 12.99 Mbps against
-7.66. On this link, with only uTP flows competing, classic LEDBAT's unfairness
-costs less than LEDBAT++'s deference does.
-
-What would change that verdict is a TCP flow in the mix, because that is the
-traffic uTP is supposed to yield to, and 33 ms of standing queue is exactly
-what would hurt it. **There is no TCP model in the emulator, so that
-experiment has not been run.** It is the single most valuable thing missing
-from this file.
+LEDBAT++ splits the link evenly and classic LEDBAT does not, but the honest
+reading is that this difference is small (0.985 against 1.000) next to the
+aggregate throughput difference (12.99 Mbps against 7.66). Between two uTP
+flows, classic LEDBAT's unfairness costs less than LEDBAT++'s deference does.
+The deference experiment above is the one that decides the question, because
+competing with itself is not what uTP is for.
 
 ### Why the default is still classic LEDBAT
 
-Matching libutp is the default everywhere else in this library, and LEDBAT++
-is measurably slower on most links here. Changing the default would halve some
-users' throughput to buy a property this harness cannot yet demonstrate the
-value of.
+On the evidence above, LEDBAT++ is the better congestion controller for what
+uTP is for. It defers to loss-based traffic where classic LEDBAT out-competes
+it, and it leaves a tenth of the queue.
 
-For a BitTorrent client -- the case in the brief -- the argument runs the other
-way: yielding to the user's interactive traffic *is* the requirement, and 33 ms
-of self-inflicted queue is the thing uTP was invented to avoid. That is a
-choice for the integrator, made with the numbers above, not one to make
-silently in a default.
+The default is nevertheless unchanged, for one reason: this library's standing
+rule is to match libutp unless there is a concrete reason not to, and a
+default is not the place to spend that. Switching it would change the
+behaviour of every existing caller without their asking, and on an
+uncontended link it would cost some of them half their throughput. It is one
+line for a caller who wants it:
+
+```go
+config := utp.NewConnectionConfig()
+config.CongestionAlgorithm = utp.AlgorithmLEDBATPP
+```
+
+**For a BitTorrent client -- the case in the brief -- that line should be
+there.** Yielding to the user's own interactive traffic is the entire reason
+uTP exists rather than plain TCP, and the numbers above say classic LEDBAT
+does not do it: 60% of a shared link taken from a loss-based flow, and 25 ms
+of self-inflicted queue. A client that ships classic LEDBAT is shipping
+something that behaves like TCP with extra latency.
 
 ## Classic LEDBAT, before the M5 correction
 
@@ -193,7 +236,14 @@ What each change was, and the libutp line it came from, is in
   vendored libutp driven over the same links, which the harness cannot do yet.
   Until that exists, "matches libutp's congestion control" is a claim about
   code read against `utp_internal.cpp`, not a measurement.
-- **Not a test of fairness against TCP**, as above. This is the important gap.
+- **Not a test against real TCP.** The competitor implements Reno's
+  congestion control and nothing else of TCP: no header, no handshake, no
+  SACK, no delayed acknowledgements. Its receiver acks every packet, where a
+  real TCP receiver acks every second one, so it grows marginally faster than
+  real TCP would -- which means a uTP flow measured against it is tested
+  slightly harder than reality, the safe direction for a deference claim.
+  Read the result as "against a loss-based sender that fills the queue", not
+  as "against Linux TCP".
 - **Not long enough to reach steady state on a high-BDP path** for classic
   LEDBAT. Its High BDP row is 2.09 Mbps on a 20 Mbps link because a window
   growing at 3000 bytes per round trip needs about 170 round trips to reach

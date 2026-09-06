@@ -318,6 +318,12 @@ Comes with the standing-queue metric that shows it (see "Not for upstream"
 below on the harness), the latecomer experiment, and two documented readings
 of ambiguous parts of the draft.
 
+The result upstream should see first is the deference one. Over a shared
+bottleneck against a loss-based competitor, classic LEDBAT takes 60% of the
+link and leaves 25ms of queue; LEDBAT++ takes 44% and leaves 2.5ms. libutp's
+LEDBAT is not less-than-best-effort, and every throughput number in this fork
+that favours it favours it for that reason.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

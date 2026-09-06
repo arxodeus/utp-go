@@ -16,7 +16,7 @@ all.
 | **M3** — fix the failing transfer tests | **Done.** Root causes below; gates in "Verification". |
 | **M4** — audit transfer paths against libutp | **Started.** The ack path and the loss-recovery path are audited: selective-ack construction, fast retransmission, window decay, the two inherited "consistent with the reference" claims, and the RESET for an unknown connection. Findings below. The send path and the timers are not yet audited. |
 | **M4b** — exhaustive libutp compatibility sweep | **Not done.** No `COMPATIBILITY.md` exists. |
-| **M5** — verify LEDBAT, add LEDBAT++ | **Done, with one gap.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft and opt-in, with the latecomer experiment and a standing-queue measurement. The gap: no TCP model in the emulator, so "yields to TCP" is still unmeasured. See [BENCHMARKS.md](BENCHMARKS.md). |
+| **M5** — verify LEDBAT, add LEDBAT++ | **Done.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft, opt-in. Deference measured against a loss-based competitor over a shared bottleneck: classic LEDBAT takes 60% of the link from it, LEDBAT++ takes 44%. See [BENCHMARKS.md](BENCHMARKS.md). |
 | **M6** — MTU path discovery | **Not done.** Not investigated. |
 | **M7** — anacrolix/torrent integration | **Partly done.** The interop gate passes in both directions against real libutp; the `anacrolix/torrent` adapter is not written. |
 | **M8** — soak and hardening | **Not done.** |
@@ -745,6 +745,36 @@ the classic-LEDBAT improvements were free because "queueing delay went down".
 They were not free and the queueing delay did not go down; the number that
 said so was the controller marking its own homework. The corrected reading is
 in BENCHMARKS.md.
+
+## Classic LEDBAT does not yield, and that is the point of the protocol
+
+**Measured, not fixed.** This is the most important thing in this file, and it
+is not a defect in the port -- it is a property of what libutp implements.
+
+uTP exists so a background transfer does not hurt the user's interactive
+traffic. That claim had never been tested here, because the harness had no
+loss-based traffic to yield to: every measurement was uTP against uTP, which
+is the easy case. Two additions closed that -- a shared bottleneck
+(`Network.ConnectShared`) so two flows contend for one queue, and a
+Reno-shaped competitor (`netem.RunRenoFlow`).
+
+Over a shared 10 Mbps bottleneck with a 256 KB queue, with the competitor
+started first and given time to fill it:
+
+| | uTP's share of the link | Competitor kept | Bottleneck queue p50 |
+| --- | --- | --- | --- |
+| LEDBAT | **60%** | 69% | **24.6 ms** |
+| LEDBAT++ | **44%** | 77% | **2.5 ms** |
+
+Classic LEDBAT takes more than half the link from the traffic it is supposed
+to defer to, and leaves 25 ms of queue for everyone else. It is faster than
+LEDBAT++ in every throughput table in [BENCHMARKS.md](BENCHMARKS.md) *because*
+it is not yielding.
+
+The default is unchanged, because matching libutp is this library's default
+and a silent behaviour change is not the place to spend a deviation. But a
+BitTorrent client should set `CongestionAlgorithm: AlgorithmLEDBATPP`, and the
+reasoning is in BENCHMARKS.md rather than left implicit.
 
 ## Things found but deliberately not fixed
 

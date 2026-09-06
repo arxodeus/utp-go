@@ -179,10 +179,14 @@ func (e *Endpoint) WriteTo(b []byte, dst utp.ConnectionPeer) (int, error) {
 	if link == nil {
 		return 0, fmt.Errorf("%w: %s -> %s", ErrNoRoute, e.peer.name, dst.Hash())
 	}
+	dstEndpoint := e.net.endpointFor(dst.Hash())
+	if dstEndpoint == nil {
+		return 0, fmt.Errorf("%w: %s -> %s", ErrNoRoute, e.peer.name, dst.Hash())
+	}
 	// Copy: the caller owns b and may reuse it the moment we return.
 	payload := make([]byte, len(b))
 	copy(payload, b)
-	link.enqueue(payload)
+	link.enqueue(payload, e, dstEndpoint)
 	return len(b), nil
 }
 
@@ -286,6 +290,55 @@ func (n *Network) Connect(a, b *Endpoint, cfg Config) {
 func (n *Network) ConnectAsymmetric(a, b *Endpoint, aToB, bToA Config) {
 	n.addLink(a, b, aToB)
 	n.addLink(b, a, bToA)
+}
+
+// endpointFor looks up an endpoint by name.
+func (n *Network) endpointFor(name string) *Endpoint {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.endpoints[name]
+}
+
+// ConnectShared wires several endpoint pairs through a single bottleneck:
+// one queue, one rate, one loss draw, shared by every pair given.
+//
+// This is what makes flows actually compete. Connect and ConnectAsymmetric
+// give each directed pair its own Link, so two flows between two different
+// pairs of endpoints each get their own queue and their own full bandwidth --
+// they run alongside each other without ever contending. A congestion
+// controller cannot be judged against another controller on links like that,
+// because neither one can crowd the other out.
+//
+// Each element of pairs is a {source, destination} pair, and every one of
+// them is routed through the same Link, in the direction given. To share a
+// bottleneck in both directions, pass both directions.
+//
+// The Link's stats and queue samples cover all the traffic through it, which
+// is the point: the standing queue at a shared bottleneck is a property of
+// the bottleneck, not of any one flow.
+func (n *Network) ConnectShared(cfg Config, pairs ...[2]*Endpoint) {
+	if len(pairs) == 0 {
+		return
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if cfg.QueueBytes <= 0 {
+		cfg.QueueBytes = DefaultQueueBytes
+	}
+	if cfg.ReorderDelay <= 0 {
+		cfg.ReorderDelay = DefaultReorderDelay
+	}
+	seed := cfg.Seed
+	if seed == 0 {
+		n.linkSeq++
+		seed = n.seed + n.linkSeq*7919
+	}
+	l := newLink(pairs[0][0], pairs[0][1], cfg, seed)
+	for _, pair := range pairs {
+		n.links[linkKey(pair[0].peer.name, pair[1].peer.name)] = l
+	}
+
+	go l.run()
 }
 
 func (n *Network) addLink(src, dst *Endpoint, cfg Config) {

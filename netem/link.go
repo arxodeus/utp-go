@@ -47,6 +47,11 @@ type scheduled struct {
 	// sizeBytes is retained so the queue accounting can be released on
 	// departure.
 	sizeBytes int
+	// src and dst are this packet's endpoints. They are per packet rather
+	// than per link because one Link can be shared by several endpoint
+	// pairs -- that is what makes a shared bottleneck, where two flows
+	// contend for one queue and one rate. See Network.ConnectShared.
+	src, dst *Endpoint
 }
 
 type deliveryHeap []*scheduled
@@ -110,7 +115,7 @@ func newLink(src, dst *Endpoint, cfg Config, seed int64) *Link {
 
 // enqueue applies the link model to a packet and schedules its delivery.
 // It never blocks.
-func (l *Link) enqueue(payload []byte) {
+func (l *Link) enqueue(payload []byte, src, dst *Endpoint) {
 	now := time.Now()
 	size := len(payload)
 
@@ -182,12 +187,20 @@ func (l *Link) enqueue(payload []byte) {
 	arriveAt := departAt.Add(serviceTime).Add(delay)
 
 	l.seq++
+	if src == nil {
+		src = l.src
+	}
+	if dst == nil {
+		dst = l.dst
+	}
 	item := &scheduled{
 		arriveAt:   arriveAt,
 		payload:    payload,
 		seq:        l.seq,
 		queueDelay: queueDelay,
 		sizeBytes:  size,
+		src:        src,
+		dst:        dst,
 	}
 	heap.Push(&l.pending, item)
 
@@ -230,7 +243,7 @@ func (l *Link) run() {
 		l.mu.Unlock()
 
 		for _, item := range due {
-			ok := l.dst.deliver(inboundPacket{payload: item.payload, from: l.src.peer})
+			ok := item.dst.deliver(inboundPacket{payload: item.payload, from: item.src.peer})
 			l.mu.Lock()
 			if ok {
 				l.stats.PacketsDelivered++

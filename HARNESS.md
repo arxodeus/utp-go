@@ -154,11 +154,41 @@ Both are written up in [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md). Neither
 would have been visible in a throughput number alone, which is the argument
 for recording cwnd and RTT rather than just goodput.
 
+## Shared bottlenecks, and a loss-based competitor
+
+Two things were added so the M5 deference gate could be run at all.
+
+**`Network.ConnectShared(cfg, pairs...)`** routes several endpoint pairs
+through one `Link`: one queue, one rate, one loss draw. `Connect` and
+`ConnectAsymmetric` give every directed pair its own link, so two flows
+between different endpoint pairs each got their own queue and their own full
+bandwidth -- they ran alongside each other without ever contending. No
+congestion controller can be judged against another on links like that,
+because neither can crowd the other out.
+
+**`netem.RunRenoFlow(ctx, sender, receiver, bytes, mss)`** is a loss-based
+competitor: TCP Reno's congestion control exactly -- slow start, one segment
+per round trip in congestion avoidance, fast retransmit on three duplicate
+acknowledgements, fast recovery, RFC 6298 timers with Karn's algorithm -- and
+none of TCP's protocol.
+
+It is emphatically not TCP, and `netem/reno.go` opens by saying what it does
+and does not model: no header, no handshake, no options, no SACK, no Nagle,
+no delayed acknowledgements, no interoperability with anything. Its receiver
+acknowledges every packet where a real one acknowledges every second, so it
+grows marginally faster than real TCP. That error is in the safe direction
+for the claim being tested: a uTP flow measured against it is tested slightly
+harder than reality.
+
+Results are in [BENCHMARKS.md](BENCHMARKS.md). The short version is that
+classic LEDBAT takes 60% of a shared bottleneck from this competitor, which is
+the opposite of what the protocol is for.
+
 ## What it does not do
 
-- **No TCP model.** The M5 gate "yields to a greedy TCP flow" cannot be run
-  against this as it stands. It needs either a TCP model over the same
-  bottleneck or a real kernel TCP flow through a real bottleneck.
+- **The competitor is Reno-shaped, not TCP.** Read a result from it as
+  "against a loss-based sender that fills the queue". Testing against real
+  kernel TCP would need a real bottleneck and real sockets.
 - **No virtual time**, per above.
 - **Bandwidth is modelled as pure serialization** with a tail-drop FIFO.
   There is no AQM, no token bucket burst allowance, and no per-flow queueing.
