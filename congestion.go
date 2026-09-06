@@ -19,8 +19,14 @@ const (
 	defaultMinTimeout         = 1000 * time.Millisecond
 	defaultMaxTimeout         = 60 * time.Second
 	defaultMaxPacketSizeBytes = 1024
-	defaultGain               = 1.0
-	defaultDelayWindow        = 120 * time.Second
+	// defaultMaxWindowSizeIncBytes is the cap on how far the congestion
+	// window may grow in one RTT. libutp:
+	// `#define MAX_CWND_INCREASE_BYTES_PER_RTT 3000` (utp_internal.cpp:43).
+	// This was 1024, one packet per RTT, which on a 100 ms path meant about
+	// ten kilobytes of window per second -- a 20 Mbps link needs 500 KB.
+	defaultMaxWindowSizeIncBytes = 3000
+	defaultGain                  = 1.0
+	defaultDelayWindow           = 120 * time.Second
 )
 
 const (
@@ -67,7 +73,7 @@ func defaultCtrlConfig() *ctrlConfig {
 		MinTimeout:            defaultMinTimeout,
 		MaxTimeout:            defaultMaxTimeout,
 		MaxPacketSizeBytes:    defaultMaxPacketSizeBytes,
-		MaxWindowSizeIncBytes: defaultMaxPacketSizeBytes,
+		MaxWindowSizeIncBytes: defaultMaxWindowSizeIncBytes,
 		Gain:                  defaultGain,
 		DelayWindow:           defaultDelayWindow,
 	}
@@ -77,7 +83,8 @@ type Controller interface {
 	OnTransmit(seqNum uint16, transmit Transmit, dataLen uint32) error
 	OnAck(seqNum uint16, ack Ack) error
 	OnLostPacket(seqNum uint16, retransmitting bool, now time.Time) error
-	OnTimeout()
+	OnTimeout(hasPacketsInFlight bool)
+	OnWindowFull(now time.Time)
 	Timeout() time.Duration
 	BytesAvailableInWindow() uint32
 	// Stats returns a snapshot of the controller's internal state.
@@ -129,7 +136,28 @@ type defaultController struct {
 	// lastWindowDecay is when the congestion window was last halved for
 	// loss. libutp's `last_rwin_decay` (utp_internal.cpp:461).
 	lastWindowDecay time.Time
-	mu              sync.Mutex
+	// slowStart and ssthreshBytes are the slow-start phase and its exit
+	// threshold. libutp starts every connection in slow start with
+	// `ssthresh = opt_sndbuf` (utp_internal.cpp:2620-2621) and grows the
+	// window by a packet per acked packet until either the threshold is
+	// crossed or the delay approaches the target (:1691-1702).
+	//
+	// This fork had no slow start at all: every connection began at two
+	// packets and crept up by the LEDBAT increment alone.
+	slowStart     bool
+	ssthreshBytes uint32
+	// maxWindowUpperBytes is the ceiling on the congestion window --
+	// libutp's `opt_sndbuf`, which it clamps against at
+	// utp_internal.cpp:1710.
+	maxWindowUpperBytes uint32
+	// lastMaxedOutWindow is when the sender last had data to send and no
+	// window to send it in. libutp's `last_maxed_out_window`, set by
+	// `is_full` (utp_internal.cpp:945, :957) and read at :1681: a sender
+	// that has not filled its window in the last second is limited by the
+	// application rather than the path, and growing the window further would
+	// be measuring nothing.
+	lastMaxedOutWindow time.Time
+	mu                 sync.Mutex
 }
 
 func newDefaultController(config *ctrlConfig) *defaultController {
@@ -152,6 +180,13 @@ func newDefaultController(config *ctrlConfig) *defaultController {
 		rttVarianceMicros: (800 * time.Millisecond).Microseconds(),
 		transmissions:     make(map[uint16]*packetRecord),
 		delayAcc:          newDelayAccumulator(config.DelayWindow),
+		// libutp starts every connection in slow start with
+		// `ssthresh = opt_sndbuf` (utp_internal.cpp:2620-2621), and its
+		// default opt_sndbuf is 1 MB (utp_api.cpp:91) -- the same value as
+		// DefaultWindowSize here.
+		slowStart:           true,
+		ssthreshBytes:       config.WindowSize,
+		maxWindowUpperBytes: config.WindowSize,
 	}
 }
 
@@ -237,16 +272,7 @@ func (c *defaultController) OnAck(seqNum uint16, ack Ack) error {
 
 	baseDelayMicros := uint32(c.delayAcc.BaseDelay().Microseconds())
 	packetDelayMicros := uint32(ack.Delay.Microseconds())
-	maxWindowSizeAdjustment := computeMaxWindowSizeAdjustment(
-		c.targetDelayMicros,
-		baseDelayMicros,
-		packetDelayMicros,
-		c.windowSizeBytes,
-		packetInst.SizeBytes,
-		c.maxWindowSizeIncBytes,
-		c.gain,
-	)
-	c.applyMaxWindowSizeAdjustment(maxWindowSizeAdjustment)
+	c.applyCongestionControl(baseDelayMicros, packetDelayMicros, packetInst.SizeBytes, ack.RTT, ack.ReceivedAt)
 
 	c.windowSizeBytes -= packetInst.SizeBytes
 
@@ -305,6 +331,10 @@ func (c *defaultController) OnLostPacket(seqNum uint16, retransmitting bool, now
 	if c.lastWindowDecay.IsZero() || now.Sub(c.lastWindowDecay) >= maxWindowDecayInterval {
 		c.maxWindowSizeBytes = uint32(math.Max(float64(c.maxWindowSizeBytes/2), float64(c.minWindowSizeBytes)))
 		c.lastWindowDecay = now
+		// libutp leaves slow start on any decay and sets the threshold to
+		// where the window ended up (utp_internal.cpp:616-617).
+		c.slowStart = false
+		c.ssthreshBytes = c.maxWindowSizeBytes
 	}
 
 	if !retransmitting {
@@ -314,26 +344,156 @@ func (c *defaultController) OnLostPacket(seqNum uint16, retransmitting bool, now
 	return nil
 }
 
-func (c *defaultController) OnTimeout() {
-	c.maxWindowSizeBytes = c.minWindowSizeBytes
+// OnTimeout is libutp's timeout branch (utp_internal.cpp:1206-1228).
+//
+// hasPacketsInFlight distinguishes the two cases libutp treats differently.
+// This fork collapsed the window to its floor in both, so an application that
+// paused long enough to hit an RTO -- routine -- restarted from two packets,
+// and with no slow start took hundreds of round trips to recover on a
+// high-bandwidth path.
+func (c *defaultController) OnTimeout(hasPacketsInFlight bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	packetSize := c.minWindowSizeBytes / 2
+	if !hasPacketsInFlight && c.maxWindowSizeBytes > packetSize {
+		// "we don't have any packets in-flight, even though we could. This
+		// implies that the connection is just idling. No need to be
+		// aggressive about resetting the congestion window. Just let it decay
+		// by a 3:rd." (utp_internal.cpp:1216-1222)
+		c.maxWindowSizeBytes = maxUint32(c.maxWindowSizeBytes*2/3, packetSize)
+	} else {
+		// "our delay was so high that our congestion window was shrunk below
+		// one packet ... reset the congestion window to fit one packet, to
+		// start over again" (:1223-1228). libutp re-enters slow start here.
+		c.maxWindowSizeBytes = packetSize
+		c.slowStart = true
+	}
+	if c.maxWindowSizeBytes < c.minWindowSizeBytes {
+		c.maxWindowSizeBytes = c.minWindowSizeBytes
+	}
 	c.timeout = time.Duration(math.Min(float64(c.timeout*2), float64(c.maxTimeout)))
 }
 
 // applyMaxWindowSizeAdjustment adjusts the maximum window size based on the given adjustment.
-func (c *defaultController) applyMaxWindowSizeAdjustment(adjustment int64) {
-	// Apply the adjustment.
-	adjMaxWindowSizeBytes := int64(c.maxWindowSizeBytes) + adjustment
-
-	// The maximum congestion window must not fall below the minimum.
-	if adjMaxWindowSizeBytes < int64(c.minWindowSizeBytes) {
-		adjMaxWindowSizeBytes = int64(c.minWindowSizeBytes)
+// applyCongestionControl is libutp's apply_ccontrol (utp_internal.cpp:1615-1712),
+// run once per acked packet rather than once per ack packet. The two are
+// equivalent: the window factor scales each step by that packet's share of
+// the window, so a full window of acks sums to one RTT's worth of increase
+// either way.
+//
+// It is called with the controller's lock held.
+func (c *defaultController) applyCongestionControl(
+	baseDelayMicros uint32,
+	packetDelayMicros uint32,
+	bytesAcked uint32,
+	rtt time.Duration,
+	now time.Time,
+) {
+	// The queueing delay this ack reports: how far above the lowest delay
+	// seen on this path the packet ran.
+	ourDelayMicros := int64(packetDelayMicros) - int64(baseDelayMicros)
+	if ourDelayMicros < 0 {
+		ourDelayMicros = 0
 	}
 
-	// The maximum congestion window cannot increase by more than the configured maximum increment.
-	c.maxWindowSizeBytes = uint32(math.Min(
-		float64(adjMaxWindowSizeBytes),
-		float64(c.maxWindowSizeBytes)+float64(c.maxWindowSizeIncBytes),
-	))
+	// "the delay can never be greater than the rtt" (utp_internal.cpp:1617-1621):
+	// libutp clamps our_delay to the minimum RTT of the packets this ack
+	// covers. Without the clamp a peer that reports a wild timestamp -- by
+	// malice, by a clock step, or by a timestamp wrap -- drives off_target
+	// arbitrarily negative and collapses the window in one ack. We clamp to
+	// this packet's own RTT, which is the closest thing available where the
+	// controller sees one packet at a time.
+	if rttMicros := rtt.Microseconds(); rttMicros > 0 && ourDelayMicros > rttMicros {
+		ourDelayMicros = rttMicros
+	}
+
+	target := int64(c.targetDelayMicros)
+	if target <= 0 {
+		// utp_internal.cpp:1635-1636.
+		target = 100000
+	}
+
+	offTarget := target - ourDelayMicros
+	delayFactor := float64(offTarget) / float64(target)
+
+	// libutp: min(bytes_acked, max_window) / max(max_window, bytes_acked)
+	// (utp_internal.cpp:1668). Two things this fork had wrong. It divided by
+	// the bytes currently *in flight* rather than by the congestion window,
+	// which is a smaller denominator and so a larger factor -- with one
+	// packet outstanding the factor was 1, and a single ack claimed a whole
+	// RTT's worth of increase. And it had no min/max, so the factor could
+	// exceed 1 outright.
+	maxWindow := float64(c.maxWindowSizeBytes)
+	acked := float64(bytesAcked)
+	windowFactor := math.Min(acked, maxWindow) / math.Max(maxWindow, acked)
+
+	scaledGain := float64(c.gain) * float64(c.maxWindowSizeIncBytes) * windowFactor * delayFactor
+
+	// A sender that has not filled its window in the last second is limited
+	// by the application, not by the path, so the delay it measures says
+	// nothing about how much more the path would carry. libutp refuses to
+	// grow the window in that case (utp_internal.cpp:1681-1686). Without
+	// this, an idle-but-trickling connection grows its window without bound
+	// and then dumps it all at once when the application speeds up.
+	//
+	// libutp initialises last_maxed_out_window to zero and compares it
+	// against a millisecond counter that also starts near zero, so early in a
+	// connection the difference is small and growth is allowed. A zero
+	// time.Time here is far in the past instead, which would block all growth
+	// until the window was first filled, so an unset value means "not yet
+	// application-limited" and permits growth.
+	if scaledGain > 0 && !c.lastMaxedOutWindow.IsZero() &&
+		now.Sub(c.lastMaxedOutWindow) > time.Second {
+		scaledGain = 0
+	}
+
+	ledbatCwnd := float64(c.maxWindowSizeBytes) + scaledGain
+	if ledbatCwnd < float64(c.minWindowSizeBytes) {
+		ledbatCwnd = float64(c.minWindowSizeBytes)
+	}
+
+	if c.slowStart {
+		// utp_internal.cpp:1691-1702.
+		ssCwnd := float64(c.maxWindowSizeBytes) + windowFactor*float64(c.minWindowSizeBytes/2)
+		switch {
+		case ssCwnd > float64(c.ssthreshBytes):
+			c.slowStart = false
+		case ourDelayMicros > int64(float64(target)*0.9):
+			// "even if we're a little under the target delay, we
+			// conservatively discontinue the slow start phase".
+			c.slowStart = false
+			c.ssthreshBytes = c.maxWindowSizeBytes
+		default:
+			c.maxWindowSizeBytes = uint32(math.Max(ssCwnd, ledbatCwnd))
+		}
+	} else {
+		c.maxWindowSizeBytes = uint32(ledbatCwnd)
+	}
+
+	// utp_internal.cpp:1710.
+	c.maxWindowSizeBytes = clampUint32(c.maxWindowSizeBytes, c.minWindowSizeBytes, c.maxWindowUpperBytes)
+}
+
+// OnWindowFull records that the sender had data to send and no window to send
+// it in. libutp's `is_full` (utp_internal.cpp:945, :957).
+func (c *defaultController) OnWindowFull(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastMaxedOutWindow = now
+}
+
+func clampUint32(v, lo, hi uint32) uint32 {
+	if hi < lo {
+		hi = lo
+	}
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 // applyTimeoutAdjustment recomputes the retransmission timeout from the RTT

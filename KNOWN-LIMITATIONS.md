@@ -16,7 +16,7 @@ all.
 | **M3** — fix the failing transfer tests | **Done.** Root causes below; gates in "Verification". |
 | **M4** — audit transfer paths against libutp | **Started.** The ack path and the loss-recovery path are audited: selective-ack construction, fast retransmission, window decay, the two inherited "consistent with the reference" claims, and the RESET for an unknown connection. Findings below. The send path and the timers are not yet audited. |
 | **M4b** — exhaustive libutp compatibility sweep | **Not done.** No `COMPATIBILITY.md` exists. |
-| **M5** — verify LEDBAT, add LEDBAT++ | **Not done.** But see "The congestion controller had no delay signal" — this milestone's premise has changed. |
+| **M5** — verify LEDBAT, add LEDBAT++ | **Half done.** Classic LEDBAT is verified against `apply_ccontrol` and corrected: seven defects, +42% to +80% goodput depending on the link, with the standing queue unchanged. See [BENCHMARKS.md](BENCHMARKS.md). LEDBAT++ itself is not implemented. |
 | **M6** — MTU path discovery | **Not done.** Not investigated. |
 | **M7** — anacrolix/torrent integration | **Partly done.** The interop gate passes in both directions against real libutp; the `anacrolix/torrent` adapter is not written. |
 | **M8** — soak and hardening | **Not done.** |
@@ -640,6 +640,86 @@ six times more than the link lost.
 The loss-free link is unchanged (6.38 Mbps against 6.33 before, within
 run-to-run noise), as it must be — none of this code runs when nothing is
 lost. Both libutp interoperability directions still pass.
+
+## Classic LEDBAT, verified against libutp (M5, first half)
+
+The brief asks for LEDBAT to be verified before LEDBAT++ is added, on the
+grounds that comparing a new controller against a broken one tells you
+nothing. Seven defects, read out of `apply_ccontrol`
+(`utp_internal.cpp:1615-1712`) and the timeout branch (`:1206-1228`).
+
+Full before-and-after tables are in [BENCHMARKS.md](BENCHMARKS.md); the
+summary is +42% to +80% goodput depending on the link, with queueing delay
+flat or lower and Jain fairness unchanged at 1.000.
+
+### There was no slow start
+
+**Fixed.** libutp starts every connection in slow start with
+`ssthresh = opt_sndbuf` (`utp_internal.cpp:2620-2621`), grows by a packet per
+acked packet, and leaves on either crossing the threshold or the delay
+reaching 90% of target (`:1691-1702`). It re-enters slow start on a
+retransmission timeout (`:1227`) and leaves it on any window decay
+(`:616-617`).
+
+This fork had none of that. Every connection began at two packets and grew
+only by the LEDBAT increment.
+
+### The window factor was computed against the wrong window
+
+**Fixed, and this is the largest of the seven.** libutp's factor is
+`min(bytes_acked, max_window) / max(max_window, bytes_acked)`
+(`utp_internal.cpp:1668`) — the acked bytes as a fraction of the *congestion
+window*. We divided by the bytes currently **in flight**.
+
+In flight is never more than the window and is often far less, so our factor
+was systematically too large: with a single packet outstanding it reached 1,
+and one ack claimed a whole round trip's worth of increase. There was also no
+`min`/`max` pair, so the factor could exceed 1 outright.
+
+### The window could grow by only 1024 bytes per round trip
+
+**Fixed.** `MAX_CWND_INCREASE_BYTES_PER_RTT` is 3000 in libutp
+(`utp_internal.cpp:43`). This fork used its packet size, 1024. On a 100 ms
+path that is the difference between 30 KB and 10 KB of window per second.
+
+### The queueing delay was never clamped to the round-trip time
+
+**Fixed.** "the delay can never be greater than the rtt" —
+`our_delay = min(our_hist.get_value(), min_rtt)` (`utp_internal.cpp:1617-1621`).
+
+Without the clamp, a peer reporting a wild timestamp — by malice, by a clock
+step, or by a timestamp wrap — drives `off_target` arbitrarily negative and
+collapses the window in a single ack. This is the delay-based analogue of the
+malformed-header cases in M2: an input the peer controls, used unchecked.
+
+### A window the application never filled grew anyway
+
+**Fixed.** libutp refuses to grow the window when the sender has not been
+blocked by it in the last second (`utp_internal.cpp:1681-1686`), because a
+sender limited by the application rather than the path measures nothing useful
+about the path. It records this in `last_maxed_out_window`, set by `is_full`
+(`:945`, `:957`).
+
+We had no equivalent, so a connection trickling data grew its window without
+bound and then dumped it all at once when the application sped up.
+
+### There was no ceiling on the congestion window
+
+**Fixed.** libutp clamps to `opt_sndbuf` (`utp_internal.cpp:1710`), whose
+default is 1 MB (`utp_api.cpp:91`) — the same as `DefaultWindowSize` here. The
+`ctrlConfig.WindowSize` field existed already and was never read.
+
+### A timeout collapsed the window even when nothing was in flight
+
+**Fixed.** libutp splits the case (`utp_internal.cpp:1216-1228`). With packets
+in flight, the window resets to one packet and the connection re-enters slow
+start. With nothing in flight the connection was merely idling, nothing was
+actually lost, and the window decays to two thirds instead: "No need to be
+aggressive about resetting the congestion window."
+
+We collapsed to the floor in both cases. An application that paused long
+enough to hit an RTO — routine — restarted from two packets, and with no slow
+start took hundreds of round trips to recover.
 
 ## Things found but deliberately not fixed
 

@@ -205,27 +205,49 @@ func TestOnLostPacketUnknownSeqNum(t *testing.T) {
 		"expected max window size %d, got %d", initialMaxWindowSizeBytes, ctrl.maxWindowSizeBytes)
 }
 
-func TestOnTimeout(t *testing.T) {
+// A timeout with packets in flight resets the window to one packet and
+// re-enters slow start. libutp: utp_internal.cpp:1223-1228.
+func TestOnTimeoutWithPacketsInFlight(t *testing.T) {
 	ctrl := newDefaultController(defaultCtrlConfig())
+	ctrl.slowStart = false
 
-	// Set initial max window size
 	initialMaxWindowSizeBytes := ctrl.minWindowSizeBytes * 10
 	ctrl.maxWindowSizeBytes = initialMaxWindowSizeBytes
-
-	// Store initial timeout
 	initialTimeout := ctrl.Timeout()
 
-	// Register timeout
-	ctrl.OnTimeout()
+	ctrl.OnTimeout(true)
 
-	// Verify max window size was reset to minimum
 	require.Equal(t, ctrl.minWindowSizeBytes, ctrl.maxWindowSizeBytes,
 		"expected max window size %d, got %d", ctrl.minWindowSizeBytes, ctrl.maxWindowSizeBytes)
+	require.True(t, ctrl.slowStart, "a timeout with packets in flight must re-enter slow start")
 
-	// Verify timeout was doubled
 	expectedTimeout := initialTimeout * 2
 	require.Equal(t, expectedTimeout, ctrl.Timeout(),
 		"expected timeout %v, got %v", expectedTimeout, ctrl.Timeout())
+}
+
+// A timeout on an idle connection -- nothing in flight, so nothing was
+// actually lost -- decays the window by a third instead of collapsing it.
+//
+// libutp: "No need to be aggressive about resetting the congestion window.
+// Just let it decay by a 3:rd" (utp_internal.cpp:1216-1222). This fork
+// collapsed the window to its floor in both cases, so an application that
+// paused long enough to hit an RTO restarted from two packets.
+func TestOnTimeoutWhileIdleDecaysGently(t *testing.T) {
+	ctrl := newDefaultController(defaultCtrlConfig())
+	ctrl.slowStart = false
+
+	initial := ctrl.minWindowSizeBytes * 30
+	ctrl.maxWindowSizeBytes = initial
+
+	ctrl.OnTimeout(false)
+
+	want := initial * 2 / 3
+	require.Equal(t, want, ctrl.maxWindowSizeBytes,
+		"an idle timeout should decay the window to two thirds (%d), got %d", want, ctrl.maxWindowSizeBytes)
+	require.False(t, ctrl.slowStart, "an idle timeout is not a loss signal and must not re-enter slow start")
+	require.Greater(t, ctrl.maxWindowSizeBytes, ctrl.minWindowSizeBytes,
+		"an idle timeout collapsed the window to its floor")
 }
 
 func TestOnTimeoutNotExceedMax(t *testing.T) {
@@ -236,7 +258,7 @@ func TestOnTimeoutNotExceedMax(t *testing.T) {
 	ctrl := newDefaultController(config)
 
 	// Register timeout
-	ctrl.OnTimeout()
+	ctrl.OnTimeout(true)
 
 	// Verify timeout is capped at max
 	require.Equal(t, config.MaxTimeout, ctrl.Timeout(),

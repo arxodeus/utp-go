@@ -79,3 +79,10 @@ var randomUint16Source = func() uint16 { return uint16(fastrand.Uint32n(65535)) 
 func RandomUint16() uint16 {
 	return randomUint16Source()
 }
+
+func maxUint32(a, b uint32) uint32 {
+	if a > b {
+		return a
+	}
+	return b
+}

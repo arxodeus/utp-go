@@ -16,6 +16,7 @@ do. See:
 | [CONFORMANCE.md](CONFORMANCE.md) | The conformance corpus: how two implementations are compared packet by packet, what it found, and what it does not cover. |
 | [HARNESS.md](HARNESS.md) | The emulated network harness: what it models, what it measures, and the numbers proving it is sound. |
 | [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) | **Read this first.** Root cause of every defect fixed, what has and has not been measured, and everything found but not fixed. |
+| [BENCHMARKS.md](BENCHMARKS.md) | Congestion-control measurements: the link profiles, the numbers before and after, and what they do not prove. |
 | [REFERENCE.md](REFERENCE.md) | Which copy of libutp is normative, and proof the copy used for differential testing is protocol-identical to it. |
 | [DEVIATIONS.md](DEVIATIONS.md) | Every intentional difference from libutp. |
 | [UPSTREAM.md](UPSTREAM.md) | What should go back to `zen-eth/utp-go`, and in what order. |

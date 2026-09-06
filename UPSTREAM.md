@@ -237,6 +237,35 @@ loss-free path is unchanged.
 This one needs review rather than a rubber stamp: it changes when the window
 decays, and any tuning upstream has done was taken against the old behaviour.
 
+## PR 12 — the congestion controller, against libutp's apply_ccontrol
+
+Seven defects, and the largest throughput change in the fork: +42% to +80%
+goodput depending on the link, with queueing delay flat or lower and Jain
+fairness unchanged. Full tables in BENCHMARKS.md.
+
+- No slow start at all. libutp starts every connection in it
+  (`utp_internal.cpp:2620-2621`, `:1691-1702`), re-enters on a timeout
+  (`:1227`) and leaves on any window decay (`:616-617`).
+- The window factor divided by bytes **in flight** rather than by the
+  congestion window (`utp_internal.cpp:1668`), and had no min/max pair. With
+  one packet outstanding the factor reached 1 and a single ack claimed a whole
+  RTT of increase.
+- `MAX_CWND_INCREASE_BYTES_PER_RTT` was the packet size, 1024, against
+  libutp's 3000 (`utp_internal.cpp:43`).
+- The queueing delay was never clamped to the RTT (`utp_internal.cpp:1621`),
+  so a peer reporting a wild timestamp collapsed the window in one ack.
+- No `last_maxed_out_window`: a window the application never filled grew
+  anyway (`utp_internal.cpp:1681-1686`).
+- No ceiling on the window (`utp_internal.cpp:1710`). The `WindowSize` config
+  field existed and was never read.
+- A retransmission timeout collapsed the window to its floor even when nothing
+  was in flight, where libutp decays to two thirds because an idle connection
+  has not actually lost anything (`utp_internal.cpp:1216-1228`).
+
+This is the PR that most needs a conversation rather than a review. Any tuning
+upstream has done was taken against a controller with these defects, and the
+numbers will move.
+
 ## PR 10 — the test suite
 
 Independent of the library. On a clean checkout upstream's suite cannot pass:
@@ -292,4 +321,4 @@ delay signal and a timer that fired at random within a one-second window.
 Both will move once these land, and that is the point, but it should not be a
 surprise.
 
-PR 5 needs review of the per-packet-timer subtlety above. PR 11 is optional for upstream and the most invasive; offer it last.
+PR 5 needs review of the per-packet-timer subtlety above. PR 12 is the largest behavioural change in the fork and needs the most discussion. PR 11 is optional for upstream and the most invasive; offer it last.

@@ -96,7 +96,7 @@ func newSentPacketsWithoutLogger(initSeqNum uint16, congestionCtrl Controller) *
 }
 
 func (s *sentPackets) OnTimeout() {
-	s.congestionCtrl.OnTimeout()
+	s.congestionCtrl.OnTimeout(s.HasUnackedPackets())
 }
 
 func (s *sentPackets) NextSeqNum() uint16 {
@@ -127,6 +127,12 @@ func (s *sentPackets) ControllerStats() ControllerStats {
 
 func (s *sentPackets) Window() uint32 {
 	return s.congestionCtrl.BytesAvailableInWindow()
+}
+
+// OnWindowFull records that the sender was blocked by the congestion window
+// rather than by having nothing to send.
+func (s *sentPackets) OnWindowFull(now time.Time) {
+	s.congestionCtrl.OnWindowFull(now)
 }
 
 func (s *sentPackets) HasUnackedPackets() bool {

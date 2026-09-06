@@ -560,6 +560,14 @@ func (c *connection) processWrites(now time.Time) {
 	windowSize := minUint32(c.state.SentPackets.Window(), c.peerRecvWindow)
 	var payloads [][]byte
 
+	// libutp's `is_full` marks the connection application-limited or not
+	// every time it considers sending a packet (utp_internal.cpp:945, :957),
+	// and the congestion controller refuses to grow a window the application
+	// never fills (:1681-1686). The equivalent signal here is "we had data
+	// and no room for it": either no window at all, or the window ran out
+	// before the send buffer did.
+	windowFull := windowSize == 0 && c.state.SendBuf.Pending() > 0
+
 	for windowSize > 0 {
 		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			c.logger.Trace("has window size to send a packet data in sendBuffer", "windowSize", windowSize)
@@ -572,6 +580,12 @@ func (c *connection) processWrites(now time.Time) {
 		}
 		payloads = append(payloads, data[:n])
 		windowSize -= uint32(n)
+		if windowSize == 0 && c.state.SendBuf.Pending() > 0 {
+			windowFull = true
+		}
+	}
+	if windowFull {
+		c.state.SentPackets.OnWindowFull(now)
 	}
 
 	// Write pending data to send buffer
