@@ -476,8 +476,20 @@ func (s *UtpSocket) maybeSendReset(pkt *packet, peer ConnectionPeer) {
 	s.rstInfo.put(key, struct{}{})
 	s.rstInfoExpirations.put(key, key, rstInfoTimeout)
 
+	// Fields match libutp's send_rst (utp_internal.cpp:846-863) exactly:
+	//
+	//   - ack_nr is the sequence number of the packet being rejected, so the
+	//     peer can tell which of its packets drew the reset. We previously
+	//     left it at zero, which named no packet at all.
+	//   - seq_nr is random, so an off-path attacker cannot predict it.
+	//   - windowsize is zero: there is no connection, so there is no receive
+	//     window to advertise. We previously advertised 100000.
+	//   - the timestamp fields are left at zero. libutp zeroes the whole
+	//     header and never fills them in for a reset.
 	randSeqNum := RandomUint16()
-	resetPacket := NewPacketBuilder(st_reset, pkt.Header.ConnectionId, uint32(time.Now().UnixMicro()), 100_000, randSeqNum).Build()
+	resetPacket := NewPacketBuilder(st_reset, pkt.Header.ConnectionId, 0, 0, randSeqNum).
+		WithAckNum(pkt.Header.SeqNum).
+		Build()
 	s.socketEvents <- newOutgoingSocketEvent(resetPacket, peer)
 }
 

@@ -49,6 +49,17 @@ differs rather than silently skipping it:
 | `ZeroWindow` | a peer advertising a zero receive window |
 | `InvalidAckNumIsIgnored` | a packet acking a sequence number never sent |
 | `WildlyInvalidAckNumIsIgnored` | the same, thousands out of range |
+| `MalformedEmptyPacket` | a zero-byte datagram |
+| `MalformedTruncatedHeader` | 1..19 bytes of a 20-byte header |
+| `MalformedWrongVersion` | every version nibble other than 1 |
+| `MalformedUnknownPacketType` | every type nibble above `ST_SYN` |
+| `MalformedExtensionPromisedButAbsent` | a header claiming an extension with no bytes after it |
+| `MalformedExtensionLengthOverrunsPacket` | an extension whose length runs past the datagram |
+| `MalformedExtensionChainLoops` | extensions chained so the list never terminates |
+| `MalformedUnknownExtensionType` | a first extension byte naming no known extension |
+| `MalformedZeroLengthSelectiveAck` | a selective ack of length zero |
+| `MalformedSelectiveAckLength` | a selective ack of 1, 3, 5, 7 bytes (a divergence — see below) |
+| `MalformedUnknownConnectionId` | a non-SYN packet for a connection neither side has |
 
 ## What it found
 
@@ -83,9 +94,40 @@ Finding this was incidental — the first version of the corpus used
 `ack_nr = seq_nr`, libutp silently dropped every packet, and the resulting
 confusion led to the check.
 
+### The version nibble was never checked
+
+**Fixed** (`packet.go`). We decoded the type and extension fields out of any
+packet regardless of what version it claimed, so a version-0 or version-15
+header was processed as if it were version 1. libutp reads the version first
+and drops anything that is not 1 (`utp_internal.cpp:2481`, `:2834`).
+
+This is the dangerous direction — more permissive than the reference — and
+it is the direction a fuzzer finds first. Nothing in the wild speaks another
+version, so the leniency bought nothing.
+
+### The first extension byte was never checked
+
+**Fixed** (`packet.go`). Any value was accepted and, if it was not 1, treated
+as "no extension". libutp requires `ext < 3` before it will even name the
+packet's version (`utp_internal.cpp:2481`), so a header naming extension 7 is
+dropped outright there.
+
+The practical difference is small — both ends stop parsing — but the
+malformed corpus is exactly where "small" needs to be demonstrated rather than
+assumed, and matching the reference costs one comparison.
+
+### Our RESET for an unknown connection was missing two fields
+
+**Fixed** (`utp_socket.go`). libutp's `send_rst`
+(`utp_internal.cpp:846-863`) sets `ack_nr` to the sequence number of the
+packet being rejected and `windowsize` to zero. We sent `ack_nr = 0`, naming
+no packet, and advertised a 100000-byte receive window for a connection that
+does not exist. Found by the unknown-connection-id case, which reached the
+byte comparison only because both sides do answer such a packet.
+
 ## Deliberate divergences
 
-One, asserted explicitly in the corpus rather than absorbed into a tolerance:
+Two, asserted explicitly in the corpus rather than absorbed into a tolerance:
 
 **libutp acks twice on reaching a FIN.** Once immediately
 (`utp_internal.cpp:2370`, *"if the other end wants to close, ack"*) and once
@@ -94,6 +136,22 @@ second carries no information the first did not; emitting a gratuitous
 duplicate would cost a packet and change nothing a peer depends on. The corpus
 asserts libutp emits exactly one extra packet and that it is byte-identical
 to the one before it — if it ever carried new information, the case fails.
+
+**We reject a selective ack whose length is not a multiple of 4; libutp
+accepts it.** libutp's extension loop performs no length validation on a
+selective ack at all — `case 1: selack_ptr = data; break;`
+(`utp_internal.cpp:1844`) — beyond the generic check that the length fits
+inside the datagram. It will therefore read a 1, 3, 5 or 7-byte bitfield and
+act on it. We drop the packet.
+
+This is the stricter direction, so it is an interoperability risk rather than
+an attack surface, and the risk is empty in practice: libutp always emits
+exactly four bytes (`utp_internal.cpp:806-818`), so no libutp peer can produce
+a packet we would reject here. A truncated bitfield has no defined meaning —
+acting on one means guessing which packets the peer meant to ack.
+`TestMalformedSelectiveAckLength` asserts the divergence in both directions:
+that we stay silent, *and* that libutp still answers. If libutp ever tightens
+this, the case fails rather than quietly agreeing.
 
 ## Limits
 

@@ -69,8 +69,12 @@ func (d *Driver) Listen() { C.libutp_driver_listen(d.c) }
 // whether libutp claimed the packet: 1 means it was for a known connection or
 // started one, 0 means it was not recognised.
 func (d *Driver) Inject(pkt []byte) int {
+	// libutp asserts the buffer is non-NULL even for a zero-length datagram,
+	// and a real socket always hands it a valid pointer, so pass scratch
+	// storage rather than Go's nil for an empty slice.
 	if len(pkt) == 0 {
-		return int(C.libutp_driver_inject(d.c, nil, 0))
+		var empty [1]byte
+		return int(C.libutp_driver_inject(d.c, unsafe.Pointer(&empty[0]), 0))
 	}
 	return int(C.libutp_driver_inject(d.c, unsafe.Pointer(&pkt[0]), C.size_t(len(pkt))))
 }

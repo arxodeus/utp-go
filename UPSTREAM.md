@@ -169,6 +169,26 @@ directions.
 Only shows up under loss, and only against another implementation. Worth
 sending on its own so it is not lost in a larger diff.
 
+## PR 9b — header validation, and the RESET for an unknown connection
+
+Small and independent of PR 9, though they touch the same file.
+
+- The version nibble was never checked. A packet claiming any version was
+  parsed as version 1. libutp drops anything that is not 1
+  (`utp_internal.cpp:2481`, `:2834`).
+- The first extension byte was never checked. Any value was accepted and
+  treated as "no extension" unless it was 1. libutp requires `ext < 3`
+  (`utp_internal.cpp:2481`).
+- The RESET sent for a packet addressed to a connection the socket does not
+  have carried `ack_nr = 0` and advertised a 100000-byte window. libutp's
+  `send_rst` sets `ack_nr` to the rejected packet's sequence number and
+  `windowsize` to zero (`utp_internal.cpp:846-863`).
+
+All three are the "more permissive or less informative than the reference"
+direction. None of them can be triggered by a well-behaved peer, which is why
+nothing caught them; all three were found by comparing against libutp on
+malformed input.
+
 ## PR 10 — the test suite
 
 Independent of the library. On a clean checkout upstream's suite cannot pass:
@@ -214,7 +234,7 @@ interface methods.
 
 ## Order of operations
 
-PR 1, PR 4, PR 6, PR 8, PR 9 and PR 10 are close to unarguable and should go first.
+PR 1, PR 4, PR 6, PR 8, PR 9, PR 9b and PR 10 are close to unarguable and should go first.
 
 PR 2 and PR 3 both need a conversation, for the same reason: any tuning or
 measurement upstream has done was taken against a controller with a constant

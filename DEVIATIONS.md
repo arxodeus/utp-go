@@ -74,6 +74,31 @@ only addition is a cap at `MaxTimeout`, which libutp does not have because its
 own two-timeout limit bounds the backoff; it is unreachable at the default
 `MaxConnAttempts` and only matters if a caller raises it.
 
+## Selective acks whose length is not a multiple of 4 bytes
+
+**We reject them. libutp accepts them.**
+
+libutp's extension loop does not validate the length of a selective-ack
+extension (`utp_internal.cpp:1844` — `case 1: selack_ptr = data; break;`); the
+only check applied is the generic one that the extension's length fits inside
+the datagram. A 1, 3, 5 or 7-byte bitfield is read and acted on.
+
+`DecodeSelectiveAck` requires a whole number of 4-byte words and fails the
+packet otherwise.
+
+Reason: a bitfield that is not a whole number of words is truncated, and there
+is no defined reading of it — acting on one means guessing which of the peer's
+packets were meant to be acked. libutp itself never emits such an extension:
+it always writes exactly four bytes (`utp_internal.cpp:806-818`). So no libutp
+peer can send a packet this rejects, and the divergence is unreachable against
+the reference implementation.
+
+Direction matters here. Being *stricter* than libutp risks interoperability;
+being *more permissive* is an attack surface. This is the stricter direction,
+with the interoperability risk shown to be empty. It is asserted explicitly by
+`TestMalformedSelectiveAckLength` in the M2 corpus, which fails if either side
+changes: if we start accepting these, or if libutp starts rejecting them.
+
 ## Inherited notes that claim consistency with the reference
 
 Two comments in `conn.go` describe behaviour as matching the reference

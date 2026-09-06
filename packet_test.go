@@ -12,7 +12,12 @@ import (
 
 func (p *PacketHeaderV1) Generate(rand *rand.Rand, size int) reflect.Value {
 	packetType := PacketType(rand.Intn(5))
-	extension := byte(rand.Intn(256))
+	// The extension byte must name a known extension: the decoder rejects
+	// anything above MAX_KNOWN_EXTENSION, matching libutp
+	// (utp_internal.cpp:2481). This generator previously produced arbitrary
+	// bytes and asserted they survived a round trip, which only held while
+	// the decoder validated nothing.
+	extension := byte(rand.Intn(MAX_KNOWN_EXTENSION + 1))
 	header := &PacketHeaderV1{
 		PacketType:    packetType,
 		Version:       PROTOCOL_VERSION_ONE,

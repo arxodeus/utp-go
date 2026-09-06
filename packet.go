@@ -10,12 +10,15 @@ const (
 	MINIMAL_HEADER_SIZE                    = 20
 	MINIMAL_HEADER_SIZE_WITH_SELECTIVE_ACK = 26
 	PROTOCOL_VERSION_ONE                   = 1
-	ZERO_MOMENT                            = time.Duration(0)
-	ACKS_ARRAY_LENGTH                      = byte(4)
-	PACKET_HEADER_LEN                      = 20
-	SELECTIVE_ACK_BITS                     = 32
-	EXTENSION_TYPE_LEN                     = 1
-	EXTENSION_LEN_LEN                      = 1
+	// MAX_KNOWN_EXTENSION is the highest extension type either implementation
+	// recognises: 0 none, 1 selective ack, 2 extension bits.
+	MAX_KNOWN_EXTENSION = 2
+	ZERO_MOMENT         = time.Duration(0)
+	ACKS_ARRAY_LENGTH   = byte(4)
+	PACKET_HEADER_LEN   = 20
+	SELECTIVE_ACK_BITS  = 32
+	EXTENSION_TYPE_LEN  = 1
+	EXTENSION_LEN_LEN   = 1
 )
 
 const (
@@ -28,6 +31,8 @@ const (
 
 var (
 	ErrInvalidHeaderSize           = errors.New("invalid header size")
+	ErrUnsupportedVersion          = errors.New("unsupported protocol version")
+	ErrUnknownExtension            = errors.New("unknown extension type")
 	ErrInvalidPacketVersion        = errors.New("invalid packet version")
 	ErrInvalidPacketType           = errors.New("invalid packet type")
 	ErrInvalidExtensionType        = errors.New("invalid extension type")
@@ -103,10 +108,38 @@ func DecodePacketHeader(value []byte) (*PacketHeaderV1, error) {
 		return nil, err
 	}
 
+	// Version 1 is the only version either this implementation or libutp
+	// speaks. libutp drops anything else outright (utp_internal.cpp:2834),
+	// and accepting what the reference rejects is both an incompatibility and
+	// an attack surface: it lets a peer reach the rest of this decoder with a
+	// packet no real implementation would have sent.
 	version := value[0] & 0x0F
+	if version != PROTOCOL_VERSION_ONE {
+		return nil, ErrUnsupportedVersion
+	}
 	versionVal := version
 
+	// The first extension byte must name a known extension: 0 (none),
+	// 1 (selective ack) or 2 (extension bits).
+	//
+	// libutp folds this into its version check. UTP_Version
+	// (utp_internal.cpp:2481) returns the version only if
+	// `pf->type() < ST_NUM_STATES && pf->ext < 3`, and returns 0 otherwise,
+	// which the caller then rejects as an unsupported version
+	// (utp_internal.cpp:2834). So a packet whose *first* extension is type 3
+	// or above is dropped outright.
+	//
+	// Only the first one: an unknown extension further along a chain is
+	// skipped by its length, which is what BEP 29 describes. Verified
+	// empirically against libutp -- a chain of selective-ack followed by
+	// extension 99 is accepted, while extension 99 alone is not.
+	//
+	// Accepting what the reference rejects is both an incompatibility and an
+	// attack surface, so this rejects too.
 	extension := value[1]
+	if extension > MAX_KNOWN_EXTENSION {
+		return nil, ErrUnknownExtension
+	}
 
 	connID := binary.BigEndian.Uint16(value[2:4])
 	tsMicros := binary.BigEndian.Uint32(value[4:8])

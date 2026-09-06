@@ -22,6 +22,9 @@ type step struct {
 	name string
 	// inject is a packet arriving from the peer.
 	inject *packet
+	// injectRaw is the same, but as bytes, for packets too malformed to build
+	// through the packet builder.
+	injectRaw []byte
 	// write queues application data.
 	write []byte
 	// closeStream closes the connection.
@@ -107,8 +110,8 @@ func runResponderCorpus(t *testing.T, steps []step) {
 
 	for i, st := range steps {
 		// libutp
-		if st.inject != nil {
-			drv.Inject(st.inject.Encode())
+		if raw := st.rawBytes(); raw != nil {
+			drv.Inject(raw)
 		}
 		if st.write != nil {
 			if _, err := drv.Write(st.write); err != nil {
@@ -127,8 +130,8 @@ func runResponderCorpus(t *testing.T, steps []step) {
 		drv.ClearEmitted()
 
 		// ours
-		if st.inject != nil {
-			conn.inject(st.inject.Encode())
+		if raw := st.rawBytes(); raw != nil {
+			conn.inject(raw)
 		}
 		if st.write != nil {
 			s := getStream()
@@ -354,4 +357,40 @@ func TestConformanceWildlyInvalidAckNumIsIgnored(t *testing.T) {
 			wantNoEmission: true,
 		},
 	})
+}
+
+// rawBytes is the wire form of whatever this step injects, if anything.
+func (s step) rawBytes() []byte {
+	if s.injectRaw != nil {
+		return s.injectRaw
+	}
+	if s.inject != nil {
+		return s.inject.Encode()
+	}
+	return nil
+}
+
+// libutpNewDriverForCorpus builds a driver pinned the way the corpus expects.
+func libutpNewDriverForCorpus() (*libutp.Driver, error) {
+	d, err := libutp.NewDriver(1_000_000)
+	if err != nil {
+		return nil, err
+	}
+	d.PushRandom(corpusPinnedSeq)
+	return d, nil
+}
+
+// goResponderForCorpus starts one of our sockets accepting the corpus
+// connection, and returns its scripted transport.
+func goResponderForCorpus(t *testing.T) (*scriptedConn, *UtpSocket, context.CancelFunc) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	conn := newScriptedConn()
+	sock := WithSocket(ctx, conn, conformanceLogger())
+	cid := NewConnectionId(conn.peer, corpusSynConnID+1, corpusSynConnID)
+	go func() {
+		_, _ = sock.AcceptWithCid(ctx, cid, NewConnectionConfig())
+	}()
+	time.Sleep(100 * time.Millisecond)
+	return conn, sock, cancel
 }
