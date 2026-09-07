@@ -19,7 +19,7 @@ all.
 | **M5** — verify LEDBAT, add LEDBAT++ | **Done.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft, opt-in. Deference measured against a loss-based competitor over a shared bottleneck: classic LEDBAT takes 60% of the link from it, LEDBAT++ takes 44%. See [BENCHMARKS.md](BENCHMARKS.md). |
 | **M6** — MTU path discovery | **Not done.** Not investigated. |
 | **M7** — anacrolix/torrent integration | **Done, with one gap.** `utpnet` presents a uTP socket as `net.PacketConn`/`net.Conn` and satisfies torrent's uTP interface, checked against the real interface by reflection in `integration/anacrolix`. The gap: torrent selects its uTP implementation at build time, so wiring it in needs a `replace` or a patched file — recipes in that module's README. |
-| **M8** — soak and hardening | **Partly done.** Four fuzz targets (three on the decoder, one driving a live connection) and three soak tests; two defects found and fixed. See [FUZZING.md](FUZZING.md). Not done: differential fuzzing against libutp, the initiator role, and anything running for hours. |
+| **M8** — soak and hardening | **Partly done.** Five fuzz targets — three on the decoder, one driving a live connection, and one differential against real libutp — plus three soak tests. Five defects found and fixed. See [FUZZING.md](FUZZING.md). Not done: the initiator role, timing comparison, and anything running for hours. |
 
 **The interoperability gate now passes.** libutp is vendored at the pinned
 commit in `native/libutp/`, with a bridge that gives it a UDP socket and an
@@ -832,6 +832,41 @@ byte stream.
 - **No way to learn the local address.** `Bind` with port 0 — the usual thing
   to do — gave no way to find out which port the kernel chose.
   `UtpSocket.LocalAddr` was added.
+
+## A peer could push us arbitrarily far ahead in sequence space
+
+**Fixed.** libutp drops any packet whose sequence number is more than 1024 past
+the next expected one, without buffering it, acking it, or letting it touch
+congestion control (`REORDER_BUFFER_MAX_SIZE`, `utp_internal.cpp:54`, applied
+at `:1890`). One that is *old* — up to 1024 behind — is dropped too, but
+re-acked first, because the peer evidently missed the ack already sent.
+
+This fork had no bound at all. A peer could name any sequence number in the
+16-bit space and we would buffer the packet as out-of-order data and answer it
+with a STATE. Unbounded pending state driven by a remote party, one emitted
+packet per junk packet where the reference emits none, and a selective ack
+naming nothing (the sequence number being far outside the 30-entry window).
+
+## Packets acking data we never sent were processed
+
+**Fixed, and it corrects a claim this repository made.** libutp validates the
+acknowledgement number before anything else (`utp_internal.cpp:1794-1807`):
+
+> ignore packets whose ack_nr is invalid. This would imply a spoofed address or
+> a malicious attempt to attach the uTP implementation. acking a packet that
+> hasn't been sent yet!
+
+CONFORMANCE.md previously recorded that we "already match" here. We did not.
+Two corpus cases happened to produce the same silence for other reasons, so
+the agreement was incidental and the rule was never implemented. A single
+`ST_DATA` whose `ack_nr` named a packet we had never sent was enough to show
+it — once there was something generating packets nobody had thought of, and
+libutp on hand to say what the answer should have been.
+
+Both of these were found by `FuzzDifferentialResponder`, which is the M2
+conformance harness and the M8 fuzzer wired together: the fuzzer generates the
+packets, libutp decides whether the answer was right. Neither half could find
+these alone. See [FUZZING.md](FUZZING.md).
 
 ## Failed connection attempts leaked socket state
 

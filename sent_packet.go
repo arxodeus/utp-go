@@ -140,6 +140,19 @@ func (s *sentPackets) OnTick(now time.Time) {
 	s.congestionCtrl.OnTick(now)
 }
 
+// UnackedCount is how many packets have been sent and not yet acknowledged --
+// libutp's `cur_window_packets`.
+func (s *sentPackets) UnackedCount() uint16 {
+	if len(s.packets) == 0 {
+		return 0
+	}
+	lastAck, none := s.LastAckNum()
+	if none {
+		return uint16(len(s.packets))
+	}
+	return s.NextSeqNum() - 1 - lastAck
+}
+
 func (s *sentPackets) HasUnackedPackets() bool {
 	_, err := s.FirstUnackedSeqNum()
 	return err == nil

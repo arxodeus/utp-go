@@ -99,6 +99,31 @@ with the interoperability risk shown to be empty. It is asserted explicitly by
 `TestMalformedSelectiveAckLength` in the M2 corpus, which fails if either side
 changes: if we start accepting these, or if libutp starts rejecting them.
 
+## Completing an incoming connection
+
+**libutp completes one only on an `ST_DATA` packet. We complete it on the
+handshake.**
+
+`if (pk_flags == ST_DATA && conn->state == CS_SYN_RECV) conn->state =
+CS_CONNECTED;` (`utp_internal.cpp:2158-2161`). Until data arrives libutp sits
+in `CS_SYN_RECV`, and the guard at `:2314` drops everything else without a
+word — so a peer that completes the handshake and immediately sends a FIN gets
+silence until its idle timeout, and a zero-length transfer never completes at
+all.
+
+Reason: that is a defect in the reference, not a rule worth reproducing. A
+peer that opens a connection, sends nothing and closes is doing something
+legitimate. Our answer is one STATE for one FIN, from a peer that has already
+completed a handshake, so it is neither an amplification vector nor reachable
+without completing one — the two things that would make being more talkative
+than libutp dangerous.
+
+Pinned by `TestConformanceFinBeforeAnyData`, which fails if either side
+changes. It is also why `FuzzDifferentialResponder` primes both implementations
+with one data packet before feeding them generated input: without that, every
+sequence not starting with data reports this divergence instead of finding a
+new one.
+
 ## No half-close
 
 **We tear the connection down when the peer's FIN is reached. libutp keeps it

@@ -14,6 +14,7 @@ go test -run xxx -fuzz '^FuzzDecodePacketHeader$'    -fuzztime 5m
 go test -run xxx -fuzz '^FuzzDecodePacket$'          -fuzztime 5m
 go test -run xxx -fuzz '^FuzzDecodeSelectiveAck$'    -fuzztime 5m
 go test -run xxx -fuzz '^FuzzResponderPacketSequence$' -fuzztime 5m
+go test -run xxx -fuzz '^FuzzDifferentialResponder$'   -fuzztime 10m
 ```
 
 Soak:
@@ -66,6 +67,56 @@ It runs at roughly 25–100 executions per second, against ~50,000/sec for the
 decoder targets, because each execution builds and tears down a socket. Run it
 for longer rather than expecting the same coverage.
 
+### `FuzzDifferentialResponder`
+
+The fuzzer generating input and **libutp deciding whether the answer was
+right**.
+
+The two halves existed separately and neither could do this alone. M2's
+harness drives both implementations through the same packets and compares
+what each emits, field by field — but only on cases someone wrote down. The
+fuzzer above generates sequences nobody wrote down — but could only tell that
+this implementation had crashed, hung, or died, because it had nothing to
+compare against. A *behavioural* divergence on input nobody thought of is
+invisible to either.
+
+The property is not "the two agree". They deliberately do not, in ways
+CONFORMANCE.md and DEVIATIONS.md set out, and a fuzzer that failed on those
+would be useless. It is the direction rule those documents already use:
+
+> Being stricter than the reference is an interoperability risk.
+> Being more permissive is an attack surface.
+
+So: **we must never answer more than libutp does** — asserted strictly, because
+emitting a packet where the reference stays silent is the amplification
+surface and is what a malformed-input attack looks for. **Where both answer,
+the significant fields must agree**, with timestamps and the advertised window
+exempt for the reasons in `allowedToDiffer`. **Answering less is permitted**,
+and is where the documented divergences live; being quieter cannot be
+exploited, only cost interoperability, which the M2 corpus pins case by case.
+
+Two details make the comparison mean what it says:
+
+- **Packets are matched per connection id, not by position.** Order between
+  packets for different connections is not observable by any peer, and ours
+  falls out differently because a RESET for a connection we do not have is
+  answered on the socket's goroutine while a connection's own STATE goes
+  through that connection's. Comparing by position reported that as a
+  five-field divergence when the two had emitted the same two packets. Order
+  *within* one connection is observable, and is compared.
+- **Both sides are primed with one in-order data packet** after the handshake.
+  libutp completes an incoming connection only on an `ST_DATA`
+  (`utp_internal.cpp:2158-2161`) and sits in `CS_SYN_RECV` dropping everything
+  until one arrives; we treat it as established once the handshake completes.
+  Without priming, every generated sequence starting with anything but data
+  reported that one known divergence instead of finding a new one. The
+  divergence itself is pinned by `TestConformanceFinBeforeAnyData`, so
+  removing it here does not hide it.
+
+It runs at roughly 10–20 executions per second, because each one builds two
+implementations and waits for ours to go quiet. That is the price of an
+oracle.
+
 ### The soak tests
 
 - `TestSoakConnectionChurn` — connections opened, used and closed in a loop.
@@ -102,6 +153,55 @@ emitted unparseable packets.
 
 Both minimised inputs are in `testdata/fuzz/FuzzDecodePacket/`.
 
+### No bound on how far ahead a peer could push us
+
+**Fixed.** libutp drops any packet whose sequence number is more than 1024
+past the next expected one, without buffering it, acking it, or letting it
+touch congestion control (`REORDER_BUFFER_MAX_SIZE`, `utp_internal.cpp:54`,
+applied at `:1890`). A packet that is *old* — within 1024 behind — is also
+dropped, but re-acked first, because the peer evidently missed the ack already
+sent.
+
+This fork had no such bound. A peer could name any sequence number in the
+16-bit space and we would buffer the packet as out-of-order data and answer it
+with a STATE. Three costs: unbounded pending state driven by a remote party,
+one emitted packet per junk packet where the reference emits none, and — since
+the sequence number is far outside the 30-entry selective-ack window — a
+selective ack naming nothing at all.
+
+A single `ST_FIN` with a sequence number 11,435 past the expected one drew a
+STATE from us and silence from libutp.
+
+### Packets acking data we never sent were processed
+
+**Fixed, and it corrects an earlier claim.** libutp validates the
+acknowledgement number before anything else, and is unusually explicit about
+why (`utp_internal.cpp:1794-1807`):
+
+> ignore packets whose ack_nr is invalid. This would imply a spoofed address or
+> a malicious attempt to attach the uTP implementation. acking a packet that
+> hasn't been sent yet!
+
+The acceptable range is a short window ending at the last sequence number
+actually sent. We had no such rule. CONFORMANCE.md previously recorded that we
+"already match" here, on the strength of two corpus cases that happened to
+produce the same silence for other reasons — the behaviour was incidental, not
+implemented, and the fuzzer showed the difference with a single `ST_DATA`
+whose `ack_nr` named a packet we had never sent.
+
+Order matters between these two: a packet rejected for its ack number must not
+first draw a re-ack from the reorder-window check.
+
+### Our re-ack consumed a sequence number
+
+**Fixed**, and it was introduced by the reorder-window fix above — caught two
+fuzz runs later. The re-ack went through `transmit()`, which registers the
+packet with `SentPackets` and arms a retransmission timer. A STATE is neither
+retransmitted nor numbered: libutp's `send_ack` writes the current `seq_nr`
+without consuming it (`utp_internal.cpp:781`, with `:1088-1089` showing where
+one *is* consumed). Every re-ack advanced our sequence number, so the next
+STATE carried a number libutp's never would.
+
 ### Failed connection attempts leaked socket state
 
 **Fixed.** The socket was told to forget a connection from exactly one place:
@@ -124,11 +224,14 @@ connection outliving its socket cannot block on the report.
 - **No fuzzing of the initiator role.** `FuzzResponderPacketSequence` drives
   the accepting side only, as the M2 corpus does. A malicious *server* is not
   modelled.
-- **No differential fuzzing against libutp.** The M2 harness can compare the
-  two implementations on a given input, and the fuzzer can generate inputs,
-  but they are not wired together. That is the obvious next step and it is not
-  done: it would turn every divergence in behaviour into a fuzz failure rather
-  than only crashes and hangs.
+- **Differential fuzzing covers the responder role only**, as the M2 corpus
+  does. A malicious *server* — one that answers our SYN — is not modelled by
+  either.
+- **The differential comparison is coarse in time.** It compares what each
+  side emitted after the whole sequence, not after each packet, because
+  settling ours between every packet costs more than the coverage is worth.
+  A divergence in *when* a packet is sent, rather than whether or what, would
+  not be caught.
 - **No long-running soak.** The longest run here is a few hundred connection
   cycles over seconds. Nothing has been run for hours, which is where a slow
   leak — a few bytes per connection — would show and these would not.

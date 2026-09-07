@@ -983,6 +983,160 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 	}
 }
 
+// reorderBufferMaxSize bounds how far past the next expected sequence number
+// a packet may name and still be processed.
+//
+// libutp: `#define REORDER_BUFFER_MAX_SIZE 1024` (utp_internal.cpp:54),
+// applied at :1890. It is the limit on how far ahead a peer can push this
+// connection's pending state, and therefore on what a peer can make it hold.
+const reorderBufferMaxSize = uint16(1024)
+
+// reorderOldPacketFloor is the other end of the same test: a distance at or
+// above this has wrapped, so the packet is an *old* one within
+// reorderBufferMaxSize behind us rather than a wildly future one. libutp
+// writes it as `(SEQ_NR_MASK + 1) - REORDER_BUFFER_MAX_SIZE`
+// (utp_internal.cpp:1891).
+const reorderOldPacketFloor = uint16(1<<16 - 1024)
+
+// ackNrAllowedWindow is how far behind the last sent sequence number a peer's
+// acknowledgement may point and still be believed.
+//
+// libutp: `#define ACK_NR_ALLOWED_WINDOW DUPLICATE_ACKS_BEFORE_RESEND`, which
+// is 3 (utp_internal.cpp:64, :69).
+const ackNrAllowedWindow = uint16(3)
+
+// invalidAckNum reports whether a packet acknowledges something this
+// connection never sent, or something so old it cannot be meaningful.
+//
+// libutp (utp_internal.cpp:1794-1807), which is unusually explicit about why:
+//
+//	// ignore packets whose ack_nr is invalid. This would imply a spoofed
+//	// address or a malicious attempt to attach the uTP implementation.
+//	// acking a packet that hasn't been sent yet!
+//
+//	const uint16 curr_window = max<uint16>(
+//	    conn->cur_window_packets + ACK_NR_ALLOWED_WINDOW, ACK_NR_ALLOWED_WINDOW);
+//	if ((pk_flags != ST_SYN || conn->state != CS_SYN_RECV) &&
+//	    (wrapping_compare_less(conn->seq_nr - 1, pk_ack_nr, ACK_NR_MASK)
+//	     || wrapping_compare_less(pk_ack_nr, conn->seq_nr - 1 - curr_window, ACK_NR_MASK)))
+//	    return 0;
+//
+// The acceptable range is a short window ending at the last sequence number
+// actually sent. Anything above it acknowledges a packet that does not exist
+// yet; anything below is too stale to act on.
+//
+// This fork had no such rule. CONFORMANCE.md previously recorded that we
+// "already match" here, on the strength of two corpus cases that happened to
+// produce the same silence for other reasons -- the behaviour was incidental,
+// not implemented. FuzzDifferentialResponder showed the difference with a
+// single ST_DATA whose ack_nr named a packet we had never sent: libutp
+// dropped it without a word, we answered it.
+func (c *connection) invalidAckNum(pkt *packet) bool {
+	if pkt.Header.PacketType == st_syn {
+		// libutp's exception for a SYN arriving in CS_SYN_RECV: there are no
+		// previous packets for it to be acking.
+		return false
+	}
+	if c.state.stateType != ConnConnected || c.state.SentPackets == nil {
+		return false
+	}
+
+	lastSent := c.state.SentPackets.NextSeqNum() - 1
+	window := c.state.SentPackets.UnackedCount() + ackNrAllowedWindow
+	if window < ackNrAllowedWindow {
+		window = ackNrAllowedWindow
+	}
+
+	ackNum := pkt.Header.AckNum
+	if wrappingLessThan(lastSent, ackNum) {
+		// Acknowledges a packet we have not sent.
+		return true
+	}
+	if wrappingLessThan(ackNum, lastSent-window) {
+		// Too far behind to mean anything.
+		return true
+	}
+	return false
+}
+
+// outsideReorderWindow reports whether a packet names a sequence number too
+// far from the one expected to be worth processing, and answers it the way
+// libutp does if so.
+//
+// libutp (utp_internal.cpp:1886-1899):
+//
+//	const uint seqnr = (pk_seq_nr - conn->ack_nr - 1) & SEQ_NR_MASK;
+//	if (seqnr >= REORDER_BUFFER_MAX_SIZE) {
+//	    if (seqnr >= (SEQ_NR_MASK + 1) - REORDER_BUFFER_MAX_SIZE
+//	        && pk_flags != ST_STATE) conn->schedule_ack();
+//	    return 0;
+//	}
+//
+// `seqnr` counts how far past the next expected packet this one is, so 0 means
+// "exactly the packet we are waiting for". Past 1024 the packet is either
+// absurdly far in the future or, by wrapping, an old one already consumed.
+// Either way libutp drops it without buffering it, acking it, or letting it
+// touch congestion control. An old packet -- within 1024 behind, and not a
+// STATE -- additionally re-triggers an ack, because the peer evidently missed
+// the one already sent.
+//
+// This fork had no such bound. A peer could name any sequence number in the
+// 16-bit space and we would buffer the packet as out-of-order data and answer
+// it with a STATE. Three costs: unbounded pending state driven by a remote
+// party, one emitted packet per junk packet where the reference emits none,
+// and -- since the sequence number is far outside the 30-entry selective-ack
+// window -- a selective ack naming nothing at all.
+//
+// The check covers ST_DATA, ST_STATE and ST_FIN only. libutp reaches it
+// through utp_process_incoming, which a SYN returns from before the check
+// (utp_internal.cpp:1878) and which a RESET never enters at all: RESET is
+// handled in its own branch at the socket level and returns
+// (utp_internal.cpp:2855-2880).
+//
+// Both the missing bound and the wrongly-included RESET were found by
+// FuzzDifferentialResponder, which runs this implementation and libutp over
+// the same generated packet sequences and fails when we answer something the
+// reference ignores.
+func (c *connection) outsideReorderWindow(pkt *packet) bool {
+	switch pkt.Header.PacketType {
+	case st_data, st_state, st_fin:
+	default:
+		return false
+	}
+	if c.state.stateType != ConnConnected || c.state.RecvBuf == nil {
+		return false
+	}
+
+	distance := pkt.Header.SeqNum - c.state.RecvBuf.AckNum() - 1 // wrapping
+	if distance < reorderBufferMaxSize {
+		return false
+	}
+
+	if distance >= reorderOldPacketFloor && pkt.Header.PacketType != st_state {
+		// An old packet the peer is still retransmitting: re-ack, as libutp
+		// does, so it can stop.
+		//
+		// Emitted directly rather than through transmit(), which registers
+		// the packet with SentPackets and arms a retransmission timer. A
+		// STATE is neither retransmitted nor numbered: libutp's send_ack
+		// writes the current seq_nr without consuming it
+		// (utp_internal.cpp:781, with :1088-1089 showing where one is
+		// consumed). Going through transmit() advanced our sequence number
+		// on every re-ack, so the next STATE carried a number libutp's never
+		// would -- caught by FuzzDifferentialResponder comparing consecutive
+		// acks.
+		if statePkt := c.statePacket(); statePkt != nil {
+			c.socketEvents <- newOutgoingSocketEvent(statePkt, c.cid)
+		}
+	}
+	if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		c.logger.Trace("dropping packet outside the reorder window",
+			"seqNum", pkt.Header.SeqNum, "ackNum", c.state.RecvBuf.AckNum(),
+			"distance", distance)
+	}
+	return true
+}
+
 func (c *connection) onPacket(packet *packet, now time.Time) {
 	if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 		c.logger.Trace("on packet start...",
@@ -1020,6 +1174,21 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 		c.peerTsDiff = time.Second
 	} else {
 		c.peerTsDiff = peerTsDiff
+	}
+
+	// libutp validates the acknowledgement number before anything else, and
+	// so does this. Order matters: a packet rejected here must not first
+	// draw a re-ack from the reorder-window check below.
+	if c.invalidAckNum(packet) {
+		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+			c.logger.Trace("dropping packet with an out-of-range ack number",
+				"ackNum", packet.Header.AckNum, "type", packet.Header.PacketType.String())
+		}
+		return
+	}
+
+	if c.outsideReorderWindow(packet) {
+		return
 	}
 
 	// Handle different packet types

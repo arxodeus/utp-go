@@ -62,6 +62,7 @@ differs rather than silently skipping it:
 | `MalformedUnknownConnectionId` | a non-SYN packet for a connection neither side has |
 | `WideReordering` | a gap, then a packet 40 past it — the selective-ack window's width |
 | `DataAfterReachedFin` | data arriving past a FIN already reached in order (a divergence — see below) |
+| `FinBeforeAnyData` | a FIN as the first packet after the handshake (a divergence — see below) |
 
 ## What it found
 
@@ -87,14 +88,30 @@ invisible to any test that compares an implementation only against itself.
 
 ### Packets acking unsent data
 
-Checked, and we already match: libutp drops any packet whose `ack_nr` acks a
-sequence number it has not sent, calling it "a spoofed address or a malicious
-attempt to attach the uTP implementation" (`utp_internal.cpp:1795-1806`). We
-emit nothing for such a packet either.
+**This section previously said "checked, and we already match". That was
+wrong**, and differential fuzzing showed it. The two corpus cases that
+supported the claim produce the same silence for other reasons; the rule
+itself was never implemented, so the agreement was incidental.
 
-Finding this was incidental — the first version of the corpus used
+libutp drops any packet whose `ack_nr` falls outside a short window ending at
+the last sequence number it actually sent, calling it "a spoofed address or a
+malicious attempt to attach the uTP implementation"
+(`utp_internal.cpp:1794-1807`). `connection.invalidAckNum` now implements that
+rule, ahead of everything else, as libutp does.
+
+Finding the rule was incidental — the first version of the corpus used
 `ack_nr = seq_nr`, libutp silently dropped every packet, and the resulting
-confusion led to the check.
+confusion led to reading the check. Finding that we did not *follow* it took
+`FuzzDifferentialResponder`.
+
+### No bound on how far ahead a peer could push us
+
+**Fixed.** libutp drops any packet more than 1024 sequence numbers past the
+next expected one, and re-acks (without processing) one that is up to 1024
+behind (`utp_internal.cpp:54`, `:1890`). We had no bound: a peer could name
+any sequence number in the 16-bit space and we would buffer the packet and
+answer it. Found by `FuzzDifferentialResponder`; see
+[FUZZING.md](FUZZING.md).
 
 ### The version nibble was never checked
 
@@ -140,7 +157,7 @@ byte comparison only because both sides do answer such a packet.
 
 ## Deliberate divergences
 
-Three, asserted explicitly in the corpus rather than absorbed into a tolerance:
+Four, asserted explicitly in the corpus rather than absorbed into a tolerance:
 
 **libutp acks twice on reaching a FIN.** Once immediately
 (`utp_internal.cpp:2370`, *"if the other end wants to close, ack"*) and once
@@ -176,6 +193,24 @@ means a new connection state and a write path that survives the peer's FIN.
 `TestConformanceDataAfterReachedFin` pins the current behaviour — it asserts
 that we emit exactly one RESET and that libutp emits nothing, so it fails both
 if libutp changes and if half-close lands here.
+
+**libutp completes an incoming connection only on data; we complete it on the
+handshake.** `if (pk_flags == ST_DATA && conn->state == CS_SYN_RECV)
+conn->state = CS_CONNECTED;` (`utp_internal.cpp:2158-2161`). Until an `ST_DATA`
+arrives, libutp sits in `CS_SYN_RECV` and the guard at `:2314` drops
+everything else without a word — so a peer that completes the handshake and
+immediately sends a FIN gets silence until its idle timeout.
+
+We treat the connection as established once the handshake completes. The
+reason for not matching: a peer that opens a connection, sends nothing and
+closes is doing something legitimate, and our answer is one STATE for one FIN
+from a peer that has already completed a handshake — neither an amplification
+vector nor reachable without completing one.
+
+`TestConformanceFinBeforeAnyData` pins it. It is also why
+`FuzzDifferentialResponder` primes both sides with one data packet: without
+that, every generated sequence not starting with data reports this known
+divergence instead of finding a new one.
 
 ## Limits
 

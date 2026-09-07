@@ -376,6 +376,27 @@ Both found by tests of a kind this repository did not have.
 Comes with the fuzz targets and soak tests that found them, plus the two
 minimised regression inputs.
 
+## PR 18 — two hardening rules from libutp, found by differential fuzzing
+
+Both are checks libutp performs and this fork did not, and both are in the
+direction that matters: we answered packets the reference drops.
+
+- **No reorder-window bound.** libutp drops any packet more than 1024
+  sequence numbers past the next expected one, and re-acks (without
+  processing) one up to 1024 behind (`utp_internal.cpp:54`, `:1890`). We
+  buffered anything a peer named, anywhere in the 16-bit space, and answered
+  it: unbounded pending state driven by a remote party, plus one emitted
+  packet per junk packet.
+- **No ack_nr validation.** libutp drops any packet acking outside a short
+  window ending at the last sequence number it sent, and says why in the
+  source: "a spoofed address or a malicious attempt to attach the uTP
+  implementation" (`utp_internal.cpp:1794-1807`). Order matters -- a packet
+  rejected here must not first draw a re-ack from the reorder check.
+
+Comes with `FuzzDifferentialResponder`, which found them: the M2 conformance
+harness and the M8 fuzzer wired together, so libutp decides whether the answer
+to a generated packet sequence was right. Neither half could find these alone.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

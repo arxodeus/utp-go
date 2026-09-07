@@ -460,3 +460,58 @@ func TestConformanceDataAfterReachedFin(t *testing.T) {
 	t.Logf("deliberate divergence: data past a reached FIN -- libutp stays silent (CS_GOT_FIN), " +
 		"we have already torn the connection down and the socket answers with a RESET")
 }
+
+// A FIN as the first packet after the handshake, before any data.
+//
+// A deliberate divergence. libutp completes an incoming connection only on an
+// ST_DATA packet:
+//
+//	// Incoming connection completion
+//	if (pk_flags == ST_DATA && conn->state == CS_SYN_RECV) {
+//	    conn->state = CS_CONNECTED;
+//	}
+//	                                        (utp_internal.cpp:2158-2161)
+//
+// so a FIN -- or anything else -- arriving first leaves the socket in
+// CS_SYN_RECV, where the guard at :2314 drops it without a word. The peer
+// gets no acknowledgement at all and must retransmit until it happens to send
+// data, which for a zero-length transfer it never will.
+//
+// We treat the connection as established once the handshake completes and
+// process whatever arrives next. The reason for not matching libutp here: a
+// peer that opens a connection, sends nothing and closes is doing something
+// legitimate, and libutp answers it with silence until the idle timeout. Our
+// answer is one STATE for one FIN, from a peer that has already completed a
+// handshake, so it is neither an amplification vector nor reachable without
+// completing one.
+//
+// Found by FuzzDifferentialResponder. It is pinned here so the divergence
+// cannot drift, and so the fuzzer -- which primes both sides with a data
+// packet to get past exactly this state difference -- is not the only record
+// of it.
+func TestConformanceFinBeforeAnyData(t *testing.T) {
+	raws := [][]byte{
+		NewPacketBuilder(st_fin, corpusSynConnID+1, 200000, corpusWindow, corpusSynSeq+1).
+			WithAckNum(corpusPinnedSeq - 1).Build().Encode(),
+	}
+	ours, libutpOut := runDivergenceSteps(t, raws)
+
+	if len(libutpOut) != 0 {
+		t.Errorf("libutp emitted %d packet(s) for a FIN before any data; it is expected to "+
+			"stay in CS_SYN_RECV and drop it, so this case no longer documents the divergence "+
+			"it was written for", len(libutpOut))
+	}
+	if len(ours) != 1 {
+		t.Fatalf("we emitted %d packets, want exactly 1 (the STATE acknowledging the FIN)", len(ours))
+	}
+	pkt, err := DecodePacket(ours[0])
+	if err != nil {
+		t.Fatalf("decoding our own emission: %v", err)
+	}
+	if pkt.Header.PacketType != st_state {
+		t.Errorf("we emitted packet type %d for a FIN before any data; the documented "+
+			"divergence is a STATE", pkt.Header.PacketType)
+	}
+	t.Logf("deliberate divergence: a FIN before any data -- libutp stays in CS_SYN_RECV and " +
+		"drops it silently, we acknowledge it")
+}
