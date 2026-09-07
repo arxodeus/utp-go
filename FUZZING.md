@@ -272,12 +272,12 @@ connection outliving its socket cannot block on the report.
 - **No fuzzing of the initiator role.** `FuzzResponderPacketSequence` drives
   the accepting side only, as the M2 corpus does. A malicious *server* is not
   modelled.
-- **No timing comparison.** The differential targets compare *what* each side
-  emitted after each packet, not *when*. libutp defers acks and flushes them
-  at defined points; ours acks from a goroutine on a real clock. A divergence
-  in latency, or in how many packets are coalesced into one ack, would not be
-  caught. Doing better needs an injectable clock in our connection, which is
-  the same thing the M2 corpus needs and does not have — see CONFORMANCE.md.
+- **No timing comparison in the fuzz targets.** They compare *what* each side
+  emitted after each packet, not *when*. Retransmission timing is now compared
+  directly, by measurement, in `conformance_timing_test.go` — but ack timing
+  is not: libutp defers acks and flushes them at defined points, ours acks
+  from a goroutine on a real clock, and a divergence in latency or in how many
+  packets are coalesced into one ack would not be caught here.
 - **The M2 corpus is still responder-only.** The fuzzer now drives both roles;
   the hand-written cases do not.
 - **Each differential execution injects at most 8 packets**, so a divergence

@@ -233,3 +233,56 @@ func TestRetransmitKeysAreScoped(t *testing.T) {
 		t.Fatalf("after disarming one scope, Len() = %d, want 1", got)
 	}
 }
+
+// The same promise, but armed part-way through a tick.
+//
+// TestTimeWheelNeverFiresEarly arms everything immediately after the wheel is
+// created, when the next tick is a full interval away. That is the one case
+// where placing an item n-1 slots ahead happens to be right, so the wheel
+// passed that test while firing up to a full interval early for every timer
+// armed at any other moment -- which, in a live connection, is all of them.
+//
+// This arms at a range of offsets through the tick cycle. It reproduced the
+// defect at every offset but zero.
+func TestTimeWheelNeverFiresEarlyWhenArmedMidCycle(t *testing.T) {
+	const interval = 20 * time.Millisecond
+
+	for _, offsetNum := range []int{1, 2, 3} {
+		offset := interval * time.Duration(offsetNum) / 4
+		t.Run(offset.String()+"-into-the-tick", func(t *testing.T) {
+			f := newFiring()
+			tw := newTimeWheel[int](interval, 8, f.record)
+			defer tw.stop()
+
+			// Let the wheel get part-way through a tick before arming.
+			time.Sleep(offset)
+
+			delays := map[any]time.Duration{
+				"one-tick":    interval,
+				"two-ticks":   2 * interval,
+				"three-ticks": 3 * interval,
+			}
+			armedAt := time.Since(f.start)
+			for k, d := range delays {
+				tw.put(k, 1, d)
+			}
+
+			time.Sleep(6*interval + 200*time.Millisecond)
+
+			for k, want := range delays {
+				got, ok := f.at(k)
+				if !ok {
+					t.Errorf("%v (delay %v) never fired", k, want)
+					continue
+				}
+				// f.at records the time since the recorder was created; the
+				// delay is owed from when the item was armed.
+				sinceArmed := got - armedAt
+				if sinceArmed < want {
+					t.Errorf("%v fired %v after arming, before its %v delay "+
+						"(armed %v into the tick cycle)", k, sinceArmed, want, offset)
+				}
+			}
+		})
+	}
+}

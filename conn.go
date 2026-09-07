@@ -194,6 +194,23 @@ type connection struct {
 	// retransmitCount is consecutive retransmission timeouts with no
 	// intervening ack. libutp calls this retransmit_count.
 	retransmitCount int
+	// rtoDeadline is when this connection's retransmission timeout expires.
+	//
+	// libutp has exactly one of these per connection (`rto_timeout`,
+	// utp_internal.cpp:494): armed when the first packet enters an empty
+	// window (:994-998), reset on every acknowledgement of new data
+	// (:1388-1389), and compared against the clock before a timeout is
+	// declared (:1147-1148).
+	//
+	// This connection arms one timer per outstanding packet, so without a
+	// deadline of its own a single RTO expiry produced several timeout
+	// events, and the wheel's resolution let a callback arrive before the
+	// timeout had actually elapsed. Measured against libutp: our backoff
+	// doubled once every *two* retransmissions instead of every one, and the
+	// first retransmission fired at roughly 0.6 of the RTO. See
+	// conformance_timing_test.go.
+	rtoDeadline time.Time
+
 	// synTimeout is the current retransmission timeout for the SYN, doubled
 	// on each attempt. libutp calls this retransmit_timeout.
 	synTimeout    time.Duration
@@ -265,6 +282,14 @@ func newConnection(
 // armRetransmit schedules a retransmission timer for one packet.
 func (c *connection) armRetransmit(pkt *packet, delay time.Duration) {
 	seq := pkt.Header.SeqNum
+	if len(c.armed) == 0 {
+		// First packet into an empty window: start the connection's RTO.
+		//
+		// libutp: "Setup initial timeout timer" in write_outgoing_packet,
+		// guarded by `cur_window_packets == 0`
+		// (utp_internal.cpp:994-998).
+		c.rtoDeadline = time.Now().Add(delay)
+	}
 	c.armed[seq] = struct{}{}
 	c.timers.arm(
 		retransmitKey{scope: c.timerScope, seq: seq},
@@ -912,22 +937,42 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 			return
 		}
 
-		// Handle timeout amplification prevention.
+		// One timeout event per RTO expiry, measured against the clock.
 		//
-		// This connection arms one timer per outstanding packet, so a single
-		// RTO expiry delivers one callback per packet in flight. libutp has a
-		// single connection-wide RTO, and counts one event per expiry. This
-		// guard is what distinguishes the two, so everything that must happen
-		// once per RTO -- backing off, counting, and the give-up check --
-		// belongs inside it.
-		var isTimeout bool
-		if c.latestTimeout != nil {
-			isTimeout = time.Since(*c.latestTimeout) > c.state.SentPackets.Timeout()
-		} else {
-			isTimeout = true
-		}
-
-		if isTimeout {
+		// This connection arms one timer per outstanding packet, and the
+		// wheel that fires them has a resolution of its own, so a callback
+		// arriving is not by itself evidence that the retransmission timeout
+		// has elapsed. libutp asks the clock: `current_ms - rto_timeout >= 0`
+		// (utp_internal.cpp:1147-1148). So does this.
+		//
+		// The guard it replaces compared the time since the *last* timeout
+		// against the current RTO, which is a different question and gave a
+		// different answer: after a timeout doubled the RTO, the next
+		// expiry arrived exactly one (old) RTO later, which is not more than
+		// the new one -- so it was not counted, the backoff did not double,
+		// and the packet was resent anyway. The result was two
+		// retransmissions per RTO value instead of one. Measured against
+		// libutp with a 50ms floor: ours resent at 29, 128, 231, 429, 629,
+		// 1030, 1430 ms where libutp resends at 50, 150, 350, 750 ms.
+		// The *backoff* happens once per expiry; the retransmission happens
+		// for every packet whose timer fired.
+		//
+		// That split matters, and getting it wrong cost a benchmark run to
+		// discover. An earlier attempt returned without retransmitting when
+		// the deadline had not passed, on the theory that only one callback
+		// per expiry is a real timeout. It is -- but the others are still
+		// packets that need resending: libutp marks every outstanding packet
+		// need_resend on an RTO (utp_internal.cpp:1230-1237). Skipping them
+		// left holes that fast retransmit could not fill, and the 5%-loss
+		// benchmark stopped completing at all.
+		//
+		// Earliness is not this check's job either. The wheel guarantees it
+		// now: an item is never fired before its delay (see timeWheel.put),
+		// which is what a retransmission timer has to promise, because
+		// resending before the timeout resends a packet the peer was still
+		// going to acknowledge.
+		now := time.Now()
+		if isTimeout := !now.Before(c.rtoDeadline); isTimeout {
 			// Give up once enough consecutive RTOs have passed with the peer
 			// acking nothing, as libutp does (utp_internal.cpp:1191). The
 			// check precedes the increment there, so the connection dies on
@@ -945,6 +990,9 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 			c.timeouts++
 			currentTime := time.Now()
 			c.latestTimeout = &currentTime
+			// libutp: `rto_timeout = ctx->current_ms + new_timeout`
+			// (utp_internal.cpp:1204), with new_timeout already doubled.
+			c.rtoDeadline = currentTime.Add(c.state.SentPackets.Timeout())
 		}
 		c.packetsRetransmitted++
 		c.bytesRetransmitted += uint64(len(originPacket.Body))
@@ -1353,6 +1401,25 @@ func (c *connection) processAck(
 			"fullAcked.end", fullAcked.end)
 	}
 	retired := c.disarmAcked(fullAcked)
+
+	// Restart the retransmission timeout, but only when this ack actually
+	// retired something.
+	//
+	// libutp resets rto_timeout from inside its RTT-sample path
+	// (utp_internal.cpp:1388-1389), which runs once per newly acknowledged
+	// packet -- not once per ack received. Resetting on every ack looks
+	// equivalent and is not: duplicate acks are how a peer reports a hole,
+	// so on a lossy path they arrive in a stream, and each one would push the
+	// deadline further out. The RTO would then never fire, and a packet that
+	// fast retransmit could not recover -- it resends each packet once, and
+	// at most four per ack -- would never be retransmitted at all.
+	//
+	// Measured: with the reset unconditional, the 5%-loss and broadband
+	// profiles in the netem benchmark suite stopped completing, the receiver
+	// timing out after 76 seconds on a transfer that takes one.
+	if retired > 0 {
+		c.rtoDeadline = now.Add(c.state.SentPackets.Timeout())
+	}
 	for _, selectedAck := range selectedAcks {
 		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			c.logger.Trace("process ack, will remove acked num from innerMap",

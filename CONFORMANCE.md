@@ -155,6 +155,34 @@ no packet, and advertised a 100000-byte receive window for a connection that
 does not exist. Found by the unknown-connection-id case, which reached the
 byte comparison only because both sides do answer such a packet.
 
+## Retransmission timing
+
+The corpus compares *what* each implementation emits. `TestConformanceSynRetransmitSchedule`
+and `TestConformanceDataRetransmitSchedule` compare *when*.
+
+The obstacle was always our clock: libutp runs on a virtual clock its driver
+controls, ours on the real one, so the two cannot be stepped together. The way
+round is to compare the schedule's **shape** rather than its absolute times.
+Both implementations parameterise the backoff on a base timeout and double from
+there, so a schedule is a sequence of multiples of that base — and multiples
+are comparable across two time scales.
+
+libutp's schedule is measured on every run rather than hard-coded, and both
+halves of the claim are asserted: the multiples must match, *and* our default
+base timeouts must equal libutp's, which together mean the absolute schedules
+coincide.
+
+Measured:
+
+| | libutp | ours |
+| --- | --- | --- |
+| SYN | 1x, 3x its 3000ms base; gives up at 7x | 1x, 3x; gives up at 7x |
+| Data | 1x, 3x, 7x, 15x its 1000ms floor | 1x, 3x, 7x, 15x |
+
+Both found real defects — see [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md):
+the backoff doubled once every two retransmissions instead of every one, and
+the timer wheel could fire up to a full interval early.
+
 ## Deliberate divergences
 
 Four, asserted explicitly in the corpus rather than absorbed into a tolerance:
@@ -220,11 +248,12 @@ none.
 - **Only the responder role is covered.** Every case drives both
   implementations as the side accepting a connection. The initiator role —
   where we send the SYN and libutp answers — is not in the corpus.
-- **Timing is not compared.** The brief asks for retransmit schedules and ack
-  timing within a stated tolerance. libutp's side is fully deterministic here,
-  but ours runs on the real clock with real goroutines, so the runner can only
-  wait for our side to go quiet. Comparing schedules would need an injectable
-  clock in our connection. Nothing in this corpus asserts *when* a packet was
+- **Ack timing is not compared, though retransmission timing now is.**
+  `conformance_timing_test.go` measures libutp's retransmission schedule on
+  its virtual clock and asserts ours has the same shape — see "Retransmission
+  timing" below. What is still uncompared is *ack* timing: libutp defers acks
+  and flushes them at defined points, ours acks from a goroutine on the real
+  clock. Nothing in this corpus asserts *when* a packet was
   sent, only what it contained and in what order.
 - **State is compared only through the wire.** Terminal outcomes are inferred
   from emitted packets, not read out of either implementation. Notably, a

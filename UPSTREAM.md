@@ -415,6 +415,31 @@ connection id could otherwise inject a SYN into an established connection.
 Found by the differential fuzzer's initiator role, which models a malicious
 server answering our SYN -- the direction a client is exposed to on every dial.
 
+## PR 20 — the retransmission schedule, measured against libutp
+
+Two defects in the retransmission timers, both found by measuring libutp's
+schedule on its virtual clock and comparing ours against it.
+
+- **The backoff doubled every other timeout.** The guard reconciling this
+  fork's per-packet timers with libutp's single connection-wide RTO compared
+  the time since the last timeout against the current RTO, which after a
+  doubling is never satisfied by the next expiry. Two retransmissions per RTO
+  value instead of one. The connection now keeps its own deadline, as libutp
+  does (`rto_timeout`, utp_internal.cpp:494, :994-998, :1147-1148, :1204,
+  :1388-1389).
+- **The timer wheel could fire a full interval early.** An item due in n ticks
+  was placed n-1 slots ahead, which is only right when the wheel has just
+  started. Armed mid-cycle -- which is every timer in a live connection -- a
+  20ms timer fired at 5.4ms. Early is the wrong direction: it resends a packet
+  the peer was still going to acknowledge.
+
+Comes with conformance_timing_test.go, which measures libutp's schedule on
+every run rather than hard-coding it, and asserts both that the multiples
+match and that our base timeouts equal libutp's -- which together mean the
+absolute schedules coincide. Also a wheel test that arms mid-cycle; the
+existing one armed at the single moment when the off-by-one is harmless, and
+passed throughout.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

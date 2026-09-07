@@ -14,7 +14,7 @@ all.
 | **M1** — emulated network harness | **Done.** See [HARNESS.md](HARNESS.md) and `netem/`. |
 | **M2** — conformance harness against real libutp | **Partly done.** Twenty-one-case corpus comparing emitted packets field by field, including malformed and hostile headers; see [CONFORMANCE.md](CONFORMANCE.md). Responder role only, no timing comparison. |
 | **M3** — fix the failing transfer tests | **Done.** Root causes below; gates in "Verification". |
-| **M4** — audit transfer paths against libutp | **Started.** The ack path and the loss-recovery path are audited: selective-ack construction, fast retransmission, window decay, the two inherited "consistent with the reference" claims, and the RESET for an unknown connection. Findings below. The send path and the timers are not yet audited. |
+| **M4** — audit transfer paths against libutp | **Mostly done.** The ack path, the loss-recovery path and the retransmission timers are audited against libutp, the last of them by measurement rather than by reading — see [CONFORMANCE.md](CONFORMANCE.md). What remains unaudited is the send path: packet sizing, when a packet is built, and the zero-window probe. |
 | **M4b** — exhaustive libutp compatibility sweep | **Not done.** No `COMPATIBILITY.md` exists. |
 | **M5** — verify LEDBAT, add LEDBAT++ | **Done.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft, opt-in. Deference measured against a loss-based competitor over a shared bottleneck: classic LEDBAT takes 60% of the link from it, LEDBAT++ takes 44%. See [BENCHMARKS.md](BENCHMARKS.md). |
 | **M6** — MTU path discovery | **Not done.** Not investigated. |
@@ -832,6 +832,68 @@ byte stream.
 - **No way to learn the local address.** `Bind` with port 0 — the usual thing
   to do — gave no way to find out which port the kernel chose.
   `UtpSocket.LocalAddr` was added.
+
+## The retransmission backoff doubled every other timeout
+
+**Fixed.** This connection arms one timer per outstanding packet, where libutp
+has a single connection-wide RTO. The guard that reconciled the two compared
+the time since the *last* timeout against the *current* RTO — a different
+question, with a different answer. After a timeout doubled the RTO, the next
+expiry arrived exactly one (old) RTO later, which is not more than the new
+one, so it was not counted as a timeout: the backoff did not double, and the
+packet was resent anyway. The result was two retransmissions per RTO value
+instead of one.
+
+The connection now keeps a single deadline of its own, as libutp does
+(`rto_timeout`, `utp_internal.cpp:494`): armed when the first packet enters an
+empty window (`:994-998`), reset when an ack retires something (`:1388-1389`),
+compared against the clock before a timeout is declared (`:1147-1148`), and
+moved forward by the doubled timeout on expiry (`:1204`).
+
+Measured against libutp with a 200ms base, before and after:
+
+| | retransmissions at |
+| --- | --- |
+| libutp | 1x, 3x, 7x, 15x |
+| before | 0.6x, 2.6x, 4.6x, 8.6x, 12.6x, 20.6x, 28.6x |
+| after | 1x, 3x, 7x, 15x |
+
+Two things about the fix are worth recording because both were got wrong on
+the way:
+
+- **Resetting the deadline on every ack is not the same as resetting it on
+  every acked packet.** Duplicate acks are how a peer reports a hole, so on a
+  lossy path they arrive in a stream; resetting on each one pushes the
+  deadline out indefinitely, the RTO never fires, and a packet fast
+  retransmit cannot recover is never retransmitted at all. The 5%-loss and
+  broadband benchmark profiles stopped completing — the receiver timing out
+  after 76 seconds on a transfer that takes one.
+- **The backoff happens once per expiry; the retransmission happens for every
+  packet whose timer fired.** An attempt to return early without
+  retransmitting, on the theory that only one callback per expiry is a real
+  timeout, left holes fast retransmit could not fill. libutp marks *every*
+  outstanding packet `need_resend` on an RTO (`utp_internal.cpp:1230-1237`).
+
+## The timer wheel could fire a full interval early
+
+**Fixed**, and its own test said it could not.
+
+An item due in n ticks was placed n-1 slots ahead, on the reasoning that "the
+next tick processes slots[current]". That holds only if the next tick is a
+full interval away, which is true exactly when the wheel has just started. In
+a live connection a timer is armed at an arbitrary point in the tick cycle, so
+the item fired on the n'th tick from then — between n-1 and n intervals away,
+up to a full interval **early**.
+
+Early is the wrong direction: it resends a packet the peer was still going to
+acknowledge. libutp cannot do it, because it compares the clock against
+`rto_timeout` rather than trusting a timer (`utp_internal.cpp:1147-1148`).
+
+`TestTimeWheelNeverFiresEarly` existed and passed throughout, because it armed
+every timer immediately after creating the wheel — the one moment when the
+off-by-one is harmless. `TestTimeWheelNeverFiresEarlyWhenArmedMidCycle` arms
+part-way through the cycle instead, and against the old code a 20ms timer
+fires at 5.4ms.
 
 ## A SYN could be delivered into an established connection
 

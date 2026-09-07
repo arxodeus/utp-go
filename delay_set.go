@@ -92,13 +92,27 @@ func (tw *timeWheel[P]) put(key any, value P, delay time.Duration) {
 		ticks = 1
 	}
 
-	// The next tick processes slots[current], so an item due in n ticks
-	// belongs at current+n-1.
-	idx := (tw.current + ticks - 1) % tw.slotNum
+	// The next tick processes slots[current], and it may be about to happen:
+	// the wheel ticks on its own schedule, not on ours, so the gap between
+	// now and the next tick is anywhere from nothing to a full interval.
+	//
+	// An item placed at current+n-1 is therefore fired on the n'th tick from
+	// now, which is between (n-1) and n intervals away -- up to a full
+	// interval *early*, contradicting the promise above. Placing it at
+	// current+n fires it on the (n+1)'th tick, between n and n+1 intervals
+	// away: never early, at most one interval late.
+	//
+	// Measured against libutp before the fix: a SYN with a 200ms timeout was
+	// retransmitted at 186ms. At the real 3000ms timeout the error is under
+	// 1%, but early is the wrong direction -- it resends a packet the peer
+	// was still going to acknowledge, and libutp cannot do it, because it
+	// compares the clock against rto_timeout rather than trusting a timer
+	// (utp_internal.cpp:1147-1148).
+	idx := (tw.current + ticks) % tw.slotNum
 	tw.slots[idx][key] = &timeWheelItem[P]{
 		key:    key,
 		value:  value,
-		rounds: (ticks - 1) / tw.slotNum,
+		rounds: ticks / tw.slotNum,
 	}
 	tw.index[key] = idx
 }
