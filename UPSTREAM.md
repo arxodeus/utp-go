@@ -360,6 +360,22 @@ against the real interface by reflection rather than against a copy of it.
 Optional for upstream, but it is what makes the library usable by anything
 that expects standard library types, and it is what found PRs 14 and 15.
 
+## PR 17 — a leaked connection table entry, and an encoder inconsistency
+
+Both found by tests of a kind this repository did not have.
+
+- The socket was told to forget a connection only from the branch of the
+  event loop where the state machine reached `ConnClosed`. A connection torn
+  down by a cancelled context left its table entry forever: 40 attempts to a
+  dead port left 40 tracked connections. Goroutines were unaffected, which is
+  why goroutine-counting caught nothing.
+- `packet.Encode` took the extension byte from the header rather than from
+  what it was writing, so a decoded packet carrying an extension this library
+  discards re-encoded into a packet this library rejects.
+
+Comes with the fuzz targets and soak tests that found them, plus the two
+minimised regression inputs.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

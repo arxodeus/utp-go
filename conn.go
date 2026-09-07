@@ -317,6 +317,19 @@ func (c *connection) disarmAll() {
 
 func (c *connection) eventLoop(stream *UtpStream) error {
 	defer c.disarmAll()
+	// Tell the socket to drop this connection on *every* exit, not only the
+	// one where the state machine reached ConnClosed.
+	//
+	// It used to be reported from that one branch alone, so a connection torn
+	// down by a cancelled context -- which is what an abandoned or failed
+	// connection attempt is -- left its entry in the socket's table forever.
+	// Measured before the fix: 40 attempts to a dead port left 40 tracked
+	// connections behind, permanently. A client dialling unreachable peers,
+	// which is most of them, accumulates one of these per attempt.
+	//
+	// The goroutines were fine; it is the map entry and its channel that
+	// leaked, which is why nothing that counted goroutines noticed.
+	defer c.notifySocketShutdown()
 	if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 		c.logger.Trace("uTP conn starting", "dst.peer", c.cid.Peer, "cid.Send", c.cid.Send, "cid.Recv", c.cid.Recv)
 	}
@@ -476,9 +489,23 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			// A final sample, so the last state of a connection is always
 			// observed rather than lost to the throttle.
 			c.sampleMetrics(time.Now(), true)
-			c.socketEvents <- newShutdownSocketEvent(c.cid)
 			return c.state.Err
 		}
+	}
+}
+
+// notifySocketShutdown asks the socket to forget this connection.
+//
+// The wait is bounded because the socket's event loop may already be gone --
+// if the socket is closing, it drops its whole table anyway, so there is
+// nothing left to clean up and blocking here would leak the very goroutine
+// this is trying to tidy up after.
+func (c *connection) notifySocketShutdown() {
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case c.socketEvents <- newShutdownSocketEvent(c.cid):
+	case <-timer.C:
 	}
 }
 

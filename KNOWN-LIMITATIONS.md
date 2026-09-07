@@ -19,7 +19,7 @@ all.
 | **M5** — verify LEDBAT, add LEDBAT++ | **Done.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft, opt-in. Deference measured against a loss-based competitor over a shared bottleneck: classic LEDBAT takes 60% of the link from it, LEDBAT++ takes 44%. See [BENCHMARKS.md](BENCHMARKS.md). |
 | **M6** — MTU path discovery | **Not done.** Not investigated. |
 | **M7** — anacrolix/torrent integration | **Done, with one gap.** `utpnet` presents a uTP socket as `net.PacketConn`/`net.Conn` and satisfies torrent's uTP interface, checked against the real interface by reflection in `integration/anacrolix`. The gap: torrent selects its uTP implementation at build time, so wiring it in needs a `replace` or a patched file — recipes in that module's README. |
-| **M8** — soak and hardening | **Not done.** |
+| **M8** — soak and hardening | **Partly done.** Four fuzz targets (three on the decoder, one driving a live connection) and three soak tests; two defects found and fixed. See [FUZZING.md](FUZZING.md). Not done: differential fuzzing against libutp, the initiator role, and anything running for hours. |
 
 **The interoperability gate now passes.** libutp is vendored at the pinned
 commit in `native/libutp/`, with a bridge that gives it a UDP socket and an
@@ -832,6 +832,44 @@ byte stream.
 - **No way to learn the local address.** `Bind` with port 0 — the usual thing
   to do — gave no way to find out which port the kernel chose.
   `UtpSocket.LocalAddr` was added.
+
+## Failed connection attempts leaked socket state
+
+**Fixed.** The socket was told to forget a connection from exactly one place:
+the branch of the connection's event loop where the state machine reached
+`ConnClosed`. A connection torn down by a cancelled context — which is what an
+abandoned or failed connection attempt *is* — exited by a different path and
+left its entry in the socket's connection table forever.
+
+Measured before the fix: 40 attempts to a port with nothing on it left 40
+tracked connections behind, permanently. A BitTorrent client dialling
+unreachable peers, which is most of them, accumulates one per attempt.
+
+The goroutines were fine throughout, which is why nothing that counted
+goroutines had noticed — it is the map entry and its channel that leaked. The
+event loop now reports shutdown on every exit path, with a bounded wait so a
+connection outliving its socket cannot block on the report.
+
+Found by `TestSoakAbandonedConnections`; see [FUZZING.md](FUZZING.md).
+
+## packet.Encode could produce a packet this decoder rejects
+
+**Fixed.** `Encode` took the header's extension byte from `p.Header`, which is
+only correct for packets built by `PacketBuilder`. A *decoded* packet keeps
+whatever extension byte the peer sent, while `Eack` is nil unless a selective
+ack was retained — so a packet carrying a zero-length selective ack, the
+extension-bits extension, or a chain continuing past the selective ack,
+re-encoded to a header claiming an extension with no extension bytes after it.
+This library's own decoder rejects that, with "insufficient length for
+extension".
+
+Latent: nothing on the live path re-encodes a decoded packet. But
+`DecodePacket` is exported and its result has exported methods, so an external
+caller can reach it, and a proxy or relay built on this library would have
+emitted unparseable packets.
+
+Found by `FuzzDecodePacket`; both minimised inputs are kept as regression
+cases in `testdata/fuzz/`.
 
 ## Things found but deliberately not fixed
 

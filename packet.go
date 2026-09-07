@@ -275,11 +275,30 @@ func (p *packet) EncodedLen() int {
 	return length
 }
 
+// Encode writes the packet to the wire.
+//
+// The header's extension byte is derived from what is actually being written
+// rather than taken from p.Header, so that everything this produces can be
+// decoded again.
+//
+// It used to be taken from p.Header, which is only correct for packets built
+// by PacketBuilder. A *decoded* packet keeps whatever extension byte the peer
+// sent, while Eack is nil unless a selective ack was retained -- so a packet
+// that arrived carrying a zero-length selective ack, or the extension-bits
+// extension, re-encoded to a header claiming an extension with no extension
+// bytes after it. This implementation's own decoder rejects that, with
+// "insufficient length for extension". Found by FuzzDecodePacket.
+//
+// Nothing on the live path re-encodes a decoded packet today, so this was
+// latent -- but DecodePacket is exported and its result has exported methods,
+// so an external caller could reach it, and a proxy or relay built on this
+// library would have emitted unparseable packets.
 func (p *packet) Encode() []byte {
-	bytes := make([]byte, 0)
+	bytes := make([]byte, 0, p.EncodedLen())
 
-	// Encode header
-	bytes = append(bytes, p.Header.EncodeToBytes()...)
+	header := *p.Header
+	header.Extension = p.extensionByte()
+	bytes = append(bytes, header.EncodeToBytes()...)
 
 	// Encode selective ack if present
 	if p.Eack != nil {
@@ -292,6 +311,15 @@ func (p *packet) Encode() []byte {
 	bytes = append(bytes, p.Body...)
 
 	return bytes
+}
+
+// extensionByte is the extension this packet actually carries, as opposed to
+// the one its header claims.
+func (p *packet) extensionByte() byte {
+	if p.Eack != nil {
+		return 1
+	}
+	return 0
 }
 
 func DecodePacket(b []byte) (*packet, error) {
@@ -339,6 +367,17 @@ func DecodePacket(b []byte) (*packet, error) {
 	// before the connection ever saw it, which meant it was never acked and
 	// the peer retransmitted it forever -- a silent stall against any peer
 	// that sends one.
+	// The header describes the packet as this implementation holds it, not
+	// as it arrived. An extension we did not retain -- a zero-length
+	// selective ack, or extension 2, whose contents nothing here reads -- is
+	// gone, so the header must not go on claiming it. Otherwise the struct
+	// lies about its own contents, which is what let Encode produce
+	// unparseable packets before it derived this byte itself.
+	header.Extension = 0
+	if ack != nil {
+		header.Extension = 1
+	}
+
 	p.Header = header
 	p.Eack = ack
 	p.Body = payload
