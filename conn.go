@@ -1225,7 +1225,25 @@ func (c *connection) onState(seqNum, ackNum uint16) {
 		congestionCtrl := newDefaultController(fromConnConfig(c.config))
 		sentPacketsHolder := newSentPackets(c.endpoint.SynNum, congestionCtrl, c.logger)
 
-		close(c.state.connectedCh)
+		// Report success the same way the acceptor path does, at line ~351:
+		// send nil.
+		//
+		// This used to close the channel instead. A closed channel and a
+		// successful one are indistinguishable to a receiver that checks the
+		// `ok` flag, and UtpSocket.Connect checks it -- so every successful
+		// outgoing connection made through Connect was reported to the caller
+		// as "connection timed out", after a handshake that had in fact
+		// completed. ConnectWithCid happened to use the bare receive form and
+		// so was unaffected, which is why every test in this repository
+		// passed: they all use ConnectWithCid.
+		//
+		// The channel is buffered with room for one, and the failure path at
+		// onTimeout only fires while the state is still ConnConnecting, so
+		// this send cannot block and cannot be followed by another.
+		if c.state.connectedCh != nil {
+			c.state.connectedCh <- nil
+			c.state.connectedCh = nil
+		}
 		c.state.stateType = ConnConnected
 		c.state.RecvBuf = recvBuf
 		c.state.SendBuf = sendBuf

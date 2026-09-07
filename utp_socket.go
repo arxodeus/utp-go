@@ -98,6 +98,11 @@ func (c *UdpConn) Close() error {
 	return c.base.Close()
 }
 
+// LocalAddr returns the address this connection is bound to.
+func (c *UdpConn) LocalAddr() net.Addr {
+	return c.base.LocalAddr()
+}
+
 type IncomingPacketRaw struct {
 	peer    ConnectionPeer
 	payload []byte
@@ -591,6 +596,19 @@ func (s *UtpSocket) nextIncomingConn() *IncomingPacket {
 	return incomingAccept
 }
 
+// LocalAddr returns the address the underlying socket is bound to, or nil if
+// it cannot report one.
+//
+// A caller that binds to port 0 -- which is the usual thing to do -- has no
+// other way to learn which port the kernel chose.
+func (s *UtpSocket) LocalAddr() net.Addr {
+	type localAddresser interface{ LocalAddr() net.Addr }
+	if la, ok := s.socket.(localAddresser); ok {
+		return la.LocalAddr()
+	}
+	return nil
+}
+
 func (s *UtpSocket) NumConnections() int {
 	s.connsMutex.Lock()
 	defer s.connsMutex.Unlock()
@@ -748,9 +766,16 @@ func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *Co
 		} else if err != nil {
 			return nil, err
 		}
-		return nil, fmt.Errorf("connection timed out")
+		// A closed channel with nothing in it means the connection went away
+		// without ever reporting an outcome. Saying "timed out" here was
+		// wrong twice over: it was not a timeout, and until the connection
+		// started reporting success by sending rather than by closing, this
+		// was the branch every successful connection took.
+		return nil, fmt.Errorf("connection closed before it was established")
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	case <-s.ctx.Done():
+		return nil, s.ctx.Err()
 	}
 }
 

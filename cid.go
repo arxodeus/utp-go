@@ -34,6 +34,13 @@ func (p *UdpPeer) Hash() string {
 	return p.addr.String()
 }
 
+// Addr returns the UDP address this peer names. It exists so callers that
+// need a net.Addr -- anything presenting a uTP stream as a net.Conn -- can
+// get one back out without reparsing the hash.
+func (p *UdpPeer) Addr() *net.UDPAddr {
+	return p.addr
+}
+
 func (p *UdpPeer) String() string {
 	return p.addr.String()
 }

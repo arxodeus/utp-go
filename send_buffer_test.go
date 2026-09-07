@@ -104,3 +104,54 @@ func TestWrite(t *testing.T) {
 		t.Errorf("Data in buffer does not match written data")
 	}
 }
+
+// The buffer must own the bytes it holds. UtpStream.Write returns as soon as
+// the data is accepted here, so the caller is free to reuse its array the
+// moment it returns -- and io.Writer's contract ("Implementations must not
+// retain p") means every stdlib-shaped caller does exactly that.
+//
+// This buffer used to store the caller's slice by reference. Any full-duplex
+// exchange -- read into a buffer, write it back, repeat -- had its queued
+// bytes overwritten by the next read.
+func TestSendBufferDoesNotRetainCallerSlice(t *testing.T) {
+	sb := newSendBuffer(1024)
+
+	caller := []byte("the original bytes")
+	if n := sb.Write(caller); n != len(caller) {
+		t.Fatalf("wrote %d of %d bytes", n, len(caller))
+	}
+
+	// The caller reuses its array, as io.Copy does between iterations.
+	for i := range caller {
+		caller[i] = 'X'
+	}
+
+	out := make([]byte, 64)
+	n := sb.Read(out)
+	if got := string(out[:n]); got != "the original bytes" {
+		t.Errorf("read back %q, want %q: the buffer kept a reference to the caller's array",
+			got, "the original bytes")
+	}
+}
+
+// The same, for a write the buffer can only take part of: the accepted part
+// must be copied too.
+func TestSendBufferDoesNotRetainOnPartialWrite(t *testing.T) {
+	sb := newSendBuffer(8)
+
+	caller := []byte("0123456789abcdef")
+	n := sb.Write(caller)
+	if n != 8 {
+		t.Fatalf("wrote %d bytes into an 8-byte buffer", n)
+	}
+
+	for i := range caller {
+		caller[i] = 'X'
+	}
+
+	out := make([]byte, 64)
+	got := sb.Read(out)
+	if string(out[:got]) != "01234567" {
+		t.Errorf("read back %q, want %q", out[:got], "01234567")
+	}
+}

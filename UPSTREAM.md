@@ -324,6 +324,42 @@ link and leaves 25ms of queue; LEDBAT++ takes 44% and leaves 2.5ms. libutp's
 LEDBAT is not less-than-best-effort, and every throughput number in this fork
 that favours it favours it for that reason.
 
+## PR 14 — the send buffer retained the caller's slice
+
+One line, and the most damaging defect found in the fork.
+
+`sendBuffer.Write` stored the caller's `[]byte` by reference, and
+`UtpStream.Write` returns before those bytes are transmitted. Any caller that
+reuses its buffer between writes -- which `io.Writer`'s contract explicitly
+permits, and `io.Copy` and `bufio.Writer` do -- had its queued data
+overwritten.
+
+Only reachable in full-duplex use, which is why the whole suite passed: every
+test in the repository is unidirectional. Reproduces in a sixteen-line echo
+loop.
+
+## PR 15 — UtpSocket.Connect, and two API gaps
+
+- `Connect` reported every successful connection as "connection timed out".
+  The initiator signalled success by closing `connectedCh`, and `Connect`
+  checked the receive's `ok` flag. `ConnectWithCid` used the bare receive form
+  and so worked -- and every test uses `ConnectWithCid`.
+- `UtpStream.Read`, an incremental read. `ReadToEOF` only returns when the
+  whole transfer is done, so nothing could treat a uTP stream as an
+  `io.Reader`.
+- `UtpSocket.LocalAddr`, so a socket bound to port 0 can report its port.
+
+## PR 16 — the net adapter
+
+`utpnet`, presenting a uTP socket as `net.PacketConn` and its streams as
+`net.Conn`, including passing through datagrams that are not uTP so the port
+can be shared with a DHT. Satisfies the interface `anacrolix/torrent`
+requires; `integration/anacrolix` is a separate module that checks that
+against the real interface by reflection rather than against a copy of it.
+
+Optional for upstream, but it is what makes the library usable by anything
+that expects standard library types, and it is what found PRs 14 and 15.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

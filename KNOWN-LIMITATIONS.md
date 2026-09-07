@@ -18,7 +18,7 @@ all.
 | **M4b** — exhaustive libutp compatibility sweep | **Not done.** No `COMPATIBILITY.md` exists. |
 | **M5** — verify LEDBAT, add LEDBAT++ | **Done.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft, opt-in. Deference measured against a loss-based competitor over a shared bottleneck: classic LEDBAT takes 60% of the link from it, LEDBAT++ takes 44%. See [BENCHMARKS.md](BENCHMARKS.md). |
 | **M6** — MTU path discovery | **Not done.** Not investigated. |
-| **M7** — anacrolix/torrent integration | **Partly done.** The interop gate passes in both directions against real libutp; the `anacrolix/torrent` adapter is not written. |
+| **M7** — anacrolix/torrent integration | **Done, with one gap.** `utpnet` presents a uTP socket as `net.PacketConn`/`net.Conn` and satisfies torrent's uTP interface, checked against the real interface by reflection in `integration/anacrolix`. The gap: torrent selects its uTP implementation at build time, so wiring it in needs a `replace` or a patched file — recipes in that module's README. |
 | **M8** — soak and hardening | **Not done.** |
 
 **The interoperability gate now passes.** libutp is vendored at the pinned
@@ -775,6 +775,63 @@ The default is unchanged, because matching libutp is this library's default
 and a silent behaviour change is not the place to spend a deviation. But a
 BitTorrent client should set `CongestionAlgorithm: AlgorithmLEDBATPP`, and the
 reasoning is in BENCHMARKS.md rather than left implicit.
+
+## The send buffer retained the caller's slice
+
+**Fixed.** `sendBuffer.Write` stored the caller's `[]byte` by reference:
+
+```go
+sb.pending = append(sb.pending, data)
+```
+
+`UtpStream.Write` returns as soon as the bytes are accepted into that buffer,
+which is before they are transmitted. So the caller got control back while the
+connection still held a reference to their array. Anything that reused its
+buffer between writes had the queued bytes overwritten with whatever it wrote
+next.
+
+That is not an exotic pattern. `io.Writer`'s contract is explicit —
+"Implementations must not retain p" — and `io.Copy`, `bufio.Writer` and every
+echo loop rely on it.
+
+It shows up in any **full-duplex** exchange: read into a buffer, write it
+back, reuse the buffer. Every test in this repository passed throughout,
+because every one of them is unidirectional and writes each buffer once and
+never touches it again. It was found by the first test that exchanged data in
+both directions, written for the anacrolix integration, and it reproduced in
+sixteen lines with no adapter involved (`TestFullDuplexEcho`).
+
+BitTorrent peer connections are full-duplex by nature, so this would have
+corrupted data on essentially every connection a torrent client made.
+
+## UtpSocket.Connect never succeeded
+
+**Fixed.** The initiator reported a completed handshake by *closing*
+`connectedCh`; `UtpSocket.Connect` read it with `err, ok := <-connectedCh` and
+treated `!ok` as failure, returning "connection timed out" after a handshake
+that had in fact completed.
+
+`ConnectWithCid` used the bare receive form, where a closed channel yields a
+nil error, and so worked. Every test in this repository uses `ConnectWithCid`,
+which is why the simplest and most obvious entry point in the public API had
+never worked and nothing noticed.
+
+The connection now reports success by sending `nil`, as the acceptor path
+already did, so the two paths agree and `ok` means what it looks like it
+means.
+
+## Two API gaps this exposed
+
+Both found by writing the first caller that treats a uTP stream as an ordinary
+byte stream.
+
+- **No incremental read.** `UtpStream.ReadToEOF` only returns once the whole
+  transfer is complete, which cannot serve a connection that stays open.
+  `UtpStream.Read` was added: it returns as soon as anything is available and
+  reports `io.EOF` at end of stream, so a stream can be an `io.Reader`.
+- **No way to learn the local address.** `Bind` with port 0 — the usual thing
+  to do — gave no way to find out which port the kernel chose.
+  `UtpSocket.LocalAddr` was added.
 
 ## Things found but deliberately not fixed
 

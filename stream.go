@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"sync/atomic"
 
@@ -27,6 +28,12 @@ type UtpStream struct {
 	conn         *connection
 	closeOnce    sync.Once
 	readLocker   sync.Mutex
+	// readRemainder holds bytes from a chunk that a Read call could not fit
+	// in the caller's buffer. Guarded by readLocker.
+	readRemainder []byte
+	// readErr is the terminal read error, kept so every Read after the first
+	// one returns it rather than blocking. Guarded by readLocker.
+	readErr error
 }
 
 func NewUtpStream(
@@ -104,6 +111,65 @@ func (s *UtpStream) ReadToEOF(ctx context.Context, buf *[]byte) (int, error) {
 			data = append(data, res.Data[:res.Len]...)
 			*buf = data
 		}
+	}
+}
+
+// Read reads the next available bytes from the stream into buf, returning as
+// soon as anything is available. It returns io.EOF once the peer has closed
+// its sending side and everything it sent has been read.
+//
+// This is the streaming counterpart to ReadToEOF, which only returns once the
+// whole transfer is complete and so cannot be used for a connection that
+// stays open. Anything that treats a uTP stream as an ordinary byte stream --
+// net.Conn, io.Reader, a BitTorrent peer connection -- needs this one.
+//
+// Do not mix Read and ReadToEOF on the same stream. They share the same
+// underlying channel and each would consume chunks the other expected.
+func (s *UtpStream) Read(ctx context.Context, buf []byte) (int, error) {
+	if len(buf) == 0 {
+		return 0, nil
+	}
+	s.readLocker.Lock()
+	defer s.readLocker.Unlock()
+
+	// Anything left over from the last chunk comes first.
+	if len(s.readRemainder) > 0 {
+		n := copy(buf, s.readRemainder)
+		s.readRemainder = s.readRemainder[n:]
+		return n, nil
+	}
+	if s.readErr != nil {
+		return 0, s.readErr
+	}
+
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-s.streamCtx.Done():
+		// The stream is gone. Report it as end of stream rather than as a
+		// context error: a reader that has already had everything the peer
+		// sent should see io.EOF, which is what every io.Reader caller
+		// expects, not "context canceled".
+		s.readErr = io.EOF
+		return 0, io.EOF
+	case res, ok := <-s.reads:
+		if !ok {
+			s.readErr = io.EOF
+			return 0, io.EOF
+		}
+		if res.Len == 0 || len(res.Data) == 0 {
+			if res.Err != nil {
+				s.readErr = res.Err
+				return 0, res.Err
+			}
+			s.readErr = io.EOF
+			return 0, io.EOF
+		}
+		n := copy(buf, res.Data[:res.Len])
+		if n < res.Len {
+			s.readRemainder = append([]byte(nil), res.Data[n:res.Len]...)
+		}
+		return n, nil
 	}
 }
 
