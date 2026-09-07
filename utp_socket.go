@@ -375,6 +375,30 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
 	for i, cidType := range cidTypes {
 		cid := CidFromPacket(packetPtr, incomingRaw.peer, cidType)
 		cids[i] = cid
+
+		// A SYN is matched only by the SYN derivation.
+		//
+		// The other two derive a connection id as if the packet's id were a
+		// *send* id, which is right for an established connection and wrong
+		// for a SYN: a SYN carries the sender's own receive id, so those
+		// derivations alias it onto whatever local connection happens to
+		// hold that number. Concretely, a SYN whose id equals an outgoing
+		// connection's receive id was delivered into that connection, where
+		// onSyn answered it with a RESET.
+		//
+		// libutp cannot do this. It has exactly one lookup per case: a SYN
+		// is looked up as `UTPSocketKey(addr, id + 1)` and rejected outright
+		// if something is already there -- "rejected incoming connection,
+		// connection already exists" (utp_internal.cpp:2957-2965) -- while
+		// everything else is looked up on the receive id alone (:2884-2892).
+		// It never delivers a SYN into an established connection.
+		//
+		// Found by FuzzDifferentialInitiator. It matters beyond the spurious
+		// RESET: an off-path attacker who guesses a connection id could
+		// otherwise inject a SYN into an established connection.
+		if packetPtr.Header.PacketType == st_syn && cidType != IdTypeRecvId {
+			continue
+		}
 		// Look for existing connection
 		if connStream := s.getConnStreamWithCids(cid, cidType); connStream != nil {
 			select {

@@ -397,6 +397,24 @@ Comes with `FuzzDifferentialResponder`, which found them: the M2 conformance
 harness and the M8 fuzzer wired together, so libutp decides whether the answer
 to a generated packet sequence was right. Neither half could find these alone.
 
+## PR 19 — a SYN could be delivered into an established connection
+
+The socket derives three candidate connection ids for every incoming packet
+and delivers to whichever matches. Two of the three treat the packet's id as a
+*send* id, which is right for an established connection and wrong for a SYN --
+a SYN carries the sender's own receive id, so those derivations alias it onto
+whatever local connection holds that number. A SYN whose id equalled an
+outgoing connection's receive id was delivered into that connection, where
+onSyn answered it with a RESET.
+
+libutp has exactly one lookup per case and rejects a SYN that matches an
+existing socket outright (`utp_internal.cpp:2957-2965`). The spurious RESET is
+the symptom; what matters is that an off-path attacker who guessed a
+connection id could otherwise inject a SYN into an established connection.
+
+Found by the differential fuzzer's initiator role, which models a malicious
+server answering our SYN -- the direction a client is exposed to on every dial.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

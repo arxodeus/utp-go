@@ -15,6 +15,7 @@ go test -run xxx -fuzz '^FuzzDecodePacket$'          -fuzztime 5m
 go test -run xxx -fuzz '^FuzzDecodeSelectiveAck$'    -fuzztime 5m
 go test -run xxx -fuzz '^FuzzResponderPacketSequence$' -fuzztime 5m
 go test -run xxx -fuzz '^FuzzDifferentialResponder$'   -fuzztime 10m
+go test -run xxx -fuzz '^FuzzDifferentialInitiator$'   -fuzztime 10m
 ```
 
 Soak:
@@ -67,7 +68,7 @@ It runs at roughly 25–100 executions per second, against ~50,000/sec for the
 decoder targets, because each execution builds and tears down a socket. Run it
 for longer rather than expecting the same coverage.
 
-### `FuzzDifferentialResponder`
+### `FuzzDifferentialResponder` and `FuzzDifferentialInitiator`
 
 The fuzzer generating input and **libutp deciding whether the answer was
 right**.
@@ -95,7 +96,16 @@ exempt for the reasons in `allowedToDiffer`. **Answering less is permitted**,
 and is where the documented divergences live; being quieter cannot be
 exploited, only cost interoperability, which the M2 corpus pins case by case.
 
-Two details make the comparison mean what it says:
+**Both roles are covered.** The responder target models a malicious *client*;
+the initiator target models a malicious *server* — the side that answers a SYN
+we sent. That is the direction a BitTorrent client is exposed to every time it
+dials a peer address from a tracker or the DHT, which is to say constantly,
+and nothing here modelled it before: the M2 corpus is responder-only too. The
+connection ids and the SYN's sequence number are pinned to the same value on
+both sides, so the two implementations emit an identical SYN — asserted
+directly by `TestDifferentialHandshakeIsEmitted`.
+
+Three details make the comparison mean what it says:
 
 - **Packets are matched per connection id, not by position.** Order between
   packets for different connections is not observable by any peer, and ours
@@ -113,9 +123,25 @@ Two details make the comparison mean what it says:
   divergence itself is pinned by `TestConformanceFinBeforeAnyData`, so
   removing it here does not hide it.
 
-It runs at roughly 10–20 executions per second, because each one builds two
-implementations and waits for ours to go quiet. That is the price of an
-oracle.
+- **Comparison is step-wise, not only at the end.** Both implementations are
+  driven in lockstep and compared after every injected packet, so a divergence
+  is attributed to the packet that caused it and one that appears at one step
+  and is undone by a later one is still caught. The comparison is *cumulative*
+  rather than per-step-in-isolation, deliberately: our side is goroutine-driven
+  on a real clock, so an emission can land just after the settle meant to catch
+  it, and comparing cumulative transcripts counts it at the next step instead
+  of producing a spurious "we emitted more than libutp" at this one. It still
+  catches the divergence, one step later at worst.
+
+Each execution injects at most 8 packets and waits for our side to go quiet
+after each, so these run at roughly 5–25 executions per second against ~50,000
+for the decoder targets. That is the price of an oracle, and of attribution.
+
+A differential target that drove nothing would pass forever — two empty
+transcripts agree — so `TestDifferentialHarnessIsLive` asserts that an
+in-order data packet draws an answer from *both* implementations in both
+roles. A regression that made the fuzzing vacuous fails rather than passing
+silently.
 
 ### The soak tests
 
@@ -152,6 +178,28 @@ caller can reach it, and a proxy or relay built on this library would have
 emitted unparseable packets.
 
 Both minimised inputs are in `testdata/fuzz/FuzzDecodePacket/`.
+
+### A SYN could be delivered into an established connection
+
+**Fixed**, and found by the initiator target on its first run.
+
+The socket derived three candidate connection ids for every incoming packet
+and delivered to whichever matched. Two of the three treat the packet's id as
+a *send* id, which is right for an established connection and wrong for a SYN:
+a SYN carries the sender's own **receive** id, so those derivations alias it
+onto whatever local connection happens to hold that number. A SYN whose id
+equalled an outgoing connection's receive id was delivered into that
+connection, where `onSyn` answered it with a RESET.
+
+libutp cannot do this. It has exactly one lookup per case: a SYN is looked up
+as `UTPSocketKey(addr, id + 1)` and rejected outright if something is already
+there — "rejected incoming connection, connection already exists"
+(`utp_internal.cpp:2957-2965`) — while everything else is looked up on the
+receive id alone (`:2884-2892`).
+
+The spurious RESET is the visible symptom; the reason it matters is that an
+off-path attacker who guessed a connection id could otherwise inject a SYN
+into an established connection.
 
 ### No bound on how far ahead a peer could push us
 
@@ -224,14 +272,16 @@ connection outliving its socket cannot block on the report.
 - **No fuzzing of the initiator role.** `FuzzResponderPacketSequence` drives
   the accepting side only, as the M2 corpus does. A malicious *server* is not
   modelled.
-- **Differential fuzzing covers the responder role only**, as the M2 corpus
-  does. A malicious *server* — one that answers our SYN — is not modelled by
-  either.
-- **The differential comparison is coarse in time.** It compares what each
-  side emitted after the whole sequence, not after each packet, because
-  settling ours between every packet costs more than the coverage is worth.
-  A divergence in *when* a packet is sent, rather than whether or what, would
-  not be caught.
+- **No timing comparison.** The differential targets compare *what* each side
+  emitted after each packet, not *when*. libutp defers acks and flushes them
+  at defined points; ours acks from a goroutine on a real clock. A divergence
+  in latency, or in how many packets are coalesced into one ack, would not be
+  caught. Doing better needs an injectable clock in our connection, which is
+  the same thing the M2 corpus needs and does not have — see CONFORMANCE.md.
+- **The M2 corpus is still responder-only.** The fuzzer now drives both roles;
+  the hand-written cases do not.
+- **Each differential execution injects at most 8 packets**, so a divergence
+  that only appears deep into a long conversation is out of reach.
 - **No long-running soak.** The longest run here is a few hundred connection
   cycles over seconds. Nothing has been run for hours, which is where a slow
   leak — a few bytes per connection — would show and these would not.

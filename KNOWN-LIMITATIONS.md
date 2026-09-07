@@ -19,7 +19,7 @@ all.
 | **M5** — verify LEDBAT, add LEDBAT++ | **Done.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft, opt-in. Deference measured against a loss-based competitor over a shared bottleneck: classic LEDBAT takes 60% of the link from it, LEDBAT++ takes 44%. See [BENCHMARKS.md](BENCHMARKS.md). |
 | **M6** — MTU path discovery | **Not done.** Not investigated. |
 | **M7** — anacrolix/torrent integration | **Done, with one gap.** `utpnet` presents a uTP socket as `net.PacketConn`/`net.Conn` and satisfies torrent's uTP interface, checked against the real interface by reflection in `integration/anacrolix`. The gap: torrent selects its uTP implementation at build time, so wiring it in needs a `replace` or a patched file — recipes in that module's README. |
-| **M8** — soak and hardening | **Partly done.** Five fuzz targets — three on the decoder, one driving a live connection, and one differential against real libutp — plus three soak tests. Five defects found and fixed. See [FUZZING.md](FUZZING.md). Not done: the initiator role, timing comparison, and anything running for hours. |
+| **M8** — soak and hardening | **Partly done.** Six fuzz targets — three on the decoder, one driving a live connection, and two differential against real libutp covering both the responder and initiator roles — plus three soak tests. Six defects found and fixed. See [FUZZING.md](FUZZING.md). Not done: timing comparison, and anything running for hours. |
 
 **The interoperability gate now passes.** libutp is vendored at the pinned
 commit in `native/libutp/`, with a bridge that gives it a UDP socket and an
@@ -832,6 +832,29 @@ byte stream.
 - **No way to learn the local address.** `Bind` with port 0 — the usual thing
   to do — gave no way to find out which port the kernel chose.
   `UtpSocket.LocalAddr` was added.
+
+## A SYN could be delivered into an established connection
+
+**Fixed.** The socket derived three candidate connection ids for every
+incoming packet and delivered to whichever matched. Two of the three treat the
+packet's id as a *send* id, which is right for an established connection and
+wrong for a SYN: a SYN carries the sender's own **receive** id, so those
+derivations alias it onto whatever local connection happens to hold that
+number.
+
+A SYN whose id equalled an outgoing connection's receive id was delivered into
+that connection, where `onSyn` answered it with a RESET. libutp cannot do
+this: it has exactly one lookup per case, and a SYN matching an existing
+socket is rejected outright — "rejected incoming connection, connection
+already exists" (`utp_internal.cpp:2957-2965`).
+
+The spurious RESET is the visible symptom. What matters is that an off-path
+attacker who guessed a connection id could otherwise inject a SYN into an
+established connection.
+
+Found by `FuzzDifferentialInitiator` on its first run — the target that
+models a malicious *server*, which is the direction a BitTorrent client is
+exposed to every time it dials a peer address from a tracker or the DHT.
 
 ## A peer could push us arbitrarily far ahead in sequence space
 
