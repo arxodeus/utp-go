@@ -14,10 +14,10 @@ all.
 | **M1** — emulated network harness | **Done.** See [HARNESS.md](HARNESS.md) and `netem/`. |
 | **M2** — conformance harness against real libutp | **Partly done.** Twenty-one-case corpus comparing emitted packets field by field, including malformed and hostile headers; see [CONFORMANCE.md](CONFORMANCE.md). Responder role only, no timing comparison. |
 | **M3** — fix the failing transfer tests | **Done.** Root causes below; gates in "Verification". |
-| **M4** — audit transfer paths against libutp | **Mostly done.** The ack path, the loss-recovery path and the retransmission timers are audited against libutp, the last of them by measurement rather than by reading — see [CONFORMANCE.md](CONFORMANCE.md). What remains unaudited is the send path: packet sizing, when a packet is built, and the zero-window probe. |
+| **M4** — audit transfer paths against libutp | **Done.** The ack path, the loss-recovery path, the retransmission timers and the send path are all audited against libutp — the timers by measurement rather than by reading, see [CONFORMANCE.md](CONFORMANCE.md). Three findings from the send path below; the packet-size one is deliberately left to M6. |
 | **M4b** — exhaustive libutp compatibility sweep | **Not done.** No `COMPATIBILITY.md` exists. |
 | **M5** — verify LEDBAT, add LEDBAT++ | **Done.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft, opt-in. Deference measured against a loss-based competitor over a shared bottleneck: classic LEDBAT takes 60% of the link from it, LEDBAT++ takes 44%. See [BENCHMARKS.md](BENCHMARKS.md). |
-| **M6** — MTU path discovery | **Not done.** Not investigated. |
+| **M6** — MTU path discovery | **Not done**, but now scoped: the send-path audit measured what a larger packet is worth and why it cannot be taken without discovery. See "The packet size is smaller than libutp's" below. |
 | **M7** — anacrolix/torrent integration | **Done, with one gap.** `utpnet` presents a uTP socket as `net.PacketConn`/`net.Conn` and satisfies torrent's uTP interface, checked against the real interface by reflection in `integration/anacrolix`. The gap: torrent selects its uTP implementation at build time, so wiring it in needs a `replace` or a patched file — recipes in that module's README. |
 | **M8** — soak and hardening | **Partly done.** Six fuzz targets — three on the decoder, one driving a live connection, and two differential against real libutp covering both the responder and initiator roles — plus three soak tests. Six defects found and fixed. See [FUZZING.md](FUZZING.md). Not done: timing comparison, and anything running for hours. |
 
@@ -832,6 +832,65 @@ byte stream.
 - **No way to learn the local address.** `Bind` with port 0 — the usual thing
   to do — gave no way to find out which port the kernel chose.
   `UtpSocket.LocalAddr` was added.
+
+## There was no zero-window probe
+
+**Fixed.** A peer that advertises a zero receive window stops this sender, and
+nothing restarted it.
+
+The peer sends a window update when its application drains its buffer, but
+that update is a single packet on an unreliable path. Lost, it leaves the
+sender with nothing outstanding — so no retransmission timer — and no reason
+of its own to transmit. The connection stops dead with data queued, until the
+idle timeout kills it sixty seconds later.
+
+libutp arms a timer when an acknowledgement reports a zero window and, when it
+expires, forces the peer's window up to one packet
+(`utp_internal.cpp:2149-2151` and `:1142-1145`). One packet goes out, the peer
+acknowledges it, and the acknowledgement carries a fresh window. Recovery
+costs one packet per interval and needs nothing from the peer beyond an ack.
+
+This is now implemented, with libutp's 15-second interval as the default. It
+needed a wake-up of its own in the event loop: every other reason that loop
+runs is an event — a packet arrived, the application wrote, a timer expired —
+and a closed window is the absence of all three.
+
+`TestZeroWindowProbe` fails without it, reporting the connection stuck.
+
+## Nothing was ever sent on an idle connection
+
+**Fixed.** libutp sends a keep-alive after 29 seconds of silence on an
+established connection (`utp_internal.cpp:74`, `:1271-1274`) — a STATE
+acknowledging one *less* than it actually has, so the packet reads as a stale
+acknowledgement and the peer answers it without any sequence number being
+consumed or data delivered (`send_keep_alive`, `:834-844`).
+
+29 seconds is chosen to sit under the 30-second UDP mapping timeout common in
+NATs. A connection quiet for longer loses its mapping and cannot be reached
+from outside again.
+
+This library sent nothing at all. It relied entirely on the peer speaking
+first, which against another copy of this library means neither side ever
+does.
+
+## The packet size is smaller than libutp's
+
+**Measured, and deliberately not changed.**
+
+libutp sizes packets from the interface MTU less the header, discovered by
+probing (`get_packet_size`, `utp_internal.cpp:1757-1762`), which lands around
+1400 bytes. This fork uses a fixed 1024.
+
+Raising it to 1400 was measured on the full benchmark suite: +2.4% on the long
+transfer, +17% on the reordering profile, within noise everywhere else. The
+emulator charges by the byte, so the only saving is header overhead — 20 bytes
+in 1024 against 20 in 1400.
+
+It was reverted. A 1420-byte datagram fragments or is dropped on any path
+below a 1500-byte MTU, which PPPoE and most VPNs are, and nothing here would
+detect that. A few percent of throughput is not worth a connection that fails
+outright, and the fix is not a larger constant but M6's discovery, which can
+establish what the path actually carries.
 
 ## The retransmission backoff doubled every other timeout
 

@@ -440,6 +440,35 @@ absolute schedules coincide. Also a wheel test that arms mid-cycle; the
 existing one armed at the single moment when the off-by-one is harmless, and
 passed throughout.
 
+## PR 21 — the send path: a zero-window deadlock and a missing keep-alive
+
+Two things libutp does that this fork did not, both found by auditing the send
+path against `utp_internal.cpp`.
+
+- **No zero-window probe.** A peer advertising a zero receive window stops
+  this sender, and nothing restarts it. The peer's window update is a single
+  packet on an unreliable path; lost, it leaves the sender with nothing
+  outstanding -- so no retransmission timer -- and no reason to transmit. The
+  connection stops dead with data queued until the idle timeout. libutp arms a
+  timer on a zero-window ack and forces one packet through when it expires
+  (`utp_internal.cpp:2149-2151`, `:1142-1145`). Implemented, with libutp's
+  15-second default.
+- **No keep-alive.** libutp sends one after 29 seconds of silence
+  (`utp_internal.cpp:74`, `:1271-1274`), acking one behind so the peer answers
+  without consuming a sequence number. 29 seconds sits under the 30-second UDP
+  mapping timeout common in NATs. This fork sent nothing, and against another
+  copy of itself neither side ever spoke first.
+
+Both intervals are configurable, defaulting to libutp's, on the same grounds
+as the retransmission timeouts this library already exposes: so they can be
+tested in less than half a minute.
+
+Not included, deliberately: raising the packet size from 1024 towards libutp's
+~1400. Measured at +2.4% on a long transfer and +17% on a reordering profile,
+within noise elsewhere -- but a 1420-byte datagram is dropped on any path below
+a 1500-byte MTU, and nothing here detects that. That belongs with MTU
+discovery, not with a larger constant.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

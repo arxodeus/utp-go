@@ -16,8 +16,26 @@ const (
 	// defaultMinTimeout is the RTO floor. libutp computes
 	// rto = max(rtt + rtt_var * 4, 1000) in milliseconds
 	// (utp_internal.cpp:1380), so the floor is one second.
-	defaultMinTimeout         = 1000 * time.Millisecond
-	defaultMaxTimeout         = 60 * time.Second
+	defaultMinTimeout = 1000 * time.Millisecond
+	defaultMaxTimeout = 60 * time.Second
+	// defaultMaxPacketSizeBytes is the largest packet this library builds.
+	//
+	// libutp uses the interface MTU less the header, discovered by probing
+	// (`get_packet_size`, utp_internal.cpp:1757-1762), which lands around
+	// 1400 bytes. This fork has no MTU discovery, so a fixed size has to be
+	// safe on every path rather than fast on most.
+	//
+	// Measured at 1400: +2.4% on the long transfer, +17% on the reordering
+	// profile, and within noise everywhere else -- the emulator charges by
+	// the byte, so the saving is only the header overhead, 20 bytes in 1024
+	// against 20 in 1400. A 1420-byte datagram also fragments or is dropped
+	// on any path below a 1500-byte MTU, which PPPoE and most VPNs are, and
+	// nothing here would detect that.
+	//
+	// A few percent of throughput is not worth a connection that fails
+	// outright on a low-MTU path. Raising this belongs with M6, where
+	// discovery can establish what the path actually carries. See
+	// KNOWN-LIMITATIONS.md.
 	defaultMaxPacketSizeBytes = 1024
 	// defaultMaxWindowSizeIncBytes is the cap on how far the congestion
 	// window may grow in one RTT. libutp:

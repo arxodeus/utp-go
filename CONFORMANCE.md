@@ -155,6 +155,13 @@ no packet, and advertised a 100000-byte receive window for a connection that
 does not exist. Found by the unknown-connection-id case, which reached the
 byte comparison only because both sides do answer such a packet.
 
+## The send path
+
+Audited against libutp as part of M4. Three findings, two fixed and one
+measured and deliberately left alone: no zero-window probe, no keep-alive, and
+a packet size well below libutp's. All three are written up in
+[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
+
 ## Retransmission timing
 
 The corpus compares *what* each implementation emits. `TestConformanceSynRetransmitSchedule`

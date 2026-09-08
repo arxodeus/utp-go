@@ -99,6 +99,27 @@ type ConnectionConfig struct {
 	// MetricsInterval is the minimum gap between snapshots. Defaults to
 	// DefaultMetricsInterval.
 	MetricsInterval time.Duration
+	// KeepAliveInterval is how long an established connection may stay silent
+	// before sending a keep-alive.
+	//
+	// Defaults to libutp's 29 seconds (utp_internal.cpp:74), chosen to sit
+	// under the 30-second UDP mapping timeout common in NATs. Configurable
+	// only so it can be tested in less than half a minute.
+	KeepAliveInterval time.Duration
+	// ZeroWindowProbeInterval is how long a closed peer receive window is
+	// tolerated before one packet is forced through to elicit an update.
+	//
+	// A peer that advertises a zero window sends an update when its
+	// application drains its buffer, but that update is a single packet on an
+	// unreliable path. Lost, it leaves this sender with nothing outstanding,
+	// no retransmission timer, and no reason to transmit -- stopped dead with
+	// data queued until the idle timeout.
+	//
+	// Defaults to libutp's 15 seconds (utp_internal.cpp:2151). Configurable
+	// only so it can be tested in less than fifteen seconds; libutp hard-codes
+	// it, as it hard-codes the retransmission timeouts this library also makes
+	// configurable.
+	ZeroWindowProbeInterval time.Duration
 	// CongestionAlgorithm selects the congestion controller.
 	//
 	// The zero value is AlgorithmLEDBAT: classic LEDBAT, matching libutp.
@@ -113,15 +134,17 @@ func NewConnectionConfig() *ConnectionConfig {
 		// libutp gives up on a connection attempt once retransmit_count
 		// reaches 2 while in CS_SYN_SENT, which is three transmissions of the
 		// SYN in total (utp_internal.cpp:1191).
-		MaxConnAttempts: 3,
-		MaxIdleTimeout:  DefaultMaxIdleTimeout,
-		MaxPacketSize:   defaultMaxPacketSizeBytes,
-		InitialTimeout:  defaultInitialTimeout,
-		MinTimeout:      defaultMinTimeout,
-		MaxTimeout:      defaultMaxTimeout,
-		TargetDelay:     defaultTargetMicros,
-		WindowSize:      DefaultWindowSize,
-		BufferSize:      DefaultBufferSize,
+		MaxConnAttempts:         3,
+		MaxIdleTimeout:          DefaultMaxIdleTimeout,
+		MaxPacketSize:           defaultMaxPacketSizeBytes,
+		InitialTimeout:          defaultInitialTimeout,
+		MinTimeout:              defaultMinTimeout,
+		MaxTimeout:              defaultMaxTimeout,
+		TargetDelay:             defaultTargetMicros,
+		WindowSize:              DefaultWindowSize,
+		BufferSize:              DefaultBufferSize,
+		KeepAliveInterval:       defaultKeepAliveInterval,
+		ZeroWindowProbeInterval: defaultZeroWindowProbeInterval,
 		// Classic LEDBAT by default, because matching libutp is the default
 		// everywhere else in this library.
 		CongestionAlgorithm: AlgorithmLEDBAT,
@@ -194,6 +217,26 @@ type connection struct {
 	// retransmitCount is consecutive retransmission timeouts with no
 	// intervening ack. libutp calls this retransmit_count.
 	retransmitCount int
+	// zeroWindowProbeDue is when a closed peer window should be probed. Zero
+	// means the peer's window is open and nothing is pending.
+	//
+	// libutp's `zerowindow_time` (utp_internal.cpp:496), armed when an
+	// acknowledgement reports a zero window (:2149-2151) and acted on in
+	// check_timeouts (:1142-1145).
+	zeroWindowProbeDue time.Time
+	// lastSentPacket is when this connection last put a packet on the wire.
+	// libutp's `last_sent_packet`, which its keep-alive compares against
+	// (utp_internal.cpp:1272).
+	lastSentPacket time.Time
+	// armProbeTimer wakes the event loop when a closed window has gone
+	// unprobed for long enough. Installed by the event loop, which owns the
+	// timer.
+	armProbeTimer func(time.Duration)
+	// probingZeroWindow allows one packet through a window the peer has
+	// closed. libutp expresses the same thing by writing PACKET_SIZE into
+	// max_window_user, which the next acknowledgement then overwrites.
+	probingZeroWindow bool
+
 	// rtoDeadline is when this connection's retransmission timeout expires.
 	//
 	// libutp has exactly one of these per connection (`rto_timeout`,
@@ -362,7 +405,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	if c.endpoint.Type == Initiator {
 		synSeqNum := c.endpoint.SynNum
 		synPkt := c.synPacket(synSeqNum)
-		c.socketEvents <- newOutgoingSocketEvent(synPkt, c.cid)
+		c.emit(synPkt)
 		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			c.logger.Trace("put a initial syn packet to delay map", "socketEvents.len", len(c.socketEvents), "dst.peer", c.cid.Peer, "synSeqNum", synSeqNum)
 		}
@@ -378,7 +421,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		c.synState = c.statePacket()
 
 		c.logger.Debug("a initial state packet", "peer", c.cid.Peer, "cid.Send", c.cid.Send, "cid.Recv", c.cid.Recv)
-		c.socketEvents <- newOutgoingSocketEvent(c.synState, c.cid)
+		c.emit(c.synState)
 
 		recvBuf := newReceiveBufferWithLogger(c.config.BufferSize, syn, c.logger)
 		sendBuf := newSendBuffer(c.config.BufferSize)
@@ -402,6 +445,45 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		idleTimer.Reset(c.config.MaxIdleTimeout)
 	}
 	defer idleTimer.Stop()
+
+	// The zero-window probe needs a wake-up of its own.
+	//
+	// Every other reason this loop runs is an event: a packet arrived, the
+	// application wrote, a retransmission timer expired. A closed peer window
+	// is the absence of all three -- nothing is outstanding, so no
+	// retransmission timer exists, and nothing will arrive until the peer
+	// chooses to speak. Without this the probe would be armed and never
+	// checked.
+	// An established connection that has gone quiet still has to say
+	// something occasionally, or a NAT drops its mapping and the peer's own
+	// idle timeout eventually kills it. libutp checks this on every timeout
+	// pass (utp_internal.cpp:1271-1274); this ticks at the same interval.
+	keepAliveTicker := time.NewTicker(c.keepAliveIntervalOrDefault())
+	defer keepAliveTicker.Stop()
+
+	probeTimer := time.NewTimer(time.Hour)
+	if !probeTimer.Stop() {
+		<-probeTimer.C
+	}
+	defer probeTimer.Stop()
+	c.armProbeTimer = func(d time.Duration) {
+		if !probeTimer.Stop() {
+			select {
+			case <-keepAliveTicker.C:
+				// libutp: `if (state >= CS_CONNECTED && !fin_sent)` and the
+				// connection has been silent for the interval
+				// (utp_internal.cpp:1271-1274).
+				if c.state.stateType == ConnConnected &&
+					(c.state.closing == nil || c.state.closing.LocalFin == nil) &&
+					time.Since(c.lastSentPacket) >= c.keepAliveIntervalOrDefault() {
+					c.emit(c.keepAlivePacket())
+				}
+			case <-probeTimer.C:
+			default:
+			}
+		}
+		probeTimer.Reset(d)
+	}
 	handleIncoming := func(event *streamEvent) {
 		if event.Type == streamIncoming {
 			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
@@ -482,6 +564,19 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			c.processWrites(time.Now())
 		case timeoutPkt := <-c.unackTimeoutCh:
 			handleTimeout(timeoutPkt)
+		case <-keepAliveTicker.C:
+			// libutp: `if (state >= CS_CONNECTED && !fin_sent)` and the
+			// connection has been silent for the interval
+			// (utp_internal.cpp:1271-1274).
+			if c.state.stateType == ConnConnected &&
+				(c.state.closing == nil || c.state.closing.LocalFin == nil) &&
+				time.Since(c.lastSentPacket) >= c.keepAliveIntervalOrDefault() {
+				c.emit(c.keepAlivePacket())
+			}
+		case <-probeTimer.C:
+			// The peer's window has been closed for a whole interval. Let one
+			// packet through, so its acknowledgement carries a fresh window.
+			c.processWrites(time.Now())
 		case <-idleTimer.C:
 			handleIdleTimeout()
 		case <-c.ctx.Done():
@@ -600,6 +695,70 @@ func (c *connection) shutdown() {
 	}
 }
 
+// emit hands a packet to the socket and records when this connection last
+// spoke.
+//
+// Every outbound packet goes through here so that the keep-alive can tell
+// whether the connection has been silent, which is libutp's
+// `last_sent_packet` (utp_internal.cpp:1272).
+func (c *connection) emit(pkt *packet) {
+	if pkt == nil {
+		return
+	}
+	c.lastSentPacket = time.Now()
+	c.socketEvents <- newOutgoingSocketEvent(pkt, c.cid)
+}
+
+// keepAlivePacket is a STATE acknowledging one less than we actually have.
+//
+// libutp: `ack_nr--; send_ack(); ack_nr++` (utp_internal.cpp:834-844). Acking
+// one behind makes the packet look like a stale acknowledgement to the peer,
+// which answers it -- so the exchange proves both directions still work
+// without consuming a sequence number or delivering anything.
+func (c *connection) keepAlivePacket() *packet {
+	pkt := c.statePacket()
+	if pkt == nil {
+		return nil
+	}
+	pkt.Header.AckNum-- // wrapping
+	return pkt
+}
+
+// keepAliveIntervalOrDefault is the configured interval, or libutp's.
+func (c *connection) keepAliveIntervalOrDefault() time.Duration {
+	if c.config.KeepAliveInterval > 0 {
+		return c.config.KeepAliveInterval
+	}
+	return defaultKeepAliveInterval
+}
+
+// zeroWindowProbeIntervalOrDefault is the configured interval, or libutp's.
+func (c *connection) zeroWindowProbeIntervalOrDefault() time.Duration {
+	if c.config.ZeroWindowProbeInterval > 0 {
+		return c.config.ZeroWindowProbeInterval
+	}
+	return defaultZeroWindowProbeInterval
+}
+
+// effectivePeerWindow is how much the peer says it can accept, with the
+// zero-window probe applied.
+//
+// libutp does this by overwriting max_window_user with PACKET_SIZE once
+// zerowindow_time has passed (utp_internal.cpp:1142-1145); the next
+// acknowledgement overwrites it again with whatever the peer reports. The
+// effect is the same: exactly one packet gets through a closed window per
+// interval, and the peer's answer to it carries a fresh window.
+func (c *connection) effectivePeerWindow(now time.Time) uint32 {
+	if c.peerRecvWindow > 0 {
+		return c.peerRecvWindow
+	}
+	if c.zeroWindowProbeDue.IsZero() || now.Before(c.zeroWindowProbeDue) {
+		return 0
+	}
+	c.probingZeroWindow = true
+	return uint32(c.config.MaxPacketSize)
+}
+
 func (c *connection) processWrites(now time.Time) {
 	if c.state.SentPackets != nil {
 		// LEDBAT++'s slowdowns are driven by the clock, not by acks. Without
@@ -626,7 +785,7 @@ func (c *connection) processWrites(now time.Time) {
 	}
 
 	// Compose data packets
-	windowSize := minUint32(c.state.SentPackets.Window(), c.peerRecvWindow)
+	windowSize := minUint32(c.state.SentPackets.Window(), c.effectivePeerWindow(now))
 	var payloads [][]byte
 
 	// libutp's `is_full` marks the connection application-limited or not
@@ -928,7 +1087,7 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 			c.armRetransmit(originPacket, c.synTimeout)
 
 			// Re-send SYN packet
-			c.socketEvents <- newOutgoingSocketEvent(c.synPacket(seq), c.cid)
+			c.emit(c.synPacket(seq))
 		}
 
 	case ConnConnected:
@@ -1030,6 +1189,20 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 	default:
 	}
 }
+
+// defaultZeroWindowProbeInterval is how long libutp tolerates a closed peer
+// window before forcing a packet through: "Reset max_window_user to 1 every 15
+// seconds" (utp_internal.cpp:2150-2151).
+const defaultZeroWindowProbeInterval = 15 * time.Second
+
+// defaultKeepAliveInterval is how long libutp lets an established connection
+// stay silent before sending a keep-alive: `#define KEEPALIVE_INTERVAL 29000`
+// (utp_internal.cpp:74), applied at :1271-1274.
+//
+// 29 seconds is chosen to sit under the 30-second UDP mapping timeout common
+// in NATs. A connection that goes quiet for longer than that loses its
+// mapping and cannot be reached again from the outside.
+const defaultKeepAliveInterval = 29 * time.Second
 
 // reorderBufferMaxSize bounds how far past the next expected sequence number
 // a packet may name and still be processed.
@@ -1174,7 +1347,7 @@ func (c *connection) outsideReorderWindow(pkt *packet) bool {
 		// would -- caught by FuzzDifferentialResponder comparing consecutive
 		// acks.
 		if statePkt := c.statePacket(); statePkt != nil {
-			c.socketEvents <- newOutgoingSocketEvent(statePkt, c.cid)
+			c.emit(statePkt)
 		}
 	}
 	if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
@@ -1197,6 +1370,25 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 			"now", now)
 	}
 	c.peerRecvWindow = packet.Header.WndSize
+
+	// Arm or disarm the zero-window probe.
+	//
+	// libutp arms it whenever an acknowledgement reports a zero window
+	// (utp_internal.cpp:2149-2151), and lets the next acknowledgement
+	// overwrite the forced one-packet window with whatever the peer now
+	// reports (:2145).
+	if c.peerRecvWindow == 0 {
+		if c.zeroWindowProbeDue.IsZero() {
+			interval := c.zeroWindowProbeIntervalOrDefault()
+			c.zeroWindowProbeDue = now.Add(interval)
+			if c.armProbeTimer != nil {
+				c.armProbeTimer(interval)
+			}
+		}
+	} else {
+		c.zeroWindowProbeDue = time.Time{}
+	}
+	c.probingZeroWindow = false
 	c.packetsReceived++
 	c.bytesReceived += uint64(len(packet.Body))
 
@@ -1284,11 +1476,11 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 			c.logger.Warn("missing SYN STATE")
 			if statePacket := c.statePacket(); statePacket != nil {
 				c.synState = statePacket
-				c.socketEvents <- newOutgoingSocketEvent(c.synState, c.cid)
+				c.emit(c.synState)
 			} else {
 				randSeqNum := RandomUint16()
 				resetPacket := NewPacketBuilder(st_reset, packet.Header.ConnectionId, uint32(time.Now().UnixMicro()), 100_000, randSeqNum).Build()
-				c.socketEvents <- newOutgoingSocketEvent(resetPacket, c.cid)
+				c.emit(resetPacket)
 			}
 		} else {
 			// A SYN for a connection we have already accepted is the initiator
@@ -1302,7 +1494,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 					"dst.peer", c.cid.Peer, "cid.send", c.cid.Send, "cid.recv", c.cid.Recv,
 					"seqNum", c.synState.Header.SeqNum, "ackNum", c.synState.Header.AckNum)
 			}
-			c.socketEvents <- newOutgoingSocketEvent(c.synState, c.cid)
+			c.emit(c.synState)
 		}
 
 	case st_data, st_fin:
@@ -1314,7 +1506,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 					"packet.cid", statePacket.Header.ConnectionId)
 			}
 
-			c.socketEvents <- newOutgoingSocketEvent(statePacket, c.cid)
+			c.emit(statePacket)
 		}
 	}
 
@@ -1764,5 +1956,5 @@ func (c *connection) transmit(packet *packet, now time.Time) {
 	c.state.SentPackets.OnTransmit(packet.Header.SeqNum, packet.Header.PacketType, payload, length, now)
 	c.armRetransmit(packet, c.state.SentPackets.Timeout())
 
-	c.socketEvents <- newOutgoingSocketEvent(packet, c.cid)
+	c.emit(packet)
 }
