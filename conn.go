@@ -224,6 +224,8 @@ type connection struct {
 	// acknowledgement reports a zero window (:2149-2151) and acted on in
 	// check_timeouts (:1142-1145).
 	zeroWindowProbeDue time.Time
+	// mtu is this connection's path-MTU search. See mtu.go.
+	mtu *mtuSearch
 	// lastSentPacket is when this connection last put a packet on the wire.
 	// libutp's `last_sent_packet`, which its keep-alive compares against
 	// (utp_internal.cpp:1272).
@@ -319,6 +321,12 @@ func newConnection(
 		pendingWrites:  make([]*queuedWrite, 0),
 		writable:       make(chan struct{}, 3),
 		latestTimeout:  nil,
+		// The ceiling is the largest packet this library will ever try; the
+		// search starts at the midpoint between it and 576 and only grows
+		// once a probe of that size has been acknowledged. That ordering is
+		// why raising the ceiling is safe: nothing large is sent until
+		// something large is known to arrive.
+		mtu: newMtuSearch(uint32(config.MaxPacketSize), time.Now()),
 	}
 }
 
@@ -658,7 +666,7 @@ func (c *connection) shutdown() {
 				if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 					c.logger.Trace("transmitting FIN", "dst.Peer", c.cid.Peer, "dst.Send", c.cid.Send, "dst.Recv", c.cid.Recv, "seq", seqNum)
 				}
-				c.transmit(fin, time.Now())
+				c.transmit(fin, time.Now(), true)
 			}
 		} else {
 			var localFin *uint16
@@ -682,7 +690,7 @@ func (c *connection) shutdown() {
 				if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 					c.logger.Trace("transmitting FIN", "dst.Peer", c.cid.Peer, "dst.Send", c.cid.Send, "dst.Recv", c.cid.Recv, "seq", seqNum)
 				}
-				c.transmit(fin, time.Now())
+				c.transmit(fin, time.Now(), true)
 			}
 			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 				c.logger.Trace("init localFin of closingRecord", "dst.peer", c.cid.Peer, "dst.send", c.cid.Send, "dst.recv", c.cid.Recv, "localFin", localFin)
@@ -800,7 +808,7 @@ func (c *connection) processWrites(now time.Time) {
 		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			c.logger.Trace("has window size to send a packet data in sendBuffer", "windowSize", windowSize)
 		}
-		maxDataSize := minUint32(windowSize, uint32(c.config.MaxPacketSize-64))
+		maxDataSize := minUint32(windowSize, c.mtu.payloadSize())
 		data := make([]byte, maxDataSize)
 		n := c.state.SendBuf.Read(data)
 		if n == 0 {
@@ -861,7 +869,7 @@ func (c *connection) processWrites(now time.Time) {
 			seqNum,
 		).WithPayload(payload).WithTsDiffMicros(uint32(c.peerTsDiff.Microseconds())).WithAckNum(ackNum).WithSelectiveAck(selectiveAck).Build()
 
-		c.transmit(packetInst, now)
+		c.transmit(packetInst, now, true)
 		seqNum = seqNum + 1 // wrapping add in uint16
 	}
 }
@@ -1131,6 +1139,25 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 		// resending before the timeout resends a packet the peer was still
 		// going to acknowledge.
 		now := time.Now()
+
+		// A retransmission timeout on the MTU probe, with nothing else
+		// outstanding, says the path will not carry that size -- not that it
+		// is congested. libutp lowers the ceiling and sets `ignore_loss`, so
+		// the window is left alone and the binary search moves on
+		// (utp_internal.cpp:1152-1167).
+		probeTimedOut := c.mtu.probeOutstanding(originPacket.Header.SeqNum) &&
+			c.state.SentPackets.UnackedCount() == 1
+		if probeTimedOut && !now.Before(c.rtoDeadline) {
+			c.mtu.onProbeLost(now)
+			c.logger.Debug("MTU probe timed out",
+				"floor", c.mtu.floor, "ceiling", c.mtu.ceiling, "current", c.mtu.current)
+			c.rtoDeadline = now.Add(c.state.SentPackets.Timeout())
+			c.packetsRetransmitted++
+			c.bytesRetransmitted += uint64(len(originPacket.Body))
+			c.retransmit(originPacket, now)
+			return
+		}
+
 		if isTimeout := !now.Before(c.rtoDeadline); isTimeout {
 			// Give up once enough consecutive RTOs have passed with the peer
 			// acking nothing, as libutp does (utp_internal.cpp:1191). The
@@ -1156,38 +1183,31 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 		c.packetsRetransmitted++
 		c.bytesRetransmitted += uint64(len(originPacket.Body))
 
-		retransmissionPacket := &packet{
-			Header: &PacketHeaderV1{
-				PacketType:   originPacket.Header.PacketType,
-				Version:      originPacket.Header.Version,
-				Extension:    originPacket.Header.Extension,
-				ConnectionId: originPacket.Header.ConnectionId,
-				SeqNum:       originPacket.Header.SeqNum,
-			},
-			Body: originPacket.Body,
-			Eack: nil,
-		}
-
-		recvWindow := uint32(c.state.RecvBuf.Available())
-		nowMicros := time.Now().UnixMicro()
-		tsDiffMicros := uint32(c.peerTsDiff.Microseconds())
-
-		retransmissionPacket.Header.WndSize = recvWindow
-		retransmissionPacket.Header.Timestamp = nowMicros
-		retransmissionPacket.Header.TimestampDiff = tsDiffMicros
-		retransmissionPacket.Header.AckNum = c.state.RecvBuf.AckNum()
-		retransmissionPacket.Eack = c.state.RecvBuf.SelectiveAck()
-
-		//newPacket := NewPacketBuilder(packet.Header.PacketType, packet.Header.ConnectionId, uint32(nowMicros), recvWindow, packet.Header.SeqNum).
-		//	WithAckNum(c.state.RecvBuf.AckNum()).
-		//	WithSelectiveAck(c.state.RecvBuf.SelectiveAck()).
-		//	WithTsDiffMicros(tsDiffMicros).
-		//	WithPayload(packet.Body).
-		//	Build()
-
-		c.transmit(retransmissionPacket, now)
+		c.retransmit(originPacket, now)
 	default:
 	}
+}
+
+// retransmit resends a packet with its acknowledgement fields brought up to
+// date. The sequence number and payload are the original's; everything the
+// peer reads about our current state is not.
+func (c *connection) retransmit(originPacket *packet, now time.Time) {
+	retransmissionPacket := &packet{
+		Header: &PacketHeaderV1{
+			PacketType:    originPacket.Header.PacketType,
+			Version:       originPacket.Header.Version,
+			Extension:     originPacket.Header.Extension,
+			ConnectionId:  originPacket.Header.ConnectionId,
+			SeqNum:        originPacket.Header.SeqNum,
+			WndSize:       uint32(c.state.RecvBuf.Available()),
+			Timestamp:     time.Now().UnixMicro(),
+			TimestampDiff: uint32(c.peerTsDiff.Microseconds()),
+			AckNum:        c.state.RecvBuf.AckNum(),
+		},
+		Body: originPacket.Body,
+		Eack: c.state.RecvBuf.SelectiveAck(),
+	}
+	c.transmit(retransmissionPacket, now, false)
 }
 
 // defaultZeroWindowProbeInterval is how long libutp tolerates a closed peer
@@ -1592,6 +1612,30 @@ func (c *connection) processAck(
 			"fullAcked.start", fullAcked.start,
 			"fullAcked.end", fullAcked.end)
 	}
+	// A probe that came back acknowledged proves the path carries its size.
+	// libutp: utp_internal.cpp:1969-1974.
+	for seq := fullAcked.Start(); ; seq++ {
+		if c.mtu.onAck(seq, now) {
+			c.logger.Debug("MTU probe acknowledged",
+				"floor", c.mtu.floor, "ceiling", c.mtu.ceiling, "current", c.mtu.current)
+		}
+		if seq == fullAcked.End() {
+			break
+		}
+	}
+	for _, selectedAck := range selectedAcks {
+		if c.mtu.onAck(selectedAck, now) {
+			c.logger.Debug("MTU probe selectively acknowledged",
+				"floor", c.mtu.floor, "ceiling", c.mtu.ceiling, "current", c.mtu.current)
+		}
+	}
+
+	// A converged search stands for a while and is then redone, because paths
+	// change. libutp: 30 minutes (utp_internal.cpp:1310).
+	if c.mtu.dueForSearch(now) {
+		c.mtu.reset(uint32(c.config.MaxPacketSize), now)
+	}
+
 	retired := c.disarmAcked(fullAcked)
 
 	// Restart the retransmission timeout, but only when this ack actually
@@ -1927,11 +1971,18 @@ func (c *connection) retransmitLostPackets(now time.Time) {
 				"packet.cid", packetInst.Header.ConnectionId,
 				"packet.data.len", len(payload))
 		}
-		c.transmit(packetInst, now)
+		c.transmit(packetInst, now, true)
 	}
 }
 
-func (c *connection) transmit(packet *packet, now time.Time) {
+// transmit sends a packet and arms its retransmission timer.
+//
+// firstTransmission distinguishes a packet going out for the first time from
+// one being resent. Only the former can serve as an MTU probe: libutp excludes
+// retransmissions because an oversized packet being resent needs to fragment
+// just to get through, which is the opposite of what a probe is for
+// (utp_internal.cpp:900-904).
+func (c *connection) transmit(packet *packet, now time.Time, firstTransmission bool) {
 	var payload []byte
 	var length uint32
 
@@ -1952,6 +2003,23 @@ func (c *connection) transmit(packet *packet, now time.Time) {
 
 	c.packetsSent++
 	c.bytesSent += uint64(len(packet.Body))
+
+	// Use this packet as an MTU probe if the search wants one.
+	//
+	// libutp decides the same thing in send_packet (utp_internal.cpp:906-925)
+	// and sends the probe with fragmentation disabled. This library cannot
+	// set that flag through its abstract Conn, so a probe too large for the
+	// path is fragmented on IPv4 rather than dropped -- it is acknowledged,
+	// the floor rises, and the search settles on a size that works but costs
+	// fragmentation. On IPv6, where routers do not fragment, it is dropped
+	// and the search learns correctly. See KNOWN-LIMITATIONS.md.
+	if datagramSize := uint32(packet.EncodedLen()); c.mtu.eligibleProbe(datagramSize, firstTransmission) {
+		c.mtu.beginProbe(packet.Header.SeqNum, datagramSize)
+		if c.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+			c.logger.Debug("MTU probe", "size", datagramSize,
+				"floor", c.mtu.floor, "ceiling", c.mtu.ceiling, "seq", packet.Header.SeqNum)
+		}
+	}
 
 	c.state.SentPackets.OnTransmit(packet.Header.SeqNum, packet.Header.PacketType, payload, length, now)
 	c.armRetransmit(packet, c.state.SentPackets.Timeout())

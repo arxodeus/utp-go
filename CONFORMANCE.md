@@ -155,6 +155,13 @@ no packet, and advertised a 100000-byte receive window for a connection that
 does not exist. Found by the unknown-connection-id case, which reached the
 byte comparison only because both sides do answer such a packet.
 
+## Path MTU
+
+Implemented as libutp does it (M6) — a binary search between a 576-byte floor
+and a ceiling, probing with ordinary data packets. What is not matched: probes
+do not carry the don't-fragment bit, and the ceiling is a fixed 1400 rather
+than the interface MTU. Both are in [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
+
 ## The send path
 
 Audited against libutp as part of M4. Three findings, two fixed and one

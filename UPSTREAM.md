@@ -469,6 +469,39 @@ within noise elsewhere -- but a 1420-byte datagram is dropped on any path below
 a 1500-byte MTU, and nothing here detects that. That belongs with MTU
 discovery, not with a larger constant.
 
+## PR 22 — path-MTU discovery, and the packet size it makes safe
+
+libutp sizes packets from the interface MTU less the header, discovered by
+probing, landing around 1400 bytes. This fork used a fixed 1024, and that was
+the right call without discovery: a datagram above the path's MTU is
+fragmented, or on IPv6 silently dropped, and a connection that picks too large
+a size and cannot detect it does not run slowly, it stops.
+
+`mtu.go` implements libutp's search -- a binary search between a 576-byte floor
+and a ceiling, each probe an ordinary data packet at the midpoint, the floor
+rising when one is acknowledged and the ceiling dropping when one is lost, with
+the whole thing redone every 30 minutes (`mtu_search_update`,
+utp_internal.cpp:1289-1312; `mtu_reset`, :1314-1322; the probe decision in
+send_packet, :890-925; acknowledged, :1969-1974; the two failure paths, :1152-1167
+and :1927-1940).
+
+The ceiling then rose from 1024 to 1400, which is safe precisely because the
+ceiling is no longer what gets sent: the search starts at the midpoint, 988
+bytes -- *below* the old 1024 -- and grows only once a probe of that size has
+been acknowledged. An untested path gets a smaller packet than before. A path
+that drops every probe settles on 576. That argument is asserted as a test,
+not left as prose.
+
+Measured against the fixed 1024: +2.1% long transfer, +11% reordering, +2.6%
+two flows, flat elsewhere.
+
+Not included, and stated in KNOWN-LIMITATIONS.md: probes do not carry the
+don't-fragment bit, because this library writes through an abstract Conn with
+nowhere to put it. On IPv6 an oversized probe is dropped and the search learns
+correctly; on IPv4 it is fragmented and acknowledged, so the search settles on
+a size that works but costs fragmentation. And the ceiling is a fixed 1400
+rather than the interface MTU, so a jumbo-frame path is not found.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

@@ -11,10 +11,21 @@ Each link profile has a fixed seed, and the emulator's loss, reordering,
 jitter and queueing all draw from it, so the *network* is identical between
 runs. Our side is not: it runs on the real clock with real goroutines. Each
 profile therefore runs three times and the **median** is reported, with the
-full range beside it. Where the range is wide -- the 5% loss profile is the
-one -- a single retransmission timeout costs a full RTO and dominates a short
-transfer, and no amount of averaging hides that; the range is printed so it
-cannot be mistaken for precision.
+full range beside it. Where the range is wide, no amount of averaging hides it, and the range is
+printed so it cannot be mistaken for precision.
+
+**The two loss profiles were lengthened after these numbers exposed a defect in
+the benchmark itself.** At 512 KB and 256 KB they took about a second, and a
+single retransmission timeout -- a second on its own at the default floor --
+made the result bimodal: nine runs landed in two clusters a factor of three
+apart, and the median reported whichever cluster held five of them. A row that
+swings on which mode the majority fell into is not measuring the congestion
+controller, it is measuring the startup transient. They now carry 4 MB and
+2 MB, and the 1% loss range tightened from 1.04-3.19 to 3.91-5.25.
+
+That also means the loss rows in the historical tables below are not
+comparable with the ones above: they were measured on the shorter profiles,
+and were mostly reporting how one RTO happened to fall.
 
 Two columns describe queueing, and they are not the same thing:
 
@@ -47,15 +58,15 @@ libutp.
 
 | Profile | Goodput (median) | Range | Elapsed | Retx | cwnd mean | cwnd max | at floor | qdelay p50 | qdelay p95 | standing queue p50 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| LAN (1ms, 100Mbps, no loss) | 89.65 Mbps | 89.55-90.61 | 374ms | 0.00% | 96883B | 152622B | 0.7% | 209µs | 808µs | 5.467ms |
-| Broadband (20ms, 10Mbps, no loss) | 6.34 Mbps | 6.21-6.35 | 1.323s | 0.00% | 50692B | 76238B | 0.3% | 193µs | 445µs | 2.048ms |
-| Broadband, 1% loss | 3.27 Mbps | 3.10-3.28 | 1.281s | 1.34% | 21427B | 37362B | 0.5% | 422µs | 886µs | 1.139ms |
-| Broadband, 5% loss | 1.93 Mbps | 0.97-1.93 | 1.088s | 4.99% | 13321B | 22984B | 0.9% | 297µs | 771µs | 1.181ms |
-| High BDP (100ms, 20Mbps, no loss) | 2.09 Mbps | 2.09-2.09 | 8.017s | 0.00% | 72549B | 110444B | 0.2% | 501µs | 965µs | 952µs |
-| Shallow queue (20ms, 10Mbps, 16KB queue) | 4.70 Mbps | 4.70-4.71 | 893ms | 0.00% | 36643B | 55439B | 0.5% | 230µs | 388µs | 1.216ms |
-| Long transfer (20ms, 10Mbps, 8MB) | 8.80 Mbps | 8.73-8.87 | 7.63s | 0.06% | 85446B | 113659B | 0.0% | 510µs | 912µs | 32.992ms |
-| Reordering (20ms, 10Mbps, 2% reordered) | 3.06 Mbps | 3.06-3.11 | 1.37s | 1.82% | 19150B | 28358B | 0.4% | 480µs | 19.874ms | 769µs |
-| Two flows, 8Mbps bottleneck | 6.48 Mbps total | 6.46-6.48 | | | | | | | | Jain 1.000 |
+| LAN (1ms, 100Mbps, no loss) | 89.21 Mbps | 85.56-91.21 | 376ms | 0.00% | 97283B | 153045B | 0.7% | 193µs | 740µs | 5.637ms |
+| Broadband (20ms, 10Mbps, no loss) | 6.40 Mbps | 6.37-6.41 | 1.312s | 0.00% | 51098B | 76359B | 0.3% | 253µs | 459µs | 2.433ms |
+| Broadband, 1% loss | 5.22 Mbps | 3.91-5.25 | 6.425s | 0.72% | 32602B | 62149B | 0.1% | 517µs | 1.009ms | 1.454ms |
+| Broadband, 5% loss | 1.24 Mbps | 0.98-1.59 | 13.498s | 6.44% | 14388B | 24910B | 1.1% | 462µs | 1.029ms | 1.448ms |
+| High BDP (100ms, 20Mbps, no loss) | 2.10 Mbps | 2.10-2.10 | 8.004s | 0.00% | 73141B | 110611B | 0.3% | 441µs | 977µs | 1.058ms |
+| Shallow queue (20ms, 10Mbps, 16KB queue) | 4.75 Mbps | 4.69-4.77 | 882ms | 0.00% | 36773B | 55483B | 0.6% | 177µs | 472µs | 1.65ms |
+| Long transfer (20ms, 10Mbps, 8MB) | 8.82 Mbps | 8.66-8.91 | 7.608s | 0.05% | 84619B | 114121B | 0.0% | 366µs | 796µs | 32.263ms |
+| Reordering (20ms, 10Mbps, 2% reordered) | 3.40 Mbps | 3.36-3.70 | 1.234s | 1.89% | 21385B | 32393B | 0.5% | 391µs | 1.339ms | 1.054ms |
+| Two flows, 8Mbps bottleneck | 6.63 Mbps total | 6.55-6.65 | | | | | | | | Jain 1.000 |
 
 ## LEDBAT++
 
@@ -63,15 +74,15 @@ Opt in with `ConnectionConfig.CongestionAlgorithm = AlgorithmLEDBATPP`.
 
 | Profile | Goodput (median) | Range | Elapsed | Retx | cwnd mean | cwnd max | at floor | qdelay p50 | qdelay p95 | standing queue p50 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| LAN (1ms, 100Mbps, no loss) | 74.22 Mbps | 71.94-75.02 | 452ms | 0.00% | 104991B | 263900B | 0.6% | 234µs | 977µs | 4.227ms |
-| Broadband (20ms, 10Mbps, no loss) | 2.91 Mbps | 2.82-2.93 | 2.884s | 2.26% | 36134B | 139225B | 5.9% | 298µs | 727µs | 1.175ms |
-| Broadband, 1% loss | 0.92 Mbps | 0.92-1.12 | 4.539s | 1.26% | 8344B | 36519B | 8.9% | 438µs | 1.007ms | 852µs |
-| Broadband, 5% loss | 0.51 Mbps | 0.49-0.53 | 4.108s | 4.88% | 3129B | 5582B | 9.4% | 424µs | 982µs | 685µs |
-| High BDP (100ms, 20Mbps, no loss) | 4.09 Mbps | 4.09-4.09 | 4.102s | 0.00% | 252974B | 479261B | 22.2% | 395µs | 881µs | 7.698ms |
-| Shallow queue (20ms, 10Mbps, 16KB queue) | 2.07 Mbps | 2.06-2.12 | 2.022s | 3.62% | 26283B | 85459B | 5.9% | 235µs | 631µs | 2.233ms |
-| Long transfer (20ms, 10Mbps, 8MB) | 6.22 Mbps | 6.03-6.27 | 10.791s | 0.23% | 43871B | 139361B | 2.4% | 579µs | 1.104ms | 1.551ms |
-| Reordering (20ms, 10Mbps, 2% reordered) | 1.00 Mbps | 0.94-1.00 | 4.205s | 1.03% | 5866B | 21536B | 5.2% | 529µs | 2.041ms | 866µs |
-| Two flows, 8Mbps bottleneck | 3.66 Mbps total | 3.63-3.67 | | | | | | | | Jain 0.997 |
+| LAN (1ms, 100Mbps, no loss) | 77.01 Mbps | 76.56-77.20 | 436ms | 0.00% | 108966B | 262201B | 0.6% | 256µs | 973µs | 4.949ms |
+| Broadband (20ms, 10Mbps, no loss) | 3.45 Mbps | 1.79-3.58 | 2.432s | 2.40% | 41878B | 140769B | 7.3% | 228µs | 525µs | 2.438ms |
+| Broadband, 1% loss | 1.51 Mbps | 1.37-1.54 | 22.241s | 0.78% | 9350B | 47660B | 5.8% | 563µs | 1.083ms | 883µs |
+| Broadband, 5% loss | 0.54 Mbps | 0.45-0.57 | 31.275s | 5.19% | 4145B | 9213B | 12.4% | 525µs | 1.066ms | 1.131ms |
+| High BDP (100ms, 20Mbps, no loss) | 4.38 Mbps | 4.37-4.38 | 3.834s | 0.00% | 294953B | 577090B | 23.4% | 327µs | 849µs | 24.554ms |
+| Shallow queue (20ms, 10Mbps, 16KB queue) | 2.33 Mbps | 1.23-2.39 | 1.799s | 3.47% | 27243B | 85219B | 7.9% | 246µs | 659µs | 2.356ms |
+| Long transfer (20ms, 10Mbps, 8MB) | 6.85 Mbps | 6.81-6.94 | 9.802s | 0.23% | 51102B | 141151B | 2.8% | 551µs | 1.108ms | 4.759ms |
+| Reordering (20ms, 10Mbps, 2% reordered) | 1.31 Mbps | 0.94-2.31 | 3.195s | 1.23% | 8200B | 28056B | 4.9% | 460µs | 1.098ms | 933µs |
+| Two flows, 8Mbps bottleneck | 4.02 Mbps total | 3.94-5.38 | | | | | | | | Jain 0.999 |
 
 ## What LEDBAT++ costs, and what it buys
 
@@ -80,7 +91,7 @@ six of eight profiles, by as much as a factor of three. That reading is
 incomplete, and the two rows that matter tell the real story.
 
 **It wins where the window has to get large.** High BDP (100 ms, 20 Mbps):
-2.09 -> 4.09 Mbps, mean congestion window 72 KB -> 253 KB. Classic LEDBAT
+2.10 -> 4.38 Mbps, mean congestion window 73 KB -> 295 KB. Classic LEDBAT
 grows at a flat 3000 bytes per round trip whatever the path, so on a long fat
 link it never reaches the bandwidth-delay product; LEDBAT++'s gain scales with
 the base RTT (§4.2) and its slow start is exponential, so it does.
@@ -89,10 +100,10 @@ the base RTT (§4.2) and its slow start is exponential, so it does.
 
 | | Goodput | Standing queue p50 |
 | --- | --- | --- |
-| LEDBAT | 8.80 Mbps | **32.99 ms** |
-| LEDBAT++ | 6.22 Mbps | **1.55 ms** |
+| LEDBAT | 8.82 Mbps | **32.26 ms** |
+| LEDBAT++ | 6.85 Mbps | **4.76 ms** |
 
-29% less throughput for 21x less queue. On the deeper-queue latecomer link
+22% less throughput for 7x less queue. On the deeper-queue latecomer link
 (256 KB, ~200 ms of buffering) the gap is wider still: 38.1 ms against 1.1 ms.
 
 That is the entire proposition of a "less than best effort" protocol, and it
@@ -227,6 +238,37 @@ made classic LEDBAT substantially faster, not that it made it well-behaved.
 
 What each change was, and the libutp line it came from, is in
 [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
+
+## What path-MTU discovery changed
+
+The packet size is no longer a fixed 1024. It is discovered per connection by
+binary search, between a 576-byte floor and a 1400-byte ceiling, and the
+ceiling could only be raised because discovery makes it safe: an untested path
+starts at 988 bytes, *below* the old fixed size, and grows only once a probe
+of a given size has been acknowledged. See
+[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
+
+Against the fixed 1024 it replaces, on the profiles that resolve cleanly:
+
+| Profile | fixed 1024 | discovered | |
+| --- | --- | --- | --- |
+| LAN (1ms, 100Mbps) | 89.80 Mbps | 89.21 Mbps | flat |
+| Broadband (20ms, 10Mbps) | 6.35 Mbps | 6.40 Mbps | +0.8% |
+| High BDP (100ms, 20Mbps) | 2.09 Mbps | 2.10 Mbps | flat |
+| Shallow queue (16KB) | 4.71 Mbps | 4.75 Mbps | +0.8% |
+| Long transfer (8MB) | 8.68 Mbps | 8.82 Mbps | +1.6% |
+| Reordering (2%) | 3.08 Mbps | 3.40 Mbps | +10% |
+| Two flows, 8Mbps | 6.46 Mbps total | 6.63 Mbps total | +2.6% |
+
+The two loss profiles are omitted from this comparison on purpose: they were
+lengthened in the same change, so their old and new numbers measure different
+things.
+
+The gains are modest because this emulator charges by the byte, so the only
+saving is header overhead -- 20 bytes in 1024 against 20 in a discovered 1400.
+On a real path the saving is larger, because per-packet cost is not purely
+proportional to size. The reordering profile gains most for a different
+reason: fewer, larger packets are fewer opportunities to be reordered.
 
 ## What these numbers are not
 

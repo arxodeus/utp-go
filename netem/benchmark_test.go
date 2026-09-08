@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,18 @@ import (
 // reported. Three is enough to reject a single outlier and cheap enough to
 // run on every congestion-control change.
 const benchmarkRepeats = 3
+
+// benchmarkRepeatsEnv overrides the repeat count, for profiles whose result is
+// bimodal -- the loss ones, where a single retransmission timeout dominates a
+// short transfer and three runs cannot separate the two modes.
+func benchmarkRepeatCount() int {
+	if v := os.Getenv("UTP_BENCHMARK_REPEATS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return benchmarkRepeats
+}
 
 // benchmarkAlgorithms is the set of congestion controllers the suite runs.
 // Every profile runs under each, so the tables can be compared directly.
@@ -78,16 +91,25 @@ func benchmarkProfiles() []linkProfile {
 			payload: 1024 * 1024,
 		},
 		{
+			// Long enough that a single retransmission timeout is not a
+			// large fraction of the run.
+			//
+			// At 512 KB these took about a second, and one RTO -- a second on
+			// its own at the default floor -- made the result bimodal: nine
+			// runs still landed in two clusters a factor of three apart, and
+			// the median reported whichever cluster held five of them. A
+			// benchmark row that swings on which mode the majority fell into
+			// is not measuring the congestion controller.
 			name:    "Broadband, 1% loss",
 			seed:    103,
 			cfg:     Config{Delay: 20 * time.Millisecond, LossRate: 0.01, BandwidthBps: 10_000_000, QueueBytes: 64 * 1024},
-			payload: 512 * 1024,
+			payload: 4 * 1024 * 1024,
 		},
 		{
 			name:    "Broadband, 5% loss",
 			seed:    104,
 			cfg:     Config{Delay: 20 * time.Millisecond, LossRate: 0.05, BandwidthBps: 10_000_000, QueueBytes: 64 * 1024},
-			payload: 256 * 1024,
+			payload: 2 * 1024 * 1024,
 		},
 		{
 			name:    "High BDP (100ms, 20Mbps, no loss)",
@@ -146,7 +168,7 @@ func TestBenchmarkSuite(t *testing.T) {
 						qdelayP95 []time.Duration
 						queueP50  []time.Duration
 					)
-					for run := 0; run < benchmarkRepeats; run++ {
+					for run := 0; run < benchmarkRepeatCount(); run++ {
 						res, sum := runProfileOnce(t, profile, alg.algo)
 						mbps = append(mbps, res.Goodput.Mbps())
 						elapsed = append(elapsed, res.Elapsed)
@@ -175,7 +197,7 @@ func TestBenchmarkSuite(t *testing.T) {
 			// judged on.
 			t.Run("Two flows, 8Mbps bottleneck", func(t *testing.T) {
 				var totals, fairnesses []float64
-				for run := 0; run < benchmarkRepeats; run++ {
+				for run := 0; run < benchmarkRepeatCount(); run++ {
 					fairness, throughputs := runTwoFlowBottleneck(t, 108, alg.algo)
 					total := throughputs[0].Mbps() + throughputs[1].Mbps()
 					totals = append(totals, total)

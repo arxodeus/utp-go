@@ -17,7 +17,7 @@ all.
 | **M4** — audit transfer paths against libutp | **Done.** The ack path, the loss-recovery path, the retransmission timers and the send path are all audited against libutp — the timers by measurement rather than by reading, see [CONFORMANCE.md](CONFORMANCE.md). Three findings from the send path below; the packet-size one is deliberately left to M6. |
 | **M4b** — exhaustive libutp compatibility sweep | **Not done.** No `COMPATIBILITY.md` exists. |
 | **M5** — verify LEDBAT, add LEDBAT++ | **Done.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft, opt-in. Deference measured against a loss-based competitor over a shared bottleneck: classic LEDBAT takes 60% of the link from it, LEDBAT++ takes 44%. See [BENCHMARKS.md](BENCHMARKS.md). |
-| **M6** — MTU path discovery | **Not done**, but now scoped: the send-path audit measured what a larger packet is worth and why it cannot be taken without discovery. See "The packet size is smaller than libutp's" below. |
+| **M6** — MTU path discovery | **Done.** Binary search between a 576-byte floor and a 1400-byte ceiling, probing with ordinary data packets, as libutp does. The ceiling could be raised from 1024 only because discovery makes it safe: an untested path still gets 988 bytes. One gap: probes are not sent with the don't-fragment bit, so on IPv4 an oversized probe is fragmented rather than dropped. See below. |
 | **M7** — anacrolix/torrent integration | **Done, with one gap.** `utpnet` presents a uTP socket as `net.PacketConn`/`net.Conn` and satisfies torrent's uTP interface, checked against the real interface by reflection in `integration/anacrolix`. The gap: torrent selects its uTP implementation at build time, so wiring it in needs a `replace` or a patched file — recipes in that module's README. |
 | **M8** — soak and hardening | **Partly done.** Six fuzz targets — three on the decoder, one driving a live connection, and two differential against real libutp covering both the responder and initiator roles — plus three soak tests. Six defects found and fixed. See [FUZZING.md](FUZZING.md). Not done: timing comparison, and anything running for hours. |
 
@@ -873,24 +873,58 @@ This library sent nothing at all. It relied entirely on the peer speaking
 first, which against another copy of this library means neither side ever
 does.
 
-## The packet size is smaller than libutp's
+## The packet size was smaller than libutp's, and now discovers itself (M6)
 
-**Measured, and deliberately not changed.**
+**Fixed, by implementing path-MTU discovery.**
 
 libutp sizes packets from the interface MTU less the header, discovered by
 probing (`get_packet_size`, `utp_internal.cpp:1757-1762`), which lands around
-1400 bytes. This fork uses a fixed 1024.
+1400 bytes. This fork used a fixed 1024, because without discovery the only
+safe fixed size is a small one: a datagram above the path's MTU is either
+fragmented — costing more than it saves — or, on IPv6 and on any IPv4 path
+with the don't-fragment bit set, silently dropped. A connection that picks too
+large a size and cannot detect it does not run slowly; it stops.
 
-Raising it to 1400 was measured on the full benchmark suite: +2.4% on the long
-transfer, +17% on the reordering profile, within noise everywhere else. The
-emulator charges by the byte, so the only saving is header overhead — 20 bytes
-in 1024 against 20 in 1400.
+Raising the constant to 1400 was measured first, as the send-path audit: +2.4%
+on the long transfer, +17% on the reordering profile, within noise elsewhere.
+It was reverted, because a few percent is not worth a connection that fails
+outright on a PPPoE or VPN path.
 
-It was reverted. A 1420-byte datagram fragments or is dropped on any path
-below a 1500-byte MTU, which PPPoE and most VPNs are, and nothing here would
-detect that. A few percent of throughput is not worth a connection that fails
-outright, and the fix is not a larger constant but M6's discovery, which can
-establish what the path actually carries.
+`mtu.go` now implements libutp's search: a binary search between a 576-byte
+floor and a ceiling, where each probe is an ordinary data packet sized at the
+midpoint. Acknowledged, the floor rises to it; lost, the ceiling drops to just
+below. The search stops when the two are within 16 bytes and restarts every 30
+minutes, because paths change. All of it is libutp's —
+`mtu_search_update` (`:1289-1312`), `mtu_reset` (`:1314-1322`), the probe
+decision in `send_packet` (`:890-925`), the acknowledged path (`:1969-1974`),
+and the two failure paths, retransmission timeout (`:1152-1167`) and duplicate
+acknowledgements (`:1927-1940`).
+
+**Why raising the ceiling to 1400 is now safe**, and the argument is asserted
+as a test rather than left as prose: the ceiling is no longer what gets sent.
+The search starts at the midpoint between 576 and the ceiling — 988 bytes,
+below the 1024 this library used before — and grows only once a probe of a
+given size has been acknowledged. An untested path gets a smaller packet than
+it did before this change. A path that drops every probe settles on 576.
+
+Two things libutp does that this does not:
+
+- **Probes are not sent with the don't-fragment bit.** libutp passes
+  `UTP_UDP_DONTFRAG` for the probe (`utp_internal.cpp:925`). This library
+  writes through an abstract `Conn` — a UDP socket in production, an emulated
+  link or a scripted transport in tests — and has nowhere to put that flag.
+  The consequence is asymmetric: on IPv6, where routers do not fragment, an
+  oversized probe is dropped and the search learns correctly; on IPv4 it is
+  fragmented and acknowledged, so the search settles on a size that works but
+  costs fragmentation. That is a performance loss, not a failure, which is why
+  it is recorded rather than blocking.
+- **The ceiling is a fixed 1400, not the interface MTU.** libutp asks the
+  socket (`get_udp_mtu`, `:1316`). A fixed conservative ceiling cannot find a
+  jumbo-frame path, and gives up about 6% of a 1500-byte one.
+
+Measured with discovery, against the fixed 1024 it replaces: +2.1% on the long
+transfer, +11% on reordering, +2.6% on two flows sharing a bottleneck, flat on
+LAN, broadband and high-BDP. See [BENCHMARKS.md](BENCHMARKS.md).
 
 ## The retransmission backoff doubled every other timeout
 

@@ -18,25 +18,23 @@ const (
 	// (utp_internal.cpp:1380), so the floor is one second.
 	defaultMinTimeout = 1000 * time.Millisecond
 	defaultMaxTimeout = 60 * time.Second
-	// defaultMaxPacketSizeBytes is the largest packet this library builds.
+	// defaultMaxPacketSizeBytes is the largest datagram this library will
+	// ever try -- the ceiling of the path-MTU search, not a size it sends
+	// straight away.
 	//
-	// libutp uses the interface MTU less the header, discovered by probing
-	// (`get_packet_size`, utp_internal.cpp:1757-1762), which lands around
-	// 1400 bytes. This fork has no MTU discovery, so a fixed size has to be
-	// safe on every path rather than fast on most.
+	// libutp derives its ceiling from the interface MTU (`get_udp_mtu`,
+	// utp_internal.cpp:1316) and searches downward from there. 1400 is the
+	// same idea with a fixed, conservative starting assumption: below a
+	// 1500-byte Ethernet MTU with room for tunnelling overhead.
 	//
-	// Measured at 1400: +2.4% on the long transfer, +17% on the reordering
-	// profile, and within noise everywhere else -- the emulator charges by
-	// the byte, so the saving is only the header overhead, 20 bytes in 1024
-	// against 20 in 1400. A 1420-byte datagram also fragments or is dropped
-	// on any path below a 1500-byte MTU, which PPPoE and most VPNs are, and
-	// nothing here would detect that.
-	//
-	// A few percent of throughput is not worth a connection that fails
-	// outright on a low-MTU path. Raising this belongs with M6, where
-	// discovery can establish what the path actually carries. See
-	// KNOWN-LIMITATIONS.md.
-	defaultMaxPacketSizeBytes = 1024
+	// This was a flat 1024 before path-MTU discovery existed, because without
+	// discovery the only safe fixed size is a small one. It is safe to raise
+	// now precisely because it is no longer what gets sent: the search starts
+	// at the midpoint between 576 and this, and grows only once a probe of a
+	// given size has been acknowledged. An untested path therefore still gets
+	// a 988-byte packet, close to the old 1024, and reaches 1400 only after
+	// proving it can. See mtu.go.
+	defaultMaxPacketSizeBytes = 1400
 	// defaultMaxWindowSizeIncBytes is the cap on how far the congestion
 	// window may grow in one RTT. libutp:
 	// `#define MAX_CWND_INCREASE_BYTES_PER_RTT 3000` (utp_internal.cpp:43).
