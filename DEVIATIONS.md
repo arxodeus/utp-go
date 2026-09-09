@@ -148,6 +148,41 @@ libutp's `min(14+16, inbuf.size())` — the second term is the capacity of its
 circular reorder buffer, which has no equivalent here, so our window is 30
 entries always. That makes ours at least as wide as libutp's and never wider.
 
+## Acks are deferred, but not batched the way libutp's are
+
+Both implementations defer acknowledgements rather than sending one per data
+packet. libutp's `utp_process_incoming` calls `schedule_ack()`
+(`utp_internal.cpp:2377`), which sets a flag, and the embedder flushes it once
+per read batch via `utp_issue_deferred_acks()` (`utp.h:512-517`,
+`utp_internal.cpp:3796-3808`). We set `connection.ackPending` and flush at the
+end of the event-loop pass that received the data.
+
+libutp emits exactly one ack per batch, whatever the batch size. We emit
+somewhere between one and one-per-packet, depending on load.
+
+The difference is where the batch boundary falls, not whether acks are
+deferred. libutp is handed a whole batch of datagrams by its embedder before
+the flush, so a batch cannot split. Our packets cross three goroutines between
+the socket and the connection's event loop, so a pass covers however many
+happen to have arrived — several when they arrive faster than the connection
+drains them, one when they do not.
+
+Measured, on a 512 KB transfer over the emulated network: 0.82 acks per data
+packet at 20 Mbps, 0.37 at 100 Mbps, 0.17 at 1 Gbps, against exactly 1.000
+before deferring was implemented.
+
+Reason for not closing it: matching libutp's count means the socket
+accumulating datagrams and handing the connection a batch, which trades read
+latency for return-path packets, or a delayed-ack timer, which libutp does not
+have. Neither is worth it for a saving that is already largest exactly when it
+matters most — at high packet rates. `TestConformanceAckCoalescing` asserts the
+structural bound against real libutp and `netem.TestAckCoalescingUnderLoad`
+asserts the load-dependent one, so neither can silently drift back to one ack
+per packet.
+
+A FIN is acked immediately rather than deferred, matching libutp's direct
+`send_ack()` at `:2369-2370`.
+
 ## Inherited notes that claim consistency with the reference
 
 Two comments in `conn.go` describe behaviour as matching the reference

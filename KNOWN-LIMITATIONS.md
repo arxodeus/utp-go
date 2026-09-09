@@ -12,14 +12,14 @@ all.
 | --- | --- |
 | **M0** — pin the reference, prove the two libutp copies agree | **Done.** See [REFERENCE.md](REFERENCE.md) and `scripts/check-libutp-reference.sh`. |
 | **M1** — emulated network harness | **Done.** See [HARNESS.md](HARNESS.md) and `netem/`. |
-| **M2** — conformance harness against real libutp | **Partly done.** Twenty-one-case corpus comparing emitted packets field by field, including malformed and hostile headers; see [CONFORMANCE.md](CONFORMANCE.md). Responder role only, no timing comparison. |
+| **M2** — conformance harness against real libutp | **Partly done.** Corpus comparing emitted packets field by field, including malformed and hostile headers, plus retransmission-schedule and ack-count comparisons measured against libutp on each run; see [CONFORMANCE.md](CONFORMANCE.md). Responder role only, and ack *latency* is still not compared. |
 | **M3** — fix the failing transfer tests | **Done.** Root causes below; gates in "Verification". |
 | **M4** — audit transfer paths against libutp | **Done.** The ack path, the loss-recovery path, the retransmission timers and the send path are all audited against libutp — the timers by measurement rather than by reading, see [CONFORMANCE.md](CONFORMANCE.md). Three findings from the send path below; the packet-size one is deliberately left to M6. |
-| **M4b** — exhaustive libutp compatibility sweep | **Not done.** No `COMPATIBILITY.md` exists. |
+| **M4b** — exhaustive libutp compatibility sweep | **Done, and it is a map of gaps as much as of coverage.** [COMPATIBILITY.md](COMPATIBILITY.md) records every protocol area, the *kind* of evidence behind it — differential, measured, interop, cited, or none — and what is unchecked. Writing it found one defect (an ack per data packet, below). The largest gap it names: libutp has never been run over the emulated network, so every congestion-control claim is *cited* and every benchmark is a self-comparison. |
 | **M5** — verify LEDBAT, add LEDBAT++ | **Done.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft, opt-in. Deference measured against a loss-based competitor over a shared bottleneck: classic LEDBAT takes 60% of the link from it, LEDBAT++ takes 44%. See [BENCHMARKS.md](BENCHMARKS.md). |
 | **M6** — MTU path discovery | **Done.** Binary search between a 576-byte floor and a 1400-byte ceiling, probing with ordinary data packets, as libutp does. The ceiling could be raised from 1024 only because discovery makes it safe: an untested path still gets 988 bytes. One gap: probes are not sent with the don't-fragment bit, so on IPv4 an oversized probe is fragmented rather than dropped. See below. |
 | **M7** — anacrolix/torrent integration | **Done, with one gap.** `utpnet` presents a uTP socket as `net.PacketConn`/`net.Conn` and satisfies torrent's uTP interface, checked against the real interface by reflection in `integration/anacrolix`. The gap: torrent selects its uTP implementation at build time, so wiring it in needs a `replace` or a patched file — recipes in that module's README. |
-| **M8** — soak and hardening | **Partly done.** Six fuzz targets — three on the decoder, one driving a live connection, and two differential against real libutp covering both the responder and initiator roles — plus three soak tests. Six defects found and fixed. See [FUZZING.md](FUZZING.md). Not done: timing comparison, and anything running for hours. |
+| **M8** — soak and hardening | **Partly done.** Six fuzz targets — three on the decoder, one driving a live connection, and two differential against real libutp covering both the responder and initiator roles — plus three soak tests. Six defects found and fixed. See [FUZZING.md](FUZZING.md). Not done: anything running for hours. |
 
 **The interoperability gate now passes.** libutp is vendored at the pinned
 commit in `native/libutp/`, with a bridge that gives it a UDP socket and an
@@ -34,9 +34,10 @@ That is the difference between conformance by citation -- code read against
 `utp_internal.cpp` and matched by hand -- and evidence that the implementation
 every peer in the wild runs will actually complete a transfer with this one.
 
-What remains unmet in M7 is the `anacrolix/torrent` side: no adapter to its
-`utpSocket` interface, and no hash-verified torrent transfer. `CGO_ENABLED=0
-go build ./...` does succeed for the whole module.
+What remains unmet in M7 is a hash-verified torrent transfer: the adapter
+exists and is checked against torrent's real interface by reflection, but no
+actual torrent has moved through it. `CGO_ENABLED=0 go build ./...` succeeds
+for the whole module.
 
 Writing the gate immediately found two defects that nothing else had, both
 described below: `Accept` could not accept, and `Close` took up to half a
@@ -1083,6 +1084,83 @@ emitted unparseable packets.
 
 Found by `FuzzDecodePacket`; both minimised inputs are kept as regression
 cases in `testdata/fuzz/`.
+
+## Every data packet was acknowledged separately (M4b)
+
+We sent one STATE packet for every ST_DATA packet received. libutp does not:
+`utp_process_incoming` calls `schedule_ack()` (`utp_internal.cpp:2377`), which
+only sets a flag, and the embedder calls `utp_issue_deferred_acks()` once after
+draining a batch of datagrams (`utp.h:512-517`, `utp_internal.cpp:3796-3808`).
+A batch of *n* data packets costs libutp one ack and cost us *n*.
+
+Found by running both: with the harness already in place it took one test to
+ask each side how many packets it emitted for a batch.
+
+`connection.ackPending` now records that an ack is owed and `flushAck` sends at
+most one at the end of the event-loop pass, with the priority drain extended to
+pull up to 64 further queued events into the same pass. A FIN is still acked
+immediately, because libutp acks it directly at `:2369-2370`, and because
+deferring it emitted *nothing*: the connection is torn down in the same pass
+and `statePacket()` then returns nil. Two conformance cases caught that within
+a minute of the change.
+
+### The first version of this measurement was measuring the scheduler
+
+The conformance test initially asserted a fixed bound — libutp emits one ack
+per batch, we emit at most two — and that is what a plain run showed, for
+batches of 1, 2, 4, 8 and 16. Under `-race` it failed: 7 acks for a batch of 8,
+and 5 for a batch of 16.
+
+The first diagnosis was that the test injected packets too slowly, so a "batch"
+was only as batched as the injecting goroutine was fast. That was real, and the
+harness was fixed for it: `scriptedConn.hold`/`release` queue a whole batch
+before any of it is delivered, which is the starting position libutp's embedder
+gives it. Under `-race` the numbers improved and still failed — 9 to 14 acks
+for a batch of 16.
+
+The bound was wrong, not the harness. Our packets cross three goroutines
+between the socket and the connection's event loop, so how many land in one
+pass depends on whether they arrive faster than the connection drains them.
+When they do not, each is acknowledged alone — which is correct, and is what
+libutp does too when its embedder reads one datagram per batch. There is no
+fixed ratio to assert, and asserting one meant asserting a property of the Go
+scheduler on one machine.
+
+What the conformance test asserts now is the structural claim: libutp emits
+exactly one ack per batch (measured on every run, not hard-coded), and we emit
+at least one and never more than one per data packet — which is precisely where
+this fork used to sit.
+
+### What the change is actually worth, measured under load
+
+The saving is load-dependent, so it is measured under load, on the emulated
+network, by `netem.TestAckCoalescingUnderLoad`: one verified 512 KB transfer,
+counting packets offered to the forward link (data) against packets offered to
+the return link (acks).
+
+| Link | acks per data packet, before | after | after, under `-race` |
+| --- | --- | --- | --- |
+| 20 Mbps, 10 ms | 1.000 | 0.823 | 0.844 - 0.919 |
+| 100 Mbps, 1 ms | 1.000 | 0.368 | 0.670 - 0.721 |
+| 1 Gbps, 1 ms | 1.000 | 0.167 | 0.390 - 0.486 |
+
+Before the change the ratio was exactly 1.000 at every rate — measured, by
+stashing the change and re-running. After it, the ratio falls as the packet
+rate rises, which is the behaviour deferring acks should produce: the busier
+the connection, the more packets are already queued when a pass ends. At 1 Gbps
+that is roughly six data packets per ack.
+
+Only the highest rate is asserted, and loosely (at most 0.75). At the lowest
+rate coalescing barely engages by design, so a slower machine could reach 1.000
+there legitimately and the assertion would again be measuring the machine.
+
+**Effect on throughput: none measurable.** Re-running the benchmark suite at
+seven repeats put every profile inside its own run-to-run range (LAN 89.21 to
+89.40 Mbps, broadband 6.40 to 6.40, long transfer 8.82 to 8.85, two flows 6.63
+to 6.63 at Jain 1.000). That is the expected result: coalescing removes
+*return-path* packets, and none of these profiles is ack-limited. It was kept
+because it costs nothing and matches the reference, not because it was faster.
+The claim being made here is only that it did not regress.
 
 ## Things found but deliberately not fixed
 

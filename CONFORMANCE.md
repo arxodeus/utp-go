@@ -197,9 +197,30 @@ Both found real defects — see [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md):
 the backoff doubled once every two retransmissions instead of every one, and
 the timer wheel could fire up to a full interval early.
 
+## Ack coalescing
+
+`TestConformanceAckCoalescing` asks both implementations the same question:
+for a batch of *n* ST_DATA packets delivered back to back, how many STATE
+packets come out? libutp answers one, for every *n*, measured on each run
+rather than hard-coded, so the test fails if its behaviour ever changes rather
+than silently pinning a stale assumption. We answer between one and *n*, where
+this fork used to answer exactly *n*.
+
+Only that structural bound is asserted here. An earlier version asserted a
+fixed ratio, passed, and then failed under `-race` — it was measuring the Go
+scheduler rather than the code, and the story is written up in
+[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md). How much deferring actually saves
+depends on load, and is measured under load by
+`netem.TestAckCoalescingUnderLoad` instead.
+
+This is the one place the corpus compares *volume* rather than content. Ack
+*latency* is still not compared — that needs an injectable clock in our
+connection, and is listed in [COMPATIBILITY.md](COMPATIBILITY.md) as not
+covered.
+
 ## Deliberate divergences
 
-Four, asserted explicitly in the corpus rather than absorbed into a tolerance:
+Five, asserted explicitly in the corpus rather than absorbed into a tolerance:
 
 **libutp acks twice on reaching a FIN.** Once immediately
 (`utp_internal.cpp:2370`, *"if the other end wants to close, ack"*) and once
@@ -254,6 +275,22 @@ vector nor reachable without completing one.
 that, every generated sequence not starting with data reports this known
 divergence instead of finding a new one.
 
+**libutp emits one ack per batch of data packets; we emit between one and one
+per packet.** Both defer: libutp sets a flag in `schedule_ack()`
+(`utp_internal.cpp:2377`) and flushes it when the embedder calls
+`utp_issue_deferred_acks()` (`:3796-3808`); we set `ackPending` and flush at
+the end of the event-loop pass. The difference is where the batch boundary
+falls. libutp is handed a whole batch by its embedder before the flush, so a
+batch never splits. Our packets cross three goroutines between the socket and
+the connection's event loop, so a pass covers whatever has arrived by then.
+
+`TestConformanceAckCoalescing` asserts the bound in both directions: that
+libutp still emits exactly one, and that we emit at least one and never more
+than one per data packet. Closing the gap entirely means the socket handing
+the connection a batch rather than a packet — a change to the read path, not
+the ack path — and it is recorded in [DEVIATIONS.md](DEVIATIONS.md) rather
+than made.
+
 ## Limits
 
 Stated plainly, because a conformance harness that overclaims is worse than
@@ -262,13 +299,16 @@ none.
 - **Only the responder role is covered.** Every case drives both
   implementations as the side accepting a connection. The initiator role —
   where we send the SYN and libutp answers — is not in the corpus.
-- **Ack timing is not compared, though retransmission timing now is.**
-  `conformance_timing_test.go` measures libutp's retransmission schedule on
-  its virtual clock and asserts ours has the same shape — see "Retransmission
-  timing" below. What is still uncompared is *ack* timing: libutp defers acks
-  and flushes them at defined points, ours acks from a goroutine on the real
-  clock. Nothing in this corpus asserts *when* a packet was
-  sent, only what it contained and in what order.
+- **Ack timing is not compared, though ack *count* and retransmission timing
+  now are.** `conformance_timing_test.go` measures libutp's retransmission
+  schedule on its virtual clock and asserts ours has the same shape — see
+  "Retransmission timing" above — and `TestConformanceAckCoalescing` compares
+  how many acks each side emits per batch. What is still uncompared is ack
+  *latency*: libutp flushes deferred acks when its embedder says so, ours when
+  an event-loop pass ends on the real clock. Nothing in this corpus asserts
+  *when* a packet was sent, only what it contained, how many there were, and
+  in what order. Comparing latency needs an injectable clock in our
+  connection.
 - **State is compared only through the wire.** Terminal outcomes are inferred
   from emitted packets, not read out of either implementation. Notably, a
   packet with an invalid `ack_nr` produces silence from both — but ours resets

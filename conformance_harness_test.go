@@ -38,10 +38,16 @@ func (p *scriptedPeer) Hash() string { return p.name }
 // scriptedConn is a Conn whose input is injected by the test and whose output
 // is captured, so our socket can be driven exactly as the libutp driver is.
 type scriptedConn struct {
-	inbox  chan []byte
 	peer   *scriptedPeer
 	closed chan struct{}
 	once   sync.Once
+
+	// inMu guards the queue of injected packets. notify carries a single
+	// wake-up for a reader parked with nothing to read.
+	inMu    sync.Mutex
+	pending [][]byte
+	holding bool
+	notify  chan struct{}
 
 	mu      sync.Mutex
 	emitted [][]byte
@@ -49,18 +55,38 @@ type scriptedConn struct {
 
 func newScriptedConn() *scriptedConn {
 	return &scriptedConn{
-		inbox:  make(chan []byte, 1024),
 		peer:   &scriptedPeer{name: "conformance-peer"},
 		closed: make(chan struct{}),
+		notify: make(chan struct{}, 1),
 	}
 }
 
 func (c *scriptedConn) ReadFrom(b []byte) (int, ConnectionPeer, error) {
+	for {
+		c.inMu.Lock()
+		if !c.holding && len(c.pending) > 0 {
+			pkt := c.pending[0]
+			c.pending = c.pending[1:]
+			more := len(c.pending) > 0
+			c.inMu.Unlock()
+			if more {
+				c.signal()
+			}
+			return copy(b, pkt), c.peer, nil
+		}
+		c.inMu.Unlock()
+		select {
+		case <-c.notify:
+		case <-c.closed:
+			return 0, nil, context.Canceled
+		}
+	}
+}
+
+func (c *scriptedConn) signal() {
 	select {
-	case buf := <-c.inbox:
-		return copy(b, buf), c.peer, nil
-	case <-c.closed:
-		return 0, nil, context.Canceled
+	case c.notify <- struct{}{}:
+	default:
 	}
 }
 
@@ -78,7 +104,38 @@ func (c *scriptedConn) Close() error {
 	return nil
 }
 
-func (c *scriptedConn) inject(pkt []byte) { c.inbox <- pkt }
+func (c *scriptedConn) inject(pkt []byte) {
+	c.inMu.Lock()
+	c.pending = append(c.pending, pkt)
+	holding := c.holding
+	c.inMu.Unlock()
+	if !holding {
+		c.signal()
+	}
+}
+
+// hold stops packets being delivered without stopping them being injected, so
+// a test can queue a whole batch and then release it at once.
+//
+// Without it, a "batch" is only as batched as the injecting goroutine is fast:
+// under -race, injecting eight packets in a loop took longer than the
+// connection took to process one, so each arrived alone and was acknowledged
+// alone. That measures the test, not the implementation. libutp has no such
+// problem because its embedder hands it a whole batch of datagrams before
+// calling utp_issue_deferred_acks(); hold/release gives our side the same
+// starting position.
+func (c *scriptedConn) hold() {
+	c.inMu.Lock()
+	c.holding = true
+	c.inMu.Unlock()
+}
+
+func (c *scriptedConn) release() {
+	c.inMu.Lock()
+	c.holding = false
+	c.inMu.Unlock()
+	c.signal()
+}
 
 func (c *scriptedConn) takeEmitted() [][]byte {
 	c.mu.Lock()

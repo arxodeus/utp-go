@@ -224,6 +224,10 @@ type connection struct {
 	// acknowledgement reports a zero window (:2149-2151) and acted on in
 	// check_timeouts (:1142-1145).
 	zeroWindowProbeDue time.Time
+	// ackPending records that a received packet is owed an acknowledgement,
+	// which is sent once at the end of the event-loop pass that received it.
+	// libutp's schedule_ack / utp_issue_deferred_acks.
+	ackPending bool
 	// mtu is this connection's path-MTU search. See mtu.go.
 	mtu *mtuSearch
 	// lastSentPacket is when this connection last put a packet on the wire.
@@ -558,6 +562,22 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		select {
 		case event := <-stream.streamEvents:
 			handleIncoming(event)
+			// Take whatever else has already arrived before answering, so one
+			// acknowledgement covers the batch rather than one per packet.
+			// This is what libutp's embedder does by calling
+			// utp_issue_deferred_acks once per event-loop pass.
+			//
+			// Bounded so that a peer sending continuously cannot keep this
+			// inner loop fed and starve writes and timers; the outer loop
+			// returns here immediately anyway if more are waiting.
+			for drained := 0; drained < maxAckCoalesce; drained++ {
+				select {
+				case more := <-stream.streamEvents:
+					handleIncoming(more)
+				default:
+					drained = maxAckCoalesce
+				}
+			}
 			goto afterSelect
 		default:
 		}
@@ -595,6 +615,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			return c.ctx.Err()
 		}
 	afterSelect:
+		c.flushAck()
 		c.sampleMetrics(time.Now(), false)
 		if stream.shutdown.Load() && c.state.stateType != ConnClosed {
 			c.shutdown()
@@ -1188,6 +1209,27 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 	}
 }
 
+// maxAckCoalesce bounds how many already-queued packets one pass of the event
+// loop will take before answering them.
+//
+// libutp has no explicit bound: its embedder drains its socket and then calls
+// utp_issue_deferred_acks. The bound here exists because this loop also
+// services writes and timers, and an unbounded inner drain would let a peer
+// sending continuously starve them.
+const maxAckCoalesce = 64
+
+// flushAck sends the acknowledgement owed for whatever was received in this
+// pass of the event loop, if any.
+func (c *connection) flushAck() {
+	if !c.ackPending {
+		return
+	}
+	c.ackPending = false
+	if statePacket := c.statePacket(); statePacket != nil {
+		c.emit(statePacket)
+	}
+}
+
 // retransmit resends a packet with its acknowledgement fields brought up to
 // date. The sequence number and payload are the original's; everything the
 // peer reads about our current state is not.
@@ -1517,17 +1559,36 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 			c.emit(c.synState)
 		}
 
-	case st_data, st_fin:
+	case st_fin:
+		// A FIN is acknowledged immediately, not deferred.
+		//
+		// libutp: `// if the other end wants to close, ack` followed by a
+		// direct `conn->send_ack()` (utp_internal.cpp:2369-2370), separately
+		// from the deferred one it also schedules at :2404.
+		//
+		// Deferring it does not work here for a reason worth recording:
+		// reaching a FIN tears the connection down in the same pass of the
+		// event loop, so by the time the deferred acknowledgement would be
+		// sent there is no connection left to build one from, and the peer
+		// gets nothing at all. Two corpus cases caught that immediately.
 		if statePacket := c.statePacket(); statePacket != nil {
-			if c.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
-				c.logger.Debug("create a state packet to send out",
-					"packet.seqNum", statePacket.Header.SeqNum,
-					"packet.ackNum", statePacket.Header.AckNum,
-					"packet.cid", statePacket.Header.ConnectionId)
-			}
-
 			c.emit(statePacket)
 		}
+	case st_data:
+		// Note that an acknowledgement is owed; do not send it here.
+		//
+		// libutp calls `schedule_ack()` (utp_internal.cpp:2404, :2472), which
+		// adds the socket to a list its embedder flushes once per pass of its
+		// event loop. So a batch of packets arriving together draws one
+		// acknowledgement, not one each.
+		//
+		// This library used to answer every packet immediately. Measured
+		// against libutp with the driver's deferred-ack flush: eight data
+		// packets in one batch drew one acknowledgement from libutp and eight
+		// from us. On an asymmetric path -- ADSL, cellular -- that reverse
+		// traffic is not free, and on a shared bottleneck it competes with
+		// the forward data.
+		c.ackPending = true
 	}
 
 	// Notify writable on STATE packets

@@ -13,6 +13,7 @@ do. See:
 
 | Document | What it covers |
 | --- | --- |
+| [COMPATIBILITY.md](COMPATIBILITY.md) | What has been checked against libutp, how strong the evidence for each area is, and what has not been checked at all. |
 | [CONFORMANCE.md](CONFORMANCE.md) | The conformance corpus: how two implementations are compared packet by packet, what it found, and what it does not cover. |
 | [HARNESS.md](HARNESS.md) | The emulated network harness: what it models, what it measures, and the numbers proving it is sound. |
 | [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) | **Read this first.** Root cause of every defect fixed, what has and has not been measured, and everything found but not fixed. |

@@ -502,6 +502,35 @@ correctly; on IPv4 it is fragmented and acknowledged, so the search settles on
 a size that works but costs fragmentation. And the ceiling is a fixed 1400
 rather than the interface MTU, so a jumbo-frame path is not found.
 
+## PR 23 — deferred acks
+
+Upstream sends one STATE packet for every ST_DATA packet received. libutp
+sends one per batch: `schedule_ack()` sets a flag
+(`utp_internal.cpp:2377`) and the embedder flushes it once after draining a
+batch of datagrams (`utp.h:512-517`, `utp_internal.cpp:3796-3808`).
+
+`connection.ackPending` and `flushAck()` do the same, driven from the end of
+the event-loop pass rather than from an embedder call, with the priority drain
+extended to pull up to 64 further queued events into the same pass.
+
+The count cannot match libutp's exactly, and the reason is worth stating
+because it is structural: libutp's embedder hands it a whole batch of datagrams
+before the flush, where our packets cross three goroutines, so a pass covers
+however many happen to have arrived. The saving is therefore load-dependent.
+Measured on a 512 KB transfer over the emulated network, acks per data packet:
+upstream 1.000 at every rate; this 0.82 at 20 Mbps, 0.37 at 100 Mbps, 0.17 at
+1 Gbps. Two tests pin it — one against real libutp for the structural bound,
+one under load for the ratio.
+
+A FIN is excluded and acked immediately — libutp acks it directly at
+`:2369-2370`, and deferring it emits nothing at all, because the connection is
+torn down in the same pass and `statePacket()` then returns nil.
+
+No throughput claim attaches to this. Re-running the benchmark suite put every
+profile inside its own run-to-run range; the change removes return-path
+packets, and none of those profiles is ack-limited. It is worth upstreaming
+because it matches the reference and costs nothing, not because it is faster.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it
