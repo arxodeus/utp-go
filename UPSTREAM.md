@@ -531,6 +531,32 @@ profile inside its own run-to-run range; the change removes return-path
 packets, and none of those profiles is ack-limited. It is worth upstreaming
 because it matches the reference and costs nothing, not because it is faster.
 
+## PR 24 — libutp over the emulated network, and two harness defects
+
+Only relevant to upstream if it takes PR 11 (the harnesses). It puts real
+libutp on one end of an emulated link, so congestion-control changes can be
+measured against the reference instead of against the previous commit.
+
+Two defects had to be fixed first, and both are worth knowing about
+independently, because both produced plausible tables rather than obvious
+failures:
+
+- The driver's virtual clock started at zero while this library stamps packets
+  with `time.Now().UnixMicro()`. uTP peers exchange timestamps and subtract, so
+  libutp read the epoch offset as its queueing delay and its LEDBAT controller
+  collapsed the window. On a 100ms path that meant two packets per second; on
+  short paths it merely looked slow.
+- Neither `driver.cpp` nor `bridge.cpp` registered `UTP_GET_UDP_MTU`, so
+  `utp_call_get_udp_mtu` returned 0, `mtu_ceiling` was 0 against a floor of 576,
+  and libutp's MTU search settled on 288-byte packets and could never converge
+  (the `mtu_ceiling - mtu_floor <= 16` test underflows). Fixing it moved the
+  interop numbers from ~430/~374 Mbps to ~600/~430.
+
+The comparison itself says our classic LEDBAT is more aggressive than libutp's
+— 34% faster on broadband, 41% under 1% loss, with our sender against libutp's
+receiver as the control. That is a finding about this fork, not a win, and it
+belongs in any conversation about upstreaming PR 12.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

@@ -169,6 +169,23 @@ static uint64 drv_get_read_buffer_size(utp_callback_arguments *a) {
 	return (uint64)d->rx_len;
 }
 
+// libutp asks its embedder for the path MTU and uses the answer as the ceiling
+// of its own MTU search (mtu_reset, utp_internal.cpp:1314-1322). With no
+// callback registered utp_call_get_udp_mtu returns 0 (utp_callbacks.cpp:122),
+// so the ceiling is 0, the floor stays 576, and mtu_search_update settles on
+// (576 + 0) / 2 = 288-byte packets -- the underflow in its
+// `mtu_ceiling - mtu_floor <= 16` test keeps the search from ever finishing.
+// That is not libutp's behaviour, it is the behaviour of libutp wired up
+// wrongly, and it made every throughput measurement taken against this driver
+// an understatement.
+//
+// 1472 is a standard 1500-byte Ethernet MTU less 20 bytes of IPv4 header and
+// 8 of UDP, which is what an embedder on an ordinary path reports.
+static uint64 drv_get_udp_mtu(utp_callback_arguments *a) {
+	(void)a;
+	return 1472;
+}
+
 static uint64 drv_get_milliseconds(utp_callback_arguments *a) {
 	return drv_of(a)->now_micros / 1000ULL;
 }
@@ -214,6 +231,7 @@ libutp_driver *libutp_driver_create(uint64_t now_micros) {
 	utp_set_callback(d->ctx, UTP_ON_FIREWALL, &drv_on_firewall);
 	utp_set_callback(d->ctx, UTP_ON_ACCEPT, &drv_on_accept);
 	utp_set_callback(d->ctx, UTP_GET_READ_BUFFER_SIZE, &drv_get_read_buffer_size);
+	utp_set_callback(d->ctx, UTP_GET_UDP_MTU, &drv_get_udp_mtu);
 	utp_set_callback(d->ctx, UTP_GET_MILLISECONDS, &drv_get_milliseconds);
 	utp_set_callback(d->ctx, UTP_GET_MICROSECONDS, &drv_get_microseconds);
 	utp_set_callback(d->ctx, UTP_GET_RANDOM, &drv_get_random);

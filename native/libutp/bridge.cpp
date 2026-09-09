@@ -187,6 +187,21 @@ static uint64 cb_on_accept(utp_callback_arguments *a) {
 	return 0;
 }
 
+// The path MTU, which libutp uses as the ceiling of its own MTU search
+// (mtu_reset, utp_internal.cpp:1314-1322). Without this callback
+// utp_call_get_udp_mtu returns 0 (utp_callbacks.cpp:122), leaving the ceiling
+// at 0 against a floor of 576 and settling the search on 288-byte packets --
+// so libutp moves the same bytes in five times as many datagrams. See the
+// matching note in driver.cpp.
+//
+// 1472 is a standard 1500-byte Ethernet MTU less 20 bytes of IPv4 header and 8
+// of UDP. The peer runs over loopback, whose MTU is larger, but reporting the
+// ordinary path MTU is what an embedder on an ordinary path does.
+static uint64 cb_get_udp_mtu(utp_callback_arguments *a) {
+	(void)a;
+	return 1472;
+}
+
 static uint64 cb_get_read_buffer_size(utp_callback_arguments *a) {
 	libutp_peer *p = peer_of(a);
 	// How much libutp has handed us that the application has not read yet.
@@ -270,6 +285,7 @@ libutp_peer *libutp_peer_create(uint16_t port) {
 	utp_set_callback(p->ctx, UTP_ON_FIREWALL, &cb_on_firewall);
 	utp_set_callback(p->ctx, UTP_ON_ACCEPT, &cb_on_accept);
 	utp_set_callback(p->ctx, UTP_GET_READ_BUFFER_SIZE, &cb_get_read_buffer_size);
+	utp_set_callback(p->ctx, UTP_GET_UDP_MTU, &cb_get_udp_mtu);
 	// No defaults exist for these: libutp returns 0 when they are unset, which
 	// would leave every timestamp and connection id zero.
 	utp_set_callback(p->ctx, UTP_GET_MILLISECONDS, &cb_get_milliseconds);

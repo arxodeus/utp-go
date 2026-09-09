@@ -270,6 +270,41 @@ On a real path the saving is larger, because per-packet cost is not purely
 proportional to size. The reordering profile gains most for a different
 reason: fewer, larger packets are fewer opportunities to be reordered.
 
+## Against the reference implementation
+
+Everything above compares this library to itself. This table compares it to
+real libutp, run over the same emulated links by
+`netem.TestLibutpOverEmulatedNetwork`. Seven repeats per cell, median with the
+range, every transfer byte-verified. Both ends run classic LEDBAT, which is
+libutp's controller and this library's default.
+
+| Profile | go->go | libutp->go | go->libutp |
+| --- | --- | --- | --- |
+| LAN (1ms, 100Mbps) | 86.78 (84.10-88.95) | 33.50 (16.65-66.69) | 83.43 (72.99-90.57) |
+| Broadband (20ms, 10Mbps) | 6.39 (6.28-6.40) | 4.19 (4.19-4.19) | 6.43 (6.21-6.45) |
+| Broadband, 1% loss | 3.94 (3.91-4.05) | 2.80 (2.79-3.35) | 3.87 (2.69-4.06) |
+| High BDP (100ms, 20Mbps) | 2.10 (2.08-2.10) | 1.86 (1.86-1.86) | 2.09 (2.07-2.10) |
+| Shallow queue (16KB) | 5.62 (3.29-5.66) | 4.19 (3.35-4.19) | 5.56 (3.30-5.66) |
+
+Our sender is faster than libutp's everywhere — 34% on broadband, 41% under 1%
+loss. That is not a win, and reading it as one would be the mistake this file
+exists to prevent. LEDBAT's whole purpose is to yield, and the LEDBAT++ section
+above already records that our classic LEDBAT leaves 33 ms of standing queue on
+a 40 ms path where LEDBAT++ leaves 1.55 ms. A controller that yields less
+finishes sooner. The defensible reading is that this fork's classic LEDBAT is
+more aggressive than the reference's, which is a finding about this library.
+
+The `go->libutp` column is the useful control: our sender against libutp's
+receiver lands within noise of our sender against our own receiver on every
+profile, so the difference in the middle column is the sending controller and
+not the receiving end.
+
+libutp's LAN figure is bimodal — twelve consecutive runs came in at either
+~505 ms or ~2.003 s — and the gap is one retransmission timeout against its
+1000 ms RTO floor and 500 ms check granularity. Our seven runs showed no such
+mode. Details in [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md), along with the
+two harness defects that had to be fixed before this table meant anything.
+
 ## What these numbers are not
 
 - **Not a comparison against libutp.** The interoperability gate proves the

@@ -90,12 +90,22 @@ than "verified".
 | Timeout window handling | Cited | Idle vs in-flight, `:1216-1228` |
 | Delay clamp to RTT | Cited | `:1617-1621` |
 | Application-limited guard | Cited | `last_maxed_out_window`, `:1681-1686` |
-| **Behaviour under load** | **None against libutp** | The emulated network measures *ours*; libutp has never been run over it. Everything in BENCHMARKS.md compares this library to itself |
+| **Behaviour under load** | **Measured** | `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite. Ours is faster on every profile, which reads as ours being more aggressive rather than better; libutp's LAN result is bimodal on its 1000ms RTO floor |
 
-That last row is the largest gap in this table. The congestion controller is
-the part of the protocol with the most freedom, the most impact, and the least
-differential evidence — every claim about it is *cited*, and the numbers
-proving it works are self-comparisons.
+Every *row* above the last is still *cited*: the mechanisms — slow start, the
+decay limiter, the delay clamp, the application-limited guard — were matched by
+hand against `apply_ccontrol`, and only the aggregate behaviour they add up to
+has been compared against the reference. That aggregate comparison is worth
+having and it is not the same thing. Two implementations can reach the same
+goodput on a link by different routes, and this table would not tell them
+apart.
+
+Getting the load comparison to mean anything took two harness fixes, both of
+which produced plausible-looking tables first: libutp's clock was in a
+different epoch from ours, so what it read as queueing delay was an epoch
+offset, and neither the driver nor the socket bridge told libutp the path MTU,
+so it sent 288-byte packets. Both are written up in
+[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
 
 ## Whole-stack
 
@@ -108,10 +118,14 @@ proving it works are self-comparisons.
 
 ## What is not covered at all
 
-- **libutp over the emulated network.** The single most valuable thing
-  missing. It would turn every congestion-control row above from *cited* to
-  *measured*, and would let the benchmark tables compare against the reference
-  rather than against a previous version of this library.
+- **Per-mechanism congestion-control comparison.** libutp now runs over the
+  emulated network, so the *aggregate* behaviour is measured. What is still
+  uncompared is each mechanism on its own — the window trace under a step
+  change in delay, the decay limiter's effect, what each does at the moment a
+  queue fills. Goodput on five links is a coarse instrument for that.
+- **libutp against libutp on the emulated network.** Every flow measured joins
+  libutp to this library. A libutp-to-libutp flow over the same links would
+  separate the reference's behaviour from what our end contributes to it.
 - **Interop under adverse conditions.** The gate transfers over loopback. Loss,
   reordering and delay against real libutp are untested.
 - **The initiator role in the hand-written corpus.** The differential fuzzer

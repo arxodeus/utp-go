@@ -184,6 +184,32 @@ Results are in [BENCHMARKS.md](BENCHMARKS.md). The short version is that
 classic LEDBAT takes 60% of a shared bottleneck from this competitor, which is
 the opposite of what the protocol is for.
 
+## Real libutp as an endpoint
+
+`libutp_flow_test.go` puts the reference implementation on one end of an
+emulated link. `libutp.Driver` is built for this without knowing it: no socket,
+no clock, no threads, everything through explicit calls. The loop supplies all
+three — it takes packets off a netem `Endpoint` and injects them, sets libutp's
+clock from the same `time.Now().UnixMicro()` base this library stamps packets
+with, calls `utp_issue_deferred_acks` after each batch and `utp_check_timeouts`
+on a 200µs tick, drains received data every pass so libutp's advertised window
+stays open, and writes whatever it emits back onto the link.
+
+Exactly one goroutine touches the driver, because the driver is explicitly not
+safe for concurrent use. Packets reach it through a channel filled by a reader
+goroutine that never touches it.
+
+Two gates use it: `TestLibutpTransfersOverEmulatedNetwork`, which is cheap and
+runs every time, and `TestLibutpOverEmulatedNetwork`, which produces the
+comparison table in [BENCHMARKS.md](BENCHMARKS.md) and honours
+`UTP_BENCHMARK_REPEATS`.
+
+The cheap gate matters more than its throughput number suggests. Wiring the
+reference up wrongly is easy and does not look like an error — it looks like a
+result. Two defects in this harness were found by measuring rather than by
+reading, and both made libutp look worse than it is; they are in
+[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
+
 ## What it does not do
 
 - **The competitor is Reno-shaped, not TCP.** Read a result from it as
