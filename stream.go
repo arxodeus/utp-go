@@ -27,7 +27,10 @@ type UtpStream struct {
 	connHandle   *sync.WaitGroup
 	conn         *connection
 	closeOnce    sync.Once
-	readLocker   sync.Mutex
+	// abandoned is closed by Close, telling the connection that whatever is
+	// still buffered for this reader is owed to nobody.
+	abandoned  chan struct{}
+	readLocker sync.Mutex
 	// readRemainder holds bytes from a chunk that a Read call could not fit
 	// in the caller's buffer. Guarded by readLocker.
 	readRemainder []byte
@@ -64,11 +67,35 @@ func NewUtpStream(
 		streamEvents: streamEvents,
 		connHandle:   connHandle,
 		shutdown:     &atomic.Bool{},
+		abandoned:    make(chan struct{}),
 	}
 
-	utpStream.conn = newConnection(streamCtx, logger, cid, config, syn, connected, socketEvents, utpStream.reads, timers)
+	utpStream.conn = newConnection(streamCtx, logger, cid, config, syn, connected, socketEvents, utpStream.reads, utpStream.abandoned, timers)
 	go utpStream.start()
 	return utpStream
+}
+
+func (s *UtpStream) notifyRead() {
+	if s.conn == nil {
+		return
+	}
+	select {
+	case s.conn.readable <- struct{}{}:
+	default:
+	}
+}
+
+// terminalErr reports the error the connection recorded when the stream ended,
+// for a reader that learned of the end from the read channel closing rather
+// than from the end-of-stream marker. A clean end reports nil.
+func (s *UtpStream) terminalErr() error {
+	if s.conn == nil {
+		return nil
+	}
+	if boxed := s.conn.terminalErr.Load(); boxed != nil {
+		return boxed.err
+	}
+	return nil
 }
 
 func (s *UtpStream) Cid() *ConnectionId {
@@ -99,8 +126,9 @@ func (s *UtpStream) ReadToEOF(ctx context.Context, buf *[]byte) (int, error) {
 			return 0, s.streamCtx.Err()
 		case res, ok := <-s.reads:
 			if !ok {
-				return n, nil
+				return n, s.terminalErr()
 			}
+			s.notifyRead()
 			if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 				s.logger.Trace("read a new buf", "len", res.Len)
 			}
@@ -154,9 +182,14 @@ func (s *UtpStream) Read(ctx context.Context, buf []byte) (int, error) {
 		return 0, io.EOF
 	case res, ok := <-s.reads:
 		if !ok {
+			if err := s.terminalErr(); err != nil {
+				s.readErr = err
+				return 0, err
+			}
 			s.readErr = io.EOF
 			return 0, io.EOF
 		}
+		s.notifyRead()
 		if res.Len == 0 || len(res.Data) == 0 {
 			if res.Err != nil {
 				s.readErr = res.Err
@@ -212,6 +245,11 @@ func (s *UtpStream) Close() {
 			s.logger.Trace("call close utp stream", "dst.Peer", s.cid.Peer, "dst.send", s.cid.Send, "dst.recv", s.cid.Recv)
 		}
 		s.shutdown.Store(true)
+		// Tell the connection's final drain not to wait for a reader that is
+		// no longer there. Closing is what makes Close safe against its own
+		// wait below: the loop would otherwise block handing over bytes that
+		// this consumer has just said it does not want.
+		close(s.abandoned)
 		// Wake the event loop.
 		//
 		// Setting the flag alone is not enough: the loop is blocked in a

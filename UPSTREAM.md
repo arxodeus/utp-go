@@ -557,24 +557,36 @@ The comparison itself says our classic LEDBAT is more aggressive than libutp's
 receiver as the control. That is a finding about this fork, not a win, and it
 belongs in any conversation about upstreaming PR 12.
 
-## Not upstreamable yet — the event loop blocks on the application
+## PR 25 — the event loop blocked on the application
 
-Recorded here so it is not rediscovered from scratch. `processReads` hands
-bytes to the reader with a blocking channel send, so an application that stops
-reading stops its connection's event loop: no acks, no window updates, no
-retransmissions. libutp cannot reach that state — `utp_call_on_read` returns
-immediately and backpressure is the advertised receive window, fed by
-`utp_call_get_read_buffer_size`. It also deadlocks `Close()` against a consumer
-that never read.
+`processReads` handed bytes to the reader with a blocking channel send, so an
+application that stopped reading stopped its connection's event loop: no acks,
+no window updates, no retransmissions. libutp cannot reach that state --
+`utp_call_on_read` returns immediately and backpressure is the advertised
+receive window, fed by `utp_call_get_read_buffer_size`. It also deadlocked
+`Close()` against a consumer that never read.
 
-A fix was attempted and reverted: stop filling the read queue when it is full
-and let the unread bytes in `RecvBuf` close the advertised window, with a
-wake-up from the reader. It fixed both symptoms and deadlocked three unrelated
-tests under a loaded machine, including libutp interop. Details, and what a
-correct fix needs, are in [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
+The drain now stops when the read queue is full, leaving the rest in `RecvBuf`,
+whose `Available()` is what we advertise -- so the window closes instead of the
+loop stopping.
 
-`netem.TestCloseWithoutReadingDoesNotHang` is checked in skipped as a reliable
-reproduction.
+Three further changes are load-bearing, and each one is a silent data loss or a
+deadlock if it is left out:
+
+- End of stream is announced only once the receive buffer is drained. `eof()`
+  means the bytes *arrived*, not that the reader has them; without this the
+  transfer truncates (measured: 409308 of 524288 bytes against libutp).
+- The end-of-stream marker is best-effort and the event loop closes `c.reads`
+  on exit, so a reader that never received the marker still learns, with the
+  reason carried in `terminalErr`.
+- The teardown drain waits for room, escaping on the connection context or on
+  the consumer having closed the stream. Without that second escape the
+  deadlock returns.
+
+Take it with the tests. `netem.TestEventLoopRunsWhileReaderIsStalled` measures
+the event loop directly through the metrics callback, which runs on the loop's
+own goroutine, and fails 5 of 5 against the unfixed code with identical numbers.
+`netem.TestCloseWithoutReadingDoesNotHang` fails 3 of 3.
 
 ## Not for upstream
 

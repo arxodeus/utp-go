@@ -10,30 +10,17 @@ import (
 
 // Closing from a consumer that never read must not hang.
 //
-// SKIPPED: this reproduces an open defect. It is kept because it is a reliable
-// reproduction -- it failed 3 times out of 3 at the 20s mark -- and the next
-// attempt at a fix should start by unskipping it.
-//
-// UtpStream.Close waits for the connection goroutine to finish. That
-// goroutine's shutdown path runs processReads, which hands bytes to the reader
-// with a blocking channel send. A consumer that accepted a stream, never read
-// it, and then closed it deadlocks against itself: Close waits for the loop,
-// the loop waits for the reader, and the stream context that would break the
-// tie is cancelled by Close only after its wait returns.
+// UtpStream.Close waits for the connection goroutine to finish, and that
+// goroutine's shutdown path hands bytes to the reader. When that handoff could
+// block, a consumer that accepted a stream, never read it, and then closed it
+// deadlocked against itself: Close waited for the loop, the loop waited for the
+// reader, and the stream context that would break the tie is cancelled by Close
+// only after its wait returns.
 //
 // libutp has no equivalent. utp_call_on_read hands the embedder its bytes and
 // returns; a slow application closes the receive window and never stops the
 // protocol.
-//
-// An attempted fix -- stop filling the read queue once it is full and leave the
-// rest in the receive buffer, where it shrinks the advertised window -- is
-// written up in KNOWN-LIMITATIONS.md. It fixed this test and broke the
-// library: a full parallel suite deadlocked elsewhere, with libutp interop
-// reporting "our implementation never finished reading from libutp". It was
-// reverted.
 func TestCloseWithoutReadingDoesNotHang(t *testing.T) {
-	t.Skip("reproduces an open defect: a consumer that never reads deadlocks Close; " +
-		"see KNOWN-LIMITATIONS.md, 'The event loop blocks on the application'")
 
 	n := NewNetwork(32)
 	defer n.Close()

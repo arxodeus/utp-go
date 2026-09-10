@@ -1300,76 +1300,81 @@ observation is a guess, and a guess in the retransmission path is how the first
 two got in. The test that caught it stays exactly as it is: it is real-clock
 and it is load-sensitive, and both of those are why it saw this at all.
 
-## The event loop blocks on the application
+## The event loop blocked on the application
 
-**Open.** A fix was written, measured, and reverted; this section is mostly
-about why, because the reverted attempt is more useful than the description of
-the defect.
-
-`processReads` hands received bytes to the reader with a blocking channel send
-on `c.reads` (capacity 100). When the application stops reading, the
-connection's event loop stops with it: no acks, no window updates, no
-retransmissions, no replies to the peer's zero-window probes. The connection is
-not slow, it is absent.
+`processReads` handed received bytes to the reader with a blocking channel
+send on `c.reads`. When the application stopped reading, the connection's event
+loop stopped with it: no acks, no window updates, no retransmissions, no
+replies to the peer's zero-window probes. The connection was not slow, it was
+absent.
 
 libutp cannot reach this state. `utp_call_on_read` hands the embedder its bytes
 and returns; the embedder's buffer occupancy comes back through
 `utp_call_get_read_buffer_size`, and libutp shrinks the window it advertises. A
 slow application closes the receive window. It never stops the protocol.
 
-### The deadlock this causes
+This library already had that mechanism and was not using it: the window it
+advertises is `RecvBuf.Available()`. So the drain now stops when the read queue
+is full and leaves the rest in the receive buffer, which shrinks exactly that
+number.
 
 `UtpStream.Close()` waits for the connection goroutine to finish, and that
-goroutine's shutdown path calls `processReads`. A consumer that accepts a
-stream, never reads it, and then closes it deadlocks against itself: `Close`
-waits for the loop, the loop waits for the reader, and the stream context that
-would break the tie is cancelled by `Close` only after its wait returns.
+goroutine's shutdown path called the same blocking send, so a consumer that
+accepted a stream, never read it, and then closed it deadlocked against itself
+— `Close` waiting for the loop, the loop waiting for the reader, and the stream
+context that would break the tie cancelled by `Close` only after its wait
+returns. Measured at 20s and still going.
 
-`netem.TestCloseWithoutReadingDoesNotHang` reproduces it, failing at the 20s
-mark 3 times out of 3. It is checked in **skipped**, because it is a reliable
-reproduction and the next attempt should start by unskipping it.
+### Four things had to be true at once
 
-### The attempted fix, and why it was reverted
+The first attempt changed only the drain, and it broke the library. What it
+took:
 
-The mechanism this library needs is one it already has: the window it
-advertises is `RecvBuf.Available()`. So the fix looked small — stop draining
-into the read queue once it is full and leave the rest in the receive buffer,
-which shrinks exactly that number, closes the window, and applies the
-backpressure uTP is supposed to apply. `UtpStream` signalled `c.readable` when
-a reader took a chunk, so the loop would resume handing over data once there
-was room.
+1. **The drain stops when the queue is full** rather than blocking, leaving the
+   rest in `RecvBuf` where it closes the advertised window.
+2. **End of stream is announced only once the receive buffer is empty.**
+   `eof()` means every byte the peer sent has *arrived*, not that the reader has
+   been given it. While the drain always ran to completion the distinction did
+   not exist; once it can stop early, announcing the end there truncates the
+   transfer. Measured, with this guard missing: **409308 bytes delivered out of
+   524288** against real libutp, and a large loopback transfer failing its
+   payload comparison. This was the whole of the damage the first attempt did,
+   and it looked like a hang.
+3. **The end-of-stream marker is best-effort, and closing `c.reads` carries the
+   end instead.** The event loop is the only sender, so it closes the channel
+   on exit; a reader that never got the marker learns from the close, with the
+   reason in `terminalErr` rather than a bare `io.EOF`.
+4. **The final drain waits for room, with two escapes.** The ordinary
+   non-blocking drain is not good enough at teardown: the receive buffer is
+   about to be closed and anything not handed over is lost. So
+   `drainReadsForTeardown` waits — but gives up on the connection's context, or
+   on the consumer having closed the stream. That second escape is what keeps
+   the deadlock from returning: a consumer that closed without reading is not
+   owed those bytes, and waiting for it would be waiting for `Close`, which is
+   waiting for this goroutine.
 
-It fixed both symptoms and broke the library. A full parallel `go test ./...`
-deadlocked in three places that had nothing to do with slow readers —
-`TestUdpTransfer` at its 120s timeout, `TestInteropLibutpInitiatorGoResponder`
-at 90s reporting *"our implementation never finished reading from libutp"*, and
-a netem transfer. All three passed in isolation and only failed under a loaded
-machine, and the failure reproduced across two full-suite runs.
+Points 2 and 4 are the ones that are easy to miss, and each produced silent
+data loss or a deadlock rather than an obvious error.
 
-The reasoning behind the fix was that a dropped wake-up is harmless because a
-dropped send implies a pending send, so the loop will wake anyway. That is
-true, and it is not sufficient — the loop reaches its `afterSelect` label by
-`goto` from the priority drain, skipping the `readable` arm entirely, and a
-version that also ran `processReads` on every pass still stalled. The real
-condition was never diagnosed.
+### The test that made this possible
 
-**What a correct fix needs.** Not another wake-up. The handoff between the
-event loop and the reader has to stop being a bounded channel that the loop can
-block on *and* that the loop depends on being drained. That is a redesign of
-the read path, with a bound that produces window backpressure rather than
-goroutine backpressure, and it should not be attempted without a test that
-fails reliably against the unfixed code under load.
+The first attempt failed because there was no reliable reproduction to iterate
+against. Two tests were written that passed against the unfixed code, and one
+was flaky in both directions — it watched the peer's return path for traffic,
+which depends on the peer choosing to probe a closed window.
 
-### A note on the tests, because one of them lied
+`netem.TestEventLoopRunsWhileReaderIsStalled` measures the loop directly. The
+metrics callback runs on the event-loop goroutine, and a short
+`KeepAliveInterval` guarantees the loop wakes on its own with nothing arriving,
+so the callback firing *is* the loop running. Against the unfixed code it
+reports the same numbers every time — 10 passes before a 2s window and 10
+after, frozen — and fails 5 times out of 5.
 
-The first slow-reader test passed against the *unfixed* code. A 1.5s stall was
-not long enough: the peer exhausted its window and stopped sending, nothing
-queued up, and the wedge resolved when the reader woke. Strengthening it to
-sample the return path during a 3s stall made it fail against the unfixed code
-with 1.3s of complete silence — and then it turned out to be flaky in both
-directions, passing twice and failing on the same assertion afterwards. It was
-deleted rather than kept, because a flaky test proving a reverted fix is worse
-than no test. The deadlock reproduction, which is deterministic, was kept.
+`netem.TestCloseWithoutReadingDoesNotHang` covers the deadlock and failed 3
+times out of 3 at the 20s mark.
+
+Both were run against the unfixed code before the fix was written, which is the
+step that was skipped the first time.
 
 ## Things found but deliberately not fixed
 
@@ -1411,9 +1416,9 @@ risks making things worse.
 - **Packets can still be dropped when a connection's event queue is full**
   (`handleIncomingBuf` falls through to `default`), and this is now counted
   rather than only logged — `UtpSocket.PacketsDroppedFullConnQueue`. The
-  condition that makes it reachable is the blocking read handoff above: a
-  connection whose reader stops draining stops draining its own event queue
-  too.
+  condition that made it routine — a connection whose reader stopped draining
+  stopped draining its own event queue too — is fixed above, but the branch
+  remains reachable if a connection ever falls far enough behind.
 
   Unlike the rest of this list, it does have a libutp analogue. libutp has no
   queue between receiving a datagram and processing it, so it cannot drop one

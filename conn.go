@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
@@ -205,6 +206,17 @@ type connection struct {
 	// handed to the reader. Readers block on c.reads until they see it.
 	readsTerminated bool
 
+	// abandoned is closed when the consumer closes the stream. It is the one
+	// thing that distinguishes "the reader is behind" from "there is no reader
+	// any more", which the final drain has to know: bytes owed to a reader
+	// must be delivered, and bytes owed to nobody must not hold the loop open.
+	abandoned <-chan struct{}
+
+	// terminalErr carries the error that ended the stream to a reader that was
+	// not handed the marker directly. Written by the event-loop goroutine and
+	// read by the stream's reader, so it is atomic.
+	terminalErr atomic.Pointer[terminalError]
+
 	// Counters, read and written only from the event-loop goroutine.
 	packetsSent          uint64
 	bytesSent            uint64
@@ -275,6 +287,7 @@ func newConnection(
 	connected chan error,
 	socketEvents chan *socketEvent,
 	reads chan *readOrWriteResult,
+	abandoned <-chan struct{},
 	timers *retransmitTimers,
 ) *connection {
 	var endpoint *Endpoint
@@ -321,6 +334,7 @@ func newConnection(
 		armed:          make(map[uint16]struct{}),
 		unackTimeoutCh: unackTimeoutCh,
 		reads:          reads,
+		abandoned:      abandoned,
 		readable:       make(chan struct{}, 3),
 		pendingWrites:  make([]*queuedWrite, 0),
 		writable:       make(chan struct{}, 3),
@@ -397,6 +411,22 @@ func (c *connection) disarmAll() {
 
 func (c *connection) eventLoop(stream *UtpStream) error {
 	defer c.disarmAll()
+	// Report the end of the stream to the reader on every exit.
+	//
+	// This goroutine is the only sender on c.reads, so closing it here is
+	// safe, and it is what lets the loop refuse to block: the end-of-stream
+	// marker is best-effort, and a reader that never got it -- because its
+	// queue was full when the connection ended -- learns from the close
+	// instead, with the reason available in terminalErr.
+	//
+	// Without this a reader draining a full queue after the loop had gone
+	// would wait for a marker that no one was left to send.
+	defer func() {
+		if c.terminalErr.Load() == nil {
+			c.terminalErr.Store(&terminalError{err: c.state.Err})
+		}
+		close(c.reads)
+	}()
 	// Tell the socket to drop this connection on *every* exit, not only the
 	// one where the state machine reached ConnClosed.
 	//
@@ -630,7 +660,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			// definition once stateType is ConnClosed, so processReads was
 			// never called and the end-of-stream marker was never delivered.
 			// Readers reaching this path blocked in ReadToEOF forever.
-			c.processReads()
+			c.drainReadsForTeardown()
 			c.processWrites(time.Now())
 			if c.state.RecvBuf != nil {
 				c.state.RecvBuf.close()
@@ -944,7 +974,22 @@ func (c *connection) processReads() {
 	}
 	// Drain contiguous data even once the connection is closed: bytes that
 	// arrived before teardown are still owed to the reader.
+	//
+	// Never block the event loop waiting for the application to read. libutp
+	// does not: utp_call_on_read hands the embedder its bytes and returns, and
+	// a slow application is handled by the advertised receive window shrinking
+	// (utp_call_get_read_buffer_size), not by libutp stopping. This connection
+	// advertises RecvBuf.Available(), so leaving unread bytes in the receive
+	// buffer is exactly that backpressure.
+	//
+	// This goroutine is the only sender on c.reads, so a free slot observed
+	// here is still free at the send below: consumers only ever remove.
+	drained := true
 	for recvBuf != nil && !recvBuf.IsEmpty() {
+		if len(c.reads) == cap(c.reads) {
+			drained = false
+			break
+		}
 		buf := make([]byte, c.config.MaxPacketSize)
 		n := recvBuf.Read(buf)
 		if n == 0 {
@@ -958,7 +1003,55 @@ func (c *connection) processReads() {
 		c.logger.Trace("read data saving in the recvBuf, end...", "duration", time.Since(currentTime), "available", recvBuf.Available(), "isEmpty", recvBuf.IsEmpty())
 	}
 
-	// If we have reached eof, hand the reader the end-of-stream marker.
+	// If we have reached eof, hand the reader the end-of-stream marker -- but
+	// only once everything already received has been handed over first.
+	//
+	// eof() means every byte the peer sent has *arrived*, not that the reader
+	// has been given it. While the drain above ran to completion that
+	// distinction did not exist. Now that it can stop early with bytes still
+	// in the receive buffer, announcing the end here truncates the transfer:
+	// the reader sees end-of-stream and stops, and the rest is discarded.
+	// Measured, when this guard was missing: 409308 bytes delivered out of
+	// 524288 against real libutp.
+	if drained && c.eof() {
+		c.deliverTerminalRead()
+	}
+}
+
+// drainReadsForTeardown hands over everything left in the receive buffer as the
+// connection ends.
+//
+// The ordinary drain in processReads gives up when the read queue is full and
+// waits to be woken, which is what keeps the event loop from blocking on the
+// application. That is not good enough here: this is the last pass, the receive
+// buffer is about to be closed, and anything not handed over now is lost. A
+// truncated transfer is worse than a slow one -- when this path merely called
+// processReads, a large loopback transfer arrived short and
+// TestUdpTransfer failed on the payload comparison.
+//
+// So this one waits for room, and the wait has two escapes: the connection's
+// context, and the consumer closing the stream. The second is what keeps the
+// deadlock from coming back. A consumer that closed without reading is not
+// owed these bytes, and waiting for it to take them would be waiting forever,
+// because UtpStream.Close is itself blocked waiting for this goroutine.
+func (c *connection) drainReadsForTeardown() {
+	recvBuf := c.state.RecvBuf
+	for recvBuf != nil && !recvBuf.IsEmpty() {
+		buf := make([]byte, c.config.MaxPacketSize)
+		n := recvBuf.Read(buf)
+		if n == 0 {
+			break
+		}
+		select {
+		case c.reads <- &readOrWriteResult{Data: buf, Len: n}:
+		case <-c.ctx.Done():
+			return
+		case <-c.abandoned:
+			c.logger.Debug("stream closed by its consumer; dropping undelivered received bytes",
+				"bytes", n)
+			return
+		}
+	}
 	if c.eof() {
 		c.deliverTerminalRead()
 	}
@@ -1036,8 +1129,32 @@ func (c *connection) deliverTerminalRead() {
 	// close (RESET, idle timeout) carries an error.
 	err := c.state.Err
 	c.logger.Debug("read eof...", "err", err)
-	c.sendRead(&readOrWriteResult{Err: err, Data: make([]byte, 0)})
+
+	// Published before delivery is attempted, so the reason the stream ended
+	// is available however the reader finds out it has.
+	c.terminalErr.Store(&terminalError{err: err})
+
+	// Never block the event loop on this either. UtpStream.Close waits for
+	// this goroutine to finish, and only the reader drains c.reads, so a
+	// consumer that stopped reading and then closed deadlocked against
+	// itself: Close waited for the loop, the loop waited for the reader, and
+	// the context that would break the tie is cancelled by Close only after
+	// its wait returns.
+	//
+	// If there is no room the marker is simply not sent. Closing c.reads when
+	// this loop exits reports the end of the stream just as well, and carries
+	// the error through terminalErr.
+	select {
+	case c.reads <- &readOrWriteResult{Err: err, Data: make([]byte, 0)}:
+	default:
+		c.readsTerminated = false // let a later pass deliver it if room appears
+		c.logger.Debug("read queue full at end of stream; deferring the marker", "err", err)
+	}
 }
+
+// terminalError boxes the end-of-stream error so it can be stored atomically,
+// including the nil case that means a clean end of stream.
+type terminalError struct{ err error }
 
 // sendRead delivers a read result, giving up if the connection context is
 // cancelled. Without the context arm a reader that has already gone away
