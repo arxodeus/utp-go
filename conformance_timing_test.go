@@ -314,19 +314,35 @@ func ourRetransmitSchedule(t *testing.T, cfg *ConnectionConfig, afterHandshake b
 	// can land in the same window and would be counted as the first
 	// retransmission, putting every subsequent time one step out. Matching on
 	// the data packet's own sequence number is exact.
+	// Times come from each packet's own header, not from when this loop
+	// noticed it.
+	//
+	// Every transmission stamps time.Now().UnixMicro() as it goes out (see
+	// connection.retransmit), so the header carries the send time exactly.
+	// Polling for emissions and timestamping the observation instead measures
+	// the observer: this loop sleeps 2ms between passes and is descheduled
+	// like anything else, so on a loaded machine the first data packet could
+	// be seen tens of milliseconds after it was sent. Against a 200ms base
+	// that is a 27% error, and it failed the 20% tolerance -- reporting a
+	// retransmission at 254ms that the sender had made on time.
 	type timed struct {
 		at  time.Duration
 		pkt *packet
 	}
+	type dataEmission struct {
+		seq  uint16
+		ts   int64
+		body int
+	}
+	var allData []dataEmission
 	var seen []timed
 	var firstDataSeq uint16
 	var haveFirst bool
-	var start time.Time
+	var startMicros int64
 
 	deadline := time.Now().Add(cfg.MinTimeout * 20)
 	for time.Now().Before(deadline) {
 		time.Sleep(2 * time.Millisecond)
-		now := time.Now()
 		for _, raw := range conn.takeEmitted() {
 			pkt, err := DecodePacket(raw)
 			if err != nil {
@@ -335,20 +351,30 @@ func ourRetransmitSchedule(t *testing.T, cfg *ConnectionConfig, afterHandshake b
 			if pkt.Header.PacketType != st_data {
 				continue
 			}
+			allData = append(allData, dataEmission{seq: pkt.Header.SeqNum, ts: pkt.Header.Timestamp, body: len(pkt.Body)})
 			if !haveFirst {
 				firstDataSeq = pkt.Header.SeqNum
 				haveFirst = true
-				start = now
+				startMicros = pkt.Header.Timestamp
 				continue
 			}
 			if pkt.Header.SeqNum == firstDataSeq {
-				seen = append(seen, timed{at: now.Sub(start), pkt: pkt})
+				at := time.Duration(pkt.Header.Timestamp-startMicros) * time.Microsecond
+				seen = append(seen, timed{at: at, pkt: pkt})
 			}
 		}
 	}
 
 	for _, s := range seen {
 		resends = append(resends, s.at.Milliseconds())
+	}
+	if len(allData) > 0 {
+		var b []string
+		base := allData[0].ts
+		for _, d := range allData {
+			b = append(b, fmt.Sprintf("seq=%d +%dms body=%d", d.seq, (d.ts-base)/1000, d.body))
+		}
+		t.Logf("all ST_DATA emissions: %v", b)
 	}
 	return resends, 0
 }

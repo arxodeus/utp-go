@@ -1262,119 +1262,56 @@ two defects in it have already been found by measuring rather than by reading.
 Treat a third as likely rather than impossible. The numbers above are one
 machine, emulated links, and no wide-area path.
 
-## One retransmission schedule that came out doubling from the wrong origin
+## An extra retransmission that arrives before the RTO
 
-Seen once, in a full parallel `go test ./...`, and not reproduced since.
-`TestConformanceDataRetransmitSchedule` measured our data retransmissions at:
+**Open, reproducible, and not explained.** Seen three times, and now measured
+well enough to say what it is not.
 
-    [189 413 839 1663 3289] ms, against a 200ms floor
+`TestConformanceDataRetransmitSchedule` normally measures our data
+retransmissions at `[1 3 7 15]` times the RTO floor, which is libutp's
+schedule. Roughly once in eight to ten runs, under load, it measures five
+retransmissions instead of four:
 
-The expected schedule is `[1 3 7 15] x 200ms` = `[200 600 1400 3000]`, which is
-libutp's — an RTO that doubles, each retransmission timed from the one before
-it. What was measured is `[1 2 4 8 16] x ~205ms`: the same doubling, but with
-every deadline apparently taken from a fixed origin rather than from the last
-transmission. There is also one retransmission too many.
+    [189 413  839 1663 3289] ms
+    [193 418  843 1667 3294] ms
+    [184 408  833 1659 3283] ms   against a 200ms floor
 
-**It has not been explained and it has not been reproduced.** Since then the
-test has passed 3 times in isolation, 6 times alongside a running netem suite,
-and 12 times with six CPU burners on a 4-core machine — the last of which
-starves the Go scheduler far harder than the run that failed. Whatever the
-condition is, plain CPU starvation is not it.
+The shape is `[1 2 4 8 16]`. Read as intervals, it is an extra transmission
+at about 184ms followed by a correct schedule measured from *that* point:
+224, 425, 826, 1624 -- each the right RTO plus the retransmission wheel's 25ms
+tick. So the schedule is not backing off wrongly. There is one transmission too
+many, and it goes out *before* the retransmission timeout has elapsed.
 
-Two things are worth writing down rather than leaving implicit:
+### What it is not
 
-- **It is not ack coalescing.** That change touches only when a STATE packet is
-  emitted; the RTO deadline, the backoff and the timer wheel are untouched by
-  it, and this test passed on that commit under both `go test ./...` and
-  `-race`.
-- **The shape is specific enough to be a real bug rather than jitter.** Noise
-  stretches a schedule; it does not turn `1, 3, 7, 15` into `1, 2, 4, 8, 16`.
-  The most likely reading is that on some path the RTO deadline was not
-  re-armed from the retransmission that had just gone out. This fork has had
-  two defects in exactly that area already — the backoff that doubled every
-  other timeout, and the deadline that duplicate acks pushed out forever — so a
-  third would not be a surprise.
+- **Not the test's clock.** The first version of this test timestamped its own
+  observation of each packet, polling every 2ms, so on a loaded machine it
+  reported retransmissions tens of milliseconds after they happened -- a 27%
+  error against a 200ms base, which failed the 20% tolerance on its own and had
+  nothing to do with the sender. It now reads each packet's `Timestamp` header,
+  stamped by the sender as it transmits, so the times are the sender's. The
+  anomaly survives that change, which is what makes it a real emission rather
+  than a measurement artifact.
+- **Not the timer wheel firing early.** `timeWheel.put` places an item at
+  `current + ticks`, which fires on the following tick -- between n and n+1
+  intervals away, never early. The four correct intervals in the anomalous runs
+  are each one tick *late*, exactly as that predicts.
+- **Not a zero-window probe.** The scripted peer advertises a 1MB window
+  throughout.
+- **Not the event loop blocking on the reader.** That defect is fixed above, and
+  this reproduced afterwards.
 
-It is recorded here rather than fixed because a fix aimed at an unreproduced
-observation is a guess, and a guess in the retransmission path is how the first
-two got in. The test that caught it stays exactly as it is: it is real-clock
-and it is load-sensitive, and both of those are why it saw this at all.
+### What is still missing
 
-## The event loop blocked on the application
+Whether the extra packet is a duplicate of the first transmission or something
+else emitted with the same sequence number. The test now logs every ST_DATA
+emission with its sequence number, body length and send time, which is what the
+next occurrence needs to answer that -- 28 further runs under load since have
+all been clean.
 
-`processReads` handed received bytes to the reader with a blocking channel
-send on `c.reads`. When the application stopped reading, the connection's event
-loop stopped with it: no acks, no window updates, no retransmissions, no
-replies to the peer's zero-window probes. The connection was not slow, it was
-absent.
-
-libutp cannot reach this state. `utp_call_on_read` hands the embedder its bytes
-and returns; the embedder's buffer occupancy comes back through
-`utp_call_get_read_buffer_size`, and libutp shrinks the window it advertises. A
-slow application closes the receive window. It never stops the protocol.
-
-This library already had that mechanism and was not using it: the window it
-advertises is `RecvBuf.Available()`. So the drain now stops when the read queue
-is full and leaves the rest in the receive buffer, which shrinks exactly that
-number.
-
-`UtpStream.Close()` waits for the connection goroutine to finish, and that
-goroutine's shutdown path called the same blocking send, so a consumer that
-accepted a stream, never read it, and then closed it deadlocked against itself
-— `Close` waiting for the loop, the loop waiting for the reader, and the stream
-context that would break the tie cancelled by `Close` only after its wait
-returns. Measured at 20s and still going.
-
-### Four things had to be true at once
-
-The first attempt changed only the drain, and it broke the library. What it
-took:
-
-1. **The drain stops when the queue is full** rather than blocking, leaving the
-   rest in `RecvBuf` where it closes the advertised window.
-2. **End of stream is announced only once the receive buffer is empty.**
-   `eof()` means every byte the peer sent has *arrived*, not that the reader has
-   been given it. While the drain always ran to completion the distinction did
-   not exist; once it can stop early, announcing the end there truncates the
-   transfer. Measured, with this guard missing: **409308 bytes delivered out of
-   524288** against real libutp, and a large loopback transfer failing its
-   payload comparison. This was the whole of the damage the first attempt did,
-   and it looked like a hang.
-3. **The end-of-stream marker is best-effort, and closing `c.reads` carries the
-   end instead.** The event loop is the only sender, so it closes the channel
-   on exit; a reader that never got the marker learns from the close, with the
-   reason in `terminalErr` rather than a bare `io.EOF`.
-4. **The final drain waits for room, with two escapes.** The ordinary
-   non-blocking drain is not good enough at teardown: the receive buffer is
-   about to be closed and anything not handed over is lost. So
-   `drainReadsForTeardown` waits — but gives up on the connection's context, or
-   on the consumer having closed the stream. That second escape is what keeps
-   the deadlock from returning: a consumer that closed without reading is not
-   owed those bytes, and waiting for it would be waiting for `Close`, which is
-   waiting for this goroutine.
-
-Points 2 and 4 are the ones that are easy to miss, and each produced silent
-data loss or a deadlock rather than an obvious error.
-
-### The test that made this possible
-
-The first attempt failed because there was no reliable reproduction to iterate
-against. Two tests were written that passed against the unfixed code, and one
-was flaky in both directions — it watched the peer's return path for traffic,
-which depends on the peer choosing to probe a closed window.
-
-`netem.TestEventLoopRunsWhileReaderIsStalled` measures the loop directly. The
-metrics callback runs on the event-loop goroutine, and a short
-`KeepAliveInterval` guarantees the loop wakes on its own with nothing arriving,
-so the callback firing *is* the loop running. Against the unfixed code it
-reports the same numbers every time — 10 passes before a 2s window and 10
-after, frozen — and fails 5 times out of 5.
-
-`netem.TestCloseWithoutReadingDoesNotHang` covers the deadlock and failed 3
-times out of 3 at the 20s mark.
-
-Both were run against the unfixed code before the fix was written, which is the
-step that was skipped the first time.
+It is recorded rather than fixed because a fix aimed at an unreproduced
+mechanism is a guess, and guesses in the retransmission path are how two
+earlier defects there got in.
 
 ## Things found but deliberately not fixed
 
