@@ -295,8 +295,22 @@ func TestTwoFlowsShareBottleneck(t *testing.T) {
 					return
 				case <-ticker.C:
 				}
-				// Each flow offers ~75% of the link on its own.
-				for i := 0; i < 50; i++ {
+				// Each flow offers ~80% of the link on its own, so the two
+				// together oversubscribe it by about 60%.
+				//
+				// This used to be 50 packets per tick, which is ten times the
+				// whole link rate per flow rather than the "~75%" the comment
+				// claimed. At that offered load the queue is permanently full,
+				// so which flow gets a slot is decided by which goroutine the
+				// Go scheduler happened to run -- and on a busy machine the
+				// test measured scheduler fairness rather than the link's. It
+				// failed at Jain 0.885 (639 packets against 1361) during a
+				// full-package run while passing 3 times out of 3 on its own.
+				//
+				// 4 packets per 5ms tick is 800 packets/s against the link's
+				// 1000, keeping the queue busy without making admission a
+				// race between two goroutines' wake-ups.
+				for i := 0; i < 4; i++ {
 					seq++
 					p := makePayload(seq, testPayload)
 					p[4] = tag

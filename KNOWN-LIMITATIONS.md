@@ -1300,6 +1300,77 @@ observation is a guess, and a guess in the retransmission path is how the first
 two got in. The test that caught it stays exactly as it is: it is real-clock
 and it is load-sensitive, and both of those are why it saw this at all.
 
+## The event loop blocks on the application
+
+**Open.** A fix was written, measured, and reverted; this section is mostly
+about why, because the reverted attempt is more useful than the description of
+the defect.
+
+`processReads` hands received bytes to the reader with a blocking channel send
+on `c.reads` (capacity 100). When the application stops reading, the
+connection's event loop stops with it: no acks, no window updates, no
+retransmissions, no replies to the peer's zero-window probes. The connection is
+not slow, it is absent.
+
+libutp cannot reach this state. `utp_call_on_read` hands the embedder its bytes
+and returns; the embedder's buffer occupancy comes back through
+`utp_call_get_read_buffer_size`, and libutp shrinks the window it advertises. A
+slow application closes the receive window. It never stops the protocol.
+
+### The deadlock this causes
+
+`UtpStream.Close()` waits for the connection goroutine to finish, and that
+goroutine's shutdown path calls `processReads`. A consumer that accepts a
+stream, never reads it, and then closes it deadlocks against itself: `Close`
+waits for the loop, the loop waits for the reader, and the stream context that
+would break the tie is cancelled by `Close` only after its wait returns.
+
+`netem.TestCloseWithoutReadingDoesNotHang` reproduces it, failing at the 20s
+mark 3 times out of 3. It is checked in **skipped**, because it is a reliable
+reproduction and the next attempt should start by unskipping it.
+
+### The attempted fix, and why it was reverted
+
+The mechanism this library needs is one it already has: the window it
+advertises is `RecvBuf.Available()`. So the fix looked small — stop draining
+into the read queue once it is full and leave the rest in the receive buffer,
+which shrinks exactly that number, closes the window, and applies the
+backpressure uTP is supposed to apply. `UtpStream` signalled `c.readable` when
+a reader took a chunk, so the loop would resume handing over data once there
+was room.
+
+It fixed both symptoms and broke the library. A full parallel `go test ./...`
+deadlocked in three places that had nothing to do with slow readers —
+`TestUdpTransfer` at its 120s timeout, `TestInteropLibutpInitiatorGoResponder`
+at 90s reporting *"our implementation never finished reading from libutp"*, and
+a netem transfer. All three passed in isolation and only failed under a loaded
+machine, and the failure reproduced across two full-suite runs.
+
+The reasoning behind the fix was that a dropped wake-up is harmless because a
+dropped send implies a pending send, so the loop will wake anyway. That is
+true, and it is not sufficient — the loop reaches its `afterSelect` label by
+`goto` from the priority drain, skipping the `readable` arm entirely, and a
+version that also ran `processReads` on every pass still stalled. The real
+condition was never diagnosed.
+
+**What a correct fix needs.** Not another wake-up. The handoff between the
+event loop and the reader has to stop being a bounded channel that the loop can
+block on *and* that the loop depends on being drained. That is a redesign of
+the read path, with a bound that produces window backpressure rather than
+goroutine backpressure, and it should not be attempted without a test that
+fails reliably against the unfixed code under load.
+
+### A note on the tests, because one of them lied
+
+The first slow-reader test passed against the *unfixed* code. A 1.5s stall was
+not long enough: the peer exhausted its window and stopped sending, nothing
+queued up, and the wedge resolved when the reader woke. Strengthening it to
+sample the return path during a 3s stall made it fail against the unfixed code
+with 1.3s of complete silence — and then it turned out to be flaky in both
+directions, passing twice and failing on the same assertion afterwards. It was
+deleted rather than kept, because a flaky test proving a reverted fix is worse
+than no test. The deadlock reproduction, which is deterministic, was kept.
+
 ## Things found but deliberately not fixed
 
 These are real and unresolved. Each needs a measurement harness (M1) or a
@@ -1337,16 +1408,24 @@ risks making things worse.
 
   Revisit if an adversarial-peer scenario is ever tested (M8), with a
   measurement rig that can resolve 10%.
-- **Packets are dropped when a connection's event channel is full**
-  (`handleIncomingBuf` falls through to `default`). This is silent loss that
-  uTP then has to recover from with retransmits.
-- **Blocking channel sends inside the connection event loop.** `processReads`
-  blocks on `c.reads` (capacity 100). A consumer that stops reading wedges the
-  event loop; `UtpStream.Close()` waits on that same loop, so a close from a
-  non-reading consumer can deadlock. The send is now context-aware, so a
-  cancelled parent context breaks it, but the shape is still wrong.
-- **`onData` resets the connection on an empty payload and then continues**
-  processing the packet rather than returning.
+- **Packets can still be dropped when a connection's event queue is full**
+  (`handleIncomingBuf` falls through to `default`), and this is now counted
+  rather than only logged — `UtpSocket.PacketsDroppedFullConnQueue`. The
+  condition that makes it reachable is the blocking read handoff above: a
+  connection whose reader stops draining stops draining its own event queue
+  too.
+
+  Unlike the rest of this list, it does have a libutp analogue. libutp has no
+  queue between receiving a datagram and processing it, so it cannot drop one
+  there — but an embedder that falls behind overflows the kernel's UDP receive
+  buffer instead, and those packets are just as lost. The remaining difference
+  is that ours discards a packet it has already decoded and attributed, which
+  is more wasteful, not less correct.
+
+  Making the dispatcher block instead would be worse by the same standard it is
+  being judged against: one slow connection would stall every other connection
+  on the socket, and libutp, which has no shared dispatcher, has no such
+  failure mode at all.
 - **An intermittent data race was observed once**, in an early `-race` run of
   `TestManyConcurrentTransfers` under conditions where many connections were
   hitting the 60 s idle timeout. It has not reproduced in any run since —

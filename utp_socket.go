@@ -8,6 +8,7 @@ import (
 	"math"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
@@ -141,10 +142,22 @@ type UtpSocket struct {
 	// ownsSocket is true when this UtpSocket created the underlying Conn
 	// (via Bind) and is therefore responsible for closing it. A Conn handed
 	// in through WithSocket belongs to the caller.
-	ownsSocket  bool
-	closeOnce   sync.Once
-	readNextCh  chan struct{}
-	incomingBuf chan *IncomingPacketRaw
+	ownsSocket bool
+	// droppedFullConnQueue counts packets discarded because a connection's
+	// event queue was full. libutp never discards a datagram it has already
+	// received and parsed -- utp_process_udp runs synchronously, with no queue
+	// between the socket and the connection -- so any non-zero value here is
+	// this library losing work the peer will have to retransmit.
+	//
+	// It exists to be asserted on rather than to be read in production. It
+	// used to be reached routinely, because a connection whose reader stopped
+	// blocked its own event loop and stopped draining this queue; that is
+	// fixed, and TestSlowReaderDoesNotWedgeConnection asserts this stays zero
+	// across a transfer whose reader stalls.
+	droppedFullConnQueue atomic.Uint64
+	closeOnce            sync.Once
+	readNextCh           chan struct{}
+	incomingBuf          chan *IncomingPacketRaw
 }
 
 // DefaultSocketBufferSize is the size requested for the underlying UDP
@@ -407,10 +420,11 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
 				Packet: packetPtr,
 			}:
 			default:
-				if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-					s.logger.Warn("connection stream channel is full, dropping packet",
-						"connStream.len", len(connStream), "cid.send", cid.Send, "cid.recv", cid.Recv, "cid.peer", cid.Peer.Hash())
-				}
+				// See droppedFullConnQueue. This is a real packet loss that the
+				// peer has to recover from, and it is ours, not the network's.
+				s.droppedFullConnQueue.Add(1)
+				s.logger.Warn("connection stream channel is full, dropping packet",
+					"connStream.len", len(connStream), "cid.send", cid.Send, "cid.recv", cid.Recv, "cid.peer", cid.Peer.Hash())
 				return
 			}
 			if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
@@ -625,6 +639,17 @@ func (s *UtpSocket) nextIncomingConn() *IncomingPacket {
 //
 // A caller that binds to port 0 -- which is the usual thing to do -- has no
 // other way to learn which port the kernel chose.
+// PacketsDroppedFullConnQueue reports how many received, decoded packets this
+// socket discarded because the destination connection's event queue was full.
+//
+// It should be zero. libutp has no equivalent: it processes each datagram
+// synchronously, so there is no queue between receiving and processing and
+// nothing to overflow. A non-zero value means this library threw away work the
+// peer must now retransmit, and is a bug rather than a tuning signal.
+func (s *UtpSocket) PacketsDroppedFullConnQueue() uint64 {
+	return s.droppedFullConnQueue.Load()
+}
+
 func (s *UtpSocket) LocalAddr() net.Addr {
 	type localAddresser interface{ LocalAddr() net.Addr }
 	if la, ok := s.socket.(localAddresser); ok {

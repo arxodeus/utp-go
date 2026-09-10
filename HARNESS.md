@@ -210,6 +210,29 @@ result. Two defects in this harness were found by measuring rather than by
 reading, and both made libutp look worse than it is; they are in
 [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
 
+## A fairness test that was measuring the Go scheduler
+
+`TestTwoFlowsShareBottleneck` asserts a property of the link model: two
+identical greedy senders on one FIFO queue should land near an even split. Its
+comment said each flow offered "~75% of the link". Each flow actually offered
+50 packets every 5ms, which against an 8 Mbps link carrying 1000-byte payloads
+is ten times the whole link rate -- 95% of everything offered was dropped by
+the queue.
+
+At that offered load the queue is permanently full, so which flow gets a slot
+is decided by which goroutine the Go scheduler happened to wake. On an idle
+machine that averages out; on a busy one it does not. The test passed 3 times
+out of 3 when run alone and failed at Jain 0.885 -- 639 packets against 1361 --
+inside a full-package run.
+
+The offered load is now 4 packets per tick, about 80% of the link per flow, so
+the queue stays busy without admission being a race between two wake-ups. Under
+six CPU burners on a four-core machine it now measures between 0.988 and 1.000
+across six runs.
+
+It is worth saying what this was not: the link model was never unfair. The test
+was reporting on the machine it ran on and attributing the answer to the code.
+
 ## What it does not do
 
 - **The competitor is Reno-shaped, not TCP.** Read a result from it as
