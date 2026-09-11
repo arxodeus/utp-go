@@ -315,6 +315,40 @@ libutp's LAN figure is bimodal — twelve consecutive runs came in at either
 mode. Details in [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md), along with the
 two harness defects that had to be fixed before this table meant anything.
 
+## Two mechanisms, compared directly
+
+The table above compares goodput. Goodput cannot tell two controllers apart
+that reach the same rate by different routes, so these compare the mechanisms
+themselves, against libutp, on the same links.
+
+**The delay response.** The bottleneck is cut from 10 Mbps to 4 Mbps part-way
+through a transfer, so a sender filling the old capacity is suddenly
+overdriving the new one and a queue builds. What each controller settles at,
+three runs each:
+
+| | Standing queue at 10 Mbps | After the step to 4 Mbps |
+| --- | --- | --- |
+| libutp | 8.09 ms | 112.4 - 113.1 ms |
+| ours | 10.48 ms | 117.6 - 118.4 ms |
+
+Neither overflows the 256 KB queue, so both are reading the delay signal rather
+than waiting for loss. The ranges do not overlap: this fork holds about 5 ms --
+4% -- more queue than the reference, consistently, which is the same direction
+as everything else here and the reason LEDBAT++ exists.
+
+**Slow start.** Time to first carry 90% of an idle 10 Mbps link, 40 ms RTT:
+libutp 588-640 ms, ours 536-660 ms. Overlapping, so no difference worth
+claiming. Worth measuring anyway, because slow start was absent from this fork
+entirely before M5.
+
+An earlier version of the first test stepped the *propagation* delay and
+asserted the sending rate fell. Both implementations passed, and it measured
+nothing: tripling the RTT cuts the rate of any fixed window mechanically, so
+the assertion held whatever the controller did. Converting the rates back into
+windows showed both had in fact grown their window across that step --
+correctly, since a permanent propagation change is not queueing and LEDBAT
+relearns it as the new base delay.
+
 ## What these numbers are not
 
 - **Not a comparison against libutp.** The interoperability gate proves the

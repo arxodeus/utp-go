@@ -84,8 +84,8 @@ than "verified".
 
 | Area | Evidence | Notes |
 | --- | --- | --- |
-| LEDBAT window adjustment | Cited | Seven defects found by reading `apply_ccontrol` against ours |
-| Slow start | Cited | Was absent entirely |
+| LEDBAT window adjustment | **Partly measured** | Seven defects found by reading `apply_ccontrol` against ours. Its *delay response* is now compared directly: `netem.TestCongestionRespondsToSelfInflictedQueue` cuts the bottleneck mid-transfer and measures the standing queue each side settles at -- libutp 112-113ms, ours 118ms, neither overflowing. The individual rules below are still only read |
+| Slow start | **Measured** | Was absent entirely. `netem.TestCongestionSlowStartRamp` compares the ramp against libutp's on an idle path: time to 90% of the link, libutp 588-640ms against ours 536-660ms |
 | Window decay rate limit | Cited | `MAX_WINDOW_DECAY`, `:51`, `:602-605` |
 | Timeout window handling | Cited | Idle vs in-flight, `:1216-1228` |
 | Delay clamp to RTT | Cited | `:1617-1621` |
@@ -118,11 +118,19 @@ so it sent 288-byte packets. Both are written up in
 
 ## What is not covered at all
 
-- **Per-mechanism congestion-control comparison.** libutp now runs over the
-  emulated network, so the *aggregate* behaviour is measured. What is still
-  uncompared is each mechanism on its own — the window trace under a step
-  change in delay, the decay limiter's effect, what each does at the moment a
-  queue fills. Goodput on five links is a coarse instrument for that.
+- **Most of the congestion controller, mechanism by mechanism.** Two are now
+  compared directly against libutp: the delay response, by stepping the
+  bottleneck down and measuring the standing queue each settles at, and slow
+  start, by timing the ramp on an idle path. Still only read against the
+  source: the window decay rate limit, the delay clamp to RTT, the
+  application-limited guard, and the idle-versus-in-flight split on a timeout.
+  Each would need a scenario that isolates it, the way the bandwidth step
+  isolates the delay response.
+
+  Reading libutp's window directly would be worth more than any of these and is
+  not available: `max_window` is private to `UTPSocket`, `utp_socket_stats`
+  does not report it, and reaching in means modifying the copy REFERENCE.md
+  pins.
 - **libutp against libutp on the emulated network.** Every flow measured joins
   libutp to this library. A libutp-to-libutp flow over the same links would
   separate the reference's behaviour from what our end contributes to it.
