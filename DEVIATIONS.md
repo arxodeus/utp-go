@@ -199,6 +199,59 @@ per packet.
 A FIN is acked immediately rather than deferred, matching libutp's direct
 `send_ack()` at `:2369-2370`.
 
+## No Nagle
+
+libutp holds back a partial packet while anything else is in flight, and
+releases it when the next packet arrives:
+
+	if (i != ((seq_nr - 1) & ACK_NR_MASK) ||
+	    cur_window_packets == 1 ||
+	    pkt->payload >= packet_size) {
+	    send_packet(pkt);
+	}
+
+(`utp_internal.cpp:976-983`, with "flush Nagle" at `:2246-2252`.) This library
+sends whatever is in the send buffer when it composes packets.
+
+It was implemented, measured and reverted. The reasoning is worth keeping,
+because the case for it looked strong and was not.
+
+**What made it look necessary.** Counting datagrams for the same bytes on a
+50 Mbps path: 4000 writes of 20 bytes produced 4020 datagrams averaging 40
+bytes, where libutp moved the same payload in 58. That is a seventy-fold
+difference, and it is not a real comparison -- libutp's test driver takes a
+single `Write` and cannot express many small ones, so it was never asked to do
+the same thing. Comparing our own sender given one large write puts it at 881
+datagrams of 1210 bytes, so the packetisation is fine; what differs is the
+write pattern.
+
+**Why the implementation changed nothing.** With libutp's rule in place the
+hold fired 623 times out of 4000 writes, and the packet count did not move.
+The other 3377 writes had *nothing else outstanding*, which is exactly the case
+Nagle is defined to send immediately (`cur_window_packets == 1`). An
+application that waits for each write to be accepted before issuing the next is
+never writing fast enough for Nagle to have anything to coalesce, and that is
+what this library's `Write` does.
+
+Making it bite would mean holding the bytes until an acknowledgement arrives
+rather than releasing them on the next pass of the write path. That was tried.
+It still did not coalesce, and it introduces a way for buffered data to sit
+unsent if no acknowledgement comes -- a stall of exactly the kind this
+repository has been bitten by before.
+
+**What it cost.** The benchmark suite at five repeats came back consistently
+lower: broadband 6.19 against 6.40 Mbps, shallow queue 4.54 against 4.77, long
+transfer 8.73 against 8.85, two flows 6.42 against 6.63. Several of those sit
+outside the previous run-to-run ranges. A run of `FuzzDifferentialResponder`
+also failed during that suite and did not reproduce afterwards; unattributed,
+but not dismissed either.
+
+So: a change with no measured benefit, a measured cost, and an unexplained
+differential failure alongside it. Reverted. If a workload ever appears where
+this library writes faster than a round trip -- which a BitTorrent peer sending
+many small protocol messages plausibly does -- this is worth revisiting, with
+that workload as the gate.
+
 ## Inherited notes that claim consistency with the reference
 
 Two comments in `conn.go` describe behaviour as matching the reference

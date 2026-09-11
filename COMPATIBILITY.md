@@ -78,7 +78,7 @@ than "verified".
 | Keep-alive | Cited | Was absent |
 | Path-MTU discovery | **Measured + interop** | The emulated network can now refuse oversized datagrams (`netem.Config.MTU`), which found two defects here and one shared limitation; libutp was run over the same link to establish which was which |
 | Don't-fragment on probes | **None** | Not implemented; we write through an abstract `Conn` |
-| Packet coalescing / Nagle | **None** | Not investigated |
+| Packet coalescing / Nagle | **Investigated, deliberately absent** | libutp holds a partial last packet while anything else is in flight (`utp_internal.cpp:976-983`, released at `:2246-2252`). Implemented here, measured, and reverted: no workload showed a benefit and it cost ~3% across the benchmark suite. See DEVIATIONS.md |
 
 ## Congestion control
 
