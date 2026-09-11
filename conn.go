@@ -1314,6 +1314,44 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 			return
 		}
 
+		// A callback that arrived before the retransmission timeout has
+		// actually elapsed, with nothing else outstanding, is the wheel
+		// running ahead of the clock rather than a timeout. Wait out the
+		// remainder instead of resending.
+		//
+		// The wheel counts ticks, not time. Its `put` places an item so that
+		// it fires a whole number of ticks away and never early *in ticks*,
+		// which is what its comment promises -- but under scheduling pressure
+		// the wheel's goroutine is descheduled past a tick and processes the
+		// pending one immediately on resume, so eight ticks can pass in
+		// slightly under eight intervals of wall clock. Measured: a 200ms
+		// timer delivered at 198.6ms.
+		//
+		// libutp cannot do this. It re-reads the clock and acts only when
+		// `current_ms - rto_timeout >= 0` (utp_internal.cpp:1147-1148); an
+		// early wake-up does nothing at all. Here the backoff was already
+		// guarded that way, but the resend below it was not, so an early
+		// callback resent the packet and re-armed at the *undoubled* RTO.
+		// The schedule then ran 1, 2, 4, 8, 16 times the floor instead of
+		// libutp's 1, 3, 7, 15 -- one extra transmission, and every
+		// subsequent one early.
+		//
+		// The guard is deliberately narrow. When several packets are
+		// outstanding they share an expiry: the first callback is the real
+		// timeout and the rest arrive just after it, already past the new
+		// deadline this branch sets, and every one of them still needs
+		// resending because libutp marks all outstanding packets need_resend
+		// on an RTO (:1230-1237). Skipping those left holes fast retransmit
+		// could not fill and stopped the 5%-loss benchmark completing at all.
+		// With one packet outstanding there are no siblings, so there is
+		// nothing to be careful of.
+		if now.Before(c.rtoDeadline) && c.state.SentPackets.UnackedCount() == 1 {
+			if remaining := c.rtoDeadline.Sub(now); remaining > 0 {
+				c.armRetransmit(originPacket, remaining)
+				return
+			}
+		}
+
 		if isTimeout := !now.Before(c.rtoDeadline); isTimeout {
 			// Give up once enough consecutive RTOs have passed with the peer
 			// acking nothing, as libutp does (utp_internal.cpp:1191). The

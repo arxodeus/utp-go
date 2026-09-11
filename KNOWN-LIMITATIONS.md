@@ -1262,74 +1262,84 @@ two defects in it have already been found by measuring rather than by reading.
 Treat a third as likely rather than impossible. The numbers above are one
 machine, emulated links, and no wide-area path.
 
-## An extra retransmission that arrives before the RTO
+## An extra retransmission, from a timer wheel that counts ticks and not time
 
-**Open, reproducible, and not explained.** Seen three times, and now measured
-well enough to say what it is not.
+Found, diagnosed and fixed, after three failed attempts. It is worth the space
+because what made it hard was not the bug.
 
 `TestConformanceDataRetransmitSchedule` normally measures our data
 retransmissions at `[1 3 7 15]` times the RTO floor, which is libutp's
-schedule. Roughly once in eight to ten runs, under load, it measures five
-retransmissions instead of four:
+schedule. Roughly once in ten to twenty runs, under load, it measured five
+retransmissions instead of four, at `[1 2 4 8 16]`: one extra transmission,
+and every later one early.
 
-    [189 413  839 1663 3289] ms
-    [193 418  843 1667 3294] ms
-    [184 408  833 1659 3283] ms   against a 200ms floor
+### The cause
 
-The shape is `[1 2 4 8 16]`. Read as intervals, it is an extra transmission
-at about 184ms followed by a correct schedule measured from *that* point:
-224, 425, 826, 1624 -- each the right RTO plus the retransmission wheel's 25ms
-tick. So the schedule is not backing off wrongly. There is one transmission too
-many, and it goes out *before* the retransmission timeout has elapsed.
+The retransmission wheel counts ticks. `timeWheel.put` places an item a whole
+number of ticks away and never fires it early *in ticks*, which is what its
+comment promises and what a previous fix established. Wall-clock time is a
+different matter: under scheduling pressure the wheel's goroutine is
+descheduled past a tick, and on resume it processes the pending tick
+immediately, so eight ticks can elapse in slightly less than eight intervals of
+real time. Measured, with the wheel instrumented:
 
-### What it is not
+    WHEEL-FIRE seq=7001 delay=200ms elapsed=198.644817ms early=true
+    RTO-CHK    seq=7001 now-deadline=-1.314361ms isTimeout=false
 
-- **Not the test's clock.** The first version of this test timestamped its own
-  observation of each packet, polling every 2ms, so on a loaded machine it
-  reported retransmissions tens of milliseconds after they happened -- a 27%
-  error against a 200ms base, which failed the 20% tolerance on its own and had
-  nothing to do with the sender. It now reads each packet's `Timestamp` header,
-  stamped by the sender as it transmits, so the times are the sender's. The
-  anomaly survives that change, which is what makes it a real emission rather
-  than a measurement artifact.
-- **Not the timer wheel firing early.** `timeWheel.put` places an item at
-  `current + ticks`, which fires on the following tick -- between n and n+1
-  intervals away, never early. The four correct intervals in the anomalous runs
-  are each one tick *late*, exactly as that predicts.
-- **Not a zero-window probe.** The scripted peer advertises a 1MB window
-  throughout.
-- **Not the event loop blocking on the reader.** That defect is fixed above, and
-  this reproduced afterwards.
+`onTimeout` already guarded the *backoff* against this, comparing the clock
+against `rtoDeadline` exactly as libutp does (`current_ms - rto_timeout >= 0`,
+`utp_internal.cpp:1147-1148`). What it did not guard was the resend below it:
+`c.retransmit` sat outside the branch, so an early callback sent the packet
+again and re-armed at the **undoubled** RTO. From there the schedule ran
+`1, 2, 4, 8, 16` -- correct doubling, one step out of phase.
 
-### It is a duplicate of the same packet
+### The fix, and why it is narrow
 
-Two further occurrences were captured with the emission log in place, and they
-agree:
+An early callback with **one** packet outstanding now re-arms for the remaining
+time instead of resending. It is deliberately restricted to that case.
 
-    seq=7001 +0ms  +196ms  +421ms  +845ms  +1669ms  +3294ms   (all body=7)
-    seq=7001 +0ms  +193ms  +418ms  +843ms  +1668ms  +3293ms   (all body=7)
+When several packets are outstanding they share an expiry: the first callback
+is the real timeout, and its siblings arrive just after it, already past the
+new deadline that branch sets. Every one of them still needs resending, because
+libutp marks all outstanding packets `need_resend` on an RTO (`:1230-1237`), and
+an earlier attempt to skip them left holes fast retransmit could not fill and
+stopped the 5%-loss benchmark completing at all. With one packet outstanding
+there are no siblings and nothing to be careful of.
 
-Six transmissions of one packet where a healthy run has five, and every one of
-them is the same sequence number and the same seven-byte body. So the extra
-emission is a duplicate retransmission of the original packet, not a different
-packet, and not a new one taking the same sequence number. From it, the backoff
-runs correctly: 225, 424, 824, 1625 -- each the right RTO plus the wheel's 25ms
-tick.
+Verified: 60 runs under the load that reproduced it, no occurrence. At the
+observed rate of roughly 1 in 15, seeing none in 60 would happen about 2% of
+the time by chance, so this is good evidence and not proof. The benchmark suite
+at seven repeats is unchanged, including the 5%-loss profile that the
+hole-filling regression destroyed -- 1.43 Mbps against 1.33 before, inside its
+own range.
 
-The one thing that would identify it is which code path emits it. An attempt to
-capture that -- logging the call stack at every data transmission -- went 12
-runs without an occurrence, having caught two in the 17 runs before it. That
-instrumentation is not checked in; it is four lines in `transmit` and worth
-re-adding for the next attempt.
+### Three attempts that found nothing, and why
 
-What narrows it: the emission is at 193-196ms against a 200ms floor, and the
-wheel cannot fire early (it places an item to fire between n and n+1 ticks, and
-the four correct intervals are each a tick late exactly as that predicts). So
-whatever sends it is not the retransmission timer for that packet.
+The first two hunts blamed the measurement rather than the code, and both were
+right about something and wrong about the bug.
 
-It is recorded rather than fixed because a fix aimed at an unreproduced
-mechanism is a guess, and guesses in the retransmission path are how two
-earlier defects there got in.
+The test originally timestamped its own *observation* of each packet, polling
+every 2ms, so on a loaded machine it reported retransmissions tens of
+milliseconds after they happened -- a 27% error against the 200ms base, enough
+to fail the tolerance on its own. Fixing that (reading each packet's own
+`Timestamp` header, stamped by the sender as it transmits) removed a real
+source of false failures and left the anomaly untouched, which is what first
+established it as a real emission.
+
+The second attempt logged every ST_DATA emission and showed all six carried the
+same sequence number and body: a duplicate of the original packet, with a
+correct backoff from it. That ruled out a new packet reusing a sequence number,
+and ruled out the socket write path duplicating a datagram.
+
+Only the third -- logging the call site, the RTO at transmit time, and then the
+wheel's own fire time against its delay -- named it. The chain that mattered
+was: the extra transmission reports `rto=200ms` (undoubled), so `OnTimeout`
+never ran, so `isTimeout` was false, so the callback was early, so the wheel
+fired early in wall-clock terms despite being correct in ticks.
+
+The instrumentation is not checked in. It is about fifteen lines across
+`transmit`, `armRetransmit`, `onTimeout` and the wheel's expire function, and
+the sequence above is what to re-derive if something like this recurs.
 
 ## Path-MTU discovery had never met a path that limits size
 

@@ -588,6 +588,29 @@ the event loop directly through the metrics callback, which runs on the loop's
 own goroutine, and fails 5 of 5 against the unfixed code with identical numbers.
 `netem.TestCloseWithoutReadingDoesNotHang` fails 3 of 3.
 
+## PR 26 — an early timer callback resent a packet and reset its backoff
+
+The retransmission wheel counts ticks, and never fires an item early in ticks.
+Wall-clock time is a different matter: under scheduling pressure its goroutine
+is descheduled past a tick and processes the pending one immediately on resume,
+so eight ticks can elapse in slightly under eight intervals. Measured: a 200ms
+timer delivered at 198.6ms.
+
+`onTimeout` already compared the clock against `rtoDeadline` before backing
+off, as libutp does (`current_ms - rto_timeout >= 0`, utp_internal.cpp:1147-1148).
+The resend below it was not guarded, so an early callback sent the packet again
+and re-armed at the undoubled RTO, and the schedule ran 1, 2, 4, 8, 16 times
+the floor instead of 1, 3, 7, 15.
+
+An early callback with one packet outstanding now waits out the remainder. The
+restriction matters: with several packets outstanding they share an expiry and
+the siblings arriving after the real timeout must all be resent, because libutp
+marks every outstanding packet need_resend on an RTO (:1230-1237). Skipping them
+was tried once and stopped the 5%-loss benchmark completing.
+
+Reproduced at roughly 1 in 15 runs under load before, 0 in 60 after, with the
+benchmark suite unchanged at seven repeats.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it
