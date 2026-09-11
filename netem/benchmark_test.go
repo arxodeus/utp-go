@@ -37,14 +37,28 @@ import (
 //
 // It is skipped under -short.
 
-// benchmarkRepeats is how many times each profile runs. The median is
-// reported. Three is enough to reject a single outlier and cheap enough to
-// run on every congestion-control change.
-const benchmarkRepeats = 3
+// benchmarkRepeats is how many times each profile runs by default: once.
+//
+// One run is a gate, not a measurement. Everything this suite asserts is
+// per-run -- the transfer completed, and the bytes that arrived are the bytes
+// that were sent -- so a single pass catches a congestion controller that has
+// stopped working. What it cannot do is produce a number worth quoting.
+//
+// It used to be three, and together with the libutp comparison that put
+// `go test ./netem` at 634 seconds against Go's 600-second default per-package
+// timeout: the harness gate failed unless you knew to pass -timeout, which is
+// a poor way to greet anyone running the suite for the first time. Two
+// measurement suites were most of that, and neither needs to run repeatedly to
+// act as a gate.
+//
+// Set UTP_BENCHMARK_REPEATS to take a measurement. The tables in
+// BENCHMARKS.md and KNOWN-LIMITATIONS.md are medians of seven, which is what
+// the loss profiles need: their results are bimodal, one retransmission
+// timeout dominating a short transfer, and three runs cannot separate the two
+// modes.
+const benchmarkRepeats = 1
 
-// benchmarkRepeatsEnv overrides the repeat count, for profiles whose result is
-// bimodal -- the loss ones, where a single retransmission timeout dominates a
-// short transfer and three runs cannot separate the two modes.
+// benchmarkRepeatCount is the repeat count, overridable for measurement runs.
 func benchmarkRepeatCount() int {
 	if v := os.Getenv("UTP_BENCHMARK_REPEATS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {

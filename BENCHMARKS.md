@@ -5,6 +5,16 @@ Every number here came from `go test ./netem -run TestBenchmarkSuite -v` and
 described in [HARNESS.md](HARNESS.md). Nothing in this file is estimated,
 extrapolated, or carried over from a previous run.
 
+## How to reproduce them
+
+```sh
+UTP_BENCHMARK_REPEATS=7 UTP_BENCHMARK_OUT_DIR=/tmp/bench go test -timeout 60m ./netem/
+```
+
+A plain `go test ./netem/` runs each profile once, which gates the suite -- the
+assertions are all per-run -- but does not produce a number worth quoting. Every
+table here is a median of seven with the range beside it.
+
 ## How to read them
 
 Each link profile has a fixed seed, and the emulator's loss, reordering,

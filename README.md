@@ -37,16 +37,25 @@ Two things to be aware of before depending on this:
 ## Testing
 
 ```sh
-go test -timeout 30m ./...                     # full suite
-go test -timeout 30m ./netem/                  # the network harness gate
+go test ./...                                  # full suite
+go test ./netem/                               # the network harness gate
 go test ./native/libutp/                       # interop against real libutp (needs cgo)
 go test -race ./...                            # race detector
 scripts/check-libutp-reference.sh              # verify the pinned libutp reference
 ```
 
-The `-timeout` is not optional. `./netem` takes around 590 seconds on a
-four-core machine, against Go's default per-package timeout of 600, so it
-fails with a timeout panic on a busy machine often enough to be a nuisance.
+The measurement suites -- the congestion-control benchmarks and the libutp
+comparison -- run once each by default, which is enough to gate them: every
+assertion they make is per-run. To take a measurement rather than check for a
+regression, ask for repeats, and give it a longer timeout:
+
+```sh
+UTP_BENCHMARK_REPEATS=7 go test -timeout 60m ./netem/
+```
+
+That is where the tables in [BENCHMARKS.md](BENCHMARKS.md) come from. Medians
+of seven, because the loss profiles are bimodal -- one retransmission timeout
+dominates a short transfer -- and fewer runs cannot separate the two modes.
 
 `TestManyConcurrentTransfers` runs 1000 concurrent 1 MB transfers by default
 and peaks at roughly 5 GB RSS. Set `UTP_TEST_TRANSFERS` to run it smaller —
