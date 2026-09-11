@@ -21,6 +21,10 @@ type Stats struct {
 	DroppedByLoss     uint64
 	DroppedByQueue    uint64
 	DroppedByReceiver uint64
+	// DroppedByMTU counts datagrams larger than the link's MTU. This is a
+	// statement about size, not about congestion, and is kept apart from the
+	// other two for that reason.
+	DroppedByMTU uint64
 
 	PacketsReordered uint64
 
@@ -58,10 +62,10 @@ func (s Stats) MeanQueueDelay() time.Duration {
 // String renders the stats for a test log.
 func (s Stats) String() string {
 	return fmt.Sprintf(
-		"offered=%d/%dB delivered=%d/%dB dropped=%d (loss=%d queue=%d rcvr=%d) reordered=%d qdelay mean=%v max=%v",
+		"offered=%d/%dB delivered=%d/%dB dropped=%d (loss=%d queue=%d rcvr=%d mtu=%d) reordered=%d qdelay mean=%v max=%v",
 		s.PacketsOffered, s.BytesOffered,
 		s.PacketsDelivered, s.BytesDelivered,
-		s.PacketsDropped, s.DroppedByLoss, s.DroppedByQueue, s.DroppedByReceiver,
+		s.PacketsDropped, s.DroppedByLoss, s.DroppedByQueue, s.DroppedByReceiver, s.DroppedByMTU,
 		s.PacketsReordered, s.MeanQueueDelay(), s.QueueDelayMax)
 }
 

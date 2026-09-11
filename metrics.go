@@ -36,6 +36,22 @@ type ConnectionMetrics struct {
 	// BaseDelay is the lowest one-way delay seen in the delay window:
 	// LEDBAT's estimate of the path with an empty queue.
 	BaseDelay time.Duration
+	// --- path MTU ---
+
+	// MtuCurrent is the datagram size the search is currently sending, and
+	// MtuFloor and MtuCeiling bound what it still has left to test. A
+	// converged search has floor, current and ceiling equal.
+	//
+	// These are exposed because the search was previously invisible from
+	// outside, which is how a defect in it survived: a fast retransmission
+	// could be adopted as a probe, and losing it lowered the ceiling on
+	// evidence about congestion rather than about size, so a lossy path drove
+	// the packet size down for no reason. Nothing outside the connection could
+	// see that happening.
+	MtuCurrent uint32
+	MtuFloor   uint32
+	MtuCeiling uint32
+
 	// PeerTsDiff is the most recent one-way delay measured from the peer's
 	// timestamps -- the raw delay signal. Queueing delay is roughly
 	// PeerTsDiff minus BaseDelay.

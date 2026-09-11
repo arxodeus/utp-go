@@ -233,6 +233,25 @@ across six runs.
 It is worth saying what this was not: the link model was never unfair. The test
 was reporting on the machine it ran on and attributing the answer to the code.
 
+## A link that can refuse a packet for its size
+
+`Config.MTU` drops datagrams larger than the path will carry, as an IPv6 path
+does and as IPv4 does for a packet marked don't-fragment. Its drops are counted
+as `DroppedByMTU`, apart from medium loss and queue overflow, because they mean
+something different: a statement about size, carrying no information about
+congestion.
+
+It exists because path-MTU discovery had never been tested against a path that
+limits size. Every link here carried any datagram however large, so the search
+climbed to whatever ceiling it was given, every time, and the half of it that
+lowers the ceiling was never exercised end to end. The harness could not
+disagree with the code.
+
+The first run against it found two defects and one limitation that turned out
+to be libutp's as well -- see [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
+Telling those apart was only possible because the reference could be run over
+the same link.
+
 ## What it does not do
 
 - **The competitor is Reno-shaped, not TCP.** Read a result from it as

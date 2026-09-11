@@ -1301,17 +1301,116 @@ many, and it goes out *before* the retransmission timeout has elapsed.
 - **Not the event loop blocking on the reader.** That defect is fixed above, and
   this reproduced afterwards.
 
-### What is still missing
+### It is a duplicate of the same packet
 
-Whether the extra packet is a duplicate of the first transmission or something
-else emitted with the same sequence number. The test now logs every ST_DATA
-emission with its sequence number, body length and send time, which is what the
-next occurrence needs to answer that -- 28 further runs under load since have
-all been clean.
+Two further occurrences were captured with the emission log in place, and they
+agree:
+
+    seq=7001 +0ms  +196ms  +421ms  +845ms  +1669ms  +3294ms   (all body=7)
+    seq=7001 +0ms  +193ms  +418ms  +843ms  +1668ms  +3293ms   (all body=7)
+
+Six transmissions of one packet where a healthy run has five, and every one of
+them is the same sequence number and the same seven-byte body. So the extra
+emission is a duplicate retransmission of the original packet, not a different
+packet, and not a new one taking the same sequence number. From it, the backoff
+runs correctly: 225, 424, 824, 1625 -- each the right RTO plus the wheel's 25ms
+tick.
+
+The one thing that would identify it is which code path emits it. An attempt to
+capture that -- logging the call stack at every data transmission -- went 12
+runs without an occurrence, having caught two in the 17 runs before it. That
+instrumentation is not checked in; it is four lines in `transmit` and worth
+re-adding for the next attempt.
+
+What narrows it: the emission is at 193-196ms against a 200ms floor, and the
+wheel cannot fire early (it places an item to fire between n and n+1 ticks, and
+the four correct intervals are each a tick late exactly as that predicts). So
+whatever sends it is not the retransmission timer for that packet.
 
 It is recorded rather than fixed because a fix aimed at an unreproduced
 mechanism is a guess, and guesses in the retransmission path are how two
 earlier defects there got in.
+
+## Path-MTU discovery had never met a path that limits size
+
+The emulated network had no MTU. Every link carried any datagram, however
+large, so the MTU search always converged on whatever ceiling it was given and
+the half of it that *lowers* the ceiling was never exercised end to end. The
+search was tested against a harness that could not disagree with it.
+
+`netem.Config.MTU` now drops datagrams larger than the path allows, counted
+separately as `DroppedByMTU` because it is a statement about size and not about
+congestion. The first run against it found two things.
+
+### A fast retransmission could be adopted as an MTU probe
+
+libutp will only probe with a packet that has never been transmitted --
+`pkt->transmissions == 0` (`utp_internal.cpp:911`), and the comment above it
+says why: a packet larger than the ceiling "was probably used as a probe
+already and failed, now we need it to fragment just to get it through". This
+library passed `firstTransmission=true` on the fast-retransmit path, so a
+packet that had already been lost once could become the probe, and losing it
+again lowered the ceiling on evidence about congestion rather than about size.
+
+Found by reading, while looking for something else. **Its behavioural effect is
+not demonstrated**: the search converges within the first few round trips, and
+fast retransmit needs a window wide enough for three duplicate acks, so in
+practice the two rarely overlap. It is fixed because it is a plain deviation
+from the reference, not because a measurement forced it.
+
+### The probe was never cleared unless it was the one that timed out
+
+libutp clears `mtu_probe_seq` and `mtu_probe_size` on *every* retransmission
+timeout, outside the branch that lowers the ceiling (`:1166-1167`): *"we
+dropped the probe, clear these fields to allow us to send a new one"*. The
+ceiling may only come down when the probe was the sole outstanding packet,
+because only then does its loss say anything about size -- but the probe is
+gone either way.
+
+This library only touched probe state in the branch that lowered the ceiling.
+A probe lost alongside other packets left `probing` set forever, and since
+`eligibleProbe` refuses to start a second probe while one is outstanding, the
+search froze. Now fixed, to match.
+
+## A path MTU below the size already adopted stalls the connection
+
+**Open, and it is libutp's limitation as much as ours.** The most serious thing
+the MTU harness found, and the fix is a deliberate divergence rather than a
+correction, which is why it is recorded rather than made.
+
+The search raises the size it sends at whenever a probe is acknowledged. If the
+path limit falls between two probe sizes, the size it adopts next cannot
+arrive -- and because every data packet is then built at that size, nothing
+arrives at all. The ceiling only comes down when a probe times out as the
+*only* packet outstanding (`utp_internal.cpp:1152-1160`), and a connection
+whose window has stalled never gets there: nothing is acknowledged, so the
+outstanding count never falls to one.
+
+Measured, on a path that refuses anything above 1100 bytes:
+
+| | Result |
+| --- | --- |
+| ours | the search parks at 1191 bytes; a 1MB transfer delivers about 5KB, then the connection gives up |
+| libutp | sends ~1230-byte packets, delivers 20 bytes, and reports a connection error |
+
+libutp's number is measured, not read: `TestLibutpStallsOnAPathItCannotFit`
+runs the reference over the same link. That distinction matters here, because
+reading the source alone suggests libutp recovers -- it lowers the ceiling on a
+probe timeout and clears the probe on every RTO so another can go out. Both are
+true. Neither rescues a stalled window.
+
+So this is not a difference from the reference to close. Fixing it means
+diverging deliberately: concluding "too big" from repeated timeouts with no
+progress at all, rather than only from a solitary probe. That belongs in
+[DEVIATIONS.md](DEVIATIONS.md) with a measurement behind it.
+
+**It matters in practice.** A path MTU below 1400 is ordinary -- PPPoE at 1492,
+and most VPN and tunnel paths -- and a BitTorrent client on one would stall.
+The reason it is not already a known disaster in the wild is presumably that
+libutp takes its ceiling from the local interface MTU, so the common case is a
+ceiling that already matches the path. This fork uses a fixed 1400 ceiling
+instead, which is recorded in [DEVIATIONS.md](DEVIATIONS.md), and on a tunnelled
+path 1400 is still too big.
 
 ## Things found but deliberately not fixed
 

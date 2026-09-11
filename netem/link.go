@@ -124,6 +124,18 @@ func (l *Link) enqueue(payload []byte, src, dst *Endpoint) {
 	l.stats.PacketsOffered++
 	l.stats.BytesOffered += uint64(size)
 
+	// 0. Size. A datagram larger than the path will carry is dropped before
+	//    anything else, because it never gets onto the wire at all and its
+	//    loss carries no information about congestion. This is what makes
+	//    path-MTU discovery testable: the search's ceiling only comes down
+	//    when a probe is refused for being too big.
+	if cfg.MTU > 0 && size > cfg.MTU {
+		l.stats.PacketsDropped++
+		l.stats.DroppedByMTU++
+		l.mu.Unlock()
+		return
+	}
+
 	// 1. Loss on the medium. Drawn before queueing so a lost packet does not
 	//    occupy the bottleneck -- it never made it onto the wire.
 	if cfg.LossRate > 0 && l.rng.Float64() < cfg.LossRate {

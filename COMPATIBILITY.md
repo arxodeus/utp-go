@@ -76,7 +76,7 @@ than "verified".
 | `fast_resend_seq_nr` | Cited | Was absent; one packet was resent up to 16 extra times |
 | Zero-window probe | Cited | Was absent, and its absence was a deadlock |
 | Keep-alive | Cited | Was absent |
-| Path-MTU discovery | Cited | Implemented from `:890-925`, `:1289-1322`, `:1969-1974` |
+| Path-MTU discovery | **Measured + interop** | The emulated network can now refuse oversized datagrams (`netem.Config.MTU`), which found two defects here and one shared limitation; libutp was run over the same link to establish which was which |
 | Don't-fragment on probes | **None** | Not implemented; we write through an abstract `Conn` |
 | Packet coalescing / Nagle | **None** | Not investigated |
 
@@ -127,7 +127,9 @@ so it sent 288-byte packets. Both are written up in
   libutp to this library. A libutp-to-libutp flow over the same links would
   separate the reference's behaviour from what our end contributes to it.
 - **Interop under adverse conditions.** The gate transfers over loopback. Loss,
-  reordering and delay against real libutp are untested.
+  reordering and delay against real libutp are untested -- except for path MTU,
+  where `netem.TestLibutpStallsOnAPathItCannotFit` runs the reference over a
+  size-limited link.
 - **The initiator role in the hand-written corpus.** The differential fuzzer
   drives both roles; the M2 corpus is responder-only.
 - **Timing beyond retransmission.** Ack *latency* is not compared, only ack

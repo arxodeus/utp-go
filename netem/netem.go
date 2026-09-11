@@ -89,6 +89,22 @@ type Config struct {
 	// delay-based controller is supposed to keep clear of.
 	QueueBytes int
 
+	// MTU is the largest datagram the path will carry, in bytes. Zero means
+	// unlimited, which is what every link modelled here did before: any
+	// datagram, however large, arrived.
+	//
+	// A datagram larger than this is dropped outright, which is what an IPv6
+	// path does, and what an IPv4 path does for a packet marked don't-fragment.
+	// It is counted separately from loss and from queue overflow, because it is
+	// neither: it says something about size, and nothing about congestion.
+	//
+	// This exists because path-MTU discovery had never been tested against a
+	// path that limits size. The search converged on whatever ceiling it was
+	// given, every time, because nothing in the harness could refuse a large
+	// packet -- so the half of the search that lowers the ceiling was never
+	// exercised end to end.
+	MTU int
+
 	// Seed seeds this link's PRNG. Links in one Network derive distinct seeds
 	// from Network's seed, so a single Seed makes a whole topology
 	// reproducible.

@@ -1090,6 +1090,9 @@ func (c *connection) sampleMetrics(now time.Time, force bool) {
 		Timeouts:             c.timeouts,
 		FastRetransmits:      c.fastRetransmits,
 		PendingWrites:        len(c.pendingWrites),
+		MtuCurrent:           c.mtu.current,
+		MtuFloor:             c.mtu.floor,
+		MtuCeiling:           c.mtu.ceiling,
 		State:                connStateName(c.state.stateType),
 	}
 	if c.state.SentPackets != nil {
@@ -1309,6 +1312,13 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 				c.state.Err = ErrTimedOut
 				return
 			}
+			// Forget any outstanding MTU probe, whether or not it was the
+			// one that timed out. libutp clears it on every RTO, outside the
+			// branch that lowers the ceiling (utp_internal.cpp:1166-1167):
+			// the probe is gone either way, and a search that keeps waiting
+			// for it never sends another.
+			c.mtu.clearProbe()
+
 			c.retransmitCount++
 			c.state.SentPackets.OnTimeout()
 			c.timeouts++
@@ -2149,7 +2159,18 @@ func (c *connection) retransmitLostPackets(now time.Time) {
 				"packet.cid", packetInst.Header.ConnectionId,
 				"packet.data.len", len(payload))
 		}
-		c.transmit(packetInst, now, true)
+		// Not a first transmission: a fast retransmission must never be taken
+		// as an MTU probe. libutp requires `pkt->transmissions == 0`
+		// (utp_internal.cpp:911) and says why in the comment above it -- a
+		// packet larger than the ceiling "was probably used as a probe already
+		// and failed, now we need it to fragment just to get it through".
+		//
+		// Passing true here made loss shrink the path MTU: a fast
+		// retransmission could be adopted as the probe, and a packet that had
+		// already been lost once is a poor bet to arrive, so onProbeLost would
+		// lower the ceiling on evidence about congestion rather than about
+		// size. The RTO retransmission path already passes false.
+		c.transmit(packetInst, now, false)
 	}
 }
 

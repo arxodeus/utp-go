@@ -210,6 +210,28 @@ func (m *mtuSearch) onProbeLost(now time.Time) bool {
 	return true
 }
 
+// clearProbe forgets the outstanding probe without drawing any conclusion from
+// it, so another can be sent.
+//
+// libutp does this on every retransmission timeout, outside the branch that
+// lowers the ceiling: `// we dropped the probe, clear these fields to allow us
+// to send a new one` followed by `mtu_probe_seq = mtu_probe_size = 0`
+// (utp_internal.cpp:1166-1167).
+//
+// The distinction matters and its absence was a stuck search. The ceiling may
+// only come down when the probe was the *only* packet outstanding, because
+// only then does its loss say something about size rather than congestion. A
+// probe lost alongside other packets says nothing -- but it is still gone, and
+// if the search goes on waiting for it, it waits forever. Measured against a
+// path with a 1100-byte limit: the search parked at 1191 bytes, every packet
+// was refused for size, and a 1MB transfer delivered 4KB before the test timed
+// out at 60s.
+func (m *mtuSearch) clearProbe() {
+	m.probing = false
+	m.probeSeq = 0
+	m.probeSize = 0
+}
+
 // probeOutstanding reports whether seq is the packet currently under test.
 func (m *mtuSearch) probeOutstanding(seq uint16) bool {
 	return m.probing && m.probeSeq == seq
