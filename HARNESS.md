@@ -212,26 +212,40 @@ reading, and both made libutp look worse than it is; they are in
 
 ## A fairness test that was measuring the Go scheduler
 
-`TestTwoFlowsShareBottleneck` asserts a property of the link model: two
-identical greedy senders on one FIFO queue should land near an even split. Its
-comment said each flow offered "~75% of the link". Each flow actually offered
+`TestTwoFlowsShareBottleneck` asserts a property of the link model: given an
+evenly contended queue, a FIFO should deliver an even split. It took two
+attempts to make it measure that.
+
+Its comment said each flow offered "~75% of the link". Each actually offered
 50 packets every 5ms, which against an 8 Mbps link carrying 1000-byte payloads
-is ten times the whole link rate -- 95% of everything offered was dropped by
-the queue.
+is ten times the whole link rate -- 95% of everything offered was dropped. At
+that load the queue is permanently full, so which flow gets a slot is decided
+by which goroutine the Go scheduler happened to wake. The test passed 3 times
+out of 3 alone and failed at Jain 0.885 -- 639 packets against 1361 -- inside a
+full-package run.
 
-At that offered load the queue is permanently full, so which flow gets a slot
-is decided by which goroutine the Go scheduler happened to wake. On an idle
-machine that averages out; on a busy one it does not. The test passed 3 times
-out of 3 when run alone and failed at Jain 0.885 -- 639 packets against 1361 --
-inside a full-package run.
+Cutting the burst to 4 packets, about 80% of the link per flow, made it much
+better and **not** reliable: six runs under heavy load came back between 0.988
+and 1.000, which looked like a fix, and it was not. Eight further runs later
+produced 0.826. Six samples were not enough to tell a narrowed distribution
+from a fixed one.
 
-The offered load is now 4 packets per tick, about 80% of the link per flow, so
-the queue stays busy without admission being a race between two wake-ups. Under
-six CPU burners on a four-core machine it now measures between 0.988 and 1.000
-across six runs.
+The remaining variance was structural. What each goroutine manages to *offer*
+is itself decided by the scheduler, so Jain computed over delivered counts
+conflates the queue's fairness with the scheduler's, however modest the offered
+load. One feeder goroutine alternating between the two flows removes that
+term rather than shrinking it: the queue sees a perfectly interleaved arrival
+pattern, and what comes out the other end is the link's doing.
 
-It is worth saying what this was not: the link model was never unfair. The test
-was reporting on the machine it ran on and attributing the answer to the code.
+Measured since: 0.985 to 0.994 across ten ordinary runs, and 0.981 to 0.999
+across twelve under six CPU burners on four cores with the rest of the suite
+running alongside. The slight, consistent lean toward the first flow is real
+and not noise -- it is written first within each tick, so it wins the last slot
+before the queue fills.
+
+It is worth saying what this was never about: the link model was not unfair.
+The test was reporting on the machine it ran on and attributing the answer to
+the code.
 
 ## A link that can refuse a packet for its size
 

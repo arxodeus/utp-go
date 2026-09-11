@@ -281,46 +281,47 @@ func TestTwoFlowsShareBottleneck(t *testing.T) {
 		}
 	}()
 
-	// Two greedy senders, both offering above the whole link rate.
-	for _, tag := range []byte{'x', 'y'} {
-		wg.Add(1)
-		go func(tag byte) {
-			defer wg.Done()
-			ticker := time.NewTicker(5 * time.Millisecond)
-			defer ticker.Stop()
-			var seq uint32
-			for {
-				select {
-				case <-stop:
+	// One feeder, alternating between the two flows.
+	//
+	// This is a property of the link, not of any congestion control: given an
+	// evenly interleaved arrival pattern, a FIFO queue should deliver an even
+	// split. Two independent goroutines cannot establish that, because what
+	// each one manages to *offer* is itself decided by the Go scheduler, and
+	// Jain computed over delivered counts then conflates the queue's fairness
+	// with the scheduler's.
+	//
+	// That is not a hypothetical. With two goroutines the test failed at 0.885
+	// inside a full-package run while passing alone; reducing each burst from
+	// 50 packets to 4 -- the offered load had been ten times the link rate,
+	// not the "~75%" its comment claimed -- made it far better but not
+	// reliable, and it still produced 0.826 once in eight runs. One feeder
+	// removes the variance rather than narrowing it.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		tags := []byte{'x', 'y'}
+		var seq uint32
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+			}
+			// Eight packets a tick, alternating, is about 160% of the link
+			// between them: enough to keep the queue busy and contended
+			// without the offered load itself becoming the variable.
+			for i := 0; i < 8; i++ {
+				seq++
+				p := makePayload(seq, testPayload)
+				p[4] = tags[i%2]
+				if _, err := a.WriteTo(p, b.Addr()); err != nil {
 					return
-				case <-ticker.C:
-				}
-				// Each flow offers ~80% of the link on its own, so the two
-				// together oversubscribe it by about 60%.
-				//
-				// This used to be 50 packets per tick, which is ten times the
-				// whole link rate per flow rather than the "~75%" the comment
-				// claimed. At that offered load the queue is permanently full,
-				// so which flow gets a slot is decided by which goroutine the
-				// Go scheduler happened to run -- and on a busy machine the
-				// test measured scheduler fairness rather than the link's. It
-				// failed at Jain 0.885 (639 packets against 1361) during a
-				// full-package run while passing 3 times out of 3 on its own.
-				//
-				// 4 packets per 5ms tick is 800 packets/s against the link's
-				// 1000, keeping the queue busy without making admission a
-				// race between two goroutines' wake-ups.
-				for i := 0; i < 4; i++ {
-					seq++
-					p := makePayload(seq, testPayload)
-					p[4] = tag
-					if _, err := a.WriteTo(p, b.Addr()); err != nil {
-						return
-					}
 				}
 			}
-		}(tag)
-	}
+		}
+	}()
 
 	time.Sleep(500 * time.Millisecond) // warm up
 	n.Link("a", "b").ResetStats()

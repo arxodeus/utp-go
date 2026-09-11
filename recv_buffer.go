@@ -100,6 +100,15 @@ func (rb *receiveBuffer) WasWritten(seqNum uint16) bool {
 	return exists || writtenRange.Contains(seqNum)
 }
 
+// Readable reports how many contiguous bytes are ready to be read.
+//
+// It is what a caller needs to size a buffer to the data rather than to the
+// largest packet the connection might carry. Bytes held out of order are not
+// counted: they cannot be read until the gap before them is filled.
+func (rb *receiveBuffer) Readable() int {
+	return rb.offset
+}
+
 func (rb *receiveBuffer) Read(buf []byte) int {
 	if len(buf) == 0 {
 		return 0

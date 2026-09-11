@@ -1475,9 +1475,22 @@ risks making things worse.
   the report and cannot say what it was. It may have been fixed incidentally
   by the time-wheel or shutdown-fan-out changes. **Treat this package as not
   proven race-free under teardown-heavy load at high concurrency.**
-- **Per-read allocation.** `processReads` allocates `MaxPacketSize` bytes per
-  read and passes the entire buffer to the reader with a separate length,
-  rather than a right-sized slice. See "Memory" above.
+- **Per-read allocation, mostly closed.** `processReads` allocated
+  `MaxPacketSize` for every chunk and handed the whole buffer to the reader
+  with a separate length, so a 40-byte chunk kept 1400 bytes alive. It now
+  sizes the buffer to `receiveBuffer.Readable()`, and skips the allocation
+  entirely when the buffer holds only out-of-order bytes, which are not
+  readable yet.
+
+  **Measured, and smaller than the description suggests: about 2%.** Five runs
+  each way, 2000 messages of 100 bytes: 11.74-11.85 MB allocated after, against
+  11.90-12.16 MB before. On a bulk transfer there is no difference at all
+  (16.95 against 16.94 MB). The reason is that `Read` drains *all* contiguous
+  bytes at once, so under load the buffer is full regardless of how small the
+  individual packets were, and the over-allocation only showed up on the
+  trailing chunk. The reader still receives `Data` plus a separate `Len` rather
+  than a right-sized slice; changing that is an API change for no measured
+  gain.
 
 ## API notes
 

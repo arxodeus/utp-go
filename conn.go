@@ -990,7 +990,22 @@ func (c *connection) processReads() {
 			drained = false
 			break
 		}
-		buf := make([]byte, c.config.MaxPacketSize)
+		// Size the buffer to the data, not to the largest packet this
+		// connection might carry.
+		//
+		// This allocated MaxPacketSize every time and handed the whole thing to
+		// the reader with a separate length, so a 40-byte chunk kept 1400 bytes
+		// alive until the reader dropped it. IsEmpty() is also true of a buffer
+		// holding only out-of-order bytes, which are not readable yet; that
+		// case used to allocate, read nothing, and break.
+		readable := recvBuf.Readable()
+		if readable == 0 {
+			break
+		}
+		if maxSize := int(c.config.MaxPacketSize); readable > maxSize {
+			readable = maxSize
+		}
+		buf := make([]byte, readable)
 		n := recvBuf.Read(buf)
 		if n == 0 {
 			break
