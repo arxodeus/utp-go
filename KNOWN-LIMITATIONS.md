@@ -1479,12 +1479,37 @@ risks making things worse.
   failure mode at all.
 - **An intermittent data race was observed once**, in an early `-race` run of
   `TestManyConcurrentTransfers` under conditions where many connections were
-  hitting the 60 s idle timeout. It has not reproduced in any run since —
-  including runs specifically targeting the teardown paths, three runs at 150
-  concurrent transfers, and a full-suite `-race` pass — so I could not capture
-  the report and cannot say what it was. It may have been fixed incidentally
-  by the time-wheel or shutdown-fan-out changes. **Treat this package as not
-  proven race-free under teardown-heavy load at high concurrency.**
+  hitting the 60 s idle timeout. The report was never captured, so there was
+  nothing to fix — only a suspicion. It has now been pressed on hard, and
+  found nothing:
+
+  | | Connections torn down under `-race` | Races |
+  | --- | --- | --- |
+  | `TestTeardownRace`, concurrency 8 to 64 | 23,200 | 0 |
+  | of which via the idle timeout specifically | 5,800 | 0 |
+  | `TestManyConcurrentTransfers`, 100-300 concurrent, 5 runs | 900 | 0 |
+
+  `TestTeardownRace` exists for this. It drives the four ways a connection can
+  end — clean close, idle timeout, abandoned without reading, context cancelled
+  mid-transfer — concurrently, with the sockets closed underneath while
+  connections are still winding down, and with `MaxIdleTimeout` cut to 400 ms
+  because at the 60 s default nothing reaches that path in bulk. It asserts
+  that all four modes were actually taken, so it cannot quietly stop testing
+  what it claims to.
+
+  **This does not prove the package is race-free, and it is not evidence the
+  original observation was mistaken.** A race is a timing accident; a negative
+  result bounds its likelihood rather than excluding it. Two gaps are worth
+  naming: the original sighting was at 1000 concurrent transfers, and these
+  runs reach 300 (the full test peaks around 5 GB RSS, which `-race` makes
+  worse); and a race the detector never sees because the two accesses never
+  interleave during a run is exactly the kind that survives a soak.
+
+  What has changed is the standing of the suspicion. It was "unexplained and
+  unreproduced"; it is now "unreproduced across 24,100 teardowns under the
+  detector, including 5,800 through the path it was seen on". The harness is
+  checked in, so the next change to the teardown paths is measured against it
+  rather than against a memory.
 - **Per-read allocation, mostly closed.** `processReads` allocated
   `MaxPacketSize` for every chunk and handed the whole buffer to the reader
   with a separate length, so a 40-byte chunk kept 1400 bytes alive. It now

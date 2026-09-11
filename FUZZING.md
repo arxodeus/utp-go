@@ -155,6 +155,27 @@ silently.
 - `TestSoakUnknownConnectionFlood` — 20,000 packets for connections the socket
   does not have. Checks that the RESET rate limiting holds: 1,001 answers to
   20,000 packets, and flat memory.
+- `TestTeardownRace` — the four ways a connection can end, concurrently: clean
+  close, idle timeout, abandoned without reading, and context cancelled
+  mid-transfer, with the sockets closed underneath while connections are still
+  winding down. `MaxIdleTimeout` is cut to 400 ms, because at the 60 s default
+  nothing reaches that path in bulk, and the test asserts every mode was
+  actually taken so it cannot quietly stop testing what it claims to.
+
+  It exists for one recorded observation: a data race seen once under
+  teardown-heavy load, never captured and never reproduced. Run under the
+  detector across 23,200 teardowns at concurrency 8 to 64, 5,800 of them
+  through the idle-timeout path, it finds nothing — which bounds the suspicion
+  rather than settling it. See [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
+
+  Longer runs:
+
+  ```sh
+  UTP_SOAK_CYCLES=200 UTP_SOAK_CONNS=64 go test -race -count=1 -run TestTeardownRace -timeout 60m
+  ```
+
+  `-count=1` is not optional: without it Go replays a cached result, and a soak
+  that reports six clean batches having run one is worse than no soak at all.
 
 ## What they found
 
