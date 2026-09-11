@@ -126,6 +126,8 @@ new one.
 
 ## No half-close
 
+**This one has a measured cost.** See below.
+
 **We tear the connection down when the peer's FIN is reached. libutp keeps it
 alive.**
 
@@ -138,6 +140,20 @@ Reason: none that justifies it. This is a gap, not a choice — recorded here
 because it is a live behavioural difference, and in
 [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) as work still to do. It is pinned
 by `TestConformanceDataAfterReachedFin` so it cannot drift.
+
+
+Running libutp over a lossy path showed what it costs: 4 of 20 transfers ended
+with libutp reporting `UTP_ECONNRESET` on data that had in fact all arrived.
+We acknowledge the peer's FIN and tear down; if that acknowledgement is lost,
+the peer's retransmission finds no connection and draws a RESET. libutp, which
+holds the socket in `CS_GOT_FIN`, simply acknowledges it again.
+
+The socket now keeps the FIN's acknowledgement for ten seconds after a
+connection closes and re-sends it instead of a RESET, which fixes that
+(0 of 30 after). That is not a half-close: the application still cannot write
+after the peer's FIN, and data arriving *past* the FIN still draws a RESET
+where libutp stays silent. Both are still true, and both are still recorded
+here. What has gone is a finished connection telling its peer it broke.
 
 ## The selective-ack window
 

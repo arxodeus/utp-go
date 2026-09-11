@@ -25,6 +25,12 @@ const (
 	// RESET rather than one per packet. Matches libutp's RST_INFO_TIMEOUT
 	// (utp_internal.cpp:71).
 	rstInfoTimeout = 10 * time.Second
+
+	// lingerAckTimeout is how long a closed connection's acknowledgement is
+	// kept so a retransmitted FIN can be answered with it. libutp's FIN
+	// retransmissions back off from its 1000ms RTO floor, so this covers the
+	// first few, which is where a lost acknowledgement costs something.
+	lingerAckTimeout = 10 * time.Second
 	// rstInfoLimit is the number of remembered RESETs past which we stop
 	// answering unknown packets at all. Matches libutp's RST_INFO_LIMIT
 	// (utp_internal.cpp:72).
@@ -155,9 +161,18 @@ type UtpSocket struct {
 	// fixed, and TestSlowReaderDoesNotWedgeConnection asserts this stays zero
 	// across a transfer whose reader stalls.
 	droppedFullConnQueue atomic.Uint64
-	closeOnce            sync.Once
-	readNextCh           chan struct{}
-	incomingBuf          chan *IncomingPacketRaw
+	// lingerAcks holds, for a connection that has just closed after reaching
+	// its peer's FIN, the acknowledgement to re-send if that FIN arrives
+	// again. See connection.lingerAck.
+	lingerAcks        *syncMap[*packet]
+	lingerExpirations *timeWheel[string]
+	// resetsSent counts RESETs answered to packets for connections this
+	// socket does not have. A RESET tells the peer to give up, so a healthy
+	// connection that draws one has been killed by us.
+	resetsSent  atomic.Uint64
+	closeOnce   sync.Once
+	readNextCh  chan struct{}
+	incomingBuf chan *IncomingPacketRaw
 }
 
 // DefaultSocketBufferSize is the size requested for the underlying UDP
@@ -218,9 +233,16 @@ func WithSocket(ctx context.Context, socket Conn, logger log.Logger) *UtpSocket 
 		rstInfo.remove(key)
 	})
 
+	lingerAcks := newSyncMap[*packet]()
+	lingerExpirations := newTimeWheel[string](time.Second, 16, func(key any, _ string) {
+		lingerAcks.remove(key)
+	})
+
 	utp := &UtpSocket{
 		ctx:                      ctx,
 		cancel:                   cancel,
+		lingerAcks:               lingerAcks,
+		lingerExpirations:        lingerExpirations,
 		retransmitTimers:         newRetransmitTimers(defaultRetransmitTickInterval, defaultRetransmitSlots),
 		rstInfo:                  rstInfo,
 		rstInfoExpirations:       rstExpirations,
@@ -319,6 +341,7 @@ func (s *UtpSocket) writeLoop() {
 			if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 				s.logger.Trace("uTP conn shutdown", "cid.Hash", event.ConnectionId.Hash())
 			}
+			s.rememberLingerAck(event.ConnectionId.Hash(), event.Packet)
 			s.removeConnStream(event.ConnectionId.Hash())
 		}
 	}
@@ -450,6 +473,13 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
 		// ST_RESET in its own branch and returns without responding
 		// (utp_internal.cpp:2850-2881).
 		if packetPtr.Header.PacketType != st_reset {
+			// A FIN or data packet retransmitted after we closed is
+			// re-acknowledged rather than reset. Checked here, once every
+			// lookup above has missed, so a connection that still exists
+			// always wins.
+			if s.reAckLingering(packetPtr, incomingRaw.peer) {
+				return
+			}
 			s.maybeSendReset(packetPtr, incomingRaw.peer)
 		}
 		return
@@ -494,6 +524,72 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
 // per packet. A 300-connection test run emitted over 3000 of them. libutp
 // remembers what it has already answered and stays quiet
 // (utp_internal.cpp:2907-2945).
+// rememberLingerAck keeps one acknowledgement for a connection that has just
+// closed, so a FIN the peer retransmits is answered rather than reset.
+//
+// lingerAckTimeout is generous against libutp's FIN retransmissions, which
+// back off from its 1000ms RTO floor: it covers the first few, which is where
+// a lost acknowledgement actually costs something. Past that the peer gives up
+// on its own and a RESET is the right answer anyway.
+func (s *UtpSocket) rememberLingerAck(key string, ack *packet) {
+	if ack == nil {
+		return
+	}
+	s.lingerAcks.put(key, ack)
+	s.lingerExpirations.put(key, key, lingerAckTimeout)
+}
+
+// reAckLingering answers a FIN or a data packet retransmitted for a connection
+// that has just closed, and reports whether it did.
+//
+// Both arrive for the same reason: the peer finished sending, we acknowledged
+// everything including its FIN and tore down, and one of those acknowledgements
+// was lost. The peer is retransmitting something we have already received and
+// already acknowledged. Sending it that acknowledgement again ends the
+// connection cleanly on both sides; sending a RESET tells it a completed
+// transfer failed.
+//
+// This is what libutp does in return, for the same reason it can: it keeps the
+// socket in CS_GOT_FIN until its own application closes, and a socket in that
+// state acknowledges duplicates of data it has already taken.
+//
+// It is not the same question as data arriving *past* a FIN -- beyond the
+// sequence number the peer said was its last. DEVIATIONS.md records that we
+// answer that with a RESET where libutp stays silent, and this does not change
+// it: such a packet is newer than the stored acknowledgement and is refused
+// below, so it still falls through to the RESET.
+func (s *UtpSocket) reAckLingering(pkt *packet, peer ConnectionPeer) bool {
+	if pkt.Header.PacketType != st_fin && pkt.Header.PacketType != st_data {
+		return false
+	}
+	for _, cidType := range cidTypes {
+		cid := CidFromPacket(pkt, peer, cidType)
+		ack, ok := s.lingerAcks.get(cid.Hash())
+		if !ok {
+			continue
+		}
+		// Only a retransmission of something already acknowledged. A packet
+		// past the stored acknowledgement number is data beyond what the peer
+		// declared final, which is a different case with its own answer --
+		// see TestConformanceDataAfterReachedFin.
+		if wrappingLessThan(ack.Header.AckNum, pkt.Header.SeqNum) {
+			return false
+		}
+		if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+			s.logger.Debug("re-acking a FIN for a connection that has closed",
+				"cid.send", cid.Send, "cid.recv", cid.Recv)
+		}
+		// Refresh the entry: a peer still retransmitting is still waiting.
+		s.lingerExpirations.put(cid.Hash(), cid.Hash(), lingerAckTimeout)
+		select {
+		case s.socketEvents <- newOutgoingSocketEvent(ack, cid.Peer):
+		default:
+		}
+		return true
+	}
+	return false
+}
+
 func (s *UtpSocket) maybeSendReset(pkt *packet, peer ConnectionPeer) {
 	key := rstInfoKey{
 		peer:   peer.Hash(),
@@ -516,6 +612,7 @@ func (s *UtpSocket) maybeSendReset(pkt *packet, peer ConnectionPeer) {
 		return
 	}
 
+	s.resetsSent.Add(1)
 	s.rstInfo.put(key, struct{}{})
 	s.rstInfoExpirations.put(key, key, rstInfoTimeout)
 
@@ -649,6 +746,10 @@ func (s *UtpSocket) nextIncomingConn() *IncomingPacket {
 func (s *UtpSocket) PacketsDroppedFullConnQueue() uint64 {
 	return s.droppedFullConnQueue.Load()
 }
+
+// PacketsResetSent reports how many RESETs this socket answered to packets for
+// connections it does not have.
+func (s *UtpSocket) PacketsResetSent() uint64 { return s.resetsSent.Load() }
 
 func (s *UtpSocket) LocalAddr() net.Addr {
 	type localAddresser interface{ LocalAddr() net.Addr }

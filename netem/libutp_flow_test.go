@@ -6,9 +6,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/ethereum/go-ethereum/log"
 	utp "github.com/zen-eth/utp-go"
 	"github.com/zen-eth/utp-go/native/libutp"
 )
@@ -200,7 +203,7 @@ func (l *libutpEndpoint) finished() (bool, error) {
 		}
 	}
 	if st := l.drv.State(); st == libutp.StateError {
-		return true, errors.New("libutp reported a connection error")
+		return true, fmt.Errorf("libutp reported a connection error: %s", libutpErrName(l.drv.Err()))
 	}
 	return false, nil
 }
@@ -243,8 +246,11 @@ func libutpToGo(ctx context.Context, n *Network, from, to *Endpoint, payload []b
 	defer sender.Close()
 	sender.payload = payload
 
-	sock := utp.WithSocket(ctx, to, quiet())
-	defer sock.Close()
+	sock := utp.WithSocket(ctx, to, flowLogger())
+	defer func() {
+		lastReceiverResets.Store(sock.PacketsResetSent())
+		sock.Close()
+	}()
 
 	// A libutp initiator puts its recv_id in the SYN, so our acceptor mirrors
 	// it: send on what arrived, receive on one more.
@@ -266,6 +272,7 @@ func libutpToGo(ctx context.Context, n *Network, from, to *Endpoint, payload []b
 		defer stream.Close()
 		buf := make([]byte, 0, len(payload))
 		nRead, err := stream.ReadToEOF(ctx, &buf)
+		lastReceiverReadErr.Store(fmt.Sprintf("read=%d err=%v", nRead, err))
 		if err != nil && !errors.Is(err, context.Canceled) {
 			acceptEr = fmt.Errorf("read from libutp: %w", err)
 			return
@@ -331,3 +338,33 @@ func goToLibutp(ctx context.Context, n *Network, from, to *Endpoint, payload []b
 	}
 	return elapsed, receiver.received, nil
 }
+
+// libutpErrName names libutp's error codes (utp.h:60-62).
+func libutpErrName(code int) string {
+	switch code {
+	case 0:
+		return "UTP_ECONNREFUSED"
+	case 1:
+		return "UTP_ECONNRESET"
+	case 2:
+		return "UTP_ETIMEDOUT"
+	}
+	return fmt.Sprintf("unknown(%d)", code)
+}
+
+// flowLogger is quiet unless UTP_FLOW_LOG asks otherwise, for diagnosing
+// interop failures.
+func flowLogger() log.Logger {
+	if os.Getenv("UTP_FLOW_LOG") != "" {
+		return log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelWarn, false))
+	}
+	return quiet()
+}
+
+// lastReceiverResets records how many RESETs the receiving socket sent during
+// the last libutpToGo flow. A RESET tells the peer to give up, so a healthy
+// transfer that draws one was killed by this side.
+var lastReceiverResets atomic.Uint64
+
+// lastReceiverReadErr records how the receiving stream's read ended.
+var lastReceiverReadErr atomic.Value

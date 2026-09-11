@@ -611,6 +611,36 @@ was tried once and stopped the 5%-loss benchmark completing.
 Reproduced at roughly 1 in 15 runs under load before, 0 in 60 after, with the
 benchmark suite unchanged at seven repeats.
 
+## PR 27 — a completed transfer could end as a connection reset for the peer
+
+The highest-value thing in this fork for anyone talking to real libutp peers.
+
+libutp finishes sending and closes, so it sends a FIN. We acknowledge it, hand
+the application its end of stream and tear the connection down. If that
+acknowledgement is lost, libutp retransmits the FIN -- or a data packet whose
+acknowledgement was also lost -- the socket no longer has the connection, and
+it answers with a RESET. libutp reports UTP_ECONNRESET on a transfer whose
+every byte had already been read.
+
+Measured on a path with 3% loss, 2% reordering and jitter, libutp sending:
+4 of 20 seeds ended this way before, 0 of 30 after.
+
+The connection hands the socket the acknowledgement it sent for the peer's FIN
+on its way out; the socket keeps it for ten seconds and re-sends it instead of
+a RESET. Checked only after every connection lookup has missed, so a live
+connection always wins, and only for a packet at or below the stored
+acknowledgement number -- data *past* the FIN is a different case and still
+draws a RESET, which TestConformanceDataAfterReachedFin pins and which caught
+the first version of this being too broad.
+
+It is not a half-close, and does not pretend to be: the application still
+cannot write after the peer's FIN. It stops a finished connection lying to its
+peer about how it ended.
+
+Found only because libutp was run over a path that damages packets. The
+loopback interop gate cannot find this class of defect at all, which is worth
+knowing independently of this patch.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

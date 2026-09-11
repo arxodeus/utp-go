@@ -212,6 +212,11 @@ type connection struct {
 	// must be delivered, and bytes owed to nobody must not hold the loop open.
 	abandoned <-chan struct{}
 
+	// finAck is the acknowledgement sent for the peer's FIN, kept so the
+	// socket can send it again if the peer retransmits that FIN after this
+	// connection has gone.
+	finAck *packet
+
 	// terminalErr carries the error that ended the stream to a reader that was
 	// not handed the marker directly. Written by the event-loop goroutine and
 	// read by the stream's reader, so it is atomic.
@@ -673,6 +678,27 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	}
 }
 
+// lingerAck is the acknowledgement the socket should re-send if the peer keeps
+// retransmitting its FIN after this connection is gone.
+//
+// It exists because a transfer can arrive whole and still end as a failure for
+// the peer. We acknowledge the peer's FIN, hand the application its end of
+// stream and tear down; if that acknowledgement is lost the peer retransmits
+// the FIN, the socket no longer has the connection, and it answers with a
+// RESET. libutp cannot do this in return: it keeps the socket in CS_GOT_FIN
+// until its own application closes, so a retransmitted FIN is simply
+// acknowledged again (utp_internal.cpp:2369-2370).
+//
+// Measured against real libutp on a 3% loss path with reordering, before this
+// existed: 4 of 20 runs ended in UTP_ECONNRESET on a transfer whose every byte
+// had already been read.
+//
+// Only a connection that reached the peer's FIN has anything to linger for.
+// Anything else -- a reset, an idle timeout, a local close with no FIN
+// received -- should still draw a RESET, which is what libutp does for a
+// packet it has no socket for.
+func (c *connection) lingerAck() *packet { return c.finAck }
+
 // notifySocketShutdown asks the socket to forget this connection.
 //
 // The wait is bounded because the socket's event loop may already be gone --
@@ -683,7 +709,7 @@ func (c *connection) notifySocketShutdown() {
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
 	select {
-	case c.socketEvents <- newShutdownSocketEvent(c.cid):
+	case c.socketEvents <- newShutdownSocketEvent(c.cid, c.lingerAck()):
 	case <-timer.C:
 	}
 }
@@ -1752,6 +1778,12 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 		// sent there is no connection left to build one from, and the peer
 		// gets nothing at all. Two corpus cases caught that immediately.
 		if statePacket := c.statePacket(); statePacket != nil {
+			// Kept so the socket can send it again if the peer retransmits
+			// this FIN after the connection has gone -- see lingerAck. It has
+			// to be captured here: by the time the connection shuts down,
+			// statePacket() has nothing left to build one from, which is the
+			// same reason the acknowledgement above cannot be deferred.
+			c.finAck = statePacket
 			c.emit(statePacket)
 		}
 	case st_data:

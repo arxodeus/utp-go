@@ -1422,6 +1422,61 @@ ceiling that already matches the path. This fork uses a fixed 1400 ceiling
 instead, which is recorded in [DEVIATIONS.md](DEVIATIONS.md), and on a tunnelled
 path 1400 is still too big.
 
+## A completed transfer could end as a connection reset for the peer
+
+Found by running libutp over a path that damages packets, which is the gap
+COMPATIBILITY.md named: the interop gate runs on loopback, which loses nothing,
+so nothing had ever exercised recovery *between* the two implementations.
+
+**4 of 20 seeds failed**, on a path with 3% loss, 2% reordering and jitter,
+with libutp sending and this library receiving — the direction a peer uses when
+it sends us a file. libutp reported `UTP_ECONNRESET`. In every case this side
+had already read all 131,072 bytes without error: the transfer arrived whole,
+and the *close* failed.
+
+### What happens
+
+1. libutp finishes sending and closes, so it sends a FIN.
+2. We acknowledge the FIN, hand the application its end of stream, and tear the
+   connection down.
+3. That acknowledgement is lost — ordinary on a lossy path.
+4. libutp retransmits the FIN, or a data packet whose acknowledgement was also
+   lost.
+5. The socket no longer has the connection, so it answers with a RESET.
+6. libutp reports the connection reset on a transfer that in fact succeeded.
+
+libutp cannot do this in return, and the reason is the half-close recorded in
+[DEVIATIONS.md](DEVIATIONS.md): it keeps the socket in `CS_GOT_FIN` until its
+own application closes, so a retransmission of something it has already taken
+is simply acknowledged again. Until now that deviation had no measured cost
+attached to it. It has one.
+
+### The fix
+
+The connection hands the socket the acknowledgement it sent for the peer's FIN
+on its way out, and the socket keeps it for ten seconds. A FIN or data packet
+arriving for a connection that has just closed is answered with that
+acknowledgement instead of a RESET.
+
+Two restrictions matter. It is checked only after every connection lookup has
+missed, so a connection that still exists always wins. And it applies only to a
+packet at or below the stored acknowledgement number — a retransmission of
+something already taken. Data *past* the FIN, beyond what the peer declared
+final, is a different case with its own documented answer, and still draws a
+RESET; `TestConformanceDataAfterReachedFin` pins that and caught it when the
+first version of this fix was too broad.
+
+This is not a half-close. A half-close would let the application keep writing
+after the peer's FIN, which is a larger change and still unmade. This only
+stops a finished connection lying to its peer about how it ended.
+
+Measured after: **0 of 30 seeds fail, and the socket sends no RESETs at all.**
+`netem.TestLibutpCleanCloseSurvivesLostFinAck` pins the deterministic case
+(seed 3, which failed 5 times out of 5), and
+`netem.TestLibutpInteropUnderAdverseConditions` covers loss, reordering, jitter
+and all three together, in both directions, asserting on each profile that the
+link really did damage packets.
+
 ## Things found but deliberately not fixed
 
 These are real and unresolved. Each needs a measurement harness (M1) or a

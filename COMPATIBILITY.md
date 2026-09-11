@@ -113,7 +113,7 @@ so it sent 288-byte packets. Both are written up in
 | --- | --- | --- |
 | Transfer, our initiator to libutp | **Interop** | 512 KB verified over real sockets |
 | Transfer, libutp initiator to ours | **Interop** | 512 KB verified over real sockets |
-| Transfer under loss against libutp | **None** | The interop gate runs on loopback, which does not lose packets |
+| Transfer under loss against libutp | **Measured** | `netem.TestLibutpInteropUnderAdverseConditions`: loss, reordering, jitter and all three, both directions. Found a close-handshake defect that loopback could not -- 4 of 20 transfers ended in `UTP_ECONNRESET` on data that had all arrived |
 | Many concurrent connections against libutp | **None** | Interop is one connection at a time |
 
 ## What is not covered at all
@@ -126,10 +126,10 @@ so it sent 288-byte packets. Both are written up in
 - **libutp against libutp on the emulated network.** Every flow measured joins
   libutp to this library. A libutp-to-libutp flow over the same links would
   separate the reference's behaviour from what our end contributes to it.
-- **Interop under adverse conditions.** The gate transfers over loopback. Loss,
-  reordering and delay against real libutp are untested -- except for path MTU,
-  where `netem.TestLibutpStallsOnAPathItCannotFit` runs the reference over a
-  size-limited link.
+- **Interop under adverse conditions over *real sockets*.** The loopback gate
+  still transfers on a clean path. Loss, reordering and jitter against libutp
+  are now covered over the emulated network, which is where the close-handshake
+  defect was found, but nothing damages packets between two real UDP sockets.
 - **The initiator role in the hand-written corpus.** The differential fuzzer
   drives both roles; the M2 corpus is responder-only.
 - **Timing beyond retransmission.** Ack *latency* is not compared, only ack

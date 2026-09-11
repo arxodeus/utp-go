@@ -34,9 +34,16 @@ func newOutgoingSocketEvent(p *packet, cid ConnectionPeer) *socketEvent {
 	}
 }
 
-func newShutdownSocketEvent(cid ConnectionPeer) *socketEvent {
+// newShutdownSocketEvent tells the socket to forget a connection.
+//
+// lingerAck, when non-nil, is the acknowledgement to re-send if the peer keeps
+// retransmitting its FIN after this connection has gone. Without it the socket
+// answers that retransmission with a RESET, and a transfer that arrived whole
+// ends as a connection reset for the peer. See UtpSocket.rememberLingerAck.
+func newShutdownSocketEvent(cid ConnectionPeer, lingerAck *packet) *socketEvent {
 	return &socketEvent{
 		Type:         socketShutdown,
+		Packet:       lingerAck,
 		ConnectionId: cid,
 	}
 }

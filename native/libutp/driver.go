@@ -124,6 +124,13 @@ func (d *Driver) Read(b []byte) int {
 	return int(C.libutp_driver_read(d.c, unsafe.Pointer(&b[0]), C.size_t(len(b))))
 }
 
+// Err reports libutp's last error code: 0 UTP_ECONNREFUSED, 1 UTP_ECONNRESET,
+// 2 UTP_ETIMEDOUT. Meaningful only in StateError.
+//
+// Which one it is decides whose defect an interop failure is: a timeout says
+// libutp gave up waiting, a reset says the peer told it to stop.
+func (d *Driver) Err() int { return int(C.libutp_driver_error(d.c)) }
+
 // State reports the connection state.
 func (d *Driver) State() State { return State(C.libutp_driver_state(d.c)) }
 
