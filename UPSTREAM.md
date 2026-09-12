@@ -644,6 +644,46 @@ Found only because libutp was run over a path that damages packets. The
 loopback interop gate cannot find this class of defect at all, which is worth
 knowing independently of this patch.
 
+## PR 28 — a connection died when its dial context was cancelled
+
+The smallest diff here and, for anyone embedding this library behind a
+`net.Conn`, the one that decides whether it works at all.
+
+`UtpSocket.Connect` and `ConnectWithCid` passed the caller's context to
+`NewUtpStream`, which made it the connection's lifetime. `net.Dialer`
+documents the opposite -- "Canceling ctx does not affect the connection after
+it is established" -- and the standard Go shape relies on it:
+
+```go
+ctx, cancel := context.WithTimeout(ctx, dialTimeout)
+defer cancel()
+conn, err := dialer.DialContext(ctx, network, addr)
+```
+
+The `defer cancel()` fires as the dialling function returns, with the
+connection still in the caller's hands. Here that killed it.
+
+Every test in the repository dialled with a context it kept alive for the
+whole transfer, so nothing saw it. anacrolix/torrent does not: its outgoing
+connections cancel their dial context on the way out of
+`establishOutgoingConn`. What that produced was a BitTorrent connection that
+completed its handshake and then stopped mid-stream -- the peer read 796 bytes
+of a 1007-byte exchange, saw EOF, and the torrent never moved a piece.
+
+The fix is to give the stream the socket's context and leave the caller's
+context governing only the wait for the connection to come up, plus an
+explicit teardown on the paths where the caller gives up, since cancelling no
+longer does it implicitly. The accept path had the same shape for the
+`Accept` call's context and is changed with it.
+
+`utpnet.TestDialContextCancelDoesNotCloseTheConnection` pins it and fails
+against the old code with "writing after the dial context was cancelled: not
+connected".
+
+Found by running a real torrent between two `anacrolix/torrent` clients over
+this library -- which is also worth sending, as
+`integration/anacrolix/torrent_transfer_test.go`.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

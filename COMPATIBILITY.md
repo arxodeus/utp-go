@@ -115,6 +115,7 @@ so it sent 288-byte packets. Both are written up in
 | Transfer, libutp initiator to ours | **Interop** | 512 KB verified over real sockets |
 | Transfer under loss against libutp | **Measured** | `netem.TestLibutpInteropUnderAdverseConditions`: loss, reordering, jitter and all three, both directions. Found a close-handshake defect that loopback could not -- 4 of 20 transfers ended in `UTP_ECONNRESET` on data that had all arrived |
 | Many concurrent connections against libutp | **Interop** | `TestInteropConcurrentLibutpInitiators` and `TestInteropConcurrentGoInitiators`: 16 libutp peers and one socket of ours, both directions, 256 KB each verified byte for byte with per-peer stamps so a byte on the wrong stream names its origin |
+| Real torrent transfer | **Interop** | `integration/anacrolix.TestTorrentTransferOverUtp`: two `anacrolix/torrent` clients with TCP, built-in uTP and the DHT disabled, a 4 MiB torrent in 128 pieces, verified by BitTorrent's own piece hashes. Found the dial-context defect that made every `net.Conn` consumer's connection die as its dial returned |
 | IPv6 | **None** | The plumbing that differs -- address rendering, network-name mapping, peer hashing -- is unit-tested (`utpnet.TestIPv6AddressPlumbing`, `TestUdpPeerHashIdentifiesTheAddressNotItsEncoding`). An end-to-end v6 transfer is written (`utpnet.TestDialAcceptTransferIPv6`) but skips wherever there is no IPv6 stack, and the machine this was developed on has none, so it has never run |
 
 ## What is not covered at all

@@ -1577,6 +1577,85 @@ is not an address is returned as an error rather than swallowed.
 `TestUdpConnWritesToForeignPeerTypes` covers both, and fails against the old
 code with "wrote 0 bytes, want 32".
 
+## A connection died when its dial context was cancelled
+
+**Fixed, and it made the library unusable behind `net.Conn` for the most
+common dialling idiom in Go.**
+
+`UtpSocket.Connect` and `ConnectWithCid` passed the caller's context straight
+to `NewUtpStream`, where it became the connection's lifetime. `net.Dialer`
+documents the opposite -- "Canceling ctx does not affect the connection after
+it is established" -- and the standard shape relies on that:
+
+```go
+ctx, cancel := context.WithTimeout(ctx, dialTimeout)
+defer cancel()
+conn, err := dialer.DialContext(ctx, network, addr)
+```
+
+The `defer cancel()` fires as the dialling function returns, with the
+connection still in the caller's hands. Here it took the connection with it.
+
+Nothing in this repository saw it, and the reason is worth recording: every
+test dials with a context it keeps alive for the whole transfer, because that
+is the natural way to write a test. The idiom that breaks is the one a library
+uses, not the one a test does.
+
+What found it was running a real torrent. `anacrolix/torrent` cancels a dial
+context on the way out of `establishOutgoingConn`, and the result was a
+BitTorrent connection that completed its whole handshake and then stopped
+mid-stream: the peer read 796 bytes of a 1007-byte exchange, saw EOF, dropped
+the connection, and the torrent sat at 0 of 4194304 bytes with no error
+anywhere that named a cause. The library's own log said `utp stream evenLoop
+has error and return err="context canceled"` -- which is accurate and tells
+you nothing about whose context or why.
+
+The fix: the stream's lifetime is the socket's, and the caller's context
+governs only the wait for the connection to come up. A caller that gives up
+now tears the attempt down explicitly (`UtpStream.abandonDial`), because
+cancelling no longer does it implicitly -- without that, an unanswered SYN
+would go on retrying with nobody waiting for the answer. The accept path had
+the same shape for the `Accept` call's context and changed with it; the
+sibling branch two lines away had already been using the socket's context,
+which is what the inconsistency should have suggested.
+
+`utpnet.TestDialContextCancelDoesNotCloseTheConnection` pins it: it dials,
+cancels immediately as `defer cancel()` would, and then requires a full
+round-trip exchange. Against the old code it fails with "writing after the
+dial context was cancelled: not connected".
+
+## A real torrent, transferred and hash-verified over this library
+
+`integration/anacrolix/TestTorrentTransferOverUtp`. Two `torrent.Client`s, a
+generated 4 MiB torrent in 128 pieces, and BitTorrent's own piece hashes
+deciding whether what arrived is what was sent. Both clients have TCP,
+torrent's built-in uTP and the DHT disabled, so the only transport between
+them is this library; if it did not work there would be no fallback, only
+silence.
+
+The module's README had recorded this as not covered, on the grounds that
+wiring it up needed a fork of torrent or a `replace`. That is true of
+torrent's built-in socket layer, which picks its uTP implementation at build
+time -- and not true of `Client.AddListener` and `Client.AddDialer`, which are
+exported and take exactly what `utpnet.Socket` already provides. The gap was
+in the reading, not in torrent.
+
+It earned its place on the first run, by finding the dial-context defect
+above. Two later things it also caught, both in the test rather than the
+library, are worth keeping as warnings:
+
+- **`BytesCompleted() == Length()` is true for a moment before the leecher
+  works out it has nothing**, so the obvious completion check passed in about
+  240 ms with no file on disk, three runs in five. The test now also requires
+  that the whole payload arrived as peer data, which is what makes it a
+  measurement of a transfer rather than of a race.
+- **The default storage writes `<name>.part` and renames only after the whole
+  torrent completes**, which happens after the last piece is marked complete
+  rather than with it. Reading the final path immediately found no file in
+  four runs out of five, on a transfer that had genuinely finished. The test
+  reads back through `Torrent.NewReader` -- what a consumer uses, and what the
+  client will serve -- and treats the on-disk rename as a bounded afterthought.
+
 ## Things found but deliberately not fixed
 
 These are real and unresolved. Each needs a measurement harness (M1) or a

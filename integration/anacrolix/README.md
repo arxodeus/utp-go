@@ -32,6 +32,20 @@ caller's slice, so any full-duplex exchange corrupted its own data. Every
 unidirectional test in the repository passed throughout. See
 [KNOWN-LIMITATIONS.md](../../KNOWN-LIMITATIONS.md).
 
+`TestTorrentTransferOverUtp` runs a real torrent: two `torrent.Client`s, a
+generated 4 MiB torrent in 128 pieces, and BitTorrent's own piece hashes
+deciding whether what arrived is what was sent. Both clients have TCP,
+torrent's built-in uTP and the DHT disabled, so the only transport between
+them is this library.
+
+It too found a defect on its first run, and a worse one: `UtpSocket.Connect`
+made the caller's dial context the *connection's* lifetime, so the standard
+`defer cancel()` after a dial killed the connection it had just returned.
+torrent does exactly that, and the result was a BitTorrent connection that
+completed its handshake and then died mid-stream. Every test in the repository
+dials with a context it keeps alive for the whole transfer, so none of them
+could see it.
+
 ## Wiring it into a torrent client
 
 torrent chooses its uTP implementation at **build time**, not at run time:
@@ -58,8 +72,19 @@ so options 1 and 2 are a one-line substitution.
   blocked addresses before any state is created for them. This library has no
   equivalent hook, so `NewUtpSocket` accepts one and ignores it. A caller
   relying on IP blocking would not get it.
-- **A real torrent transfer.** Running one would require applying one of the
-  wiring options above inside this repository, which means either vendoring a
-  fork of torrent or a `replace` that would leak into anyone building this
-  module. The traffic-shape test is what stands in for it, and its limits are
-  stated rather than glossed.
+- **A torrent through torrent's own socket layer.** `TestTorrentTransferOverUtp`
+  takes option 3 above -- `Client.AddListener` and `Client.AddDialer`, both
+  exported, both taking what `utpnet.Socket` already provides -- so it needs
+  neither a fork nor a `replace`. What it does not exercise is options 1 and 2:
+  torrent choosing this implementation through its own `listenUtp`, which is
+  selected at build time and cannot be reached from here.
+
+  This entry previously said a real transfer was not covered because wiring it
+  up required a fork. That was true of torrent's built-in socket layer and not
+  of the client's exported hooks; the gap was in the reading of the API.
+- **Trackers, the DHT, PEX and holepunching**, all disabled: the leecher is
+  handed the seeder's address directly. What is tested is the transport, not
+  peer discovery.
+- **Encryption.** `HeaderObfuscationPolicy` is left at its default, so what the
+  two clients negotiate is whatever they would negotiate over TCP. Nothing here
+  pins it.

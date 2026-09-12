@@ -522,7 +522,10 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
 			s.logger.Trace("handing a new SYN to a waiting Accept",
 				"cid.Send", cid.Send, "cid.Recv", cid.Recv)
 		}
-		s.selectAcceptHelper(accept.ctx, cid, packetPtr, accept, s.socketEvents)
+		// The socket's context, not the Accept call's: an accepted connection
+		// outlives the Accept that produced it, exactly as a dialled one
+		// outlives its dial. The sibling branch above already used s.ctx.
+		s.selectAcceptHelper(s.ctx, cid, packetPtr, accept, s.socketEvents)
 	} else {
 		s.logger.Debug("put a new syn packet to incomingConns...")
 		s.putIncomingConn(cidHash, &IncomingPacket{pkt: packetPtr, cid: cid})
@@ -928,8 +931,22 @@ func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *Co
 	s.logger.Info("connecting", "dst.peer.hash", peer.Hash(), "dst.send", cid.Send, "dst.recv", cid.Recv, "dst.hash", cid.Hash(), "dst.peer", peer)
 	// Create new UTP stream
 	s.putConnStream(cid.Hash(), streamEvents)
+	// The connection's lifetime is the socket's, not the dial's.
+	//
+	// This passed `ctx` -- the caller's dial context -- and so gave every
+	// connection a lifetime that ended when the dial did. net.Dialer
+	// documents the opposite ("Canceling ctx does not affect the connection
+	// after it is established") and Go callers rely on it: the standard shape
+	// is a dial under a timeout with `defer cancel()`, which fires the moment
+	// the dial returns. anacrolix/torrent does exactly that, and the result
+	// was a connection that completed its BitTorrent handshake and then died
+	// mid-stream with "context canceled" -- a torrent that never moved a
+	// byte. See TestDialContextCancelDoesNotCloseTheConnection.
+	//
+	// The caller's context still governs the wait below, which is the part it
+	// is for.
 	stream := NewUtpStream(
-		ctx,
+		s.ctx,
 		s.logger,
 		cid,
 		config,
@@ -955,8 +972,12 @@ func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *Co
 		// was the branch every successful connection took.
 		return nil, fmt.Errorf("connection closed before it was established")
 	case <-ctx.Done():
+		// The attempt is the caller's to abandon even though the stream no
+		// longer shares its context.
+		stream.abandonDial()
 		return nil, ctx.Err()
 	case <-s.ctx.Done():
+		stream.abandonDial()
 		return nil, s.ctx.Err()
 	}
 }
@@ -979,8 +1000,9 @@ func (s *UtpSocket) ConnectWithCid(
 	streamEvents := make(chan *streamEvent, 1000)
 
 	s.putConnStream(cid.Hash(), streamEvents)
+	// The socket's context, not the dial's -- see the note in Connect.
 	stream := NewUtpStream(
-		ctx,
+		s.ctx,
 		s.logger,
 		cid,
 		config,
@@ -1002,8 +1024,10 @@ func (s *UtpSocket) ConnectWithCid(
 		s.logger.Error("failed to open connection", "cid.send", cid.Send, "cid.recv", cid.Recv, "cid.peer", cid.Peer.Hash())
 		return nil, fmt.Errorf("connection timed out")
 	case <-ctx.Done():
+		stream.abandonDial()
 		return nil, ctx.Err()
 	case <-s.ctx.Done():
+		stream.abandonDial()
 		return nil, s.ctx.Err()
 	}
 }

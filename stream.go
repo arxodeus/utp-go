@@ -75,6 +75,24 @@ func NewUtpStream(
 	return utpStream
 }
 
+// abandonDial tears down a connection attempt whose caller has given up.
+//
+// It exists because the stream's lifetime is the socket's rather than the
+// dial's (see UtpSocket.Connect): cancelling the dial context no longer takes
+// the connection with it, so a dial that times out or is cancelled has to say
+// so explicitly, or a half-open attempt would go on retrying its SYN with
+// nobody waiting for the answer.
+//
+// Close is the wrong tool here: it waits for the event loop to drain, and an
+// unanswered SYN keeps that loop retrying until MaxConnAttempts. Cancelling
+// the stream's own context is what the old behaviour did, and it is
+// immediate; the event loop's deferred cleanup removes the socket's entry for
+// the connection either way.
+func (s *UtpStream) abandonDial() {
+	s.shutdown.Store(true)
+	s.streamCancel()
+}
+
 func (s *UtpStream) notifyRead() {
 	if s.conn == nil {
 		return
