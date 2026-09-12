@@ -246,7 +246,8 @@ func (s *UtpStream) Write(ctx context.Context, buf []byte) (int, error) {
 	// libutp does not retain either: utp_writev copies out of the caller's
 	// iovec into packet buffers before it returns (utp_internal.cpp:1057-1066),
 	// so an embedder may reuse its buffer straight away. One copy per Write is
-	// what that costs.
+	// what that costs, and on the fastest link the harness models it does not
+	// show up at all -- see "What the write copy cost" in BENCHMARKS.md.
 	queued := make([]byte, len(buf))
 	copy(queued, buf)
 	select {

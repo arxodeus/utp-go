@@ -349,6 +349,37 @@ windows showed both had in fact grown their window across that step --
 correctly, since a permanent propagation change is not queueing and LEDBAT
 relearns it as the new base delay.
 
+## What the write copy cost
+
+`UtpStream.Write` copies the caller's buffer before queueing it, because the
+connection goroutine holds that slice after Write returns and the caller is
+entitled to reuse it (see KNOWN-LIMITATIONS.md). One copy per Write call is
+what that costs, and this is the measurement of it.
+
+The LAN profile, where the copy should cost most: 100 Mbps, no loss, so more
+bytes pass through it per second than on any other link here. Nine repeats per
+cell, the two configurations run back to back on an otherwise idle machine.
+
+| Controller | Without the copy | With the copy |
+| --- | --- | --- |
+| LEDBAT | 88.58 Mbps (86.45-91.62) | 89.46 (81.96-90.51) |
+| LEDBAT++ | 77.13 Mbps (71.37-78.21) | 77.19 (73.10-77.96) |
+
+No measurable cost: both medians move by less than 1%, in the *faster*
+direction, and every difference is well inside the run-to-run range. That is
+what the arithmetic predicts — the benchmark issues one Write for the whole
+payload, so the copy is a single 4 MB memcpy against a 375 ms transfer.
+
+**How not to measure this.** The first attempt compared a full suite run before
+the change against a full suite run after it, and reported the change making
+broadband goodput 80% faster and high-BDP goodput 52% slower. A memcpy does
+neither. The two runs were an hour apart, and the earlier one came in far below
+this file's own committed numbers for code that had not changed -- something
+was competing with it. The same committed code gave the LAN profile 77.23 Mbps
+in one full run and 89.46 in an isolated one. Cross-run comparisons in this
+harness are only worth anything back to back; HARNESS.md says why, and this is
+what ignoring it looks like.
+
 ## What these numbers are not
 
 - **Not a comparison against libutp.** The interoperability gate proves the
