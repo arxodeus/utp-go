@@ -98,7 +98,20 @@ func (c *UdpConn) WriteTo(b []byte, dst ConnectionPeer) (int, error) {
 	case *UdpPeer:
 		return c.base.WriteToUDP(b, baseDst.addr)
 	}
-	return 0, nil
+	// A peer type this package did not create. Its Hash is by contract the
+	// address, which is what utpnet's peerUDPAddr already relies on, so parse
+	// that rather than dropping the packet.
+	//
+	// This used to `return 0, nil`: every packet to such a peer vanished, and
+	// the connection above saw a successful send and timed out with nothing to
+	// explain it. Silence is the wrong answer whether or not the address
+	// parses -- if it does not, that is an error the caller needs.
+	addr, err := net.ResolveUDPAddr("udp", dst.Hash())
+	if err != nil {
+		return 0, fmt.Errorf("utp_socket: peer %T hashes to %q, which is not a UDP address: %w",
+			dst, dst.Hash(), err)
+	}
+	return c.base.WriteToUDP(b, addr)
 }
 
 func (c *UdpConn) Close() error {

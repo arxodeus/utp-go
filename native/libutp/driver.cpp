@@ -1,11 +1,18 @@
 // driver.cpp -- see driver.h.
 //
 // Single-threaded by construction: every entry point is called from Go and
-// runs to completion before returning, so there is no lock here. That is the
-// point -- the socket-backed peer needs a mutex and a thread, and neither is
-// reproducible.
+// runs to completion before returning. That is the point -- the socket-backed
+// peer needs a thread and a mutex, and neither is reproducible.
+//
+// One driver still takes the process-wide libutp lock on the way in, because
+// "single-threaded" is a property of one driver and not of the process: two
+// tests each driving their own driver from their own goroutine are two threads
+// inside libutp, which shares mutable statics across every context. See
+// global_lock.h. The lock is uncontended in the single-driver case and changes
+// nothing about what the driver emits.
 
 #include "driver.h"
+#include "global_lock.h"
 
 #include "bridge_state.h"
 #include "utp.h"
@@ -212,6 +219,9 @@ static uint64 drv_log(utp_callback_arguments *a) {
 // --- lifecycle --------------------------------------------------------------
 
 libutp_driver *libutp_driver_create(uint64_t now_micros) {
+	// See global_lock.h: libutp's statics are process-wide, so two
+	// drivers on two goroutines are two threads inside one libutp.
+	libutp_guard guard;
 	libutp_driver *d = (libutp_driver *)calloc(1, sizeof(libutp_driver));
 	if (!d) return NULL;
 	d->now_micros = now_micros;
@@ -240,6 +250,9 @@ libutp_driver *libutp_driver_create(uint64_t now_micros) {
 }
 
 void libutp_driver_destroy(libutp_driver *d) {
+	// See global_lock.h: libutp's statics are process-wide, so two
+	// drivers on two goroutines are two threads inside one libutp.
+	libutp_guard guard;
 	if (!d) return;
 	if (d->ctx) utp_destroy(d->ctx);
 	libutp_driver_emitted_clear(d);
@@ -264,6 +277,9 @@ void libutp_driver_advance(libutp_driver *d, uint64_t micros) {
 uint64_t libutp_driver_now(libutp_driver *d) { return d->now_micros; }
 
 int libutp_driver_connect(libutp_driver *d) {
+	// See global_lock.h: libutp's statics are process-wide, so two
+	// drivers on two goroutines are two threads inside one libutp.
+	libutp_guard guard;
 	if (d->sock != NULL || d->ctx == NULL) return -1;
 	d->sock = utp_create_socket(d->ctx);
 	if (!d->sock) return -1;
@@ -278,6 +294,9 @@ int libutp_driver_connect(libutp_driver *d) {
 void libutp_driver_listen(libutp_driver *d) { d->listening = 1; }
 
 int libutp_driver_inject(libutp_driver *d, const void *buf, size_t len) {
+	// See global_lock.h: libutp's statics are process-wide, so two
+	// drivers on two goroutines are two threads inside one libutp.
+	libutp_guard guard;
 	if (!d->ctx) return -1;
 	struct sockaddr_in from;
 	driver_peer_addr(&from);
@@ -288,12 +307,18 @@ int libutp_driver_inject(libutp_driver *d, const void *buf, size_t len) {
 }
 
 void libutp_driver_check_timeouts(libutp_driver *d) {
+	// See global_lock.h: libutp's statics are process-wide, so two
+	// drivers on two goroutines are two threads inside one libutp.
+	libutp_guard guard;
 	if (!d->ctx) return;
 	utp_check_timeouts(d->ctx);
 	drv_pump_writes(d);
 }
 
 void libutp_driver_issue_acks(libutp_driver *d) {
+	// See global_lock.h: libutp's statics are process-wide, so two
+	// drivers on two goroutines are two threads inside one libutp.
+	libutp_guard guard;
 	if (!d->ctx) return;
 	utp_issue_deferred_acks(d->ctx);
 }
@@ -316,12 +341,18 @@ void libutp_driver_emitted_clear(libutp_driver *d) {
 }
 
 long libutp_driver_write(libutp_driver *d, const void *buf, size_t len) {
+	// See global_lock.h: libutp's statics are process-wide, so two
+	// drivers on two goroutines are two threads inside one libutp.
+	libutp_guard guard;
 	if (drv_append(&d->tx, &d->tx_len, &d->tx_cap, buf, len) < 0) return -1;
 	drv_pump_writes(d);
 	return (long)len;
 }
 
 long libutp_driver_read(libutp_driver *d, void *buf, size_t len) {
+	// See global_lock.h: libutp's statics are process-wide, so two
+	// drivers on two goroutines are two threads inside one libutp.
+	libutp_guard guard;
 	size_t n = d->rx_len < len ? d->rx_len : len;
 	if (n > 0) {
 		memcpy(buf, d->rx, n);
@@ -334,6 +365,9 @@ int libutp_driver_state(libutp_driver *d) { return d->state; }
 int libutp_driver_error(libutp_driver *d) { return d->err; }
 
 void libutp_driver_close(libutp_driver *d) {
+	// See global_lock.h: libutp's statics are process-wide, so two
+	// drivers on two goroutines are two threads inside one libutp.
+	libutp_guard guard;
 	d->want_close = 1;
 	drv_pump_writes(d);
 }

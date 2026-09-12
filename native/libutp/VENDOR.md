@@ -69,11 +69,24 @@ those callbacks have defaults: an unset one returns zero, which would leave
 every timestamp and connection id zero and nothing would work. The bridge
 supplies all of them.
 
-libutp is also not thread-safe. Every call into it happens under one mutex,
-held by either the event loop or a Go-facing entry point. One peer carries one
-connection, which is all an interop test needs and keeps the lifetime rules --
-particularly that a `utp_socket` must not be touched after
-`UTP_STATE_DESTROYING` -- simple enough to get right.
+libutp is also not thread-safe, and that is broader than it looks. Every call
+into it happens under the peer's own mutex, held by either the event loop or a
+Go-facing entry point. One peer carries one connection, which is all an interop
+test needs and keeps the lifetime rules -- particularly that a `utp_socket`
+must not be touched after `UTP_STATE_DESTROYING` -- simple enough to get right.
+
+A per-peer mutex is not enough. `utp_writev` keeps its working iovec in a
+function-level `static` (`utp_internal.cpp:3156`), shared by every context in
+the process, and `write_outgoing_packet` advances that array's pointers as it
+copies payload out of it (`:1057-1066`). Two peers writing at once therefore
+take each other's bytes. `global_lock.h` / `global_lock.cpp` add one recursive
+process-wide lock around every entry into libutp, from peers and drivers
+alike; `TestInteropConcurrentLibutpInitiators` is what found the need for it,
+and removing the lock makes that test fail again immediately -- with libutp's
+own `assert(needed == 0)` (`:1068`) rather than a wrong answer.
+
+The lock lives outside the vendored sources: it is a property of how this
+harness embeds libutp, not a patch to it.
 
 ## Build tags
 

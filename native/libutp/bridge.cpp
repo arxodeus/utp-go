@@ -5,6 +5,7 @@
 // whole concurrency story.
 
 #include "bridge.h"
+#include "global_lock.h"
 
 #include "utp.h"
 
@@ -23,6 +24,20 @@
 // --- a growable byte buffer -------------------------------------------------
 // Plain malloc rather than std::vector: libutp is built -fno-exceptions, and
 // there is no reason to drag the C++ allocator in for two byte queues.
+
+// Every section below that touches libutp holds both the peer's own lock and
+// the process-wide one, always in that order. See global_lock.h: separate
+// utp_contexts on separate threads still share utp_writev's static iovec.
+#define PEER_LOCK(p)                     \
+	do {                                 \
+		pthread_mutex_lock(&(p)->mu);    \
+		libutp_global_lock();            \
+	} while (0)
+#define PEER_UNLOCK(p)                   \
+	do {                                 \
+		libutp_global_unlock();          \
+		pthread_mutex_unlock(&(p)->mu);  \
+	} while (0)
 
 struct byte_buf {
 	unsigned char *data;
@@ -308,7 +323,7 @@ fail:
 
 void libutp_peer_destroy(libutp_peer *p) {
 	if (!p) return;
-	pthread_mutex_lock(&p->mu);
+	PEER_LOCK(p);
 	if (p->ctx) {
 		utp_destroy(p->ctx);
 		p->ctx = NULL;
@@ -316,7 +331,7 @@ void libutp_peer_destroy(libutp_peer *p) {
 	}
 	buf_free(&p->rx);
 	buf_free(&p->tx);
-	pthread_mutex_unlock(&p->mu);
+	PEER_UNLOCK(p);
 
 	if (p->fd >= 0) close(p->fd);
 	if (p->wake_r >= 0) close(p->wake_r);
@@ -328,9 +343,9 @@ void libutp_peer_destroy(libutp_peer *p) {
 uint16_t libutp_peer_port(libutp_peer *p) { return p->port; }
 
 void libutp_peer_stop(libutp_peer *p) {
-	pthread_mutex_lock(&p->mu);
+	PEER_LOCK(p);
 	p->stop = 1;
-	pthread_mutex_unlock(&p->mu);
+	PEER_UNLOCK(p);
 	wake(p);
 }
 
@@ -338,9 +353,9 @@ void libutp_peer_run(libutp_peer *p) {
 	unsigned char pkt[65536];
 
 	for (;;) {
-		pthread_mutex_lock(&p->mu);
+		PEER_LOCK(p);
 		int stop = p->stop;
-		pthread_mutex_unlock(&p->mu);
+		PEER_UNLOCK(p);
 		if (stop) return;
 
 		fd_set rf;
@@ -354,7 +369,7 @@ void libutp_peer_run(libutp_peer *p) {
 		tv.tv_usec = 20000; // 20ms, so timeouts are checked promptly
 		int rv = select(maxfd + 1, &rf, NULL, NULL, &tv);
 
-		pthread_mutex_lock(&p->mu);
+		PEER_LOCK(p);
 
 		if (rv > 0 && FD_ISSET(p->wake_r, &rf)) {
 			char drain[256];
@@ -386,19 +401,19 @@ void libutp_peer_run(libutp_peer *p) {
 			pump_writes(p);
 		}
 
-		pthread_mutex_unlock(&p->mu);
+		PEER_UNLOCK(p);
 	}
 }
 
 int libutp_peer_connect(libutp_peer *p, uint16_t remote_port) {
-	pthread_mutex_lock(&p->mu);
+	PEER_LOCK(p);
 	if (p->sock != NULL || p->ctx == NULL) {
-		pthread_mutex_unlock(&p->mu);
+		PEER_UNLOCK(p);
 		return -1;
 	}
 	p->sock = utp_create_socket(p->ctx);
 	if (!p->sock) {
-		pthread_mutex_unlock(&p->mu);
+		PEER_UNLOCK(p);
 		return -1;
 	}
 	p->state = LIBUTP_STATE_CONNECTING;
@@ -409,73 +424,73 @@ int libutp_peer_connect(libutp_peer *p, uint16_t remote_port) {
 	to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 	to.sin_port = htons(remote_port);
 	utp_connect(p->sock, (struct sockaddr *)&to, sizeof(to));
-	pthread_mutex_unlock(&p->mu);
+	PEER_UNLOCK(p);
 	wake(p);
 	return 0;
 }
 
 void libutp_peer_listen(libutp_peer *p) {
-	pthread_mutex_lock(&p->mu);
+	PEER_LOCK(p);
 	p->listening = 1;
-	pthread_mutex_unlock(&p->mu);
+	PEER_UNLOCK(p);
 	wake(p);
 }
 
 int libutp_peer_state(libutp_peer *p) {
-	pthread_mutex_lock(&p->mu);
+	PEER_LOCK(p);
 	int s = p->state;
-	pthread_mutex_unlock(&p->mu);
+	PEER_UNLOCK(p);
 	return s;
 }
 
 int libutp_peer_error(libutp_peer *p) {
-	pthread_mutex_lock(&p->mu);
+	PEER_LOCK(p);
 	int e = p->err;
-	pthread_mutex_unlock(&p->mu);
+	PEER_UNLOCK(p);
 	return e;
 }
 
 long libutp_peer_queue_write(libutp_peer *p, const void *buf, size_t len) {
-	pthread_mutex_lock(&p->mu);
+	PEER_LOCK(p);
 	if (buf_append(&p->tx, buf, len) < 0) {
-		pthread_mutex_unlock(&p->mu);
+		PEER_UNLOCK(p);
 		return -1;
 	}
 	pump_writes(p);
-	pthread_mutex_unlock(&p->mu);
+	PEER_UNLOCK(p);
 	wake(p);
 	return (long)len;
 }
 
 long libutp_peer_pending_write(libutp_peer *p) {
-	pthread_mutex_lock(&p->mu);
+	PEER_LOCK(p);
 	long n = (long)p->tx.len;
-	pthread_mutex_unlock(&p->mu);
+	PEER_UNLOCK(p);
 	return n;
 }
 
 long libutp_peer_read(libutp_peer *p, void *buf, size_t len) {
-	pthread_mutex_lock(&p->mu);
+	PEER_LOCK(p);
 	size_t n = p->rx.len < len ? p->rx.len : len;
 	if (n > 0) {
 		memcpy(buf, p->rx.data, n);
 		buf_consume(&p->rx, n);
 	}
-	pthread_mutex_unlock(&p->mu);
+	PEER_UNLOCK(p);
 	return (long)n;
 }
 
 uint64_t libutp_peer_bytes_received(libutp_peer *p) {
-	pthread_mutex_lock(&p->mu);
+	PEER_LOCK(p);
 	uint64_t n = p->bytes_received;
-	pthread_mutex_unlock(&p->mu);
+	PEER_UNLOCK(p);
 	return n;
 }
 
 void libutp_peer_close(libutp_peer *p) {
-	pthread_mutex_lock(&p->mu);
+	PEER_LOCK(p);
 	p->want_close = 1;
 	pump_writes(p);
-	pthread_mutex_unlock(&p->mu);
+	PEER_UNLOCK(p);
 	wake(p);
 }

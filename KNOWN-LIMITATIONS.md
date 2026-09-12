@@ -1502,6 +1502,81 @@ failed 3 times out of 3 with `UTP_ECONNRESET` before this — and
 and all three together, in both directions, asserting on each profile that the
 link really did damage packets.
 
+## libutp is not thread-safe across contexts, and only concurrent interop found it
+
+**A harness defect, fixed in the harness.** Everything the interoperability
+gate proved, it proved one connection at a time. A BitTorrent client does not
+run that way: it holds tens of connections on one UDP port, all live at once.
+So the gate grew a concurrent case -- 16 libutp peers against one socket of
+ours, in both roles, each payload stamped with its peer's index so a byte
+delivered to the wrong stream names where it came from.
+
+It failed immediately, and not in the way it was written to catch. Five
+streams of eight on the first run and seven on the next -- the count moves with
+the interleaving -- carried chunks of *other* peers' payloads, at matching
+offsets:
+peer 0's stream held 2904 bytes of peer 3's data, and peer 1's stream held
+2904 bytes of peer 0's. At two peers instead of eight, libutp aborted the test
+process on an assertion of its own:
+
+> `utp_internal.cpp:1070: void UTPSocket::write_outgoing_packet(...): Assertion 'needed == 0' failed.`
+
+The cause is upstream, and it is worth knowing for anyone embedding libutp:
+
+```cpp
+ssize_t utp_writev(utp_socket *conn, struct utp_iovec *iovec_input, size_t num_iovecs)
+{
+    static utp_iovec iovec[UTP_IOV_MAX];
+                                        (utp_internal.cpp:3154-3156)
+```
+
+That `static` is process-wide. `write_outgoing_packet` copies payload out of
+it and advances its pointers as it goes (`:1057-1066`), so two threads inside
+`utp_writev` walk the same array: each takes bytes the other had already
+claimed, and when the interleaving is unlucky one of them runs out and trips
+the assertion at `:1068`. `utp_utils.cpp` has process-wide statics of its own
+(`:86`, `:131`, `:159`, `:199`), so `utp_writev` is the one that corrupts
+data, not the only thing that is shared.
+
+"libutp is not thread-safe" was already written down here, in `bridge.h` and
+in `VENDOR.md`. What was assumed, and is wrong, is that it means *per
+context*: give every peer its own `utp_context`, its own thread and its own
+mutex, and nothing is shared. The bridge did exactly that.
+
+The fix is one recursive process-wide lock around every entry into libutp,
+from socket-backed peers and deterministic drivers alike (`global_lock.h`,
+`global_lock.cpp`). Recursive because libutp calls the embedder back from
+inside its own calls -- `UTP_STATE_WRITABLE` during `utp_process_udp` -- and
+the bridge answers some of those by calling libutp again. It lives outside the
+vendored sources, which stay byte-for-byte upstream.
+
+Nothing in this library changed. The Go side had been routing all sixteen
+connections correctly the whole time; it was the reference that was mixing the
+bytes before they reached the wire. That is worth stating precisely, because a
+test that fails on its first run is usually finding a defect in the thing under
+test, and this one was not -- the evidence for that is that our own end passed
+the same concurrency in the other direction (`TestInteropConcurrentGoInitiators`,
+one socket initiating to sixteen libutp readers) while libutp was only reading.
+
+The causal check, rather than an assumption: with the lock removed the
+concurrent test fails again on libutp's assertion, and with it restored it
+passes -- 5 runs of 16 peers, and the whole package clean under `-race`.
+
+## A packet to a peer type we did not define was dropped and reported as sent
+
+**Fixed.** `UdpConn.WriteTo` switched on `*UdpPeer` and `*ConnectionId` and
+ended in `return 0, nil` for anything else. `ConnectionPeer` is an exported
+interface with one method, so a caller can implement it -- and a connection
+built on such a peer would have every packet discarded while each send
+reported success, then time out with nothing anywhere to say why.
+
+Silence is the wrong answer either way. The address is now parsed from the
+peer's `Hash`, which is the contract the rest of this repository already
+relies on (`utpnet`'s `peerUDPAddr` has always done this), and a `Hash` that
+is not an address is returned as an error rather than swallowed.
+`TestUdpConnWritesToForeignPeerTypes` covers both, and fails against the old
+code with "wrote 0 bytes, want 32".
+
 ## Things found but deliberately not fixed
 
 These are real and unresolved. Each needs a measurement harness (M1) or a
