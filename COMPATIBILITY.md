@@ -61,7 +61,7 @@ than "verified".
 | Ack-number validation | Differential | Was absent, and previously *claimed* to match |
 | Duplicate data | Differential | `DuplicateData` |
 | FIN handling | Differential | Corpus; libutp acks twice, we once |
-| Data past a reached FIN | Differential | A deliberate divergence: we have no half-close |
+| Data past a reached FIN | Differential | Silence on both sides; the half-close above the wire is still unmade |
 | RESET handling | Differential | Corpus, plus the rate limiting under flood |
 | Zero peer window | Differential | Corpus |
 | **Ack coalescing** | **Differential + measured** | libutp emits one ack per batch; we emitted one per packet. Now deferred, with the residual measured under load and recorded as a deviation |

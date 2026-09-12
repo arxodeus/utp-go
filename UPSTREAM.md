@@ -625,17 +625,20 @@ every byte had already been read.
 Measured on a path with 3% loss, 2% reordering and jitter, libutp sending:
 4 of 20 seeds ended this way before, 0 of 30 after.
 
-The connection hands the socket the acknowledgement it sent for the peer's FIN
+The connection hands the socket the acknowledgement it sent alongside its FIN
 on its way out; the socket keeps it for ten seconds and re-sends it instead of
 a RESET. Checked only after every connection lookup has missed, so a live
-connection always wins, and only for a packet at or below the stored
-acknowledgement number -- data *past* the FIN is a different case and still
-draws a RESET, which TestConformanceDataAfterReachedFin pins and which caught
-the first version of this being too broad.
+connection always wins, and repeated only for a packet at or below the stored
+acknowledgement number. A packet past it is data the peer wrote after we said
+we were finished: libutp takes it into CS_GOT_FIN and says nothing, and we
+cannot take it but we can also say nothing, so the socket drops it in silence.
+TestConformanceDataAfterReachedFin pins both halves and caught this fix twice
+-- once too broad, once too narrow.
 
 It is not a half-close, and does not pretend to be: the application still
-cannot write after the peer's FIN. It stops a finished connection lying to its
-peer about how it ended.
+cannot read or write after the peer's FIN, so that payload is lost where libutp
+would have delivered it. It stops a finished connection lying to its peer about
+how it ended.
 
 Found only because libutp was run over a path that damages packets. The
 loopback interop gate cannot find this class of defect at all, which is worth

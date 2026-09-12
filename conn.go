@@ -212,6 +212,11 @@ type connection struct {
 	// must be delivered, and bytes owed to nobody must not hold the loop open.
 	abandoned <-chan struct{}
 
+	// lastStateSent is the most recent STATE packet emitted, kept for the same
+	// reason as finAck: after this connection is gone the socket may still
+	// need to tell a peer what we acknowledged.
+	lastStateSent *packet
+
 	// finAck is the acknowledgement sent for the peer's FIN, kept so the
 	// socket can send it again if the peer retransmits that FIN after this
 	// connection has gone.
@@ -697,7 +702,41 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 // Anything else -- a reset, an idle timeout, a local close with no FIN
 // received -- should still draw a RESET, which is what libutp does for a
 // packet it has no socket for.
-func (c *connection) lingerAck() *packet { return c.finAck }
+func (c *connection) lingerAck() *packet {
+	// Only a connection that ended gracefully -- a FIN was sent, received, or
+	// both -- has anything to linger for. One killed by a RESET, an idle
+	// timeout or an error should still draw a RESET for whatever arrives
+	// afterwards, which is what libutp does for a packet it has no socket for.
+	if c.state.closing == nil {
+		return nil
+	}
+	if c.finAck != nil {
+		return c.finAck
+	}
+	// We sent the FIN and never received one, so there is no FIN
+	// acknowledgement to repeat. The last acknowledgement we did send serves:
+	// it tells a peer retransmitting what we already have, and its ack number
+	// is what distinguishes a retransmission from data written past our FIN.
+	return c.lastStateSent
+}
+
+// rememberLingerState captures an acknowledgement for the socket to repeat
+// after this connection is gone, while there is still live state to build one
+// from.
+//
+// It is called as the local FIN goes out. By the time the connection actually
+// shuts down, statePacket() has nothing left to build from -- the same reason
+// the acknowledgement for a peer's FIN cannot be deferred -- and an initiator
+// that only ever sent data has no earlier STATE to fall back on, because its
+// acknowledgements ride on the data packets.
+func (c *connection) rememberLingerState() {
+	if c.lastStateSent != nil {
+		return
+	}
+	if pkt := c.statePacket(); pkt != nil {
+		c.lastStateSent = pkt
+	}
+}
 
 // notifySocketShutdown asks the socket to forget this connection.
 //
@@ -743,6 +782,7 @@ func (c *connection) shutdown() {
 				if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 					c.logger.Trace("transmitting FIN", "dst.Peer", c.cid.Peer, "dst.Send", c.cid.Send, "dst.Recv", c.cid.Recv, "seq", seqNum)
 				}
+				c.rememberLingerState()
 				c.transmit(fin, time.Now(), true)
 			}
 		} else {
@@ -767,6 +807,7 @@ func (c *connection) shutdown() {
 				if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 					c.logger.Trace("transmitting FIN", "dst.Peer", c.cid.Peer, "dst.Send", c.cid.Send, "dst.Recv", c.cid.Recv, "seq", seqNum)
 				}
+				c.rememberLingerState()
 				c.transmit(fin, time.Now(), true)
 			}
 			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
@@ -791,6 +832,10 @@ func (c *connection) emit(pkt *packet) {
 		return
 	}
 	c.lastSentPacket = time.Now()
+	if pkt.Header.PacketType == st_state {
+		// Kept for the socket to repeat after this connection is gone.
+		c.lastStateSent = pkt
+	}
 	c.socketEvents <- newOutgoingSocketEvent(pkt, c.cid)
 }
 

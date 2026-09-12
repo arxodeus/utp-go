@@ -4,7 +4,9 @@ package utp_go
 
 import (
 	"context"
+	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -416,18 +418,25 @@ func TestConformanceWideReordering(t *testing.T) {
 
 // Data arriving after the peer's FIN has already been reached in order.
 //
-// A deliberate divergence, and the one M4 finding too large to fix in place.
-//
 // libutp keeps the socket in CS_GOT_FIN and answers nothing: the peer has
 // closed its sending side, but the connection is alive until the local
-// application closes it too. We have no half-close -- once the remote FIN is
-// reached and everything we sent is acked, `connection.eventLoop` moves
-// straight to ConnClosed (conn.go, the RemoteFin branch). The late packet
-// then reaches a socket with no connection for it, and draws a RESET.
+// application closes it too, and data arriving past the FIN it has already
+// reached is dropped in silence.
 //
-// Recorded rather than fixed: supporting a half-close means a new connection
-// state and a write path that survives the peer's FIN, which is a larger
-// change than the audit that found it. See KNOWN-LIMITATIONS.md.
+// We have no half-close as a connection state -- once the remote FIN is
+// reached and everything we sent is acked, `connection.eventLoop` moves
+// straight to ConnClosed. The late packet then reaches a socket with no
+// connection for it. What it draws there is the point of this case: it used
+// to draw a RESET, which told a peer exercising a legitimate half-close that
+// its connection had broken. The socket now holds the connection's last
+// acknowledgement in a linger table for `lingerAckTimeout` (utp_socket.go)
+// and, for a packet past that ack, stays silent exactly as libutp does.
+//
+// So the wire behaviour matches; what still differs is above it. libutp would
+// hand this payload to the application, because in CS_GOT_FIN the connection
+// is still open for reading. We have already closed it, so the payload is
+// dropped. That remains a real difference -- see KNOWN-LIMITATIONS.md -- but
+// it is no longer visible to the peer as an error.
 func TestConformanceDataAfterReachedFin(t *testing.T) {
 	raws := [][]byte{
 		NewPacketBuilder(st_data, corpusSynConnID+1, 200000, corpusWindow, corpusSynSeq+1).
@@ -441,24 +450,23 @@ func TestConformanceDataAfterReachedFin(t *testing.T) {
 
 	if len(libutpOut) != 0 {
 		t.Errorf("libutp emitted %d packet(s) for data past a reached FIN; it is expected to "+
-			"stay silent in CS_GOT_FIN, so this case no longer documents the divergence it "+
-			"was written for", len(libutpOut))
+			"stay silent in CS_GOT_FIN, so this case no longer tests what it was written for",
+			len(libutpOut))
 	}
-	if len(ours) != 1 {
-		t.Fatalf("we emitted %d packets, want exactly 1 (the RESET our lack of half-close "+
-			"produces); if this is now 0, half-close has landed and this case should become "+
-			"an ordinary corpus entry", len(ours))
+	if len(ours) != 0 {
+		var types []string
+		for _, raw := range ours {
+			pkt, err := DecodePacket(raw)
+			if err != nil {
+				t.Fatalf("decoding our own emission: %v", err)
+			}
+			types = append(types, fmt.Sprintf("%d", pkt.Header.PacketType))
+		}
+		t.Fatalf("we emitted %d packet(s) (types %s) for data past a reached FIN; libutp stays "+
+			"silent and so must we -- a RESET here tells a peer doing a legitimate half-close "+
+			"that its connection is broken", len(ours), strings.Join(types, ","))
 	}
-	pkt, err := DecodePacket(ours[0])
-	if err != nil {
-		t.Fatalf("decoding our own emission: %v", err)
-	}
-	if pkt.Header.PacketType != st_reset {
-		t.Errorf("we emitted packet type %d for data past a reached FIN; the documented divergence is a RESET",
-			pkt.Header.PacketType)
-	}
-	t.Logf("deliberate divergence: data past a reached FIN -- libutp stays silent (CS_GOT_FIN), " +
-		"we have already torn the connection down and the socket answers with a RESET")
+	t.Logf("parity: data past a reached FIN draws nothing from either side")
 }
 
 // A FIN as the first packet after the handshake, before any data.

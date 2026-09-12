@@ -133,13 +133,12 @@ alive.**
 
 libutp moves the socket to `CS_GOT_FIN` and waits for the local application to
 close as well. `connection.eventLoop` moves to `ConnClosed` as soon as the
-remote FIN is reached and everything we sent is acked, so a peer that closes
-its sending side while still expecting to receive from us loses the connection.
+remote FIN is reached and everything we sent is acked, so an application here
+cannot read or write after its peer has closed its sending side.
 
 Reason: none that justifies it. This is a gap, not a choice — recorded here
 because it is a live behavioural difference, and in
-[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) as work still to do. It is pinned
-by `TestConformanceDataAfterReachedFin` so it cannot drift.
+[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) as work still to do.
 
 
 Running libutp over a lossy path showed what it costs: 4 of 20 transfers ended
@@ -148,12 +147,18 @@ We acknowledge the peer's FIN and tear down; if that acknowledgement is lost,
 the peer's retransmission finds no connection and draws a RESET. libutp, which
 holds the socket in `CS_GOT_FIN`, simply acknowledges it again.
 
-The socket now keeps the FIN's acknowledgement for ten seconds after a
-connection closes and re-sends it instead of a RESET, which fixes that
-(0 of 30 after). That is not a half-close: the application still cannot write
-after the peer's FIN, and data arriving *past* the FIN still draws a RESET
-where libutp stays silent. Both are still true, and both are still recorded
-here. What has gone is a finished connection telling its peer it broke.
+The socket now keeps the closing connection's acknowledgement for ten seconds
+and answers a late packet with it instead of a RESET; for a packet *past* that
+acknowledgement — data the peer sent after we closed, which libutp would have
+delivered to its application — it stays silent, as libutp's `CS_GOT_FIN` does.
+Measured: 0 of 30 seeds fail where 4 of 20 did, and a peer that writes after
+our FIN sees no error and no RESET
+(`netem.TestPeerMayWriteAfterOurFin`, `netem.TestLibutpCleanCloseSurvivesLostFinAck`).
+
+So the *wire* behaviour now matches. What does not is above it: libutp would
+hand that late payload to its application and let it reply, and we drop it.
+That is the half-close itself, and it is still unmade. What has gone is a
+finished connection telling its peer that it broke.
 
 ## The selective-ack window
 

@@ -553,11 +553,11 @@ func (s *UtpSocket) rememberLingerAck(key string, ack *packet) {
 // socket in CS_GOT_FIN until its own application closes, and a socket in that
 // state acknowledges duplicates of data it has already taken.
 //
-// It is not the same question as data arriving *past* a FIN -- beyond the
-// sequence number the peer said was its last. DEVIATIONS.md records that we
-// answer that with a RESET where libutp stays silent, and this does not change
-// it: such a packet is newer than the stored acknowledgement and is refused
-// below, so it still falls through to the RESET.
+// Data arriving *past* the stored acknowledgement -- beyond anything we took --
+// is the other half of the same case: the peer writing after our FIN. libutp,
+// still in CS_GOT_FIN, hands that to its application; we have none left to hand
+// it to, so we drop it, but silently, which is what libutp's wire looks like.
+// Either way the answer is never a RESET, and this returns true for both.
 func (s *UtpSocket) reAckLingering(pkt *packet, peer ConnectionPeer) bool {
 	if pkt.Header.PacketType != st_fin && pkt.Header.PacketType != st_data {
 		return false
@@ -568,12 +568,31 @@ func (s *UtpSocket) reAckLingering(pkt *packet, peer ConnectionPeer) bool {
 		if !ok {
 			continue
 		}
-		// Only a retransmission of something already acknowledged. A packet
-		// past the stored acknowledgement number is data beyond what the peer
-		// declared final, which is a different case with its own answer --
-		// see TestConformanceDataAfterReachedFin.
+		// Data past the stored acknowledgement number is not a retransmission
+		// of anything we took: it is the peer writing after our FIN, which is
+		// what its half-close is for. We have nobody to give it to -- the
+		// application closed -- but there is a difference between discarding
+		// it and telling the peer its connection is broken.
+		//
+		// libutp discards. Its socket sits in CS_GOT_FIN and simply ignores
+		// what arrives past the FIN; DEVIATIONS.md recorded us answering with
+		// a RESET as a deliberate divergence, and measuring it showed what
+		// that costs: a libutp peer writing after our FIN gets
+		// UTP_ECONNRESET, three runs out of three. Silence matches the
+		// reference and costs the peer nothing but a few retransmissions it
+		// was going to make anyway.
 		if wrappingLessThan(ack.Header.AckNum, pkt.Header.SeqNum) {
-			return false
+			if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+				s.logger.Debug("ignoring data past a closed connection's FIN",
+					"cid.send", cid.Send, "cid.recv", cid.Recv, "seq", pkt.Header.SeqNum)
+			}
+			// Refresh, as below: a peer still writing is still there, and
+			// letting the entry expire under it would hand it the RESET this
+			// exists to avoid. The cost is one entry, held only by a peer
+			// that completed a handshake with us, which is the more expensive
+			// half of the exchange.
+			s.lingerExpirations.put(cid.Hash(), cid.Hash(), lingerAckTimeout)
+			return true
 		}
 		if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
 			s.logger.Debug("re-acking a FIN for a connection that has closed",

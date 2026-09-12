@@ -560,19 +560,27 @@ against `utp_internal.cpp` in this fork.
 
 ### No half-close: we tear the connection down on the peer's FIN
 
-**Found, not fixed.** libutp keeps the socket in `CS_GOT_FIN` when the peer
-closes its sending side; the connection stays alive until the local
-application closes it too. We move straight to `ConnClosed` once the remote
-FIN is reached and everything we sent is acked. Data arriving after that
-point reaches a socket with no connection for it and draws a RESET, where
-libutp stays silent.
+**Found; the wire symptom is fixed, the limitation is not.** libutp keeps the
+socket in `CS_GOT_FIN` when the peer closes its sending side; the connection
+stays alive until the local application closes it too, and the application can
+keep reading and writing. We move straight to `ConnClosed` once the remote FIN
+is reached and everything we sent is acked.
 
-Supporting a half-close means a new connection state and a write path that
-survives the peer's FIN — a larger change than the audit that found it, and
-one that should be made deliberately rather than as a drive-by.
+What the peer sees is now the same either way. A late retransmission is
+answered with the connection's last acknowledgement rather than a RESET, and
+data arriving *past* the FIN draws silence, exactly as libutp's `CS_GOT_FIN`
+does — see "A finished connection told its peer the connection had broken"
+below. `netem.TestPeerMayWriteAfterOurFin` drives real libutp into writing
+4 KiB after our `Close()` and asserts it sees no error and no RESET.
 
-`TestConformanceDataAfterReachedFin` pins the current behaviour and fails if
-either side changes, so this cannot drift unnoticed.
+What remains is above the wire: that 4 KiB is dropped, where libutp would hand
+it to its application, and our application cannot write after the peer's FIN at
+all. Supporting that means a new connection state and a write path that
+survives the peer's FIN — a larger change than the audit that found it, and one
+that should be made deliberately rather than as a drive-by.
+
+`TestConformanceDataAfterReachedFin` pins the wire behaviour against real
+libutp and fails if either side changes.
 
 ## The loss-recovery path, audited against libutp (M4)
 
@@ -1459,20 +1467,37 @@ arriving for a connection that has just closed is answered with that
 acknowledgement instead of a RESET.
 
 Two restrictions matter. It is checked only after every connection lookup has
-missed, so a connection that still exists always wins. And it applies only to a
-packet at or below the stored acknowledgement number — a retransmission of
-something already taken. Data *past* the FIN, beyond what the peer declared
-final, is a different case with its own documented answer, and still draws a
-RESET; `TestConformanceDataAfterReachedFin` pins that and caught it when the
-first version of this fix was too broad.
+missed, so a connection that still exists always wins. And what it re-sends is
+only ever the acknowledgement the connection actually sent, for a packet at or
+below it — a retransmission of something already taken.
 
-This is not a half-close. A half-close would let the application keep writing
-after the peer's FIN, which is a larger change and still unmade. This only
-stops a finished connection lying to its peer about how it ended.
+A packet *past* that acknowledgement is the other half of the same case: data
+the peer wrote after we said we were finished. libutp, holding the socket in
+`CS_GOT_FIN`, takes it and says nothing on the wire. We cannot take it, but we
+can stop answering it with a RESET, and that is what we do — the socket drops
+it in silence. `TestConformanceDataAfterReachedFin` pins both halves against
+real libutp, and caught the first version of this fix twice: once when it was
+too broad and re-acked data past the FIN, and once when it was too narrow and
+still sent the RESET.
+
+Making that work took one more thing than it looks like. The acknowledgement to
+repeat has to exist, and a connection that only ever sent data — an initiator
+that writes, then closes — has never emitted a standalone STATE. So `emit`
+records the last STATE it built, `shutdown` records the acknowledgement it is
+sending alongside its FIN, and both of `shutdown`'s FIN-sending paths do it;
+the second path is the one `TestPeerMayWriteAfterOurFin` found still sending
+RESETs after the first was fixed.
+
+This is still not a half-close. A half-close would let the application keep
+reading and writing after the peer's FIN, which is a larger change and still
+unmade. This only stops a finished connection lying to its peer about how it
+ended.
 
 Measured after: **0 of 30 seeds fail, and the socket sends no RESETs at all.**
 `netem.TestLibutpCleanCloseSurvivesLostFinAck` pins the deterministic case
-(seed 3, which failed 5 times out of 5), and
+(seed 3, which failed 5 times out of 5), `netem.TestPeerMayWriteAfterOurFin`
+pins the half-close case — libutp writing 4 KiB after our `Close()`, which
+failed 3 times out of 3 with `UTP_ECONNRESET` before this — and
 `netem.TestLibutpInteropUnderAdverseConditions` covers loss, reordering, jitter
 and all three together, in both directions, asserting on each profile that the
 link really did damage packets.

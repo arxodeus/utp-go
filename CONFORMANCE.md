@@ -248,14 +248,17 @@ this, the case fails rather than quietly agreeing.
 
 **We have no half-close; libutp does.** On reaching the peer's FIN we tear the
 connection down, where libutp keeps the socket in `CS_GOT_FIN` until the local
-application closes it too. Data arriving after that point draws a RESET from
-us and nothing from libutp.
+application closes it too and goes on delivering to its application.
 
-This is the one M4 finding recorded rather than fixed: supporting a half-close
-means a new connection state and a write path that survives the peer's FIN.
-`TestConformanceDataAfterReachedFin` pins the current behaviour — it asserts
-that we emit exactly one RESET and that libutp emits nothing, so it fails both
-if libutp changes and if half-close lands here.
+The difference is no longer visible to the peer. Data arriving after that point
+draws nothing from either side: the socket holds the closed connection's
+acknowledgement for ten seconds, repeats it for a retransmission, and drops
+anything past it in silence.
+`TestConformanceDataAfterReachedFin` pins that parity — it asserts that neither
+side emits anything, so it fails if libutp changes *or* if we start answering
+again. What is still unmade is the half-close itself: a connection state and a
+read/write path that survive the peer's FIN, so the payload reaches the
+application as it would under libutp.
 
 **libutp completes an incoming connection only on data; we complete it on the
 handshake.** `if (pk_flags == ST_DATA && conn->state == CS_SYN_RECV)
