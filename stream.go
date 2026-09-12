@@ -7,6 +7,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/log"
 )
@@ -229,8 +230,27 @@ func (s *UtpStream) Write(ctx context.Context, buf []byte) (int, error) {
 		return 0, ErrNotConnected
 	}
 	resCh := make(chan *readOrWriteResult, 1)
+	// The connection goroutine keeps hold of what is queued here until it has
+	// copied it into the send buffer, which may be long after this call
+	// returns: a Write that hits its deadline returns on ctx.Done below with
+	// its entry still in the connection's pending list. The caller is then
+	// free to reuse its buffer -- net.Conn makes no promise otherwise -- and
+	// the connection would copy whatever it had become.
+	//
+	// That is not only a race detector complaint. The bytes actually sent
+	// would be the mutated ones, silently, on a write the caller had already
+	// been told failed. Found by nettest.RacyWrite under -race, which mutates
+	// the buffer immediately after every Write; nothing in this repository had
+	// reason to do that.
+	//
+	// libutp does not retain either: utp_writev copies out of the caller's
+	// iovec into packet buffers before it returns (utp_internal.cpp:1057-1066),
+	// so an embedder may reuse its buffer straight away. One copy per Write is
+	// what that costs.
+	queued := make([]byte, len(buf))
+	copy(queued, buf)
 	select {
-	case s.writes <- &queuedWrite{buf, 0, resCh}:
+	case s.writes <- &queuedWrite{queued, 0, resCh}:
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
@@ -283,8 +303,114 @@ func (s *UtpStream) Close() {
 			// The queue is full, so the loop has plenty to wake it and will
 			// see the flag on its next pass.
 		}
-		// wait to consume write buffer and recv buffer
-		s.connHandle.Wait()
-		s.streamCancel()
+		// Wait for the connection to flush what is queued -- but only while it
+		// is still getting somewhere.
+		//
+		// This was a bare connHandle.Wait(), which waits for the event loop to
+		// exit. A loop with unacknowledged data does not exit until its
+		// retransmission ladder runs out -- 1 + 2 + 4 + 8 + 16 seconds -- and
+		// where that is not enough, the 60-second idle timeout behind it.
+		// Measured, closing a connection whose peer had gone took 31 seconds
+		// in the standard library's net.Conn suite and 60.001 seconds on a
+		// blackholed link, with the caller held for all of it; the eleven
+		// subtests that kernel TCP finishes in 0.43s took 140. A BitTorrent
+		// client drops peers constantly, and a minute per dropped peer is not
+		// a close, it is a leak with a timer on it.
+		//
+		// The wait cannot simply be capped. Write returns once the data is in
+		// the send buffer rather than once it is acknowledged (conn.go,
+		// processWrites), so a write followed by a close leaves a tail of up
+		// to a send buffer still to go -- and how long that takes is a
+		// property of the link, not of the caller: measured at 2.29s for a
+		// 512 KB transfer over 2 Mbps, which is past any cap short enough to
+		// be worth having. A flat timeout would truncate exactly the
+		// transfers that need the wait most. What separates the two cases is
+		// not elapsed time but whether the peer is still answering, so that
+		// is what is measured.
+		//
+		// libutp does not wait at all: utp_close sends the FIN, sets
+		// close_requested and returns (utp_internal.cpp:3232-3247), and the
+		// socket is destroyed later by utp_check_timeouts. The deviation is
+		// deliberate and recorded in DEVIATIONS.md -- a caller that writes,
+		// closes and exits should not lose its tail, which libutp leaves to
+		// the embedder to arrange and this library does not.
+		if s.waitForFlush() {
+			s.streamCancel()
+		}
+		// If the flush did not finish, the stream context is deliberately left
+		// alone. Cancelling it here would stop the event loop mid-flight and
+		// discard whatever it still had to send, which is the opposite of what
+		// giving up on *waiting* should mean -- and it is not what libutp does
+		// either: a socket closed with unacknowledged data stays alive in
+		// CS_FIN_SENT until utp_check_timeouts retires it. The loop reaches the
+		// same end on its own, and its deferred cleanup drops the connection
+		// from the socket when it does. Closing the socket cancels everything
+		// regardless.
 	})
+}
+
+// closeStallTimeout is how long Close keeps waiting for a connection that has
+// heard nothing from its peer.
+//
+// Two seconds is twice libutp's RTO floor (`rto = max(rtt + rtt_var * 4,
+// 1000)`, utp_internal.cpp:1380), so a single lost FIN and its first
+// retransmission do not read as a stall. Past that the peer has missed two
+// chances to answer and waiting longer buys the caller nothing: the connection
+// goes on retransmitting in the background either way, and reaches the same
+// end whether or not anyone is watching.
+const closeStallTimeout = 2 * time.Second
+
+// closeStallPollInterval is how often that is checked. It only bounds how
+// quickly a finished close is noticed, so it is small enough not to add
+// latency to the common case -- where the connection ends in one round trip
+// and the wait is over before the first tick.
+const closeStallPollInterval = 20 * time.Millisecond
+
+// waitForFlush waits for the connection's event loop to finish, giving up once
+// the peer has gone quiet for closeStallTimeout. It reports whether the loop
+// actually finished.
+//
+// Giving up means giving up on *waiting*, not on the connection: the caller
+// stops being held, and the event loop keeps running, keeps retransmitting and
+// exits on its own. Nothing queued is discarded by returning early -- which is
+// why the caller must not cancel the stream context on this path.
+func (s *UtpStream) waitForFlush() bool {
+	done := make(chan struct{})
+	go func() {
+		s.connHandle.Wait()
+		close(done)
+	}()
+
+	ticker := time.NewTicker(closeStallPollInterval)
+	defer ticker.Stop()
+
+	lastActivity := s.peerActivity()
+	quietSince := time.Now()
+	for {
+		select {
+		case <-done:
+			return true
+		case now := <-ticker.C:
+			if activity := s.peerActivity(); activity != lastActivity {
+				lastActivity = activity
+				quietSince = now
+				continue
+			}
+			if now.Sub(quietSince) >= closeStallTimeout {
+				s.logger.Debug("close stopped waiting for a peer that went quiet",
+					"dst.peer", s.cid.Peer, "dst.send", s.cid.Send, "dst.recv", s.cid.Recv,
+					"quiet", now.Sub(quietSince))
+				return false
+			}
+		}
+	}
+}
+
+// peerActivity reports how many packets the connection has received, or zero
+// if there is no connection to ask.
+func (s *UtpStream) peerActivity() uint64 {
+	if s.conn == nil {
+		return 0
+	}
+	return s.conn.peerActivity.Load()
 }

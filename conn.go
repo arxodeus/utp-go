@@ -217,6 +217,12 @@ type connection struct {
 	// need to tell a peer what we acknowledged.
 	lastStateSent *packet
 
+	// peerActivity counts packets received from the peer. It exists for
+	// UtpStream.Close, which needs to tell a connection that is still
+	// flushing from one whose peer has stopped answering, and is read from
+	// outside this goroutine -- hence the atomic.
+	peerActivity atomic.Uint64
+
 	// finAck is the acknowledgement sent for the peer's FIN, kept so the
 	// socket can send it again if the peer retransmits that FIN after this
 	// connection has gone.
@@ -1682,6 +1688,10 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 			"packet.windowSize", packet.Header.WndSize,
 			"now", now)
 	}
+	// Every packet from the peer is evidence the connection is still alive,
+	// which is what Close watches to decide whether waiting for the flush is
+	// still worth anything.
+	c.peerActivity.Add(1)
 	c.peerRecvWindow = packet.Header.WndSize
 
 	// Arm or disarm the zero-window probe.

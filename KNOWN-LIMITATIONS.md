@@ -1656,6 +1656,84 @@ library, are worth keeping as warnings:
   reads back through `Torrent.NewReader` -- what a consumer uses, and what the
   client will serve -- and treats the on-disk rename as a bounded afterthought.
 
+## Close waited out the retransmission ladder
+
+**Fixed.** `UtpStream.Close` waited for the connection's event loop to exit,
+full stop. A loop with unacknowledged data does not exit until its
+retransmission ladder runs out -- 1 + 2 + 4 + 8 + 16 seconds -- and where that
+is not enough, the 60-second idle timeout behind it. So closing a connection
+whose peer had gone held the caller for **31 seconds** in one shape and
+**60.001 seconds** in another, both measured.
+
+For a BitTorrent client, which drops peers constantly, that is not a close. It
+is a leak with a timer on it.
+
+libutp does not wait at all. `utp_close` sends the FIN, sets
+`close_requested` and returns (`utp_internal.cpp:3232-3247`); the socket stays
+in `CS_FIN_SENT` and `utp_check_timeouts` retires it later. The application is
+never held.
+
+The obvious fix -- cap the wait -- breaks the opposite case, and that is the
+part worth recording. `Write` returns once the data is in the send buffer, not
+once it is acknowledged (`conn.go`, `processWrites`), so a write followed by a
+close leaves a tail of up to a send buffer still to go -- and how long that
+takes is a property of the link rather than of the caller: 2.29 seconds for a
+512 KB transfer over 2 Mbps, which is past any cap short enough to be worth
+having. A clock cannot tell "still flushing"
+from "peer is gone". Whether the peer is still answering can, so the wait is
+bounded by silence instead: `Close` stops waiting once no packet has arrived
+for `closeStallTimeout` (two seconds, twice libutp's 1000 ms RTO floor, so a
+lost FIN and its first retransmission do not read as a stall).
+
+Giving up means giving up on *waiting*, not on the connection. The event loop
+keeps running, keeps retransmitting and exits on its own, and the stream
+context is deliberately left uncancelled on that path -- cancelling it would
+discard what was still to send, which is what the first version of this fix
+did.
+
+Two tests hold the two ends, both on the emulated network because neither case
+can be staged on loopback: `netem.TestCloseFlushesASlowTail` writes 512 KB over
+a 2 Mbps link and requires every byte to arrive from a `Close` that takes
+2.29s -- past any flat bound -- and `netem.TestCloseDoesNotWaitForASilentPeer`
+blackholes the link in both directions and requires `Close` to return in
+around two seconds rather than 60. Each fails against the design the other
+argues for.
+
+Written against real sockets first, both passed while measuring nothing:
+`Close` returned in 8ms with nothing left to send, and in 0s against a
+"vanished" peer that had in fact sent a FIN on its way out. That is the third
+time in this repository a test has passed by staging the wrong situation.
+
+The clean before-and-after is the conformance suite itself, same tests and same
+machine: **139.91s to 9.58s**, with `RacyRead` alone going from 31.15s to
+0.03s. This repository's own `integrated` and `netem` packages also came down
+by roughly a minute each across the same change, but tests were added to both
+in between, so that pair of numbers is not a like-for-like comparison and is
+recorded here only as the direction it went.
+
+## Write kept the caller's buffer after the call returned
+
+**Fixed.** `UtpStream.Write` queued the caller's slice and returned on
+`ctx.Done()` when the write deadline expired -- with the entry still in the
+connection's pending list, still pointing at the caller's memory. The caller is
+entitled to reuse that buffer the moment Write returns; the connection would
+copy whatever it had become.
+
+This is not only a race-detector complaint. The bytes actually put on the wire
+would be the mutated ones, silently, on a write the caller had already been
+told had failed.
+
+`Write` now copies what it queues. libutp does the same and for the same
+reason: `utp_writev` copies out of the caller's iovec into packet buffers
+before returning (`utp_internal.cpp:1057-1066`), so an embedder may reuse its
+buffer straight away.
+
+Found by `nettest.RacyWrite` under `-race` -- the one subtest that mutates the
+write buffer immediately after every call, which nothing in this repository had
+any reason to do. A near relative of this was fixed once before, on the
+send-buffer path (see the anacrolix module's README); the cancellation path
+kept it.
+
 ## Things found but deliberately not fixed
 
 These are real and unresolved. Each needs a measurement harness (M1) or a

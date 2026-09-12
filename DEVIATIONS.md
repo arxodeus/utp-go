@@ -257,6 +257,31 @@ this library writes faster than a round trip -- which a BitTorrent peer sending
 many small protocol messages plausibly does -- this is worth revisiting, with
 that workload as the gate.
 
+## Close waits; libutp's does not
+
+**libutp's `utp_close` never blocks the application.** It sends the FIN, sets
+`close_requested` and returns (`utp_internal.cpp:3232-3247`); the socket stays
+in `CS_FIN_SENT` until `utp_check_timeouts` retires it, and whether the tail
+was delivered is the embedder's problem.
+
+`UtpStream.Close` waits for the connection to flush what is queued. The reason
+is an API difference rather than a protocol one: `Write` here returns once the
+data is in the send buffer, so `Write(payload); Close()` -- the shape every Go
+caller writes -- would otherwise lose whatever had not gone out yet. libutp's
+embedders arrange that themselves by keeping the context alive and pumping it;
+this library has no equivalent thing for a caller to keep alive.
+
+The wait is bounded by the peer going silent rather than by a clock
+(`closeStallTimeout`, two seconds -- twice libutp's 1000 ms RTO floor), and
+when it gives up it gives up only on waiting: the connection goes on
+retransmitting and ends on its own, exactly as libutp's would. So the
+divergence is that a caller here is held for up to one flush or two seconds of
+silence, whichever comes first, where libutp's is held for neither.
+
+It was unbounded before, which was a defect rather than a deviation, and cost
+31 to 60 seconds per close on a connection whose peer had gone. See
+[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
+
 ## Inherited notes that claim consistency with the reference
 
 Two comments in `conn.go` describe behaviour as matching the reference

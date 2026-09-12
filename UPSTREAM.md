@@ -684,6 +684,47 @@ Found by running a real torrent between two `anacrolix/torrent` clients over
 this library -- which is also worth sending, as
 `integration/anacrolix/torrent_transfer_test.go`.
 
+## PR 29 — Close held the caller for up to a minute, and Write kept its buffer
+
+Both found by running the Go standard library's own `net.Conn` conformance
+suite (`golang.org/x/net/nettest`) against `utpnet.Conn`, under `-race`, with
+kernel TCP as a control in the same process. TCP finished the eleven subtests
+in 0.43 s; this library took 139.91 s.
+
+**Close waited out the retransmission ladder.** `UtpStream.Close` waited for
+the connection's event loop to exit. A loop with unacknowledged data does not
+exit until its ladder runs out -- 1+2+4+8+16 seconds -- and behind that the
+60-second idle timeout. Measured: 31 s in one shape, 60.001 s in another, with
+the caller held throughout. libutp's `utp_close` never blocks at all
+(`utp_internal.cpp:3232-3247`).
+
+Capping the wait is the wrong fix and the interesting part of the patch.
+`Write` returns once the data is in the send buffer rather than once it is
+acknowledged, so a write followed by a close has a tail still to flush, and on
+a slow link that tail outlasts any timeout worth having. The wait is therefore
+bounded by the peer going silent, not by a clock: two seconds without a packet,
+which is twice libutp's RTO floor, so a lost FIN and its first retransmission
+do not read as a stall. Giving up ends the *waiting* only -- the connection
+goes on retransmitting and ends on its own, which is what libutp's does.
+
+`netem.TestCloseFlushesASlowTail` and
+`netem.TestCloseDoesNotWaitForASilentPeer` hold the two ends, and each fails
+against the design the other argues for. Both had to be staged on the emulated
+network: on loopback the tail flushes in milliseconds and a closed peer sends a
+FIN, so neither case exists.
+
+**Write retained the caller's buffer.** `UtpStream.Write` queued the caller's
+slice and returned on `ctx.Done()` when the deadline expired, with the entry
+still in the connection's pending list. The caller may reuse that buffer as
+soon as Write returns; the connection would copy whatever it had become, and
+put those bytes on the wire, on a write the caller had been told had failed.
+It now copies what it queues, as libutp does
+(`utp_writev`, `utp_internal.cpp:1057-1066`).
+
+Worth sending together because the test module that found them is the third
+thing in the patch: `integration/nettest`, a separate Go module so nothing a
+caller depends on grows.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it
