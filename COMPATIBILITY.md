@@ -87,7 +87,7 @@ than "verified".
 | LEDBAT window adjustment | **Partly measured** | Seven defects found by reading `apply_ccontrol` against ours. Its *delay response* is now compared directly: `netem.TestCongestionRespondsToSelfInflictedQueue` cuts the bottleneck mid-transfer and measures the standing queue each side settles at -- libutp 112-113ms, ours 118ms, neither overflowing. The individual rules below are still only read |
 | Slow start | **Measured** | Was absent entirely. `netem.TestCongestionSlowStartRamp` compares the ramp against libutp's on an idle path: time to 90% of the link, libutp 588-640ms against ours 536-660ms |
 | Window decay rate limit | **Measured** | `netem.TestWindowDecayIsRateLimited`: 25ms of 50% loss costs one halving (72212 to 37652 bytes, 52%, from 23 retransmissions and no timeouts). Unlimited, the same burst reaches the floor at 4% |
-| Timeout window handling | **Differential** | `netem.TestLibutpIdleWindowDecay` measures the idle branch against real libutp through its first flight: 29% of the window kept across 8s idle against our 30%, compared as decays-by-a-third so a differing expiry count is not read as a differing rule. The in-flight branch is still only cited (`:1223-1228`) |
+| Timeout window handling | **Differential** | Both branches. Idle: `netem.TestLibutpIdleWindowDecay` reads libutp's window through its first flight -- 29% kept across 8s idle against our 30%, compared as decays-by-a-third so a differing expiry count is not read as a differing rule. In flight: `netem.TestTimeoutWithDataInFlightCollapsesWindow` -- our window to 2800 bytes with slow start on, and 43560 against 44233 bytes delivered in the 250ms after recovery. The direct assertions catch a wrong branch; the shared observable does not, and is labelled as the sanity check it is |
 | Timeouts for acknowledged packets | **Measured** | `netem.TestQuietConnectionDoesNotTimeOut`: a quiet connection on a lossless link took 2 timeouts and 12 retransmissions of delivered data before the fix, 0 and 0 after |
 | Delay clamp to RTT | **Measured** | `TestDelayClampedToRTT`: 20 acknowledgements each claiming 30s of delay on a 20ms path leave the window at 86722 bytes; without the clamp the same acknowledgements take it to the 2800-byte floor. Measured at the controller, not on the wire -- see the note below |
 | Application-limited guard | **Measured** | `netem.TestApplicationLimitedWindowDoesNotGrow`: after slow start ends, five seconds of 1 KB writes every 20ms leave the window unchanged to the byte (15677 -> 15677). Removing the guard makes it fail on every run |
@@ -108,9 +108,12 @@ unaltered (`conn.go`: `delay := time.Duration(packet.Header.TimestampDiff) *
 time.Microsecond`), so the controller's clamp is the only thing standing
 between a 32-bit field under the peer's control and the congestion window. That
 the wire value reaches the clamp unaltered is established by reading that one
-line, not by a test. **And the timeout row is only half differential:** the
-idle branch is compared against real libutp, the in-flight branch (`:1223-1228`)
-is still only cited.
+line, not by a test. **And the timeout row's two halves are not equally
+well pinned:** both branches are compared against real libutp, but for the
+in-flight branch the cross-implementation number agrees without discriminating
+— forcing the wrong branch still lands inside its tolerance — so what actually
+catches a regression there is the direct assertion on our own window and
+slow-start flag.
 
 Getting the load comparison to mean anything took two harness fixes, both of
 which produced plausible-looking tables first: libutp's clock was in a

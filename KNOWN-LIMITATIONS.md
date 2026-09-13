@@ -2102,6 +2102,71 @@ the packets one acknowledgement covers, and this library's controller, which
 runs per acknowledged packet, clamps to that packet's own. Ours is therefore at
 most as tight and never tighter.
 
+## Measuring the other half of the timeout branch
+
+**No defect.** The in-flight half of libutp's timeout handling, which was the
+last part of that rule still only cited.
+
+A retransmission timeout with data outstanding collapses the window to one
+packet and re-enters slow start:
+
+```cpp
+} else {
+    // our delay was so high that our congestion window
+    // was shrunk below one packet, preventing us from
+    // sending anything for one time-out period. Now, reset
+    // the congestion window to fit one packet, to start over
+    // again
+    max_window = packet_size;
+    slow_start = true;
+}
+                                        (utp_internal.cpp:1223-1228)
+```
+
+`netem.TestTimeoutWithDataInFlightCollapsesWindow` blackholes the link
+mid-transfer for 1.6 seconds, long enough for a timeout to fire with data in
+flight. Ours goes to **2800 bytes with slow start on**, and libutp and this
+library then deliver **43560 and 44233 bytes** respectively in the quarter
+second after recovery starts -- within 1.5%, and close to the 43.4 KB that slow
+start from one packet doubling over the ~5.7 round trips in 250 ms predicts.
+
+### Which measurement is doing the work
+
+Worth separating, because the answer is not the flattering one. The direct
+assertions on our own window and slow-start flag are what catch a wrong
+branch: forcing the idle branch instead leaves the window at 25569 bytes with
+slow start off, and both fail.
+
+The shared receiver-side observable does **not** catch it. Under the forced
+idle branch it read 33091 bytes against libutp's 43560 -- *lower*, and well
+inside any tolerance worth setting, because a 25 KB window outside slow start
+ramps more slowly over 250 ms than a one-packet window inside it. So the
+cross-implementation number is evidence that the two agree, and the direct
+assertions are the test. The bound on it is deliberately loose and labelled as
+a sanity check.
+
+### Two instants that are not the same
+
+The first version measured the 250 ms after *the link came back* and read
+**zero bytes for both implementations** -- a comparison of two zeroes, which
+passes. The retransmission timeout doubles on each expiry, so after a 1.6
+second blackout the next attempt is not due for another second and a half:
+nothing was flowing yet. The measurement now starts when the first byte
+actually arrives, and a recovery that never starts is a failure.
+
+### A fixed wall-clock window is not safe under load
+
+`TestLibutpIdleWindowDecay`, written earlier, opened its 40 ms first-flight
+window at the moment of the probe write. On its own that was fine. Run inside
+the full package it returned **zero**, because under load the driver's pump
+goroutine can be descheduled past the entire window -- and the test then
+compared a real number against nothing and reported that libutp had not
+decayed. It now starts the window at the first packet that actually goes out,
+and treats a flight that never starts as a failure rather than as a zero.
+
+That one only appeared when the whole suite ran, which is the argument for
+running it that way rather than test by test.
+
 ## Things found but deliberately not fixed
 
 These are real and unresolved. Each needs a measurement harness (M1) or a

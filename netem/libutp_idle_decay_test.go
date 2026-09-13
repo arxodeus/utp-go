@@ -61,6 +61,10 @@ func TestLibutpIdleWindowDecay(t *testing.T) {
 
 	// libutp has to have decayed, or there is nothing here to compare against
 	// and this test is measuring the harness rather than the reference.
+	if busy == 0 || idled == 0 {
+		t.Fatalf("libutp's first flight measured %d bytes busy and %d idle; a zero is a "+
+			"measurement that did not happen, not a window that was empty", busy, idled)
+	}
 	if float64(idled) > 0.6*float64(busy) {
 		t.Fatalf("libutp kept %d of %d bytes across %v idle; the reference did not decay, so "+
 			"this run says nothing about the divergence it exists to measure", idled, busy, idle)
@@ -341,13 +345,28 @@ func libutpFirstFlightAfterIdle(t *testing.T, idle time.Duration) int {
 	if _, err := drv.Write(probe); err != nil {
 		t.Fatalf("libutp probe write: %v", err)
 	}
-	start := time.Now()
+	// Measure the flight from its first packet, not from the call that asked
+	// for it.
+	//
+	// This used to open a 40ms window at the moment of the write. Run on its
+	// own that was fine; run inside the full package it returned zero, because
+	// under load the driver's pump goroutine can be descheduled past the whole
+	// window and the test then compared a real number against nothing. The
+	// window now starts when the first packet actually goes out, and a flight
+	// that never starts is a failure rather than a zero.
+	var first burst
+	select {
+	case first = <-sent:
+	case <-time.After(20 * time.Second):
+		t.Fatal("libutp emitted nothing after the probe write; there is no first flight to measure")
+	}
+
+	total := first.bytes
 	deadline := time.After(40 * time.Millisecond)
-	total := 0
 	for {
 		select {
 		case s := <-sent:
-			if s.at.Sub(start) > 40*time.Millisecond {
+			if s.at.Sub(first.at) > 40*time.Millisecond {
 				return total
 			}
 			total += s.bytes

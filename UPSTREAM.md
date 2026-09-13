@@ -812,6 +812,37 @@ construction.
 decays-by-a-third rather than as ratios so that a differing expiry count is not
 mistaken for a differing rule.
 
+## PR 33 — the congestion controller, measured rather than cited
+
+Not a fix: a set of measurements. Every mechanism in this library's congestion
+controller had been matched by hand against `apply_ccontrol` and none had been
+measured individually; only the aggregate goodput had been compared against the
+reference. These tests close that, and two of them found real divergences,
+which are PR 31 and PR 32.
+
+| Mechanism | Test | Result |
+| --- | --- | --- |
+| Application-limited guard (`:1681-1686`) | `netem.TestApplicationLimitedWindowDoesNotGrow` | 5s of 1 KB writes leave the window unchanged to the byte |
+| Window decay rate limit (`:602-615`) | `netem.TestWindowDecayIsRateLimited` | 25ms of 50% loss costs one halving, 52%; unlimited it reaches the floor at 4% |
+| Timeout, idle branch (`:1216-1222`) | `netem.TestLibutpIdleWindowDecay` | libutp keeps 29% of its window across 8s idle, ours 30% |
+| Timeout, in-flight branch (`:1223-1228`) | `netem.TestTimeoutWithDataInFlightCollapsesWindow` | window to one packet with slow start on; 43560 against 44233 bytes delivered in recovery |
+| Delay clamp to RTT (`:1615-1621`) | `TestDelayClampedToRTT` | 20 acknowledgements claiming 30s of delay leave the window intact; unclamped they take it to the floor |
+
+`ControllerStats` and `ConnectionMetrics` gain `SlowStart` and
+`AppLimitedSince`, without which two of these cannot be measured at all: a
+window growing while the application is idle is correct in slow start and a
+defect after it, and nothing outside the controller could tell which.
+
+The tests are worth as much as their failure modes, which are documented with
+them in KNOWN-LIMITATIONS.md. Four of the five passed against a *disabled*
+mechanism on the first attempt -- because the stimulus was too small to move
+the window, because the phase boundary was taken where `Write` returned rather
+than where the data left, because slow start is ungated and the test could not
+see which phase it was in, or because the measurement window opened at an
+instant when nothing was flowing yet. Every one of them asserts its own
+preconditions now, and every one was checked by removing the mechanism and
+confirming it fails.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it
