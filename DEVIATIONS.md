@@ -282,6 +282,35 @@ It was unbounded before, which was a defect rather than a deviation, and cost
 31 to 60 seconds per close on a connection whose peer had gone. See
 [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
 
+## The delay clamp uses one packet's RTT, not the batch minimum
+
+libutp feeds its congestion controller a delay clamped to the minimum
+round-trip time of the packets the acknowledgement covers:
+
+```cpp
+// the delay can never be greater than the rtt. The min_rtt
+// variable is the RTT in microseconds
+int32 our_delay = min<uint32>(our_hist.get_value(), uint32(min_rtt));
+                                        (utp_internal.cpp:1615-1621)
+```
+
+`apply_ccontrol` there runs once per acknowledgement, over a batch of packets,
+so `min_rtt` is the smallest round trip among them. This library's controller
+runs once per *acknowledged packet* -- the two are equivalent for the gain,
+which scales by each packet's share of the window -- so the batch does not
+exist at the point the clamp is applied, and it clamps to that packet's own
+round trip instead.
+
+The difference is a bound: a per-packet RTT is never smaller than the minimum
+across the batch it belongs to, so our clamp is at most as tight as libutp's
+and never tighter. The gap is whatever the round trip varied by within one
+acknowledgement's coverage, and it only matters at all for a peer reporting a
+delay that falls between the two -- larger than the batch minimum, smaller than
+this packet's own RTT.
+
+What the clamp is for is unaffected, and is measured:
+`TestDelayClampedToRTT`.
+
 ## Inherited notes that claim consistency with the reference
 
 Two comments in `conn.go` describe behaviour as matching the reference

@@ -2045,6 +2045,63 @@ least three packets were actually retransmitted, and that no timeout fired
 during the recovery. The first version failed on the second of those, which is
 how the mistake was caught rather than measured around.
 
+## Measuring the delay clamp, and why one lie was not enough
+
+**No defect.** The last of the congestion mechanisms that had only ever been
+read.
+
+libutp clamps the delay it feeds the controller to the round-trip time
+(`utp_internal.cpp:1615-1621`). What makes that load-bearing rather than
+housekeeping is where the delay comes from: it is not measured locally. It
+arrives in the timestamp-difference field of every incoming packet and reaches
+the controller unaltered —
+
+```go
+delay := time.Duration(packet.Header.TimestampDiff) * time.Microsecond
+```
+
+— so it is a 32-bit number under the remote peer's control, and the clamp is
+the only thing between it and the congestion window.
+
+`TestDelayClampedToRTT` measures it: twenty acknowledgements each claiming
+**30 seconds** of queueing delay on a path whose round trip is 20 ms leave the
+window at 86722 bytes. With the clamp removed the same acknowledgements take it
+from 85956 bytes to **2800, the floor**.
+
+### One lie was not enough
+
+The first version injected a single poisoned acknowledgement and **passed
+without the clamp**. The arithmetic says why, and it is worth keeping: the gain
+is scaled by that packet's share of the window,
+
+    3000 × (1400/85956) × (100000 − 29995000)/100000 ≈ −14.6 KB
+
+so one lie costs 17% of the window and no more. A peer that lies does not lie
+once. Twenty acknowledgements is what a second of a hostile or broken peer
+looks like, and it separates the two behaviours completely.
+
+This is the second time in this session a congestion test has passed against a
+disabled mechanism because the stimulus was too small to move the window — the
+application-limited guard was the first. The pattern is the same both times:
+the gain scales with `bytes_acked/max_window`, so any test of a rule that acts
+*through* the gain needs either a small window or a sustained stimulus, and
+checking that the test fails without the mechanism is the only thing that
+catches it.
+
+### What is measured and what is read
+
+The clamp is measured at the controller. That the wire value reaches it
+unaltered is established by reading the line above, not by a test — a
+wire-level version would need a peer that lies, which means the scripted
+conformance harness rather than netem, where both ends are honest by
+construction.
+
+The bound also differs slightly from libutp's, which is now recorded in
+[DEVIATIONS.md](DEVIATIONS.md): libutp clamps to the minimum round trip across
+the packets one acknowledgement covers, and this library's controller, which
+runs per acknowledged packet, clamps to that packet's own. Ours is therefore at
+most as tight and never tighter.
+
 ## Things found but deliberately not fixed
 
 These are real and unresolved. Each needs a measurement harness (M1) or a

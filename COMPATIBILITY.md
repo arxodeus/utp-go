@@ -89,16 +89,28 @@ than "verified".
 | Window decay rate limit | **Measured** | `netem.TestWindowDecayIsRateLimited`: 25ms of 50% loss costs one halving (72212 to 37652 bytes, 52%, from 23 retransmissions and no timeouts). Unlimited, the same burst reaches the floor at 4% |
 | Timeout window handling | **Differential** | `netem.TestLibutpIdleWindowDecay` measures the idle branch against real libutp through its first flight: 29% of the window kept across 8s idle against our 30%, compared as decays-by-a-third so a differing expiry count is not read as a differing rule. The in-flight branch is still only cited (`:1223-1228`) |
 | Timeouts for acknowledged packets | **Measured** | `netem.TestQuietConnectionDoesNotTimeOut`: a quiet connection on a lossless link took 2 timeouts and 12 retransmissions of delivered data before the fix, 0 and 0 after |
-| Delay clamp to RTT | Cited | `:1617-1621` |
+| Delay clamp to RTT | **Measured** | `TestDelayClampedToRTT`: 20 acknowledgements each claiming 30s of delay on a 20ms path leave the window at 86722 bytes; without the clamp the same acknowledgements take it to the 2800-byte floor. Measured at the controller, not on the wire -- see the note below |
 | Application-limited guard | **Measured** | `netem.TestApplicationLimitedWindowDoesNotGrow`: after slow start ends, five seconds of 1 KB writes every 20ms leave the window unchanged to the byte (15677 -> 15677). Removing the guard makes it fail on every run |
 | **Behaviour under load** | **Measured** | `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite. Ours is faster on every profile, which reads as ours being more aggressive rather than better; libutp's LAN result is bimodal on its 1000ms RTO floor |
 
-One row above is still *cited*: the delay clamp was matched by hand against
-`apply_ccontrol`, and only the aggregate behaviour it takes part in
-has been compared against the reference. That aggregate comparison is worth
-having and it is not the same thing. Two implementations can reach the same
-goodput on a link by different routes, and this table would not tell them
+Every row above now has a measurement behind it. That was not true when this
+file was written: each mechanism had been matched by hand against
+`apply_ccontrol`, and the only thing compared against the reference was the
+aggregate behaviour they add up to. That aggregate comparison is worth having
+and it is not the same thing — two implementations can reach the same goodput
+on a link by different routes, and the last row alone would not tell them
 apart.
+
+Two caveats on what these rows do and do not say. **The delay clamp is measured
+at the controller, not on the wire.** The value it clamps arrives in the
+timestamp-difference field of every incoming packet and reaches the controller
+unaltered (`conn.go`: `delay := time.Duration(packet.Header.TimestampDiff) *
+time.Microsecond`), so the controller's clamp is the only thing standing
+between a 32-bit field under the peer's control and the congestion window. That
+the wire value reaches the clamp unaltered is established by reading that one
+line, not by a test. **And the timeout row is only half differential:** the
+idle branch is compared against real libutp, the in-flight branch (`:1223-1228`)
+is still only cited.
 
 Getting the load comparison to mean anything took two harness fixes, both of
 which produced plausible-looking tables first: libutp's clock was in a

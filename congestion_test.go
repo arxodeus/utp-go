@@ -363,3 +363,90 @@ func TestWindowDecaysAtMostOncePerInterval(t *testing.T) {
 	require.Equal(t, initial/4, ctrl.maxWindowSizeBytes,
 		"a loss past the decay interval did not halve the window")
 }
+
+// A peer's reported delay cannot drive the window below what the round trip
+// says is possible.
+//
+// libutp clamps the delay it feeds the controller to the minimum round-trip
+// time of the packets the acknowledgement covers:
+//
+//	// the delay can never be greater than the rtt. The min_rtt
+//	// variable is the RTT in microseconds
+//	int32 our_delay = min<uint32>(our_hist.get_value(), uint32(min_rtt));
+//	                                        (utp_internal.cpp:1615-1621)
+//
+// The delay it is clamping is not measured locally. It arrives in the
+// timestamp-difference field of every incoming packet and is passed to the
+// controller unaltered (conn.go: `delay := time.Duration(
+// packet.Header.TimestampDiff) * time.Microsecond`), so it is a 32-bit number
+// under the remote peer's control. Nothing else between the wire and the
+// congestion window checks it.
+//
+// Without the clamp one packet ends the connection's usefulness. The gain is
+// `MAX_CWND_INCREASE_BYTES_PER_RTT * window_factor * (target - our_delay) /
+// target`, so a reported delay of 30 seconds against a 100 ms target makes the
+// second factor -299 and takes the window to its floor on a single
+// acknowledgement -- by malice, or by a peer whose clock stepped, or by a
+// timestamp that wrapped.
+func TestDelayClampedToRTT(t *testing.T) {
+	const (
+		rtt        = 20 * time.Millisecond
+		honest     = 5 * time.Millisecond
+		absurd     = 30 * time.Second
+		packetSize = 1400
+	)
+
+	// grow drives one honest transmit-and-acknowledge cycle.
+	grow := func(ctrl *defaultController, seq uint16, delay time.Duration, at time.Time) {
+		if err := ctrl.OnTransmit(seq, Initial, packetSize); err != nil {
+			t.Fatalf("transmit %d: %v", seq, err)
+		}
+		if err := ctrl.OnAck(seq, Ack{Delay: delay, RTT: rtt, ReceivedAt: at}); err != nil {
+			t.Fatalf("ack %d: %v", seq, err)
+		}
+	}
+
+	ctrl := newDefaultController(defaultCtrlConfig())
+	ctrl.slowStart = false
+	ctrl.maxWindowSizeBytes = 60 * packetSize
+
+	now := time.Now()
+	var seq uint16
+	for i := 0; i < 40; i++ {
+		seq++
+		grow(ctrl, seq, honest, now.Add(time.Duration(i)*rtt))
+	}
+	before := ctrl.maxWindowSizeBytes
+
+	// A peer that lies once costs 17% of the window and no more -- the gain is
+	// scaled by this packet's share of it, so a single acknowledgement can
+	// only move it so far. A peer that lies does not lie once. Twenty
+	// acknowledgements is what a second of a hostile or broken peer looks
+	// like, and is what separates the two behaviours: clamped, the delay reads
+	// as 20ms against a 100ms target and the window is fine; unclamped, each
+	// one takes about 14.6 KB and the window reaches its floor.
+	//
+	// The first version of this test injected exactly one and passed without
+	// the clamp.
+	for i := 0; i < 20; i++ {
+		seq++
+		grow(ctrl, seq, absurd, now.Add(time.Duration(41+i)*rtt))
+	}
+	after := ctrl.maxWindowSizeBytes
+
+	if before <= ctrl.minWindowSizeBytes*4 {
+		t.Fatalf("the window was only %d bytes (floor %d) before the poisoned ack; there is no "+
+			"room for a collapse to be visible", before, ctrl.minWindowSizeBytes)
+	}
+	// Clamped, the delay reads as 20ms against a 100ms target, which is under
+	// target, so the window holds or grows. Unclamped it reaches the floor.
+	// Half is far from both.
+	if after < before/2 {
+		t.Errorf("20 acknowledgements reporting %v of delay on a %v path took the window from "+
+			"%d bytes to %d (floor %d). libutp clamps the reported delay to the round trip "+
+			"(utp_internal.cpp:1615-1621) precisely so that a peer cannot do this",
+			absurd, rtt, before, after, ctrl.minWindowSizeBytes)
+	}
+	t.Logf("window %d -> %d bytes across 20 acknowledgements each claiming %v of delay on a "+
+		"%v path", before, after, absurd, rtt)
+}
