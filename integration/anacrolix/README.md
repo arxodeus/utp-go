@@ -68,10 +68,15 @@ so options 1 and 2 are a one-line substitution.
 
 ## What is not covered
 
-- **The firewall callback.** torrent uses it to refuse connections from
-  blocked addresses before any state is created for them. This library has no
-  equivalent hook, so `NewUtpSocket` accepts one and ignores it. A caller
-  relying on IP blocking would not get it.
+- ~~**The firewall callback.**~~ Honoured now. `utpnet.Options.Firewall` reaches
+  `utp.WithFirewall`, which is asked about every SYN for a connection the
+  socket does not have, before any state exists for it, and refuses by dropping
+  the packet without an answer — libutp's `UTP_ON_FIREWALL` in the same
+  position (`utp_internal.cpp:2975-2982`).
+
+  It used to be accepted and ignored, which is the worst of the three options
+  available: a caller that passed a blocklist got no blocking and no sign that
+  it was not happening.
 - **A torrent through torrent's own socket layer.** `TestTorrentTransferOverUtp`
   takes option 3 above -- `Client.AddListener` and `Client.AddDialer`, both
   exported, both taking what `utpnet.Socket` already provides -- so it needs

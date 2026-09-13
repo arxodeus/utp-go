@@ -27,8 +27,19 @@ type UtpSocket interface {
 // NewUtpSocket has the signature torrent.NewUtpSocket has, so it can replace
 // it. The firewall callback is accepted and ignored; see the note in
 // adapter_check.go.
-func NewUtpSocket(network, addr string, _ FirewallCallback, logger alog.Logger) (UtpSocket, error) {
-	sock, err := utpnet.Listen(context.Background(), udpNetwork(network), addr, &utpnet.Options{})
+func NewUtpSocket(network, addr string, fw FirewallCallback, logger alog.Logger) (UtpSocket, error) {
+	// The firewall callback is honoured rather than accepted and dropped.
+	//
+	// It used to be ignored, which is the worst of the three options: a caller
+	// that passed a blocklist got no blocking and no indication that it was
+	// not happening. torrent uses this to refuse connections it has decided
+	// against before any state exists for them, which is exactly what
+	// libutp's UTP_ON_FIREWALL is for.
+	opts := &utpnet.Options{}
+	if fw != nil {
+		opts.Firewall = fw
+	}
+	sock, err := utpnet.Listen(context.Background(), udpNetwork(network), addr, opts)
 	if err != nil {
 		return nil, err
 	}

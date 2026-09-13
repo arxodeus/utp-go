@@ -885,6 +885,26 @@ the event loop, because the second closer's FIN goes to a peer that will never
 answer. Teardown no longer waits for a packet to notice, and the soak test went
 from 131s to 0.93s.
 
+## PR 35 — the firewall callback, which was accepted and ignored
+
+libutp asks its embedder about every SYN for a connection it does not already
+have, after the duplicate check and before it creates anything: "true means
+yes, block connection" (`utp_internal.cpp:2975-2982`), and a refusal is a bare
+`return 1`.
+
+This library had no hook, and `integration/anacrolix`'s `NewUtpSocket` took
+torrent's `FirewallCallback` and discarded it — a caller that passed a
+blocklist got no blocking and no sign that it was not happening.
+
+`utp.WithFirewall` is a construction option on the socket;
+`utpnet.Options.Firewall` reaches it in `net.Addr` terms, which is what a
+blocklist is keyed by; the adapter passes torrent's callback through.
+
+Two properties beyond the obvious one, both asserted: a refusal creates no
+connection state, and a refusal is silent rather than a RESET, because
+answering confirms to a refused peer that something is listening. The
+translation from `ConnectionPeer` to `net.Addr` fails closed.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

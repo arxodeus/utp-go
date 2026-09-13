@@ -2194,6 +2194,51 @@ and treats a flight that never starts as a failure rather than as a zero.
 That one only appeared when the whole suite ran, which is the argument for
 running it that way rather than test by test.
 
+## The firewall callback was accepted and ignored
+
+**Fixed.** libutp asks its embedder about every SYN for a connection it does
+not already have, after the duplicate-connection check and before it creates
+anything:
+
+```cpp
+// true means yes, block connection.  false means no, don't block.
+if (utp_call_on_firewall(ctx, to, tolen)) {
+    ...
+    return 1;
+}
+                                        (utp_internal.cpp:2975-2982)
+```
+
+This library had no equivalent. `integration/anacrolix`'s `NewUtpSocket` took
+torrent's `FirewallCallback` and discarded it — the worst of the three options
+available, because a caller that passed a blocklist got no blocking *and* no
+sign that it was not happening. A silent no-op is worse than an unimplemented
+one.
+
+`utp.WithFirewall` is the hook, `utpnet.Options.Firewall` reaches it in
+`net.Addr` terms because that is what a blocklist is keyed by, and the adapter
+passes torrent's callback through.
+
+Two properties beyond "the connection does not happen", both asserted:
+
+- **A refusal creates no state.** Otherwise a blocklist becomes a way to make
+  a node allocate. The check sits after every connection lookup has missed and
+  before anything is constructed.
+- **A refusal is silent.** Not a RESET: answering confirms to a refused peer
+  that something is listening here, which is the opposite of what a blocklist
+  is for. libutp's refusal is a bare `return 1`, and so is this one. The
+  visible consequence is that a refused dial fails by timing out rather than
+  promptly, which is the same thing libutp's peers see.
+
+The translation from `ConnectionPeer` to `net.Addr` fails closed: a peer whose
+address cannot be recovered is refused rather than admitted unchecked, since a
+firewall that fails open is worse than no firewall.
+
+`utpnet.TestFirewallRefusesBeforeAnyStateExists` and
+`TestFirewallAdmitsWhatItDoesNotRefuse`. The first fails against the old
+behaviour with "the dial succeeded against a socket whose firewall refuses
+everything".
+
 ## Things found but deliberately not fixed
 
 These are real and unresolved. Each needs a measurement harness (M1) or a

@@ -94,6 +94,16 @@ type Options struct {
 	// This is where a BitTorrent client selects LEDBAT++ -- see
 	// BENCHMARKS.md for why it should.
 	ConnectionConfig *utp.ConnectionConfig
+	// Firewall, when set, is asked about every incoming connection before any
+	// state is created for it. Returning true refuses it: the packet is
+	// dropped without an answer, so a refused peer learns nothing.
+	//
+	// This is libutp's UTP_ON_FIREWALL. A BitTorrent client uses it for an IP
+	// blocklist, which is why torrent's own uTP constructor takes one.
+	//
+	// It runs on the socket's receive path: it must not block, and must not
+	// call back into the socket.
+	Firewall func(net.Addr) bool
 }
 
 // Listen binds a UDP port and returns a uTP socket on it.
@@ -154,7 +164,25 @@ func NewSocket(ctx context.Context, conn *net.UDPConn, opts *Options) (*Socket, 
 		closed:        make(chan struct{}),
 	}
 	s.inner = newDemuxConn(conn)
-	s.sock = utp.WithSocket(ctx, s.inner, logger)
+	var sockOpts []utp.SocketOption
+	if opts.Firewall != nil {
+		refuse := opts.Firewall
+		sockOpts = append(sockOpts, utp.WithFirewall(func(peer utp.ConnectionPeer) bool {
+			// The caller was given a net.Addr signature, because that is what
+			// it already has a blocklist keyed by. Peers this package creates
+			// carry the address; anything else is refused rather than let
+			// through unchecked, since a firewall that fails open is worse
+			// than no firewall.
+			addr, err := peerUDPAddr(peer)
+			if err != nil {
+				logger.Warn("refusing an incoming connection: its peer has no usable address",
+					"peer", peer, "err", err)
+				return true
+			}
+			return refuse(addr)
+		}))
+	}
+	s.sock = utp.WithSocket(ctx, s.inner, logger, sockOpts...)
 
 	s.readLoop.Add(1)
 	go s.run()

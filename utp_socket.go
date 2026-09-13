@@ -182,10 +182,41 @@ type UtpSocket struct {
 	// resetsSent counts RESETs answered to packets for connections this
 	// socket does not have. A RESET tells the peer to give up, so a healthy
 	// connection that draws one has been killed by us.
-	resetsSent  atomic.Uint64
-	closeOnce   sync.Once
-	readNextCh  chan struct{}
-	incomingBuf chan *IncomingPacketRaw
+	resetsSent atomic.Uint64
+	// refusedByFirewall counts SYNs the firewall callback rejected. It exists
+	// so a test can tell "refused" from "lost".
+	refusedByFirewall atomic.Uint64
+	closeOnce         sync.Once
+	readNextCh        chan struct{}
+	incomingBuf       chan *IncomingPacketRaw
+	// firewall, when set, is asked about every SYN for a connection this
+	// socket does not already have, before any state is created for it.
+	// Reporting true refuses the connection. Set once at construction and
+	// only read afterwards.
+	firewall func(ConnectionPeer) bool
+}
+
+// SocketOption configures a UtpSocket at construction.
+type SocketOption func(*UtpSocket)
+
+// WithFirewall refuses incoming connections the callback rejects.
+//
+// It is asked about a SYN for a connection this socket does not already have,
+// before any state exists for it, and reporting true drops the packet without
+// answering. That is libutp's UTP_ON_FIREWALL, in the same position and with
+// the same meaning -- "true means yes, block connection"
+// (utp_internal.cpp:2975-2982), reached after the duplicate-connection check
+// and before the socket is created, and refusing by returning rather than by
+// sending a RESET.
+//
+// A BitTorrent client uses it for an IP blocklist: the point of doing it here
+// rather than after Accept is that a refused peer costs no connection state
+// and gets no reply to confirm anything is listening.
+//
+// The callback runs on the socket's receive path. It must not block, and must
+// not call back into the socket.
+func WithFirewall(refuse func(peer ConnectionPeer) bool) SocketOption {
+	return func(s *UtpSocket) { s.firewall = refuse }
 }
 
 // DefaultSocketBufferSize is the size requested for the underlying UDP
@@ -199,7 +230,7 @@ type UtpSocket struct {
 // requesting more than the system allows is harmless.
 const DefaultSocketBufferSize = 4 * 1024 * 1024
 
-func Bind(ctx context.Context, network string, addr *net.UDPAddr, logger log.Logger) (*UtpSocket, error) {
+func Bind(ctx context.Context, network string, addr *net.UDPAddr, logger log.Logger, opts ...SocketOption) (*UtpSocket, error) {
 	conn, err := net.ListenUDP(network, addr)
 	if err != nil {
 		return nil, err
@@ -211,12 +242,12 @@ func Bind(ctx context.Context, network string, addr *net.UDPAddr, logger log.Log
 	if err := conn.SetWriteBuffer(DefaultSocketBufferSize); err != nil && logger != nil {
 		logger.Debug("could not enlarge UDP write buffer", "err", err)
 	}
-	sock := WithSocket(ctx, &UdpConn{conn}, logger)
+	sock := WithSocket(ctx, &UdpConn{conn}, logger, opts...)
 	sock.ownsSocket = true
 	return sock, nil
 }
 
-func WithSocket(ctx context.Context, socket Conn, logger log.Logger) *UtpSocket {
+func WithSocket(ctx context.Context, socket Conn, logger log.Logger, opts ...SocketOption) *UtpSocket {
 	ctx, cancel := context.WithCancel(ctx)
 	if logger == nil {
 		logger = log.New("utp", "socket")
@@ -271,6 +302,12 @@ func WithSocket(ctx context.Context, socket Conn, logger log.Logger) *UtpSocket 
 		socket:                   socket,
 		readNextCh:               make(chan struct{}, 1000000),
 		incomingBuf:              make(chan *IncomingPacketRaw, 1000000),
+	}
+
+	// Applied before the loops start, so nothing can observe a half-built
+	// socket.
+	for _, opt := range opts {
+		opt(utp)
 	}
 
 	go utp.readLoop()
@@ -494,6 +531,21 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
 				return
 			}
 			s.maybeSendReset(packetPtr, incomingRaw.peer)
+		}
+		return
+	}
+
+	// The firewall is asked here: every lookup above has missed, so this is a
+	// connection the socket does not have, and nothing has been created for it
+	// yet. libutp asks in the same place, after its duplicate-connection check
+	// and before utp_create_socket (utp_internal.cpp:2975-2982), and a refusal
+	// there is `return 1` -- the SYN is dropped without an answer. Not a
+	// RESET: a RESET would confirm to a refused peer that something is
+	// listening, which is the opposite of what a blocklist is for.
+	if s.firewall != nil && s.firewall(incomingRaw.peer) {
+		s.refusedByFirewall.Add(1)
+		if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+			s.logger.Debug("refusing an incoming connection: firewall", "src.peer", incomingRaw.peer)
 		}
 		return
 	}
@@ -784,6 +836,12 @@ func (s *UtpSocket) PacketsDroppedFullConnQueue() uint64 {
 
 // PacketsResetSent reports how many RESETs this socket answered to packets for
 // connections it does not have.
+// ConnectionsRefusedByFirewall reports how many incoming connections the
+// firewall callback rejected.
+func (s *UtpSocket) ConnectionsRefusedByFirewall() uint64 {
+	return s.refusedByFirewall.Load()
+}
+
 func (s *UtpSocket) PacketsResetSent() uint64 { return s.resetsSent.Load() }
 
 func (s *UtpSocket) LocalAddr() net.Addr {
