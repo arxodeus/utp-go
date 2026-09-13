@@ -774,6 +774,44 @@ bulk benchmark: every congestion profile in the suite is a continuous transfer,
 so none of them ever goes quiet long enough for a timer to outlive its own ack.
 `netem.TestQuietConnectionDoesNotTimeOut` comes with it.
 
+## PR 32 — an idle connection kept a window it had not measured in seconds
+
+libutp decays the congestion window of a connection sitting idle: it keeps one
+retransmission deadline per socket, never clears it when the window empties
+(set at `utp_internal.cpp:997`, reset per acked packet at `:1389`, re-armed on
+each expiry at `:1204`), and when it passes with nothing in flight the window
+falls by a third (`:1216-1222`). `retransmit_count` only increments when
+something is outstanding (`:1240`), so it repeats without killing the
+connection.
+
+This library armed retransmission timers per packet, so an idle connection had
+none and its event loop was entirely quiescent -- its window stayed exactly
+where the last transfer left it, and the next write put a stale window onto a
+path nothing had probed for seconds.
+
+Measured against real libutp over the same emulated link, 8 seconds idle after
+a 512 KB transfer -- its window read through its first flight, since
+`max_window` is private and `utp_socket_stats` does not report it:
+
+| | no idle | after 8s idle |
+| --- | --- | --- |
+| libutp | 55176 B | 15972 B (29%) |
+| ours, before | 55375 B | 55375 B (100%) |
+| ours, after | 55447 B | 16428 B (30%) |
+
+29% is (2/3)³, three decays, which is where a doubling RTO from a 1000 ms
+floor puts them in eight seconds.
+
+The patch adds one wake-up: `scheduleIdleRto` arms a timer for the deadline
+whenever nothing is outstanding, and `onIdleRto` applies the decay through the
+same `sentPackets.OnTimeout` the in-flight path uses, which asks
+`HasUnackedPackets` and so takes libutp's `cur_window_packets == 0` branch by
+construction.
+
+`netem.TestLibutpIdleWindowDecay` comes with it, comparing the two as
+decays-by-a-third rather than as ratios so that a differing expiry count is not
+mistaken for a differing rule.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

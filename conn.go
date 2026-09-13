@@ -223,6 +223,10 @@ type connection struct {
 	// outside this goroutine -- hence the atomic.
 	peerActivity atomic.Uint64
 
+	// armIdleRto schedules the wake-up that lets an idle connection's window
+	// decay. Set by the event loop, which owns the timer.
+	armIdleRto func(d time.Duration)
+
 	// finAck is the acknowledgement sent for the peer's FIN, kept so the
 	// socket can send it again if the peer retransmits that FIN after this
 	// connection has gone.
@@ -542,6 +546,41 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		}
 		probeTimer.Reset(d)
 	}
+	// An idle connection's window has to decay, and nothing else here would
+	// wake the loop to do it.
+	//
+	// Retransmission timers are armed per packet, so a connection with
+	// nothing outstanding has none, and its event loop is completely
+	// quiescent -- it does not even produce a metrics sample. libutp is not
+	// built that way: it keeps one deadline per socket, never clears it when
+	// the window empties (it is set at utp_internal.cpp:997, reset on each
+	// acknowledged packet at :1389, re-armed on each expiry at :1204), and
+	// when it passes with nothing in flight the idle branch decays the window
+	// by a third (:1216-1222). Because `retransmit_count` is only incremented
+	// when something *is* outstanding (:1240), that repeats without ever
+	// killing the connection.
+	//
+	// Measured against real libutp over the same emulated link, 8 seconds
+	// idle after a bulk transfer: libutp's first flight afterwards was 15972
+	// bytes against 55176 with no idle -- 29%, which is (2/3)^3, three decays
+	// at one, three and seven RTOs. Ours was unchanged at 55375, so it would
+	// have put a window it last measured 8 seconds ago straight back onto a
+	// path it has not probed since. See netem.TestLibutpIdleWindowDecay.
+	idleRtoTimer := time.NewTimer(time.Hour)
+	if !idleRtoTimer.Stop() {
+		<-idleRtoTimer.C
+	}
+	defer idleRtoTimer.Stop()
+	c.armIdleRto = func(d time.Duration) {
+		if !idleRtoTimer.Stop() {
+			select {
+			case <-idleRtoTimer.C:
+			default:
+			}
+		}
+		idleRtoTimer.Reset(d)
+	}
+
 	handleIncoming := func(event *streamEvent) {
 		if event.Type == streamIncoming {
 			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
@@ -651,6 +690,8 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			// The peer's window has been closed for a whole interval. Let one
 			// packet through, so its acknowledgement carries a fresh window.
 			c.processWrites(time.Now())
+		case <-idleRtoTimer.C:
+			c.onIdleRto(time.Now())
 		case <-idleTimer.C:
 			handleIdleTimeout()
 		case <-c.ctx.Done():
@@ -662,6 +703,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		}
 	afterSelect:
 		c.flushAck()
+		c.scheduleIdleRto(time.Now())
 		c.sampleMetrics(time.Now(), false)
 		if stream.shutdown.Load() && c.state.stateType != ConnClosed {
 			c.shutdown()
@@ -686,6 +728,46 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			c.sampleMetrics(time.Now(), true)
 			return c.state.Err
 		}
+	}
+}
+
+// scheduleIdleRto arms the idle wake-up when there is nothing outstanding, so
+// the retransmission deadline is still honoured on a connection that has gone
+// quiet. It is a no-op while packets are in flight, where the per-packet
+// timers already cover it.
+func (c *connection) scheduleIdleRto(now time.Time) {
+	if c.armIdleRto == nil || c.state.stateType != ConnConnected ||
+		c.state.SentPackets == nil || len(c.armed) != 0 || c.rtoDeadline.IsZero() {
+		return
+	}
+	d := c.rtoDeadline.Sub(now)
+	if d < time.Millisecond {
+		d = time.Millisecond
+	}
+	c.armIdleRto(d)
+}
+
+// onIdleRto applies libutp's idle branch: the retransmission deadline passed
+// with nothing in flight, so the window decays by a third rather than
+// collapsing (utp_internal.cpp:1216-1222), and the deadline is set again.
+//
+// The decay itself is the controller's, reached by the same call the
+// in-flight path uses: sentPackets.OnTimeout asks HasUnackedPackets, which is
+// false here, which is exactly the distinction libutp draws with
+// `cur_window_packets == 0`.
+func (c *connection) onIdleRto(now time.Time) {
+	if c.state.stateType != ConnConnected || c.state.SentPackets == nil ||
+		len(c.armed) != 0 || c.rtoDeadline.IsZero() || now.Before(c.rtoDeadline) {
+		return
+	}
+	c.state.SentPackets.OnTimeout()
+	// libutp re-arms from the doubled timeout (:1204), which OnTimeout has
+	// just applied.
+	c.rtoDeadline = now.Add(c.state.SentPackets.Timeout())
+	if c.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+		stats := c.state.SentPackets.ControllerStats()
+		c.logger.Debug("idle window decay", "cwnd", stats.MaxWindowSizeBytes,
+			"timeout", stats.Timeout)
 	}
 }
 

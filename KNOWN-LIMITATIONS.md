@@ -1923,6 +1923,83 @@ the honest reading is no measurable effect -- which is what should be expected
 of profiles that never go quiet. The fix is worth having for the idle case, not
 for these.
 
+## An idle connection kept a window it had not measured in seconds
+
+**Found and fixed, and the finding is the measurement.**
+
+libutp decays the congestion window of a connection that is sitting idle. It
+keeps one retransmission deadline per socket rather than one timer per packet,
+and never clears it when the window empties: it is set when a packet goes into
+an empty window (`utp_internal.cpp:997`), reset on every acknowledged packet
+(`:1389`), and re-armed on every expiry (`:1204`). When it passes with nothing
+in flight, the idle branch runs:
+
+```cpp
+if ((cur_window_packets == 0) && ((int)max_window > packet_size)) {
+    // we don't have any packets in-flight, even though
+    // we could. This implies that the connection is just
+    // idling. No need to be aggressive about resetting the
+    // congestion window. Just let it decay by a 3:rd.
+    max_window = max(max_window * 2 / 3, size_t(packet_size));
+                                        (utp_internal.cpp:1216-1222)
+```
+
+`retransmit_count` is only incremented when something *is* outstanding
+(`:1240`), so this repeats indefinitely without killing the connection: the
+window falls by a third at each expiry while the timeout doubles, so the decays
+land at one, three, seven and fifteen RTOs.
+
+This library could not do that. Its retransmission timers are armed per packet,
+so a connection with nothing outstanding has none, and its event loop is
+completely quiescent -- idle for eight seconds it does not even produce a
+metrics sample. So the window stayed exactly where the last transfer left it,
+and the next write would put a window last measured seconds ago straight back
+onto a path nothing had probed since.
+
+### Measured before assuming
+
+libutp's `max_window` is private and `utp_socket_stats` does not report it, so
+it was measured the way a peer sees it: idle for a while, then write a burst,
+and count what goes out before the first acknowledgement can return. Over the
+same emulated link, after a 512 KB transfer:
+
+| | no idle | after 8s idle |
+| --- | --- | --- |
+| libutp (first flight) | 55176 B | 15972 B (29%) |
+| ours, before the fix | 55375 B | 55375 B (100%) |
+| ours, after | 55447 B | 16428 B (30%) |
+
+29% is (2/3)³ to two figures -- three decays, exactly where a doubling RTO
+from a 1000 ms floor puts them in eight seconds. That the arithmetic predicted
+the measurement is the reason to believe the reading of the source.
+
+The fix gives the event loop one wake-up for the case: `scheduleIdleRto` arms a
+timer for the retransmission deadline whenever nothing is outstanding, and
+`onIdleRto` applies the decay through the same call the in-flight path uses --
+`sentPackets.OnTimeout`, which asks `HasUnackedPackets` and so takes libutp's
+`cur_window_packets == 0` branch by construction.
+
+### The comparison had to be made as a rule, not a ratio
+
+`netem.TestLibutpIdleWindowDecay` first compared the two ratios directly and
+failed one run in three, for a reason that is not a divergence: how many
+expiries fit in eight seconds depends on where the RTO floor lands, so one run
+takes two decays where another takes three -- 44% against 30% -- under exactly
+the same rule. It now converts each ratio to the number of thirds it
+represents and requires the two to agree within one expiry. That still fails a
+genuinely different rule: three halvings would read as 5.1 steps against
+libutp's 3.06.
+
+Measured across five runs: libutp 3.06 decays, ours 3.00 four times and 2.00
+once.
+
+### It was found by a test written to pin the divergence
+
+The test asserted that ours held its window where libutp decayed. Implementing
+the decay made it fail, with a message saying so and asking to be updated --
+which is what a test pinning a known divergence is for, and cheaper than
+noticing later that a comparison had silently inverted.
+
 ## Things found but deliberately not fixed
 
 These are real and unresolved. Each needs a measurement harness (M1) or a
