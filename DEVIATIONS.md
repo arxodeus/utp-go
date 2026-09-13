@@ -10,17 +10,32 @@ here is a bug, not a decision.
 
 ## Status
 
-**This list is not yet trustworthy as a complete inventory.**
+**Better founded than it was, and still not a complete inventory.**
 
-Establishing that requires the M4b compatibility sweep — reading
-`bittorrent/libutp` end to end and confirming, behaviour by behaviour, that
-this implementation agrees. That sweep has **not been done**, and there is no
-`COMPATIBILITY.md`. Nor is there a conformance harness (M2) that could catch
-divergences automatically.
+This note used to say that there was no `COMPATIBILITY.md` and no conformance
+harness, and that everything below had been noticed incidentally while fixing
+transfer-path defects. All three have changed:
 
-So what follows is only what has been observed incidentally while fixing the
-transfer-path defects. Divergences almost certainly remain, unrecorded,
-because nobody has looked.
+- [`COMPATIBILITY.md`](COMPATIBILITY.md) now records, area by area, what kind
+  of evidence stands behind each claim — differential, measured, interop, cited
+  or none — and says plainly where the answer is "none".
+- There is a conformance corpus driven against real libutp, two differential
+  fuzz targets covering both roles, an emulated network that runs libutp over
+  the same links, a real-socket interop gate including concurrent connections,
+  the standard library's own `net.Conn` suite, and a hash-verified torrent
+  transfer through `anacrolix/torrent`.
+- Every mechanism in the congestion controller now has a measurement behind it
+  rather than a citation.
+
+What has still **not** been done is the M4b sweep as originally conceived:
+reading `bittorrent/libutp` end to end and confirming agreement behaviour by
+behaviour. Sections of it have been audited that way — the ack path, loss
+recovery, the congestion controller, the close handshake — and each audit found
+defects, which is the reason to expect the unaudited remainder to contain more.
+
+So: the deviations below are recorded deliberately rather than noticed by
+accident, and the list is worth trusting for what it contains. It is not a
+proof that nothing else differs.
 
 ## Intentional deviations
 

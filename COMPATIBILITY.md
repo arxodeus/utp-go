@@ -137,20 +137,19 @@ so it sent 288-byte packets. Both are written up in
 
 ## What is not covered at all
 
-- **Most of the congestion controller, mechanism by mechanism.** Two are now
-  compared directly against libutp: the delay response, by stepping the
-  bottleneck down and measuring the standing queue each settles at, and slow
-  start, by timing the ramp on an idle path. Still only read against the
-  source: the delay clamp to RTT.
-  Each would need a scenario that isolates it, the way the bandwidth step
-  isolates the delay response.
+- **~~Most of the congestion controller, mechanism by mechanism.~~** No longer
+  true, and left here because what replaced it is the more useful statement.
+  Every mechanism in the table above now has a measurement behind it, and four
+  of them are compared directly against real libutp. What remains uneven is the
+  *kind* of evidence: the delay clamp is measured at the controller rather than
+  on the wire, and for the in-flight timeout branch the cross-implementation
+  number agrees without discriminating. Both are noted against their rows.
 
-  The application-limited guard has since moved out of that list: see below.
-
-  Reading libutp's window directly would be worth more than any of these and is
-  not available: `max_window` is private to `UTPSocket`, `utp_socket_stats`
-  does not report it, and reaching in means modifying the copy REFERENCE.md
-  pins.
+  Reading libutp's window directly would still be worth more than any of these
+  and is not available: `max_window` is private to `UTPSocket`,
+  `utp_socket_stats` does not report it, and reaching in means modifying the
+  copy REFERENCE.md pins. Where it was needed it was inferred from libutp's
+  first flight instead, which is what a peer can see.
 - **libutp against libutp on the emulated network.** Every flow measured joins
   libutp to this library. A libutp-to-libutp flow over the same links would
   separate the reference's behaviour from what our end contributes to it.
