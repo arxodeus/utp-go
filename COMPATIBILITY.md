@@ -89,12 +89,12 @@ than "verified".
 | Window decay rate limit | Cited | `MAX_WINDOW_DECAY`, `:51`, `:602-605` |
 | Timeout window handling | Cited | Idle vs in-flight, `:1216-1228` |
 | Delay clamp to RTT | Cited | `:1617-1621` |
-| Application-limited guard | Cited | `last_maxed_out_window`, `:1681-1686` |
+| Application-limited guard | **Measured** | `netem.TestApplicationLimitedWindowDoesNotGrow`: after slow start ends, five seconds of 1 KB writes every 20ms leave the window unchanged to the byte (15677 -> 15677). Removing the guard makes it fail on every run |
 | **Behaviour under load** | **Measured** | `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite. Ours is faster on every profile, which reads as ours being more aggressive rather than better; libutp's LAN result is bimodal on its 1000ms RTO floor |
 
-Every *row* above the last is still *cited*: the mechanisms — slow start, the
-decay limiter, the delay clamp, the application-limited guard — were matched by
-hand against `apply_ccontrol`, and only the aggregate behaviour they add up to
+Three rows above are still *cited*: the decay limiter, the timeout split and
+the delay clamp were matched by hand against `apply_ccontrol`, and only the
+aggregate behaviour they add up to
 has been compared against the reference. That aggregate comparison is worth
 having and it is not the same thing. Two implementations can reach the same
 goodput on a link by different routes, and this table would not tell them
@@ -126,10 +126,12 @@ so it sent 288-byte packets. Both are written up in
   compared directly against libutp: the delay response, by stepping the
   bottleneck down and measuring the standing queue each settles at, and slow
   start, by timing the ramp on an idle path. Still only read against the
-  source: the window decay rate limit, the delay clamp to RTT, the
-  application-limited guard, and the idle-versus-in-flight split on a timeout.
+  source: the window decay rate limit, the delay clamp to RTT, and the
+  idle-versus-in-flight split on a timeout.
   Each would need a scenario that isolates it, the way the bandwidth step
   isolates the delay response.
+
+  The application-limited guard has since moved out of that list: see below.
 
   Reading libutp's window directly would be worth more than any of these and is
   not available: `max_window` is private to `UTPSocket`, `utp_socket_stats`

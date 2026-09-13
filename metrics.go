@@ -58,6 +58,16 @@ type ConnectionMetrics struct {
 	PeerTsDiff time.Duration
 	// TargetDelayMicros is the standing queue the controller aims for.
 	TargetDelayMicros uint32
+	// SlowStart reports whether the controller is still in slow start, where
+	// the window grows whether or not the application is filling it. Without
+	// this, a window growing during an idle period cannot be told from the
+	// application-limited guard failing.
+	SlowStart bool
+	// AppLimitedSince is how long since the sender last had data to send and
+	// no window to send it in. Once this passes a second the controller stops
+	// growing the window, on the grounds that a window nothing fills measures
+	// nothing. Zero means the window has never been filled.
+	AppLimitedSince time.Duration
 
 	// --- cumulative counters ---
 

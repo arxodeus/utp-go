@@ -1197,6 +1197,8 @@ func (c *connection) sampleMetrics(now time.Time, force bool) {
 		m.Timeout = cs.Timeout
 		m.BaseDelay = cs.BaseDelay
 		m.TargetDelayMicros = cs.TargetDelayMicros
+		m.SlowStart = cs.SlowStart
+		m.AppLimitedSince = cs.AppLimitedSince
 	}
 	if c.state.SendBuf != nil {
 		m.SendBufferPending = c.state.SendBuf.Pending()

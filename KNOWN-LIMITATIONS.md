@@ -1790,6 +1790,71 @@ to until it is moved, a deadline moved under a blocked `ReadFrom`, and `Close`
 unblocking a waiting `ReadFrom` and keeping every later call closed. Those
 three passed first time.
 
+## Measuring the application-limited guard, and four ways to measure nothing
+
+**No defect. The mechanism was right; what took the work was proving it.**
+
+libutp refuses to grow the congestion window when the application has not been
+filling it:
+
+```cpp
+if (scaled_gain > 0 && ctx->current_ms - last_maxed_out_window > 1000) {
+    // if it was more than 1 second since we tried to send a packet
+    // and stopped because we hit the max window, we're most likely rate
+    // limited (which prevents us from ever hitting the window size)
+    // if this is the case, we cannot let the max_window grow indefinitely
+    scaled_gain = 0;
+}
+                                        (utp_internal.cpp:1681-1686)
+```
+
+This library has had the same rule since the M5 correction, as a citation.
+`netem.TestApplicationLimitedWindowDoesNotGrow` now measures it: after slow
+start has ended, five seconds of 1 KB writes every 20 ms leave the window
+unchanged **to the byte** (15677 to 15677, on three runs of three). Removing
+the guard makes it fail on every run.
+
+The measurement is recorded here because four successive versions of it passed
+or failed while measuring nothing, and each failure mode is one a similar test
+would hit again.
+
+**It passed with the guard disabled.** The first version used a 90 KB window
+and 200-byte writes. The gain the guard suppresses is
+`3000 * bytes_acked/max_window * delay_factor` — about 7 bytes per ack there,
+so roughly 170 bytes over the whole phase, invisible against 90 KB. The guard
+is only observable where the window is small and the acks are dense: 3 Mbps,
+1 KB every 20 ms, a window around 15-25 KB.
+
+**Write returns before the data is sent.** The phase boundary was taken where
+`Write` returned, which is when the data is *buffered*. A megabyte was still in
+flight, so a further second of ordinary slow-start growth — 53 KB to 90 KB —
+was attributed to the application-limited phase and failed the test.
+
+**Slow start is not gated by the guard, in either implementation.** The guard
+zeroes `scaled_gain`, but in slow start libutp takes
+`max_window = max(ss_cwnd, ledbat_cwnd)` (`:1699`) and `ss_cwnd` is not gated.
+A connection still in slow start therefore grows while the application sends
+nothing, correctly. The test could not see which phase it was in, so
+`ControllerStats` and `ConnectionMetrics` now carry `SlowStart` and
+`AppLimitedSince` — the whole point of those structs being that a controller
+observable only through its throughput cannot be told from one doing nothing.
+The link also needed a queue small enough (8 KB) to end slow start with a loss;
+on a clean link one 512 KB transfer left the connection in slow start one run
+in four, so phase A now repeats until slow start is actually over.
+
+**The guard does not apply for the first second.** libutp suppresses growth
+only once it has been *more* than a second since the window was last filled, so
+the first second after hard sending grows legitimately. Measuring from the
+start of the quiet phase counted that as failure on two runs in three. The
+baseline is now the first sample where the precondition actually holds.
+
+The test asserts all four preconditions rather than assuming them: that phase A
+grew the window at least fourfold, that slow start is over, that the sender
+really went more than a second without filling its window, and that at least
+three seconds of the phase ran with the guard engaged. Any of them failing
+stops the run with a message saying the guard was not measured, rather than
+passing quietly.
+
 ## Things found but deliberately not fixed
 
 These are real and unresolved. Each needs a measurement harness (M1) or a

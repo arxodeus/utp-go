@@ -142,6 +142,23 @@ type ControllerStats struct {
 	BaseDelay time.Duration
 	// TargetDelayMicros is the standing queue the controller aims for.
 	TargetDelayMicros uint32
+	// SlowStart reports whether the controller is still in slow start.
+	//
+	// It is here because two very different behaviours are indistinguishable
+	// without it. libutp's application-limited guard zeroes the LEDBAT gain
+	// (utp_internal.cpp:1681-1686), but in slow start the window is
+	// `max(ss_cwnd, ledbat_cwnd)` (:1699) and `ss_cwnd` is not gated -- so a
+	// window growing while the application sends nothing is correct in slow
+	// start and a defect after it. A test that cannot tell which phase it is
+	// in cannot measure the guard at all; see
+	// netem.TestApplicationLimitedWindowDoesNotGrow.
+	SlowStart bool
+	// AppLimitedSince is how long it has been since the sender last had data
+	// to send and no window to send it in -- the age of libutp's
+	// `last_maxed_out_window` (:945, :957, read at :1681). Growth is
+	// suppressed once this exceeds one second. Zero means the window has
+	// never been filled.
+	AppLimitedSince time.Duration
 }
 
 type defaultController struct {
@@ -260,6 +277,10 @@ func newDefaultController(config *ctrlConfig) *defaultController {
 func (c *defaultController) Stats() ControllerStats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	var appLimitedSince time.Duration
+	if !c.lastMaxedOutWindow.IsZero() {
+		appLimitedSince = time.Since(c.lastMaxedOutWindow)
+	}
 	return ControllerStats{
 		WindowSizeBytes:    c.windowSizeBytes,
 		MaxWindowSizeBytes: c.maxWindowSizeBytes,
@@ -269,6 +290,8 @@ func (c *defaultController) Stats() ControllerStats {
 		Timeout:            c.timeout,
 		BaseDelay:          c.delayAcc.BaseDelay(),
 		TargetDelayMicros:  c.targetDelayMicros,
+		SlowStart:          c.slowStart,
+		AppLimitedSince:    appLimitedSince,
 	}
 }
 
