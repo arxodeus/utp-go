@@ -747,6 +747,33 @@ past deadlines, a deadline moved under a blocked read, Close unblocking a
 waiting read -- and a matching goroutine check on the connection path next
 door, which uses `deadline.context` instead and was already clean.
 
+## PR 31 — a quiet connection punished itself
+
+On a link with no loss, a connection that finished a transfer and then wrote
+200 bytes every 200 ms took retransmission timeouts: 2 timeouts, 12
+retransmissions of data the peer already had, and the congestion window taken
+from 55513 to 24831 bytes over five seconds. That is the shape a BitTorrent
+peer connection spends most of its life in.
+
+Retransmission timers are armed one per packet and cancelled on the ack, but
+cancelling cannot stop a timer that has already fired -- it is out of the wheel
+and on its way to the event loop. `onTimeout` then ran for an acknowledged
+packet, and the early-timer guard re-armed it before returning, so every dead
+timer went back into the wheel. The armed set grew by one per write and never
+shrank, and a dozen of them landing past the deadline together were taken for a
+real timeout.
+
+libutp cannot reach this state: it keeps one deadline rather than a timer per
+packet, and retransmits out of its outgoing buffer
+(`utp_internal.cpp:1230-1244`), which no longer holds an acknowledged packet.
+The fix asks the same question explicitly -- `sentPackets.Outstanding(seq)` --
+and returns without acting. After: 0 timeouts, 0 retransmissions, window held.
+
+Worth sending because it costs nothing in throughput and is invisible to any
+bulk benchmark: every congestion profile in the suite is a continuous transfer,
+so none of them ever goes quiet long enough for a timer to outlive its own ack.
+`netem.TestQuietConnectionDoesNotTimeOut` comes with it.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

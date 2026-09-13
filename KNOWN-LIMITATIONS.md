@@ -1855,6 +1855,74 @@ three seconds of the phase ran with the guard engaged. Any of them failing
 stops the run with a message saying the guard was not measured, rather than
 passing quietly.
 
+## A quiet connection punished itself: timeouts for packets already acknowledged
+
+**Fixed.** On a link with no loss configured, a connection that finished a bulk
+transfer and then wrote 200 bytes every 200 ms took retransmission timeouts.
+Measured: **2 timeouts, 12 retransmissions of data the peer already had, and
+the congestion window taken from 55513 to 24831 bytes** over five seconds in
+which nothing was lost.
+
+That is the shape a BitTorrent peer connection spends most of its life in --
+a burst of blocks, then quiet, then a request -- so every peer was paying a
+window collapse for having been idle.
+
+### What was happening
+
+Retransmission timers are armed one per packet and cancelled when the ack
+arrives. Cancelling cannot stop a timer that has *already fired*: it is out of
+the wheel and on its way to the event loop, where `disarmAcked` will not find
+it. `onTimeout` then ran for a packet that had been acknowledged in the
+meantime.
+
+On its own that would be harmless, because the early-timer guard sees the
+deadline has not passed and returns. But that guard re-arms the packet first:
+
+```go
+if now.Before(c.rtoDeadline) && c.state.SentPackets.UnackedCount() == 1 {
+    if remaining := c.rtoDeadline.Sub(now); remaining > 0 {
+        c.armRetransmit(originPacket, remaining)
+        return
+    }
+}
+```
+
+so every dead timer went straight back into the wheel. The armed set grew by
+one per write and never shrank -- 5, 6, 7, 8 ... 22 in a five-second phase --
+and whenever a dozen of them landed past the deadline together they were taken
+for a real timeout: the window halved and delivered packets were sent again.
+
+libutp cannot reach this state. It keeps one deadline rather than a timer per
+packet, and it retransmits out of its outgoing buffer
+(`utp_internal.cpp:1230-1244`), which no longer holds a packet the peer has
+acknowledged.
+
+The fix is to ask the same question libutp's data structure answers
+implicitly: `sentPackets.Outstanding(seq)`, and return without acting if the
+packet has been acked. Same measurement after: **0 timeouts, 0
+retransmissions, and the window holds** (55524 to 55649 bytes), on three runs
+of three.
+
+### Why nothing had caught it
+
+Every congestion profile in the benchmark suite is a continuous transfer. None
+of them ever goes quiet, so none of them can produce a timer that outlives its
+own ack by a second. The defect showed up in the trace of a test written for
+something else entirely -- the application-limited guard -- which is the first
+test in this repository to leave a connection idle while still watching it.
+
+`netem.TestQuietConnectionDoesNotTimeOut` pins it.
+
+### What it did not change
+
+Throughput on the loss profiles, as far as five repeats can tell. Back to back,
+classic LEDBAT: broadband 1% loss 4.44 Mbps (3.82-5.25) without the fix against
+5.19 (4.39-5.21) with it, and 5% loss 1.43 (1.33-1.79) against 1.19
+(1.00-1.62). The medians move in both directions and every range overlaps, so
+the honest reading is no measurable effect -- which is what should be expected
+of profiles that never go quiet. The fix is worth having for the idle case, not
+for these.
+
 ## Things found but deliberately not fixed
 
 These are real and unresolved. Each needs a measurement harness (M1) or a

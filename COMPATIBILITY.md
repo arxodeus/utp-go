@@ -88,6 +88,7 @@ than "verified".
 | Slow start | **Measured** | Was absent entirely. `netem.TestCongestionSlowStartRamp` compares the ramp against libutp's on an idle path: time to 90% of the link, libutp 588-640ms against ours 536-660ms |
 | Window decay rate limit | Cited | `MAX_WINDOW_DECAY`, `:51`, `:602-605` |
 | Timeout window handling | Cited | Idle vs in-flight, `:1216-1228` |
+| Timeouts for acknowledged packets | **Measured** | `netem.TestQuietConnectionDoesNotTimeOut`: a quiet connection on a lossless link took 2 timeouts and 12 retransmissions of delivered data before the fix, 0 and 0 after |
 | Delay clamp to RTT | Cited | `:1617-1621` |
 | Application-limited guard | **Measured** | `netem.TestApplicationLimitedWindowDoesNotGrow`: after slow start ends, five seconds of 1 KB writes every 20ms leave the window unchanged to the byte (15677 -> 15677). Removing the guard makes it fail on every run |
 | **Behaviour under load** | **Measured** | `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite. Ours is faster on every profile, which reads as ours being more aggressive rather than better; libutp's LAN result is bimodal on its 1000ms RTO floor |

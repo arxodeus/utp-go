@@ -1339,6 +1339,36 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 			return
 		}
 
+		// A timeout for a packet the peer has already acknowledged is not a
+		// timeout at all, and acting on one is what made a quiet connection
+		// punish itself.
+		//
+		// Timers are armed per packet and cancelled when the ack arrives, but
+		// cancelling cannot stop one that has already fired: it is out of the
+		// wheel and on its way to this loop, and disarmAcked will not find
+		// it. The delivery then arrived for a packet that had been
+		// acknowledged in the meantime -- and the early-timer guard below,
+		// which asks only what the clock says, re-armed it. Each re-arm put
+		// the same dead timer back in the wheel, so the armed set grew by one
+		// per write and never shrank, and whenever several of them landed
+		// past the deadline at once they were counted as a real timeout: the
+		// window halved and packets the peer already had were sent again.
+		//
+		// Measured on a link with no loss configured, after a bulk transfer
+		// followed by 200-byte writes every 200ms: 2 timeouts, 12
+		// retransmissions of delivered data, and the congestion window taken
+		// from 55513 to 24831 bytes for nothing. That is the shape a
+		// BitTorrent peer connection spends most of its life in.
+		//
+		// libutp cannot reach this state. It has one timeout deadline rather
+		// than a timer per packet, and it retransmits out of its outgoing
+		// buffer (utp_internal.cpp:1230-1244), which no longer holds a packet
+		// the peer has acknowledged.
+		if c.state.SentPackets != nil &&
+			!c.state.SentPackets.Outstanding(originPacket.Header.SeqNum) {
+			return
+		}
+
 		// One timeout event per RTO expiry, measured against the clock.
 		//
 		// This connection arms one timer per outstanding packet, and the

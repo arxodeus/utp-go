@@ -520,6 +520,28 @@ func (s *sentPackets) SeqNumIndex(seqNum uint16) int {
 	}
 }
 
+// Outstanding reports whether seqNum names a packet that was sent and has not
+// been acknowledged.
+//
+// It exists for the retransmission timer. Timers are armed per packet and
+// cancelled when the ack arrives, but a timer that has already fired is out of
+// the wheel and on its way to the event loop, where cancelling it can no
+// longer stop it. Acting on such a timeout resends a packet the peer already
+// has.
+func (s *sentPackets) Outstanding(seqNum uint16) bool {
+	if len(s.packets) == 0 {
+		return false
+	}
+	if !s.SeqNumRange().Contains(seqNum) {
+		return false
+	}
+	i := s.SeqNumIndex(seqNum)
+	if i < 0 || i >= len(s.packets) {
+		return false
+	}
+	return len(s.packets[i].acks) == 0
+}
+
 func (s *sentPackets) FirstUnackedSeqNum() (uint16, error) {
 	if len(s.packets) == 0 {
 		return 0, ErrNoneAckNum
