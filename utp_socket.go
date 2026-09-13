@@ -1079,8 +1079,15 @@ func (s *UtpSocket) ConnectWithCid(
 		if err == nil {
 			return stream, nil
 		}
-		s.logger.Error("failed to open connection", "cid.send", cid.Send, "cid.recv", cid.Recv, "cid.peer", cid.Peer.Hash())
-		return nil, fmt.Errorf("connection timed out")
+		s.logger.Error("failed to open connection", "cid.send", cid.Send, "cid.recv", cid.Recv, "cid.peer", cid.Peer.Hash(), "err", err)
+		// Report the reason rather than assuming one. This used to return a
+		// flat "connection timed out" whatever had happened, which was true
+		// while running out of SYN attempts was the only way to fail; an
+		// ICMP error is a second way, and "refused" and "timed out" are
+		// exactly the distinction libutp draws with UTP_ECONNREFUSED against
+		// UTP_ECONNRESET (utp_internal.cpp:3122). Wrapped, so errors.Is finds
+		// ErrConnRefused and ErrTimedOut.
+		return nil, fmt.Errorf("utp_socket: connect failed: %w", err)
 	case <-ctx.Done():
 		stream.abandonDial()
 		return nil, ctx.Err()
@@ -1112,7 +1119,7 @@ func (s *UtpSocket) awaitConnected(
 		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			s.logger.Trace("connected failed", "peer", cid.Peer.Hash(), "cid.Send", cid.Send, "cid.Recv", cid.Recv, "err", err)
 		}
-		accept.stream <- &StreamResult{err: fmt.Errorf("connection failed")}
+		accept.stream <- &StreamResult{err: fmt.Errorf("utp_socket: connection failed: %w", err)}
 		return
 	}
 
@@ -1202,6 +1209,134 @@ func (s *UtpSocket) sendShutdownEventToConns() {
 			// by the cancelled socket context.
 		}
 	}
+}
+
+// ProcessICMPFragmentation reports an ICMP "fragmentation needed" message
+// (IPv4 type 3 code 4, or ICMPv6 "packet too big") for a datagram this socket
+// sent, so the path-MTU search can take the router's word for it instead of
+// discovering the same limit by losing a probe.
+//
+// quoted is the *uTP datagram the ICMP message quoted* -- the original UDP
+// payload -- not the ICMP packet and not the IP or UDP headers around it.
+// peer is the address that datagram was sent to. nextHopMTU is the router's
+// figure, which may be zero: older routers do not supply one, and the search
+// falls back to halving the gap when it is missing or implausible.
+//
+// It reports whether the quoted bytes were recognised as a uTP packet
+// belonging to a live connection, matching what libutp's return value means
+// (utp_internal.cpp:3071-3072).
+//
+// This library does not open a raw socket to collect ICMP itself, and neither
+// does libutp: on Linux the usual source is IP_RECVERR on the UDP socket, and
+// feeding it in is the embedder's job.
+func (s *UtpSocket) ProcessICMPFragmentation(quoted []byte, peer ConnectionPeer, nextHopMTU uint16) bool {
+	return s.deliverICMP(quoted, peer, &icmpNotice{
+		Kind:       icmpFragmentationNeeded,
+		NextHopMTU: uint32(nextHopMTU),
+	})
+}
+
+// ProcessICMPError reports an ICMP message that should tear a connection
+// down: destination unreachable other than fragmentation-needed, time
+// exceeded, parameter problem. The connection ends with ErrConnRefused if it
+// had only sent its SYN and ErrReset otherwise, which is libutp's
+// UTP_ECONNREFUSED / UTP_ECONNRESET distinction (utp_internal.cpp:3122).
+//
+// quoted and peer mean what they mean for ProcessICMPFragmentation, and the
+// return value likewise. Deciding which ICMP messages are fatal is the
+// caller's: libutp draws that line in its callers too.
+func (s *UtpSocket) ProcessICMPError(quoted []byte, peer ConnectionPeer) bool {
+	return s.deliverICMP(quoted, peer, &icmpNotice{Kind: icmpUnreachable})
+}
+
+// deliverICMP is libutp's parse_icmp_payload (utp_internal.cpp:3019-3067)
+// followed by the delivery its two callers share.
+func (s *UtpSocket) deliverICMP(quoted []byte, peer ConnectionPeer, notice *icmpNotice) bool {
+	if peer == nil || notice == nil {
+		return false
+	}
+
+	// "ICMP packets are only required to quote the first 8 bytes of the
+	// layer4 payload. The UDP payload is 8 bytes, and the UTP header is
+	// another 20 bytes. So, in order to find the entire UTP header, we need
+	// the ICMP packet to quote 28 bytes." -- and then libutp checks for 20,
+	// because by this point the UDP header is already off (:3032-3041).
+	if len(quoted) < MINIMAL_HEADER_SIZE {
+		s.logger.Debug("ignoring ICMP: runt quoted payload", "len", len(quoted), "peer", peer)
+		return false
+	}
+	// libutp reads the version and connection id straight out of the quoted
+	// bytes and rejects anything that is not version 1 (:3043-3052). Its
+	// UTP_Version also requires a known packet type and a first extension
+	// below 3, which is exactly what this decoder checks. Only the fixed
+	// header is parsed: a router that quoted 20 bytes has cut the extensions
+	// off, and requiring them would throw away the report.
+	header, err := DecodePacketHeader(quoted[:MINIMAL_HEADER_SIZE])
+	if err != nil {
+		s.logger.Debug("ignoring ICMP: quoted payload is not a uTP v1 packet",
+			"peer", peer, "err", err)
+		return false
+	}
+
+	connStream := s.getConnStreamForQuotedId(header.ConnectionId, peer)
+	if connStream == nil {
+		s.logger.Debug("ignoring ICMP: no matching connection",
+			"id", header.ConnectionId, "peer", peer)
+		return false
+	}
+
+	select {
+	case connStream <- &streamEvent{Type: streamICMP, ICMP: notice}:
+	default:
+		// The connection's queue is full. Dropping the report costs a probe,
+		// not correctness: the fragmentation case is rediscovered by the lost
+		// probe and the error case by the retransmission timeout. Reported as
+		// unrecognised would be wrong -- the connection was found.
+		s.logger.Warn("connection stream channel is full, dropping ICMP report",
+			"id", header.ConnectionId, "peer", peer)
+	}
+	return true
+}
+
+// getConnStreamForQuotedId finds the connection that sent the packet an ICMP
+// message quoted.
+//
+// The quoted packet is one of ours, so its connection id is our *send* id --
+// except for a SYN, which carries the sender's own receive id. libutp covers
+// both with three lookups against a map keyed on the receive id alone
+// (utp_internal.cpp:3056-3058):
+//
+//	Lookup(UTPSocketKey(addr, id))
+//	Lookup(UTPSocketKey(addr, id + 1)) && conn_id_send == id
+//	Lookup(UTPSocketKey(addr, id - 1)) && conn_id_send == id
+//
+// The first catches a quoted SYN -- the ICMP case that matters most, since an
+// unreachable host answers the SYN and nothing else. The second and third
+// catch an established connection's data, from the acceptor and the initiator
+// side respectively.
+//
+// This socket's map is keyed on the pair, so libutp's first lookup, which
+// leaves the send id free, becomes two candidates: an initiator's send id is
+// its receive id plus one and an acceptor's is minus one, so those are the
+// only two connections libutp's map could have held under that key. The order
+// is otherwise libutp's, which is what decides it when a peer holds several
+// connections whose ids happen to be adjacent.
+func (s *UtpSocket) getConnStreamForQuotedId(id uint16, peer ConnectionPeer) chan *streamEvent {
+	candidates := []*ConnectionId{
+		// recv == id (the quoted packet is our SYN), either role
+		NewConnectionId(peer, id, id+1),
+		NewConnectionId(peer, id, id-1),
+		// recv == id+1 && send == id: we accepted this connection
+		NewConnectionId(peer, id+1, id),
+		// recv == id-1 && send == id: we initiated it
+		NewConnectionId(peer, id-1, id),
+	}
+	for _, cid := range candidates {
+		if ch, ok := s.getConnStream(cid.Hash()); ok {
+			return ch
+		}
+	}
+	return nil
 }
 
 func (s *UtpSocket) getConnStreamWithCids(cid *ConnectionId, idType IdType) chan *streamEvent {

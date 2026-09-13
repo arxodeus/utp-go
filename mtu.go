@@ -139,6 +139,78 @@ func (m *mtuSearch) searchUpdate(now time.Time) {
 	}
 }
 
+// icmpFragmentationNeeded applies an ICMP "fragmentation needed" report to the
+// search.
+//
+// linkMTU is the next-hop MTU the router quoted, in ICMP's terms: the largest
+// IP datagram the next hop will carry. Zero, or anything outside what libutp
+// treats as sane, means the router did not tell us a usable size.
+//
+// libutp:
+//
+//	if (next_hop_mtu >= 576 && next_hop_mtu < 0x2000) {
+//	    conn->mtu_ceiling = min<uint32>(next_hop_mtu, conn->mtu_ceiling);
+//	    conn->mtu_search_update();
+//	    // ... we don't set mtu_last to the value in between the floor and
+//	    // the ceiling ... we want to test this MTU size first.
+//	    conn->mtu_last = conn->mtu_ceiling;
+//	} else {
+//	    conn->mtu_ceiling = (conn->mtu_floor + conn->mtu_ceiling) / 2;
+//	    conn->mtu_search_update();
+//	}
+//	                                        (utp_internal.cpp:1327-1348)
+//
+// **One deliberate difference, and it is a unit conversion.** libutp compares
+// `next_hop_mtu` directly against `mtu_ceiling`, but those are not the same
+// quantity: the ceiling comes from `get_udp_mtu` and is what fits in a UDP
+// payload, while ICMP quotes the link MTU, which also has to carry the IP and
+// UDP headers. So libutp's ceiling ends up 28 bytes too large on IPv4 whenever
+// the router's figure is the binding one. It is self-correcting -- the next
+// probe at that size is dropped and the ceiling comes down again -- but it
+// costs a round trip to discover something the router already said, and the
+// point of honouring ICMP at all is to skip that round trip.
+//
+// The sizes here are uTP datagram sizes, so the headers are subtracted before
+// the comparison. Recorded in DEVIATIONS.md.
+func (m *mtuSearch) icmpFragmentationNeeded(linkMTU uint32, now time.Time) {
+	if usable, ok := udpPayloadForLinkMTU(linkMTU); ok {
+		if usable < m.ceiling {
+			m.ceiling = usable
+		}
+		m.searchUpdate(now)
+		// Test the router's figure itself rather than the midpoint below it:
+		// there may be a smaller hop further on, but this one is known.
+		if m.ceiling >= m.floor {
+			m.current = m.ceiling
+		}
+		return
+	}
+	// No usable figure, so fall back to the binary search: halve the gap and
+	// let a probe find the truth.
+	m.ceiling = (m.floor + m.ceiling) / 2
+	m.searchUpdate(now)
+}
+
+// ipv4HeaderAndUDPOverhead is what a uTP datagram gives up to the layers below
+// it: 20 bytes of IPv4 header and 8 of UDP. IPv6's header is 40, so treating
+// every path as IPv4 makes the figure derived here at most 20 bytes too
+// generous on a v6 path -- and a probe that size then fails and lowers the
+// ceiling, which is the same correction libutp relies on generally.
+const ipv4HeaderAndUDPOverhead = 28
+
+// udpPayloadForLinkMTU converts a router's next-hop MTU into the uTP datagram
+// size that fits inside it, and reports whether the figure was usable at all.
+//
+// The bounds are libutp's: at least 576, IPv4's guaranteed reassembly size,
+// and below 0x2000, beyond which the router is not telling the truth about a
+// path this library will meet.
+func udpPayloadForLinkMTU(linkMTU uint32) (uint32, bool) {
+	if linkMTU < 576 || linkMTU >= 0x2000 {
+		return 0, false
+	}
+	return linkMTU - ipv4HeaderAndUDPOverhead, true
+}
+
 // done reports whether the search has converged.
 func (m *mtuSearch) done() bool { return m.ceiling <= m.floor }
 

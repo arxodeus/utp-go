@@ -78,6 +78,9 @@ than "verified".
 | Keep-alive | Cited | Was absent |
 | Path-MTU discovery | **Measured + interop** | The emulated network can now refuse oversized datagrams (`netem.Config.MTU`), which found two defects here and one shared limitation; libutp was run over the same link to establish which was which |
 | Don't-fragment on probes | **None** | Not implemented; we write through an abstract `Conn` |
+| ICMP fragmentation-needed | **Measured** | `UtpSocket.ProcessICMPFragmentation`, libutp's `utp_process_icmp_fragmentation`. `netem.TestIcmpBringsTheSearchWithinThePath` runs the same transfer over a 1100-byte link with the router silent and with it reporting: the search settles at 1191 bytes against 1094. The link-MTU-to-payload conversion is a deviation, recorded with its reason |
+| ICMP error teardown | **Measured** | `UtpSocket.ProcessICMPError`, libutp's `utp_process_icmp_error`, including the `UTP_ECONNREFUSED` / `UTP_ECONNRESET` split on whether only the SYN had gone out. `TestProcessICMPErrorResetsAnEstablishedConnection`, `TestProcessICMPErrorRefusesAPendingConnect`, `TestProcessICMPMatchesAnAcceptedConnection` |
+| ICMP connection lookup | **Measured** | libutp's three lookups (`utp_internal.cpp:3056-3058`), including a quoted SYN, which carries a receive id rather than a send id. `TestProcessICMPIgnoresWhatItCannotMatch` covers the runt, wrong-version, unknown-type, unknown-id and wrong-peer cases; `netem.TestIcmpWorksFromAMinimalQuote` covers a router that quotes only the 20 bytes it must |
 | Packet coalescing / Nagle | **Investigated, deliberately absent** | libutp holds a partial last packet while anything else is in flight (`utp_internal.cpp:976-983`, released at `:2246-2252`). Implemented here, measured, and reverted: no workload showed a benefit and it cost ~3% across the benchmark suite. See DEVIATIONS.md |
 
 ## Congestion control

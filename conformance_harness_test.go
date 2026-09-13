@@ -145,6 +145,32 @@ func (c *scriptedConn) takeEmitted() [][]byte {
 	return out
 }
 
+// pendingCount is how many injected packets our socket has not yet read.
+//
+// The settle loops below wait for a quiet period, and a quiet period that
+// starts before our event loop has even been handed the packet measures
+// nothing: under load the whole window can pass with the packet still sitting
+// in this queue. Draining is the precondition for the wait to mean anything.
+func (c *scriptedConn) pendingCount() int {
+	c.inMu.Lock()
+	defer c.inMu.Unlock()
+	return len(c.pending)
+}
+
+// awaitDelivered waits until our socket has read everything injected so far,
+// or the limit passes. It reports whether the queue drained; a caller that
+// injected nothing sees an immediate true.
+func (c *scriptedConn) awaitDelivered(limit time.Duration) bool {
+	deadline := time.Now().Add(limit)
+	for c.pendingCount() > 0 {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return true
+}
+
 func (c *scriptedConn) emittedCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -160,6 +186,7 @@ func (c *scriptedConn) emittedCount() int {
 func (c *scriptedConn) settle() {
 	const quiet = 60 * time.Millisecond
 	const limit = 3 * time.Second
+	c.awaitDelivered(limit)
 	deadline := time.Now().Add(limit)
 	last := c.emittedCount()
 	stableSince := time.Now()

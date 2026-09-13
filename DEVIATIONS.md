@@ -321,6 +321,87 @@ this packet's own RTT.
 What the clamp is for is unaffected, and is measured:
 `TestDelayClampedToRTT`.
 
+## ICMP: the next-hop MTU is converted from a link MTU to a payload size
+
+libutp takes the figure an ICMP fragmentation-needed message carries and
+compares it directly against its own MTU ceiling:
+
+```cpp
+if (next_hop_mtu >= 576 && next_hop_mtu < 0x2000) {
+    conn->mtu_ceiling = min<uint32>(next_hop_mtu, conn->mtu_ceiling);
+    conn->mtu_search_update();
+    conn->mtu_last = conn->mtu_ceiling;
+}
+                                        (utp_internal.cpp:3085-3093)
+```
+
+Those are not the same quantity. The ceiling comes from `get_udp_mtu`
+(`mtu_reset`, :1316) and is what fits in a **UDP payload**; `next_hop_mtu` is
+the largest **IP datagram** the hop will carry, which also has to hold the IP
+and UDP headers. So when the router's figure is the binding one, libutp sets a
+ceiling 28 bytes too large on IPv4 and the next packet it builds at that size
+is refused by the same router.
+
+`mtuSearch.icmpFragmentationNeeded` subtracts the 28 bytes before comparing.
+The reason is concrete: the whole point of honouring ICMP rather than waiting
+for a probe to disappear is to avoid a round trip, and a ceiling that is
+knowingly too big spends that round trip anyway.
+
+IPv6 is not separated out. Its header is 40 bytes rather than 20, so a v6 path
+gets a figure at most 20 bytes too generous -- and a probe at that size then
+fails and lowers the ceiling, which is the correction the search already runs
+on. Treating every path as IPv4 is therefore conservative in the direction
+that matters and needs no address-family plumbing through the search.
+
+One consequence is stated rather than hidden: on a link narrow enough that the
+converted figure falls below 576, the search settles below libutp's floor.
+libutp's floor is 576 of *payload* ("Less would not pass TCP...", :1318) while
+its ceiling is a *link* MTU, so on such a link it keeps building 576-byte
+payloads for a hop that carries 572. The floor is a heuristic, not a
+guarantee, and 572 is what the link actually carries.
+
+Measured: `TestMtuIcmpFragmentationNeededLeavesRoomForTheHeaders`,
+`TestMtuIcmpFragmentationNeededBelowTheFloor`,
+`TestMtuIcmpFragmentationNeededSavesProbes` (six probe rounds and three losses
+without the report against four and one with it), and
+`netem.TestIcmpBringsTheSearchWithinThePath`.
+
+## ICMP: no CS_IDLE state, and one terminal state instead of two
+
+`utp_process_icmp_error` switches on the connection's state
+(utp_internal.cpp:3125-3146). Two of its cases have no exact counterpart here.
+
+`CS_IDLE` is the state a libutp socket object is in before `utp_connect` or
+`utp_accept` is called. This library has no such window -- the connection is
+created *by* the call -- so there is nothing in that state to ignore. The
+reason libutp gives for ignoring it ("don't pass on errors for idle/closed
+connections") applies to a connection that has already finished, and
+`onICMPUnreachable` skips those.
+
+`CS_DESTROY` and `CS_RESET` both become `ConnClosed`. libutp uses the
+difference to decide how soon the socket object is freed, not what the
+application is told: both branches fall through to the same
+`utp_call_on_error`, so the error is reported either way, which is what
+happens here.
+
+`onICMPUnreachable` also deliberately does not go through `connection.reset`.
+That helper treats a reset arriving after our own FIN as a clean close and
+discards the error; libutp has no such branch on the ICMP path, and "the peer
+went away" is exactly what an application half way through a close needs to
+hear.
+
+## ICMP: collecting it is the embedder's job, and so is deciding what is fatal
+
+`UtpSocket.ProcessICMPFragmentation` and `UtpSocket.ProcessICMPError` (and the
+`utpnet.Socket` pass-throughs) take the quoted uTP datagram and the address it
+was sent to, exactly as `utp_process_icmp_fragmentation` and
+`utp_process_icmp_error` do. Neither this library nor libutp opens a raw
+socket to collect ICMP, and neither decides which ICMP types are fatal. On
+Linux the usual source is `IP_RECVERR` on the UDP socket.
+
+This is not a deviation; it is recorded here because the capability is easy to
+mistake for automatic.
+
 ## Inherited notes that claim consistency with the reference
 
 Two comments in `conn.go` describe behaviour as matching the reference

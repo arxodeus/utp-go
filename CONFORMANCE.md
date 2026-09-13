@@ -162,6 +162,14 @@ and a ceiling, probing with ordinary data packets. What is not matched: probes
 do not carry the don't-fragment bit, and the ceiling is a fixed 1400 rather
 than the interface MTU. Both are in [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
 
+The other half of libutp's MTU handling is the ICMP path, and it is now here
+too: `UtpSocket.ProcessICMPFragmentation` and `UtpSocket.ProcessICMPError`.
+Neither is reachable from this corpus — an ICMP message does not arrive on the
+uTP wire, so a packet-injection harness cannot deliver one — so they are tested
+against an emulated router that reports what it refused
+(`netem.Config.OnMTUDrop`) and against fabricated quoted headers. See the rows
+in [COMPATIBILITY.md](COMPATIBILITY.md).
+
 ## The send path
 
 Audited against libutp as part of M4. Three findings, two fixed and one

@@ -105,6 +105,28 @@ type Config struct {
 	// exercised end to end.
 	MTU int
 
+	// OnMTUDrop, when set, is called for every datagram this link refuses for
+	// being larger than MTU. It is the router that would have forwarded the
+	// datagram sending an ICMP "fragmentation needed" message back to the
+	// sender, and it carries what such a message carries: the front of the
+	// offending datagram and the next-hop MTU.
+	//
+	// payload is the whole refused datagram; a real router quotes only its
+	// front, so a test that wants to model that should truncate. src and dst
+	// are the endpoint names this link runs between, so a caller can route
+	// the report back to the socket that sent it. linkMTU is this link's MTU
+	// expressed the way ICMP expresses it -- the largest IP datagram the hop
+	// will carry -- which is the emulated link's MTU plus the IP and UDP
+	// headers a real path would also have had to carry.
+	//
+	// It runs on the link's goroutine with no lock held, and must not block.
+	//
+	// Without this, an emulated path that refuses a large datagram is
+	// indistinguishable from one that lost it, so the half of path-MTU
+	// discovery that takes a router's word for the limit could not be tested
+	// end to end at all.
+	OnMTUDrop func(payload []byte, src, dst string, linkMTU int)
+
 	// Seed seeds this link's PRNG. Links in one Network derive distinct seeds
 	// from Network's seed, so a single Seed makes a whole topology
 	// reproducible.

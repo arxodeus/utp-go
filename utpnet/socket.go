@@ -347,6 +347,39 @@ func (s *Socket) Dial(network, addr string) (net.Conn, error) {
 }
 
 // Addr returns the local address, satisfying net.Listener.
+// ProcessICMPFragmentation reports an ICMP "fragmentation needed" message
+// (IPv4 type 3 code 4, or ICMPv6 "packet too big") for a datagram this socket
+// sent, so the path-MTU search can take the router's word for it.
+//
+// quoted is the uTP datagram the ICMP message quoted -- the original UDP
+// payload, not the ICMP packet -- and addr is where that datagram was sent.
+// nextHopMTU is the router's figure, which may be zero when it did not supply
+// one. It reports whether the quoted bytes matched a live connection.
+//
+// Nothing in this package collects ICMP: on Linux the usual source is
+// IP_RECVERR on the UDP socket this Socket was built from, and reading it is
+// the embedder's job. libutp draws the same line.
+func (s *Socket) ProcessICMPFragmentation(quoted []byte, addr *net.UDPAddr, nextHopMTU uint16) bool {
+	if addr == nil {
+		return false
+	}
+	return s.sock.ProcessICMPFragmentation(quoted, utp.NewUdpPeer(addr), nextHopMTU)
+}
+
+// ProcessICMPError reports an ICMP message that should tear a connection
+// down: destination unreachable other than fragmentation-needed, time
+// exceeded, parameter problem. Which messages are fatal is the caller's
+// judgement, as it is in libutp.
+//
+// quoted and addr mean what they mean for ProcessICMPFragmentation, and the
+// return value likewise.
+func (s *Socket) ProcessICMPError(quoted []byte, addr *net.UDPAddr) bool {
+	if addr == nil {
+		return false
+	}
+	return s.sock.ProcessICMPError(quoted, utp.NewUdpPeer(addr))
+}
+
 func (s *Socket) Addr() net.Addr { return s.udp.LocalAddr() }
 
 // LocalAddr returns the local address, satisfying net.PacketConn.

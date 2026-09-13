@@ -61,6 +61,14 @@ import (
 func (c *scriptedConn) settleQuick() {
 	const quiet = 25 * time.Millisecond
 	const limit = 600 * time.Millisecond
+	// Wait for our socket to actually take the packet before timing anything.
+	// Without this the quiet window could elapse while the packet was still
+	// queued, so settleQuick returned before our side had reacted at all --
+	// and the reaction then landed in the *next* step's transcript, or was
+	// coalesced into the next acknowledgement and never appeared. That showed
+	// up only under full-suite load, as FuzzDifferentialInitiator reporting
+	// one packet against libutp's two on a reordered pair.
+	c.awaitDelivered(limit)
 	deadline := time.Now().Add(limit)
 	last := c.emittedCount()
 	stableSince := time.Now()
@@ -300,16 +308,50 @@ func newDifferentialRun(t *testing.T, role differentialRole) *differentialRun {
 		drv.Listen()
 		cid := NewConnectionId(r.conn.peer, corpusSynConnID+1, corpusSynConnID)
 		go func() { _, _ = r.sock.AcceptWithCid(ctx, cid, NewConnectionConfig()) }()
-		time.Sleep(20 * time.Millisecond)
+		// The acceptor emits nothing until a SYN arrives, so the only thing
+		// to wait for is the request being registered to receive one. A
+		// cid-specific Accept parks in the awaiting map until its SYN
+		// arrives, so that is where it becomes visible.
+		r.waitFor(t, "the acceptor to register", func() bool {
+			_, ok := r.sock.getAwaiting(cid.Hash())
+			return ok
+		})
 	case differentialInitiator:
 		if err := drv.Connect(); err != nil {
 			t.Skipf("libutp connect failed: %v", err)
 		}
 		cid := NewConnectionId(r.conn.peer, initiatorConnSeed, initiatorConnSeed+1)
 		go func() { _, _ = r.sock.ConnectWithCid(ctx, cid, NewConnectionConfig()) }()
-		time.Sleep(20 * time.Millisecond)
+		// Wait for the SYN itself, not for a fixed interval.
+		//
+		// This used to sleep 20ms and assume the connection goroutine had run
+		// by then. Under load it had not, and the SYN -- emitted before any
+		// injection and cleared by prime() -- instead landed in the first
+		// step's transcript, where it read as this implementation answering a
+		// packet libutp ignored. Seen as a full-suite-only failure of
+		// FuzzDifferentialInitiator/seed#2, passing whenever the test ran on
+		// its own, which is exactly the shape of a timing assumption rather
+		// than a defect in what is under test.
+		r.waitFor(t, "our SYN", func() bool {
+			return r.conn.emittedCount() > 0
+		})
 	}
 	return r
+}
+
+// waitFor polls until cond holds, and fails the test if it never does. The
+// deadline is generous because it only bounds a failure: the common case
+// returns on the first or second poll.
+func (r *differentialRun) waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	const limit = 10 * time.Second
+	deadline := time.Now().Add(limit)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("waited %v for %s and it never happened", limit, what)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func (r *differentialRun) close() {

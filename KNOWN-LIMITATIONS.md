@@ -1457,6 +1457,32 @@ ceiling that already matches the path. This fork uses a fixed 1400 ceiling
 instead, which is recorded in [DEVIATIONS.md](DEVIATIONS.md), and on a tunnelled
 path 1400 is still too big.
 
+### Half of it is now addressable: the ICMP path
+
+`UtpSocket.ProcessICMPFragmentation` is libutp's
+`utp_process_icmp_fragmentation`, and an embedder that feeds it (on Linux,
+`IP_RECVERR` on the UDP socket) gets the router's own figure instead of having
+to infer the limit from a probe that vanished. Measured over the same 1100-byte
+link, `netem.TestIcmpBringsTheSearchWithinThePath`:
+
+| | Search settles at | Ceiling |
+| --- | --- | --- |
+| router silent | 1191 bytes -- above the path | 1400 |
+| router reports | 1094 bytes -- within it | 1094 |
+
+**It fixes the search, not the stalled window, and the test says so.** Packets
+already built keep their size: uTP numbers packets rather than bytes, so one
+cannot be re-cut smaller without renumbering every packet behind it. libutp has
+the same constraint and gets away with it by not setting don't-fragment on
+ordinary data -- "now we need it to fragment just to get it through"
+(`utp_internal.cpp:898-905`) -- leaving the router to fragment what it cannot
+forward whole. On a path that refuses oversized datagrams outright, which is
+what IPv6 does and what Linux's default `IP_PMTUDISC_WANT` makes an IPv4 path
+do, the packets already in the window stay stuck under either implementation.
+
+So the report helps a connection that has not yet adopted an unusable size, and
+every connection opened afterwards; it does not rescue one that already has.
+
 ## A completed transfer could end as a connection reset for the peer
 
 Found by running libutp over a path that damages packets, which is the gap

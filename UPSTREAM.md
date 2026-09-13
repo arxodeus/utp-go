@@ -905,6 +905,65 @@ connection state, and a refusal is silent rather than a RESET, because
 answering confirms to a refused peer that something is listening. The
 translation from `ConnectionPeer` to `net.Addr` fails closed.
 
+## PR 36 — the ICMP path
+
+libutp has two entry points an embedder feeds from the error queue of its UDP
+socket, and this library had neither.
+
+`utp_process_icmp_fragmentation` (`utp_internal.cpp:3079-3106`) takes the
+router's next-hop MTU and lowers the path-MTU ceiling to it, so the search does
+not have to rediscover the same limit by losing a probe.
+`utp_process_icmp_error` (`:3117-3150`) tears a connection down, reporting
+`UTP_ECONNREFUSED` if only the SYN had gone out and `UTP_ECONNRESET`
+otherwise. Both find their connection by parsing the uTP header the ICMP
+message quoted (`parse_icmp_payload`, `:3019-3067`).
+
+`UtpSocket.ProcessICMPFragmentation` and `UtpSocket.ProcessICMPError` are those
+two, with `utpnet.Socket` pass-throughs in `net.Addr` terms. Collecting ICMP is
+left to the embedder, as it is in libutp.
+
+Three things are worth a reviewer's attention.
+
+**The lookup.** libutp's map is keyed on the receive id alone, so it needs
+three probes; the connections here are keyed on the pair, so the first of those
+probes -- the one that catches a quoted **SYN**, which carries a receive id
+rather than a send id -- becomes two candidates. Order is otherwise libutp's.
+
+**A unit conversion, which is a deviation.** libutp compares `next_hop_mtu`
+against `mtu_ceiling` directly, but the first is a link MTU and the second a
+UDP payload capacity, so libutp's ceiling ends up 28 bytes too large on IPv4
+exactly when the router's figure is the binding one. The conversion and its
+reasoning are in [DEVIATIONS.md](DEVIATIONS.md).
+
+**What it is worth, measured.** `netem.Config.OnMTUDrop` lets an emulated
+router report what it refused, so the mechanism can be tested end to end.
+Over a link that carries 1100 bytes, the search settles at 1191 bytes with the
+router silent and 1094 with it reporting. It does not rescue a transfer that
+has already stalled, and the test says so rather than asserting a result it
+does not produce: uTP numbers packets, so one already built cannot be re-cut
+smaller.
+
+`ConnectWithCid` also stopped reporting every failure as "connection timed
+out". That was true while running out of SYN attempts was the only way to
+fail; refused and timed out are now different answers, and the error is
+wrapped so `errors.Is` finds either.
+
+## PR 37 — two timing assumptions in the differential fuzz harness
+
+Not a library change, but it belongs in the same review: both differential
+fuzz targets primed their run with a fixed `time.Sleep(20ms)` and settled each
+step with a quiet window that began before our socket had necessarily read the
+injected packet.
+
+Under load neither held. The initiator's SYN could arrive after priming had
+cleared the transcript, and then read as this implementation answering a
+packet libutp ignored; and a settle window could elapse with the packet still
+queued, so our reply landed in the next step's transcript or was coalesced
+into the next acknowledgement and never appeared at all.
+
+Both now wait for the thing itself: the SYN, the accept request's
+registration, and the injected packet actually being read.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

@@ -48,6 +48,17 @@ var (
 	ErrReset             = errors.New("reset")
 	ErrSynFromAcceptor   = errors.New("syn from acceptor")
 	ErrTimedOut          = errors.New("timed out")
+	// ErrConnRefused is libutp's UTP_ECONNREFUSED: an ICMP error arrived for
+	// a connection that had only sent its SYN, so nothing is listening.
+	//
+	//	const int err = (conn->state == CS_SYN_SENT) ? UTP_ECONNREFUSED
+	//	                                             : UTP_ECONNRESET;
+	//	                                       (utp_internal.cpp:3122)
+	//
+	// The other half of that expression is ErrReset, which is also what a
+	// received ST_RESET produces -- libutp reports both as UTP_ECONNRESET,
+	// so they are deliberately not distinguished here either.
+	ErrConnRefused = errors.New("connection refused")
 )
 
 type EndpointType int
@@ -609,6 +620,8 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			c.onPacket(event.Packet, time.Now())
 		} else if event.Type == streamShutdown {
 			stream.shutdown.Store(true)
+		} else if event.Type == streamICMP {
+			c.onICMP(event.ICMP, time.Now())
 		}
 		// streamCloseWrite needs no handling beyond having woken the loop:
 		// the flag it refers to is already set, and the pass this event ends
@@ -2380,6 +2393,93 @@ func (c *connection) onReset() {
 	if c.state.stateType != ConnClosed {
 		c.reset(ErrReset)
 	}
+}
+
+// onICMP applies an ICMP report about a packet this connection sent.
+//
+// libutp's two entry points, utp_process_icmp_fragmentation and
+// utp_process_icmp_error (utp_internal.cpp:3079-3150), differ only in what
+// they do once the connection is found, so the lookup lives in the socket and
+// the two decisions live here.
+func (c *connection) onICMP(notice *icmpNotice, now time.Time) {
+	if notice == nil {
+		return
+	}
+	switch notice.Kind {
+	case icmpFragmentationNeeded:
+		c.onICMPFragmentationNeeded(notice.NextHopMTU, now)
+	case icmpUnreachable:
+		c.onICMPUnreachable()
+	}
+}
+
+// onICMPFragmentationNeeded lowers the path-MTU ceiling on a router's say-so.
+// See mtuSearch.icmpFragmentationNeeded for the libutp text and for the one
+// deliberate difference, which is a unit conversion.
+func (c *connection) onICMPFragmentationNeeded(nextHopMTU uint32, now time.Time) {
+	c.mtu.icmpFragmentationNeeded(nextHopMTU, now)
+	// libutp logs exactly this line (utp_internal.cpp:3104).
+	c.logger.Debug("MTU [ICMP]", "floor", c.mtu.floor, "ceiling", c.mtu.ceiling,
+		"current", c.mtu.current, "nextHopMTU", nextHopMTU)
+}
+
+// onICMPUnreachable tears the connection down after an ICMP error.
+//
+// libutp:
+//
+//	const int err = (conn->state == CS_SYN_SENT) ? UTP_ECONNREFUSED : UTP_ECONNRESET;
+//	switch(conn->state) {
+//	    case CS_IDLE: return 1;                    // don't pass on errors for idle/closed
+//	    default:
+//	        conn->state = conn->close_requested ? CS_DESTROY : CS_RESET;
+//	}
+//	utp_call_on_error(conn->ctx, conn, err);
+//	                                        (utp_internal.cpp:3117-3150)
+//
+// Two mappings are worth stating.
+//
+// CS_IDLE has no counterpart: libutp's socket object exists before connect or
+// accept is called, and ours does not -- the connection is created by the
+// call. The nearest thing is a connection that has already finished, and that
+// is skipped for the same stated reason ("don't pass on errors for
+// idle/closed connections").
+//
+// CS_DESTROY and CS_RESET both land on ConnClosed here, because that is the
+// only terminal state this connection has. The distinction libutp draws is
+// how soon the socket object goes away, not what the application is told:
+// both branches fall through to the same utp_call_on_error, so the error is
+// reported either way.
+func (c *connection) onICMPUnreachable() {
+	if c.state.stateType == ConnClosed {
+		return
+	}
+
+	err := ErrReset
+	// CS_SYN_SENT is reachable only by the initiator, and only before the
+	// handshake completes.
+	if c.state.stateType == ConnConnecting && c.endpoint.Type == Initiator {
+		err = ErrConnRefused
+	}
+
+	c.logger.Warn("ICMP error, closing connection", "err", err,
+		"closeRequested", c.closeRequested, "peer", c.cid.Peer)
+
+	// Deliberately not c.reset(): that treats a reset arriving after our own
+	// FIN as a clean close and discards the error. libutp has no such branch
+	// on this path -- it reports the error whatever state the connection was
+	// in -- and the difference is load-bearing, because "the peer went away"
+	// is exactly what an application half way through a close needs to hear.
+	// A connection still in the handshake has a Connect call waiting on this
+	// channel; without it the caller waits out its own context for a failure
+	// the network already reported. Same handling as the connect-attempt
+	// timeout at onTimeout.
+	if c.state.connectedCh != nil {
+		c.state.connectedCh <- err
+		c.state.connectedCh = nil
+	}
+
+	c.state.stateType = ConnClosed
+	c.state.Err = err
 }
 
 func (c *connection) reset(err error) {

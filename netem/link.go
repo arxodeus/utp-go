@@ -113,6 +113,11 @@ func newLink(src, dst *Endpoint, cfg Config, seed int64) *Link {
 	}
 }
 
+// icmpHeaderOverhead is what a real IPv4 path spends on headers below the UDP
+// payload: 20 bytes of IP and 8 of UDP. This emulator's MTU bounds the uTP
+// datagram, so a report quoting a *link* MTU has to add them back.
+const icmpHeaderOverhead = 28
+
 // enqueue applies the link model to a packet and schedules its delivery.
 // It never blocks.
 func (l *Link) enqueue(payload []byte, src, dst *Endpoint) {
@@ -133,6 +138,19 @@ func (l *Link) enqueue(payload []byte, src, dst *Endpoint) {
 		l.stats.PacketsDropped++
 		l.stats.DroppedByMTU++
 		l.mu.Unlock()
+		if cfg.OnMTUDrop != nil {
+			// The router tells the sender why. Called outside the lock: the
+			// callback reaches back into a uTP socket, which must not be able
+			// to deadlock against this link.
+			//
+			// The datagram is copied because the caller's buffer is reused,
+			// and the quoted MTU is the link MTU an ICMP message would carry:
+			// this emulator's MTU limits the uTP datagram, so the headers a
+			// real path also carries are added back.
+			quoted := make([]byte, size)
+			copy(quoted, payload)
+			cfg.OnMTUDrop(quoted, src.Name(), dst.Name(), cfg.MTU+icmpHeaderOverhead)
+		}
 		return
 	}
 
