@@ -164,6 +164,13 @@ func TestSoakConnectionChurn(t *testing.T) {
 	runtime.GC()
 	runtime.ReadMemStats(&endMem)
 	endConns := server.NumConnections() + client.NumConnections()
+	// Split by socket, because which side leaks says what the leak is: the
+	// side that closes second is a teardown that never fires, the side that
+	// closes first is one that fires and does not clean up. Chasing a
+	// half-close regression here, the split was the difference between a guess
+	// and a diagnosis.
+	t.Logf("still tracked at the end: %d on the accepting socket, %d on the dialling one",
+		server.NumConnections(), client.NumConnections())
 
 	t.Logf("%d connection cycles: goroutines %d -> %d, live heap %d KiB -> %d KiB, tracked connections %d -> %d",
 		cycles, baseGoroutines, endGoroutines,

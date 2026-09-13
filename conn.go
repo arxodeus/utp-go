@@ -223,6 +223,18 @@ type connection struct {
 	// outside this goroutine -- hence the atomic.
 	peerActivity atomic.Uint64
 
+	// closeRequested records that the application asked to close the
+	// connection entirely, rather than only its sending side.
+	//
+	// libutp's `close_requested` (utp_internal.cpp:441), set by utp_close
+	// (:3374) and not by utp_shutdown. It is what decides whether the
+	// acknowledgement of our own FIN ends the connection: "else if (conn->
+	// fin_sent && conn->cur_window_packets == acks) { fin_sent_acked = true;
+	// if (conn->close_requested) conn->state = CS_DESTROY; }" (:2178-2182).
+	// Without it a half-close would end the moment its FIN came back, which is
+	// the opposite of the point.
+	closeRequested bool
+
 	// armIdleRto schedules the wake-up that lets an idle connection's window
 	// decay. Set by the event loop, which owns the timer.
 	armIdleRto func(d time.Duration)
@@ -598,6 +610,9 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		} else if event.Type == streamShutdown {
 			stream.shutdown.Store(true)
 		}
+		// streamCloseWrite needs no handling beyond having woken the loop:
+		// the flag it refers to is already set, and the pass this event ends
+		// will see it and send the FIN.
 	}
 
 	handleWrites := func(write *queuedWrite, ok bool) {
@@ -705,8 +720,20 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		c.flushAck()
 		c.scheduleIdleRto(time.Now())
 		c.sampleMetrics(time.Now(), false)
-		if stream.shutdown.Load() && c.state.stateType != ConnClosed {
+		// shutdown() sends the local FIN once everything queued has drained.
+		// Both flags reach it: Close means finished entirely, CloseWrite means
+		// finished sending. The difference is not here -- it is that a
+		// CloseWrite connection is not torn down when the peer's FIN arrives,
+		// because its reader is still there.
+		if stream.shutdown.Load() {
+			c.closeRequested = true
+		}
+		if (stream.shutdown.Load() || stream.writeClosed.Load()) &&
+			c.state.stateType != ConnClosed {
 			c.shutdown()
+			// And re-check: shutdown may have just sent the FIN that finishes
+			// this connection, and no packet need ever arrive to notice.
+			c.updateClosingState()
 		}
 
 		if c.state.stateType == ConnClosed {
@@ -1988,30 +2015,92 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 		}
 	}
 
+	c.updateClosingState()
+}
+
+// updateClosingState decides whether the connection has finished.
+//
+// It is called both when a packet arrives and once per pass of the event loop.
+// Only the first of those used to happen, and the second is not decoration: the
+// side that closes second sends its FIN into a peer whose connection is
+// already gone, so nothing ever arrives to trigger the check again. Measured
+// when it was packet-driven only -- 29 connections still tracked after 60
+// closed cycles and 48 goroutines grown, every one of them that second closer.
+func (c *connection) updateClosingState() {
 	// Handle connection closing cases
 	if c.state.stateType == ConnConnected && c.state.closing != nil && c.state.closing.LocalFin != nil {
 		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			c.logger.Trace("try close connection locally...", "dst.Peer", c.cid.Peer, "dst.Send", c.cid.Send, "dst.Recv", c.cid.Recv)
 		}
 		lastAckNum, isNone := c.state.SentPackets.LastAckNum()
-		if !isNone && lastAckNum == *c.state.closing.LocalFin {
+		// Only when the application asked to close entirely. A FIN sent by
+		// CloseWrite is acknowledged like any other packet and means nothing
+		// about the reading side, which is still someone's (:2178-2182).
+		if !isNone && lastAckNum == *c.state.closing.LocalFin && c.closeRequested {
 			c.state.stateType = ConnClosed
 			c.state.Err = nil
 		}
 	}
 
-	if c.state.stateType == ConnConnected && c.state.closing != nil && c.state.closing.RemoteFin != nil {
-		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-			c.logger.Trace("close connection remotely...", "dst.Peer", c.cid.Peer, "dst.Send", c.cid.Send, "dst.Recv", c.cid.Recv)
-		}
-		if !c.state.SentPackets.HasUnackedPackets() && c.state.RecvBuf.AckNum() == *c.state.closing.RemoteFin {
+	// A connection whose peer has closed its sending side is *not* finished.
+	//
+	// This used to move to ConnClosed as soon as the remote FIN was reached
+	// and everything sent had been acknowledged -- without this end ever
+	// sending a FIN of its own, and whatever its application was doing. That
+	// is the half-close, and refusing it was the one place libutp could do
+	// something an application here could not: a peer closing its sending side
+	// took the whole connection with it, its own unread data included.
+	//
+	// libutp holds the socket in CS_GOT_FIN and keeps delivering
+	// (utp_internal.cpp:2314 drops only what arrives past the FIN it has
+	// reached), until its application closes too. So does this now: the reader
+	// gets its end-of-stream marker from processReads when the receive buffer
+	// catches up to the FIN, and the writer carries on.
+	//
+	// Once the application *has* closed, though, this end is finished the
+	// moment everything it sent has been acknowledged. It does not wait for
+	// its own FIN to come back, and that is not laziness: the peer closed
+	// first, so by the time this FIN goes out the peer's connection is
+	// generally gone and nothing is left to acknowledge it. libutp reaches the
+	// same place by a different route -- the peer's socket answers the
+	// unmatched FIN with a RESET, and a socket with close_requested treats a
+	// RESET as a clean destroy rather than an error
+	// (utp_internal.cpp:2865-2868). This library cannot use that route,
+	// because its socket deliberately stays silent for a packet past a closed
+	// connection's FIN so that a peer doing a half-close is not told its
+	// connection broke. Ending here instead reaches the same state without
+	// needing the RESET.
+	//
+	// Removing this entirely was the first attempt at the half-close, and the
+	// soak test caught it: 29 connections still tracked after 60 closed
+	// cycles, 48 goroutines grown, all of them the side that closed second.
+	// LocalFin != nil is doing real work in this condition. shutdown() only
+	// emits the FIN once the send buffer and the pending writes have drained,
+	// so its presence is the proof that there is nothing left to send. Without
+	// it, "nothing unacknowledged" is true at every momentary gap between a
+	// window emptying and the next packet going out -- and closing there
+	// discards the rest. Measured: the half-close test stopped delivering its
+	// 512 KB reply, because Write returns when the data is buffered and the
+	// application closed straight after it.
+	if c.state.stateType == ConnConnected && c.state.closing != nil &&
+		c.state.closing.RemoteFin != nil && c.state.closing.LocalFin != nil &&
+		c.closeRequested {
+		if !c.state.SentPackets.HasUnackedPackets() &&
+			c.state.RecvBuf.AckNum() == *c.state.closing.RemoteFin {
 			c.processReads()
 			c.state.stateType = ConnClosed
 			c.state.Err = nil
 		}
 	}
 
-	if c.state.stateType == ConnConnected && c.state.closing != nil && c.state.closing.RemoteFin != nil && c.state.closing.LocalFin != nil {
+	// Both sides have sent a FIN. That still does not end it on its own: the
+	// application may not have read what arrived before the peer's FIN, and
+	// tearing down here would discard it. The same close_requested rule
+	// applies -- a connection whose application never closes ends on the idle
+	// timeout, which is what libutp does with a socket its embedder forgets.
+	if c.state.stateType == ConnConnected && c.state.closing != nil &&
+		c.state.closing.RemoteFin != nil && c.state.closing.LocalFin != nil &&
+		c.closeRequested {
 		c.state.stateType = ConnClosed
 		c.state.Err = nil
 	}

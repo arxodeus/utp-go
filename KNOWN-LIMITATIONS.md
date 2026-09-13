@@ -558,29 +558,56 @@ against `utp_internal.cpp` in this fork.
   packet will take — it is assigned and then incremented in `send_packet`
   (`:1088-1089`), so a STATE never consumes one.
 
-### No half-close: we tear the connection down on the peer's FIN
+### ~~No half-close~~ — implemented
 
-**Found; the wire symptom is fixed, the limitation is not.** libutp keeps the
-socket in `CS_GOT_FIN` when the peer closes its sending side; the connection
-stays alive until the local application closes it too, and the application can
-keep reading and writing. We move straight to `ConnClosed` once the remote FIN
-is reached and everything we sent is acked.
+**Was: the one capability libutp had and this library did not.** Now closed.
 
-What the peer sees is now the same either way. A late retransmission is
-answered with the connection's last acknowledgement rather than a RESET, and
-data arriving *past* the FIN draws silence, exactly as libutp's `CS_GOT_FIN`
-does — see "A finished connection told its peer the connection had broken"
-below. `netem.TestPeerMayWriteAfterOurFin` drives real libutp into writing
-4 KiB after our `Close()` and asserts it sees no error and no RESET.
+libutp keeps the socket in `CS_GOT_FIN` when the peer closes its sending side,
+goes on delivering to its application, and offers `utp_shutdown(s, SHUT_WR)`
+for the other direction. This library moved straight to `ConnClosed` once the
+remote FIN was reached, so a peer that closed its sending side took the whole
+connection with it and whatever it was still sending back was lost.
 
-What remains is above the wire: that 4 KiB is dropped, where libutp would hand
-it to its application, and our application cannot write after the peer's FIN at
-all. Supporting that means a new connection state and a write path that
-survives the peer's FIN — a larger change than the audit that found it, and one
-that should be made deliberately rather than as a drive-by.
+`UtpStream.CloseWrite` and `utpnet.Conn.CloseWrite` now do what
+`utp_shutdown(SHUT_WR)` does, and reaching the peer's FIN no longer ends the
+connection. Proven against the reference:
+`netem.TestCloseWriteDeliversWhatThePeerSendsAfterIt` half-closes, libutp sees
+end of stream and sends 4096 bytes back, and all of it is read.
 
-`TestConformanceDataAfterReachedFin` pins the wire behaviour against real
-libutp and fails if either side changes.
+Three things had to be right, and each was wrong first:
+
+- **`CloseWrite` cannot reuse `Close`'s wake-up event.** The event loop sets
+  `stream.shutdown` from `streamShutdown`, so every half-close promoted itself
+  to a full close and the read side died immediately. It has its own event now.
+- **A FIN being acknowledged must not end a half-closed connection.** libutp
+  destroys on that only when `close_requested` is set
+  (`utp_internal.cpp:2178-2182`), and `utp_shutdown` does not set it where
+  `utp_close` does. Without the same distinction the read side died as soon as
+  the FIN came back.
+- **The side that closes second still has to finish.** Removing the
+  FIN-reached teardown outright left it waiting for a FIN acknowledgement that
+  could never come, because the first closer's connection was already gone: the
+  soak test measured 29 connections still tracked after 60 closed cycles and 48
+  goroutines grown. It ends once its application has closed, its own FIN has
+  gone out and everything it sent is acknowledged. libutp gets there by another
+  route — the peer's socket answers the unmatched FIN with a RESET, and a
+  socket with `close_requested` treats a RESET as a clean destroy
+  (`:2865-2868`) — which this library cannot use, because its socket
+  deliberately stays silent there so a half-closing peer is not told its
+  connection broke.
+
+Two details of that last point are worth keeping. `LocalFin != nil` is part of
+the condition because `shutdown()` only emits the FIN once the send buffer has
+drained, which makes its presence the proof that nothing is left to send;
+without it, the momentary gap between a window emptying and the next packet
+going out counted as "finished" and truncated a 512 KB reply. And the check had
+to move out of `onPacket` into the event loop as well, because the second
+closer sends its FIN into a peer that is already gone and no packet ever
+arrives to trigger it again.
+
+The soak test now finishes in **0.93s where it took 131s**, with 0 tracked
+connections against 5 before: teardown no longer waits for a packet to notice
+it.
 
 ## The loss-recovery path, audited against libutp (M4)
 

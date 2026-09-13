@@ -263,3 +263,14 @@ func (d *deadline) wait() (<-chan time.Time, bool, func()) {
 	}()
 	return ch, false, stop
 }
+
+// CloseWrite finishes the sending side and leaves the reading side open, as
+// net.TCPConn.CloseWrite does.
+//
+// It is here because callers type-assert for it: anything holding a net.Conn
+// that wants a half-close looks for `interface{ CloseWrite() error }` rather
+// than for a concrete type. A BitTorrent client uses it to say it has finished
+// uploading while it is still downloading.
+func (c *Conn) CloseWrite() error {
+	return c.stream.CloseWrite()
+}

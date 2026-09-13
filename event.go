@@ -5,6 +5,11 @@ type StreamEventType int
 const (
 	streamIncoming StreamEventType = iota
 	streamShutdown
+	// streamCloseWrite wakes the event loop for a half-close. It is separate
+	// from streamShutdown because that one means "finished entirely" and sets
+	// the flag to prove it; CloseWrite only needs the loop to notice that the
+	// sending side is done, and must not be mistaken for a full close.
+	streamCloseWrite
 )
 
 type socketEventType int

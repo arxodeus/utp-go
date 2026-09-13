@@ -635,10 +635,10 @@ cannot take it but we can also say nothing, so the socket drops it in silence.
 TestConformanceDataAfterReachedFin pins both halves and caught this fix twice
 -- once too broad, once too narrow.
 
-It is not a half-close, and does not pretend to be: the application still
-cannot read or write after the peer's FIN, so that payload is lost where libutp
-would have delivered it. It stops a finished connection lying to its peer about
-how it ended.
+That patch was not a half-close and did not pretend to be; the half-close
+itself is PR 34 below, and with it the payload reaches the application as
+libutp's does. This one stops a finished connection lying to its peer about how
+it ended, which is worth having on its own.
 
 Found only because libutp was run over a path that damages packets. The
 loopback interop gate cannot find this class of defect at all, which is worth
@@ -842,6 +842,48 @@ see which phase it was in, or because the measurement window opened at an
 instant when nothing was flowing yet. Every one of them asserts its own
 preconditions now, and every one was checked by removing the mechanism and
 confirming it fails.
+
+## PR 34 — the half-close
+
+The one capability libutp had that this library did not.
+
+libutp holds a socket in `CS_GOT_FIN` when the peer closes its sending side and
+keeps delivering to its application, and offers `utp_shutdown(s, SHUT_WR)`
+(`utp.h:176`) for the other direction. This library moved to `ConnClosed` as
+soon as the remote FIN was reached, so a peer closing its sending side took the
+whole connection with it, and whatever it was still sending back was lost.
+
+`UtpStream.CloseWrite`, plus `utpnet.Conn.CloseWrite` so that a caller holding
+a `net.Conn` finds it by type assertion — the name follows
+`net.TCPConn.CloseWrite` rather than `shutdown(how)`, because that is what Go
+callers reach for.
+
+Measured against the reference:
+`netem.TestCloseWriteDeliversWhatThePeerSendsAfterIt` half-closes, real libutp
+sees end of stream and sends 4096 bytes back, and all of it is read. The same
+exchange with `Close` still discards the reply, correctly, and
+`netem.TestPeerMayWriteAfterOurFin` pins that half.
+
+Three things it turns on, each of which was wrong first and is written up in
+KNOWN-LIMITATIONS.md:
+
+1. `CloseWrite` needs its own wake-up event. The loop sets `stream.shutdown`
+   from `streamShutdown`, so sharing it promoted every half-close to a full
+   close.
+2. A FIN being acknowledged must not end a half-closed connection. libutp
+   destroys on that only when `close_requested` is set (`:2178-2182`), and
+   `utp_shutdown` does not set it where `utp_close` does.
+3. The side that closes second must still finish. It cannot wait for its FIN to
+   be acknowledged, because the first closer is already gone — libutp gets a
+   RESET there and treats it as a clean destroy (`:2865-2868`), a route this
+   library cannot use since its socket stays silent for a half-closing peer.
+   Without this the soak test measured 29 connections still tracked after 60
+   closed cycles.
+
+A side effect worth mentioning: the closing check moved out of `onPacket` into
+the event loop, because the second closer's FIN goes to a peer that will never
+answer. Teardown no longer waits for a packet to notice, and the soak test went
+from 131s to 0.93s.
 
 ## Not for upstream
 

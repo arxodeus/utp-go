@@ -139,41 +139,36 @@ with one data packet before feeding them generated input: without that, every
 sequence not starting with data reports this divergence instead of finding a
 new one.
 
-## No half-close
+## ~~No half-close~~ — closed
 
-**This one has a measured cost.** See below.
+**This was the one place libutp could do something an application here could
+not.** It is implemented.
 
-**We tear the connection down when the peer's FIN is reached. libutp keeps it
-alive.**
+libutp holds a socket in `CS_GOT_FIN` when the peer closes its sending side and
+keeps delivering to its application, and offers `utp_shutdown(s, SHUT_WR)`
+(`utp.h:176`) for the other direction. This library tore the connection down on
+reaching the peer's FIN, so a peer closing its sending side took the whole
+connection with it — including whatever it was still trying to send back.
 
-libutp moves the socket to `CS_GOT_FIN` and waits for the local application to
-close as well. `connection.eventLoop` moves to `ConnClosed` as soon as the
-remote FIN is reached and everything we sent is acked, so an application here
-cannot read or write after its peer has closed its sending side.
+`UtpStream.CloseWrite`, and `utpnet.Conn.CloseWrite` so that anything holding a
+`net.Conn` can find it by type assertion, now do what `utp_shutdown(SHUT_WR)`
+does: flush, send the FIN, keep reading. And reaching the peer's FIN no longer
+ends the connection — the reader gets its end-of-stream marker and the writer
+carries on.
 
-Reason: none that justifies it. This is a gap, not a choice — recorded here
-because it is a live behavioural difference, and in
-[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) as work still to do.
+Measured against real libutp
+(`netem.TestCloseWriteDeliversWhatThePeerSendsAfterIt`): we write, half-close,
+libutp sees end of stream and sends 4096 bytes back, and we read all of them.
+The same exchange with `Close` still discards the reply, correctly, because
+there is nobody left to give it to —
+`netem.TestPeerMayWriteAfterOurFin` pins that half.
 
-
-Running libutp over a lossy path showed what it costs: 4 of 20 transfers ended
-with libutp reporting `UTP_ECONNRESET` on data that had in fact all arrived.
-We acknowledge the peer's FIN and tear down; if that acknowledgement is lost,
-the peer's retransmission finds no connection and draws a RESET. libutp, which
-holds the socket in `CS_GOT_FIN`, simply acknowledges it again.
-
-The socket now keeps the closing connection's acknowledgement for ten seconds
-and answers a late packet with it instead of a RESET; for a packet *past* that
-acknowledgement — data the peer sent after we closed, which libutp would have
-delivered to its application — it stays silent, as libutp's `CS_GOT_FIN` does.
-Measured: 0 of 30 seeds fail where 4 of 20 did, and a peer that writes after
-our FIN sees no error and no RESET
-(`netem.TestPeerMayWriteAfterOurFin`, `netem.TestLibutpCleanCloseSurvivesLostFinAck`).
-
-So the *wire* behaviour now matches. What does not is above it: libutp would
-hand that late payload to its application and let it reply, and we drop it.
-That is the half-close itself, and it is still unmade. What has gone is a
-finished connection telling its peer that it broke.
+What the implementation turns on, which is not obvious: libutp destroys a
+socket whose FIN has been acknowledged only when `close_requested` is set
+(`utp_internal.cpp:2178-2182`), and `utp_shutdown` does not set it where
+`utp_close` does. Without that distinction a half-close would end the moment
+its own FIN came back, which is the opposite of the point. `closeRequested`
+here is the same flag.
 
 ## The selective-ack window
 

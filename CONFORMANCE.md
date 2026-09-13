@@ -246,19 +246,19 @@ acting on one means guessing which packets the peer meant to ack.
 that we stay silent, *and* that libutp still answers. If libutp ever tightens
 this, the case fails rather than quietly agreeing.
 
-**We have no half-close; libutp does.** On reaching the peer's FIN we tear the
-connection down, where libutp keeps the socket in `CS_GOT_FIN` until the local
-application closes it too and goes on delivering to its application.
+**~~We have no half-close; libutp does.~~** We do now. Reaching the peer's FIN
+no longer ends the connection: the reader gets its end-of-stream marker and the
+writer carries on, as libutp's `CS_GOT_FIN` does, and `CloseWrite` is the
+`utp_shutdown(SHUT_WR)` half.
+`netem.TestCloseWriteDeliversWhatThePeerSendsAfterIt` reads 4096 bytes that
+real libutp sent after our FIN.
 
-The difference is no longer visible to the peer. Data arriving after that point
-draws nothing from either side: the socket holds the closed connection's
-acknowledgement for ten seconds, repeats it for a retransmission, and drops
-anything past it in silence.
-`TestConformanceDataAfterReachedFin` pins that parity — it asserts that neither
-side emits anything, so it fails if libutp changes *or* if we start answering
-again. What is still unmade is the half-close itself: a connection state and a
-read/write path that survive the peer's FIN, so the payload reaches the
-application as it would under libutp.
+What `TestConformanceDataAfterReachedFin` pins is the other case, and it is
+unchanged: after a full `Close` the application has said it is finished, so
+data arriving past the FIN we already reached is dropped — silently, exactly as
+libutp's socket drops what arrives past a FIN it has reached. Neither side
+emits anything, so the case fails if libutp changes *or* if we start answering
+again.
 
 **libutp completes an incoming connection only on data; we complete it on the
 handshake.** `if (pk_flags == ST_DATA && conn->state == CS_SYN_RECV)

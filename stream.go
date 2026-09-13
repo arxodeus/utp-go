@@ -25,9 +25,12 @@ type UtpStream struct {
 	writes       chan *queuedWrite
 	streamEvents chan *streamEvent
 	shutdown     *atomic.Bool
-	connHandle   *sync.WaitGroup
-	conn         *connection
-	closeOnce    sync.Once
+	// writeClosed is set by CloseWrite: this end has finished sending, but is
+	// still reading. Distinct from shutdown, which means finished entirely.
+	writeClosed atomic.Bool
+	connHandle  *sync.WaitGroup
+	conn        *connection
+	closeOnce   sync.Once
 	// abandoned is closed by Close, telling the connection that whatever is
 	// still buffered for this reader is owed to nobody.
 	abandoned  chan struct{}
@@ -226,7 +229,7 @@ func (s *UtpStream) Read(ctx context.Context, buf []byte) (int, error) {
 }
 
 func (s *UtpStream) Write(ctx context.Context, buf []byte) (int, error) {
-	if s.shutdown.Load() {
+	if s.shutdown.Load() || s.writeClosed.Load() {
 		return 0, ErrNotConnected
 	}
 	resCh := make(chan *readOrWriteResult, 1)
@@ -276,6 +279,41 @@ func (s *UtpStream) Write(ctx context.Context, buf []byte) (int, error) {
 		return 0, s.streamCtx.Err()
 	}
 	return writtenLen, err
+}
+
+// CloseWrite finishes this end's sending side and leaves the reading side
+// open: everything already written is flushed, a FIN goes out behind it, and
+// the peer may go on sending for as long as it likes.
+//
+// This is the half-close, and libutp has had it all along -- `utp_shutdown(s,
+// SHUT_WR)` (utp.h:176), with the socket sitting in CS_GOT_FIN while its
+// application keeps reading. This library did not, which was the one place the
+// reference could do something an application here could not: on reaching the
+// peer's FIN the connection tore itself down, so a peer that closed its
+// sending side took the whole connection with it.
+//
+// The name follows net.TCPConn.CloseWrite rather than libutp's shutdown(how),
+// because that is what Go callers reach for and what libraries type-assert:
+// anything holding a net.Conn will look for `interface{ CloseWrite() error }`.
+//
+// After it returns, Write reports ErrNotConnected. Read is unaffected and
+// keeps returning data until the peer closes too. Close still does what it
+// always did, and is what actually ends the connection.
+func (s *UtpStream) CloseWrite() error {
+	if s.shutdown.Load() {
+		return ErrNotConnected
+	}
+	if s.writeClosed.Swap(true) {
+		return nil
+	}
+	// Its own event, not the one Close uses: that one means "finished
+	// entirely" and the loop sets stream.shutdown from it, which would turn
+	// every half-close into a full one. This only has to wake the loop.
+	select {
+	case s.streamEvents <- &streamEvent{Type: streamCloseWrite}:
+	default:
+	}
+	return nil
 }
 
 func (s *UtpStream) Close() {
