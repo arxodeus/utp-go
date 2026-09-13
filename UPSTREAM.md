@@ -725,6 +725,28 @@ Worth sending together because the test module that found them is the third
 thing in the patch: `integration/nettest`, a separate Go module so nothing a
 caller depends on grows.
 
+## PR 30 — the shared port leaked a goroutine per datagram
+
+`utpnet.Socket` is a `net.PacketConn` so a BitTorrent client can run its DHT on
+the same UDP port as its uTP connections. Both `ReadFrom` and `WriteTo` asked
+the deadline for a timer channel, and the deadline started a goroutine to serve
+it; with no deadline set -- the normal case, and the only case for a DHT --
+that goroutine parked until the deadline was next changed, which for such a
+caller is never. `WriteTo` discarded the channel outright and leaked one per
+call regardless.
+
+Measured: 500 `WriteTo` and 500 `ReadFrom` calls left exactly 1000 extra
+goroutines (40 before, 1040 after). After the fix, 20 and 20.
+
+`deadline.wait` now returns a stop function that callers invoke on every path
+out, and `WriteTo` uses a new `deadline.expired`, which starts nothing because
+the answer is all it needed.
+
+Comes with the `net.PacketConn` contract tests that were missing with it --
+past deadlines, a deadline moved under a blocked read, Close unblocking a
+waiting read -- and a matching goroutine check on the connection path next
+door, which uses `deadline.context` instead and was already clean.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

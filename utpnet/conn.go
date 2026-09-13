@@ -200,29 +200,57 @@ func (d *deadline) context(parent context.Context) (context.Context, context.Can
 	return ctx, cancel, false, changed
 }
 
-// wait returns a channel that fires at the deadline, and reports whether the
-// deadline has already passed. A zero deadline gives a channel that never
-// fires until the deadline is changed.
-func (d *deadline) wait() (<-chan time.Time, bool) {
+// expired reports whether the deadline has already passed.
+//
+// It exists for callers that want only that answer. wait starts a goroutine to
+// serve its channel; a caller that discards the channel would leak it, which
+// is what WriteTo used to do -- once per datagram, for the life of the
+// process. See TestSharedPortDoesNotLeakGoroutines.
+func (d *deadline) expired() bool {
+	d.mu.Lock()
+	at := d.at
+	d.mu.Unlock()
+	return !at.IsZero() && !time.Now().Before(at)
+}
+
+// wait returns a channel that fires at the deadline, reports whether the
+// deadline has already passed, and returns a stop function the caller must
+// call when it is done with the channel. A zero deadline gives a channel that
+// never fires until the deadline is changed.
+//
+// The stop function is the whole point of the signature. Serving the channel
+// takes a goroutine, and until this returned one there was no way to end that
+// goroutine early: it parked until the deadline was next *changed*, which for
+// a caller that never sets one is never. Every ReadFrom left one behind.
+//
+// Call stop exactly once, on every path out.
+func (d *deadline) wait() (<-chan time.Time, bool, func()) {
 	d.mu.Lock()
 	at := d.at
 	changed := d.changed
 	d.mu.Unlock()
 
-	if at.IsZero() {
-		ch := make(chan time.Time)
-		go func() {
-			<-changed
-			close(ch)
-		}()
-		return ch, false
+	if !at.IsZero() && !time.Now().Before(at) {
+		return nil, true, func() {}
 	}
-	remaining := time.Until(at)
-	if remaining <= 0 {
-		return nil, true
-	}
-	timer := time.NewTimer(remaining)
+
+	done := make(chan struct{})
+	var once sync.Once
+	stop := func() { once.Do(func() { close(done) }) }
 	ch := make(chan time.Time, 1)
+
+	if at.IsZero() {
+		go func() {
+			select {
+			case <-changed:
+				close(ch)
+			case <-done:
+			}
+		}()
+		return ch, false, stop
+	}
+
+	timer := time.NewTimer(time.Until(at))
 	go func() {
 		defer timer.Stop()
 		select {
@@ -230,7 +258,8 @@ func (d *deadline) wait() (<-chan time.Time, bool) {
 			ch <- t
 		case <-changed:
 			close(ch)
+		case <-done:
 		}
 	}()
-	return ch, false
+	return ch, false, stop
 }

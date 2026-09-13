@@ -1734,6 +1734,62 @@ any reason to do. A near relative of this was fixed once before, on the
 send-buffer path (see the anacrolix module's README); the cancellation path
 kept it.
 
+## The shared port leaked a goroutine per datagram
+
+**Fixed.** `utpnet.Socket` is a `net.PacketConn` so that a BitTorrent client
+can run its DHT on the same UDP port as its uTP connections -- every DHT query
+and reply the client sends passes through `ReadFrom` and `WriteTo`. Both asked
+the deadline for a timer channel, and the deadline started a goroutine to serve
+it:
+
+```go
+if at.IsZero() {
+    ch := make(chan time.Time)
+    go func() {
+        <-changed          // only ever closed by SetDeadline
+        close(ch)
+    }()
+    return ch, false
+}
+```
+
+With no deadline set -- the normal case, and the only case for a DHT -- that
+goroutine parks until the deadline is next *changed*, which for a caller that
+never sets one is never. `WriteTo` was worse: it discarded the channel
+outright, so it leaked one per call whether a deadline was set or not.
+
+Measured: **500 `WriteTo` and 500 `ReadFrom` calls left exactly 1000 extra
+goroutines**, 40 before and 1040 after. A client doing a few hundred DHT
+messages a second accumulates a few hundred parked goroutines a second, for
+the life of the process.
+
+`wait` now returns a stop function that every caller invokes on every path out,
+and `WriteTo` uses a new `expired` that starts nothing, because the answer is
+all it wanted. Same measurement after the fix: 20 goroutines before, 20 after.
+
+Two things about the measurement were wrong first, and both would have hidden
+the leak rather than exposing it:
+
+- **Sending in bulk and draining afterwards loses datagrams.** The passthrough
+  queue is bounded and a UDP socket may drop; the drain stalled at 257 of 500.
+  The send and the read are now interleaved, each read satisfied by the
+  datagram just sent.
+- **Setting a deadline releases the leak.** `SetReadDeadline` closes `changed`,
+  which frees every goroutine parked on the old deadline. A drain loop bounded
+  by a read deadline would have freed exactly what it was counting. The test
+  sets no deadline anywhere.
+
+`TestSharedPortDoesNotLeakGoroutines` pins the packet path.
+`TestConnIODoesNotLeakGoroutines` pins the connection path next door, which
+goes through `deadline.context` instead and was already clean -- checked rather
+than assumed, because it is the same class of defect in the adjacent function.
+
+The rest of the `net.PacketConn` contract went untested with it and is now
+covered: a deadline already in the past failing both directions and continuing
+to until it is moved, a deadline moved under a blocked `ReadFrom`, and `Close`
+unblocking a waiting `ReadFrom` and keeping every later call closed. Those
+three passed first time.
+
 ## Things found but deliberately not fixed
 
 These are real and unresolved. Each needs a measurement harness (M1) or a

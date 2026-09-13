@@ -231,19 +231,24 @@ func isUtpPacket(b []byte) bool {
 // handled by Accept and DialContext.
 func (s *Socket) ReadFrom(p []byte) (int, net.Addr, error) {
 	for {
-		timeout, expired := s.readDeadline.wait()
+		timeout, expired, stop := s.readDeadline.wait()
 		if expired {
+			stop()
 			return 0, nil, timeoutError{}
 		}
 		select {
 		case <-s.closed:
+			stop()
 			return 0, nil, ErrSocketClosed
 		case d := <-s.passthrough:
+			stop()
 			n := copy(p, d.payload)
 			return n, d.from, nil
 		case <-timeout:
 			// The deadline may have been moved rather than reached; the loop
-			// re-checks it.
+			// re-checks it. stop() here too: the next pass starts its own
+			// waiter, and this one's goroutine has already served its purpose.
+			stop()
 		}
 	}
 }
@@ -258,7 +263,9 @@ func (s *Socket) WriteTo(p []byte, addr net.Addr) (int, error) {
 		return 0, ErrSocketClosed
 	default:
 	}
-	if _, expired := s.writeDeadline.wait(); expired {
+	// expired rather than wait: this path only needs the answer, and wait
+	// starts a goroutine to serve a channel WriteTo never reads.
+	if s.writeDeadline.expired() {
 		return 0, timeoutError{}
 	}
 	udpAddr, err := toUDPAddr(addr)
