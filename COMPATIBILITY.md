@@ -86,16 +86,15 @@ than "verified".
 | --- | --- | --- |
 | LEDBAT window adjustment | **Partly measured** | Seven defects found by reading `apply_ccontrol` against ours. Its *delay response* is now compared directly: `netem.TestCongestionRespondsToSelfInflictedQueue` cuts the bottleneck mid-transfer and measures the standing queue each side settles at -- libutp 112-113ms, ours 118ms, neither overflowing. The individual rules below are still only read |
 | Slow start | **Measured** | Was absent entirely. `netem.TestCongestionSlowStartRamp` compares the ramp against libutp's on an idle path: time to 90% of the link, libutp 588-640ms against ours 536-660ms |
-| Window decay rate limit | Cited | `MAX_WINDOW_DECAY`, `:51`, `:602-605` |
+| Window decay rate limit | **Measured** | `netem.TestWindowDecayIsRateLimited`: 25ms of 50% loss costs one halving (72212 to 37652 bytes, 52%, from 23 retransmissions and no timeouts). Unlimited, the same burst reaches the floor at 4% |
 | Timeout window handling | **Differential** | `netem.TestLibutpIdleWindowDecay` measures the idle branch against real libutp through its first flight: 29% of the window kept across 8s idle against our 30%, compared as decays-by-a-third so a differing expiry count is not read as a differing rule. The in-flight branch is still only cited (`:1223-1228`) |
 | Timeouts for acknowledged packets | **Measured** | `netem.TestQuietConnectionDoesNotTimeOut`: a quiet connection on a lossless link took 2 timeouts and 12 retransmissions of delivered data before the fix, 0 and 0 after |
 | Delay clamp to RTT | Cited | `:1617-1621` |
 | Application-limited guard | **Measured** | `netem.TestApplicationLimitedWindowDoesNotGrow`: after slow start ends, five seconds of 1 KB writes every 20ms leave the window unchanged to the byte (15677 -> 15677). Removing the guard makes it fail on every run |
 | **Behaviour under load** | **Measured** | `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite. Ours is faster on every profile, which reads as ours being more aggressive rather than better; libutp's LAN result is bimodal on its 1000ms RTO floor |
 
-Two rows above are still *cited*: the decay limiter and the delay clamp were
-matched by hand against `apply_ccontrol`, and only the aggregate behaviour they
-add up to
+One row above is still *cited*: the delay clamp was matched by hand against
+`apply_ccontrol`, and only the aggregate behaviour it takes part in
 has been compared against the reference. That aggregate comparison is worth
 having and it is not the same thing. Two implementations can reach the same
 goodput on a link by different routes, and this table would not tell them
@@ -127,7 +126,7 @@ so it sent 288-byte packets. Both are written up in
   compared directly against libutp: the delay response, by stepping the
   bottleneck down and measuring the standing queue each settles at, and slow
   start, by timing the ramp on an idle path. Still only read against the
-  source: the window decay rate limit and the delay clamp to RTT.
+  source: the delay clamp to RTT.
   Each would need a scenario that isolates it, the way the bandwidth step
   isolates the delay response.
 

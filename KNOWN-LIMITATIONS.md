@@ -2000,6 +2000,51 @@ the decay made it fail, with a message saying so and asking to be updated --
 which is what a test pinning a known divergence is for, and cheaper than
 noticing later that a comparison had silently inverted.
 
+## Measuring the window decay rate limit
+
+**No defect.** The rule was already right; it had only ever been read.
+
+libutp halves the congestion window on loss at most once per 100 ms:
+
+```cpp
+bool can_decay_win(int64 msec) const {
+    return (msec - last_rwin_decay) >= MAX_WINDOW_DECAY;   // 100 ms, :51
+}
+void maybe_decay_win(uint64 current_ms) {
+    if (can_decay_win(current_ms)) {
+        max_window = (size_t)(max_window * .5);
+        last_rwin_decay = current_ms;
+                                        (utp_internal.cpp:602-615)
+```
+
+and calls it once per acknowledgement that resent anything (`:1610`), not once
+per packet resent. So a queue overflow losing a dozen packets in one window
+costs one halving.
+
+`netem.TestWindowDecayIsRateLimited` stages exactly that -- the link drops half
+of what crosses it for 25 ms -- and measures: the window goes **72212 to 37652
+bytes, 52%, one halving**, from 23 retransmissions, five runs of five within a
+point. With the limit removed the same burst takes it to **2800 bytes, the
+floor, 4%**, on every run. That is the failure the rule prevents: halving per
+lost packet reaches a sixteenth on four losses and the floor on eight, after
+which the connection crawls.
+
+### Dropping everything measured nothing
+
+The first version blackholed the link for 25 ms and recovered nothing at all --
+zero retransmissions. With no packet arriving after the gap the receiver has
+nothing to acknowledge, so there are no duplicate acknowledgements, no fast
+retransmit, and recovery waits for the retransmission timeout. That is the one
+branch the test has to avoid, because a timeout collapses the window to a
+single packet through `:1223-1228` and would mask whatever the decay limiter
+did. Losing *half* a burst leaves plenty arriving to report the holes.
+
+The test asserts all three preconditions rather than assuming them: that the
+window was at least eight times its floor when the loss was staged, that at
+least three packets were actually retransmitted, and that no timeout fired
+during the recovery. The first version failed on the second of those, which is
+how the mistake was caught rather than measured around.
+
 ## Things found but deliberately not fixed
 
 These are real and unresolved. Each needs a measurement harness (M1) or a
