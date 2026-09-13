@@ -59,6 +59,7 @@ than "verified".
 | Selective-ack window width | Differential | Was unbounded; libutp scans a fixed 30 entries |
 | Reorder-window bound | Differential | Was absent; a peer could push us anywhere in the sequence space |
 | Ack-number validation | Differential | Was absent, and previously *claimed* to match |
+| Unmatched ack numbers | **Measured** | libutp discards the count and carries on (`if (acks > cur_window_packets) acks = 0;`, `:1907`); we reset the connection. Fixed. Not visible to the corpus -- both sides answer with silence -- so it is asserted on connection state instead: `TestStaleAckIsIgnoredNotFatal`, `TestAckForAPacketNeverSentIsDropped` |
 | Duplicate data | Differential | `DuplicateData` |
 | FIN handling | Differential | Corpus; libutp acks twice, we once |
 | Data past a reached FIN | Differential | Silence on both sides after a full `Close`. After `CloseWrite` it is delivered, which is the half-close: `netem.TestCloseWriteDeliversWhatThePeerSendsAfterIt` reads 4096 bytes real libutp sent after our FIN |

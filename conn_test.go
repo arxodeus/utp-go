@@ -169,15 +169,26 @@ func TestOnPacketInvalidAckNum(t *testing.T) {
 		RecvBuf:     recvBuf,
 	}
 
-	// Process invalid ack
+	// An acknowledgement number past everything we have sent acknowledges
+	// nothing -- and leaves the connection alone. libutp:
+	//
+	//	// this happens when we receive an old ack nr
+	//	if (acks > conn->cur_window_packets) acks = 0;
+	//	                                (utp_internal.cpp:1904-1907)
+	//
+	// This used to require the opposite: state ConnClosed and
+	// ErrInvalidAckNum. That made one forged ST_STATE enough to end an
+	// established transfer, and made an ordinary late or duplicated
+	// acknowledgement fatal on a lossy path.
 	delay := 100 * time.Millisecond
 	ackResult := conn.processAck(synAck+2, nil, delay, now)
 
-	// Verify results
-	require.Equal(t, ConnClosed, conn.state.stateType, "expected state to be closed")
-	require.ErrorIs(t, conn.state.Err, ErrInvalidAckNum, "expected error to be %v, got %v", ErrInvalidAckNum, conn.state.Err)
-
-	require.Error(t, ackResult, "expected processAck to return an error")
+	require.NoError(t, ackResult, "an acknowledgement outside the window is ignored, not an error")
+	require.Equal(t, ConnConnected, conn.state.stateType,
+		"the connection must survive an acknowledgement it cannot match")
+	require.NoError(t, conn.state.Err, "no error should have been recorded")
+	require.True(t, conn.state.SentPackets.HasUnackedPackets(),
+		"the outstanding packet must still be outstanding: nothing was acknowledged")
 }
 
 func TestOnFinEstablished(t *testing.T) {

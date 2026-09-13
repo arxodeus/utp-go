@@ -948,7 +948,31 @@ out". That was true while running out of SYN attempts was the only way to
 fail; refused and timed out are now different answers, and the error is
 wrapped so `errors.Is` finds either.
 
-## PR 37 — two timing assumptions in the differential fuzz harness
+## PR 37 — an unmatched acknowledgement killed the connection
+
+`sentPackets.onAck` returned `ErrInvalidAckNum` for an acknowledgement number
+outside the range it tracked, and `processAck` turned that into a reset.
+libutp discards the count and carries on: `if (acks > cur_window_packets) acks
+= 0;` (`utp_internal.cpp:1907`), commented "this happens when we receive an
+old ack nr".
+
+libutp's own pre-filter for acknowledgements of packets never sent is already
+implemented here (`invalidAckNum`, `:1794-1807`), so what reached the reset was
+a *stale* acknowledgement: behind the tracked range, still inside the
+three-packet tolerance below the last sequence number sent. A delayed or
+duplicated `ST_STATE` early in a connection is exactly that, and a forged one
+is a one-packet way to end an established transfer.
+
+CONFORMANCE.md had recorded this as a divergence the packet-injection corpus
+cannot see, because both implementations answer such a packet with silence.
+The tests therefore assert connection state, and one of them first checks that
+the pre-filter does not reject its own packet, so it cannot pass by never
+reaching the branch.
+
+One deliberate narrowing: the selective-ack extension on such a packet is
+dropped with it, where libutp still applies it. Reasoning in DEVIATIONS.md.
+
+## PR 38 — two timing assumptions in the differential fuzz harness
 
 Not a library change, but it belongs in the same review: both differential
 fuzz targets primed their run with a fixed `time.Sleep(20ms)` and settled each

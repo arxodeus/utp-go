@@ -321,10 +321,12 @@ none.
   in what order. Comparing latency needs an injectable clock in our
   connection.
 - **State is compared only through the wire.** Terminal outcomes are inferred
-  from emitted packets, not read out of either implementation. Notably, a
-  packet with an invalid `ack_nr` produces silence from both — but ours resets
-  the connection internally where libutp merely ignores the packet, and this
-  corpus cannot see that difference.
+  from emitted packets, not read out of either implementation. The divergence
+  this used to name — a packet with an unmatched `ack_nr` produced silence from
+  both, while ours reset the connection internally and libutp merely ignored
+  the packet — has since been fixed (`TestStaleAckIsIgnoredNotFatal`), but the
+  limit itself stands: a corpus that reads only emitted packets cannot tell a
+  connection that is alive from one that has just died quietly.
 - **Malformed headers are barely covered.** Truncated packets, bad version
   nibbles, unknown extension types and malformed extension chains are not in
   the corpus. That is the gap most likely to hide another finding, and it is

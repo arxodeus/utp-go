@@ -321,6 +321,30 @@ this packet's own RTT.
 What the clamp is for is unaffected, and is measured:
 `TestDelayClampedToRTT`.
 
+## A selective ack riding on an unmatched acknowledgement is dropped
+
+libutp applies the selective-ack extension whatever `ack_nr` says. When the
+cumulative acknowledgement covers nothing -- `if (acks > cur_window_packets)
+acks = 0;` (utp_internal.cpp:1907) -- the extension is still read, relative to
+that same acknowledgement number.
+
+`processAck` drops both together. The reason is concrete and narrow: this
+implementation applies the extension relative to the cumulative
+acknowledgement number, and that number has just been established to name
+nothing this connection is tracking. Honouring the extension would mean
+indexing the loss-detection machinery off a figure already known to be
+outside the window, which is reachable by anyone who can source-spoof one
+`ST_STATE`.
+
+What is lost is small and self-correcting: the peer's next acknowledgement
+carries the same selective-ack information against a cumulative number that
+does match. What is gained is that no untrusted acknowledgement number reaches
+loss detection.
+
+The cumulative half of the rule is not a deviation -- ignoring the
+acknowledgement is exactly what libutp does, and resetting the connection was
+the bug. See [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
+
 ## ICMP: the next-hop MTU is converted from a link MTU to a payload size
 
 libutp takes the figure an ICMP fragmentation-needed message carries and

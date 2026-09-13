@@ -2144,8 +2144,44 @@ func (c *connection) processAck(
 				"seqEnd", seqRange.end)
 		}
 		if errors.Is(err, ErrInvalidAckNum) {
-			c.reset(err)
-			return err
+			// An acknowledgement number outside what this connection has
+			// outstanding acknowledges nothing. It does not end the
+			// connection.
+			//
+			// libutp computes how many packets an acknowledgement covers and
+			// then throws the answer away when it exceeds the window:
+			//
+			//	int acks = (pk_ack_nr - (conn->seq_nr - 1 - conn->cur_window_packets)) & ACK_NR_MASK;
+			//	// this happens when we receive an old ack nr
+			//	if (acks > conn->cur_window_packets) acks = 0;
+			//	                                (utp_internal.cpp:1904-1907)
+			//
+			// This used to call reset, which is the divergence
+			// CONFORMANCE.md records as one the packet-injection corpus
+			// cannot see: both sides answer such a packet with silence, so
+			// the transcripts match while one connection is dead and the
+			// other is not.
+			//
+			// Two reasons it had to go. It is an attack surface -- a single
+			// forged ST_STATE from anyone who can guess a connection id ends
+			// an established transfer -- and it is a live defect: a delayed
+			// or duplicated acknowledgement arriving after the window has
+			// moved on is an ordinary event on a lossy path, and it killed
+			// connections that should have carried on. It is what made
+			// integrated.TestCloseSucceedsIfOnlyFinAckDropped fail about one
+			// run in eight, reporting "invalid ack number" where the test
+			// expects the idle timeout.
+			//
+			// The selective-ack extension on such a packet is dropped with
+			// it, where libutp would still apply it. That is deliberate and
+			// narrow: our extension is applied relative to this same
+			// acknowledgement number, so honouring it would mean indexing the
+			// loss-detection machinery off a figure just established to be
+			// outside the window.
+			c.logger.Debug("ignoring an acknowledgement outside the window",
+				"ackNum", ackNum, "seqStart", seqRange.start, "seqEnd", seqRange.end,
+				"cid.send", c.cid.Send, "cid.recv", c.cid.Recv)
+			return nil
 		}
 		return err
 	}

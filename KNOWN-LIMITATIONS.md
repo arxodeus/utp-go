@@ -1417,6 +1417,59 @@ A probe lost alongside other packets left `probing` set forever, and since
 `eligibleProbe` refuses to start a second probe while one is outstanding, the
 search froze. Now fixed, to match.
 
+## An acknowledgement the connection could not match killed it
+
+**Fixed.** Found by the ICMP work, not by looking for it: the new tests shifted
+the load enough to make `integrated.TestCloseSucceedsIfOnlyFinAckDropped` fail
+about one run in eight, reporting "invalid ack number" where the test expects
+the idle timeout. On the tree before those tests it still failed 1 run in 8;
+under the load of a full run, 2 in 4.
+
+`sentPackets.onAck` returned `ErrInvalidAckNum` for an acknowledgement number
+outside the range it was tracking, and `processAck` turned that into
+`connection.reset`. libutp does no such thing:
+
+```cpp
+int acks = (pk_ack_nr - (conn->seq_nr - 1 - conn->cur_window_packets)) & ACK_NR_MASK;
+// this happens when we receive an old ack nr
+if (acks > conn->cur_window_packets) acks = 0;
+                                        (utp_internal.cpp:1904-1907)
+```
+
+The acknowledgement covers nothing. The connection carries on.
+
+This was already written down: [CONFORMANCE.md](CONFORMANCE.md) listed it under
+"State is compared only through the wire" as a divergence the packet-injection
+corpus *cannot see*, because both implementations answer such a packet with
+silence and the transcripts therefore agree while one connection is dead and
+the other is not. It sat there as a note because nothing had shown it costing
+anything. It was costing a connection.
+
+Two ways it bites:
+
+- **An ordinary stale acknowledgement.** libutp's own pre-filter
+  (`invalidAckNum` here, `utp_internal.cpp:1794-1807`) already drops anything
+  acking a packet never sent, so what reached the reset was an acknowledgement
+  *behind* the tracked range but still inside the three-packet tolerance below
+  the last sequence number sent. A delayed or duplicated `ST_STATE` early in a
+  connection is exactly that, and on a lossy path it is routine.
+- **A forged one.** Anyone who can guess a connection id and source-spoof a
+  single `ST_STATE` inside that narrow band ends an established transfer.
+
+`processAck` now ignores the acknowledgement and returns. The selective-ack
+extension on such a packet goes with it, where libutp would still apply it;
+that is deliberate and recorded in [DEVIATIONS.md](DEVIATIONS.md), because our
+extension is applied relative to the same acknowledgement number that has just
+been established to be outside the window.
+
+Asserted on connection state rather than on emitted packets, since that is the
+whole reason the corpus missed it: `TestStaleAckIsIgnoredNotFatal` (which
+first checks that the pre-filter does *not* reject its packet, so it cannot
+pass by never reaching the branch), `TestAckForAPacketNeverSentIsDropped`, and
+`TestOnPacketInvalidAckNum`, which previously required the opposite. The
+integrated test then passed 8 runs out of 8; more to the point, the error it
+was failing with no longer exists.
+
 ## A path MTU below the size already adopted stalls the connection
 
 **Open, and it is libutp's limitation as much as ours.** The most serious thing
