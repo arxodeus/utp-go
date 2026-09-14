@@ -34,8 +34,18 @@ type ConnectionMetrics struct {
 	// Timeout is the current retransmission timeout.
 	Timeout time.Duration
 	// BaseDelay is the lowest one-way delay seen in the delay window:
-	// LEDBAT's estimate of the path with an empty queue.
-	BaseDelay time.Duration
+	// LEDBAT's estimate of the path with an empty queue. CurrentDelay is the
+	// newest sample of the same series.
+	//
+	// That series is the peer's measurement of *our* outgoing path -- the
+	// timestamp_difference field it stamps on every packet, libutp's
+	// `our_hist` (utp_internal.cpp:2016-2021). It is the direction this
+	// sender's packets travel, and therefore the one LEDBAT controls.
+	//
+	// Not to be confused with PeerTsDiff below, which measures the other
+	// direction entirely.
+	BaseDelay    time.Duration
+	CurrentDelay time.Duration
 	// --- path MTU ---
 
 	// MtuCurrent is the datagram size the search is currently sending, and
@@ -52,9 +62,14 @@ type ConnectionMetrics struct {
 	MtuFloor   uint32
 	MtuCeiling uint32
 
-	// PeerTsDiff is the most recent one-way delay measured from the peer's
-	// timestamps -- the raw delay signal. Queueing delay is roughly
-	// PeerTsDiff minus BaseDelay.
+	// PeerTsDiff is the one-way delay this end measured from the peer's
+	// timestamps: how long the peer's last packet took to arrive here. It is
+	// what gets echoed back in timestamp_difference_microseconds, and it is
+	// libutp's `their_delay` (utp_internal.cpp:2000-2001).
+	//
+	// It is the *inbound* path. BaseDelay and CurrentDelay are the outbound
+	// one. Subtracting across the two is meaningless, which is what
+	// QueueingDelay used to do -- see the note there.
 	PeerTsDiff time.Duration
 	// TargetDelayMicros is the standing queue the controller aims for.
 	TargetDelayMicros uint32
@@ -109,17 +124,34 @@ func (m ConnectionMetrics) RetransmitRate() float64 {
 	return float64(m.PacketsRetransmitted) / float64(m.PacketsSent)
 }
 
-// QueueingDelay estimates the standing queue as the excess of the current
-// one-way delay over the lowest one seen. This is the quantity LEDBAT exists
-// to bound, and the number the M5 gates are judged on.
+// QueueingDelay estimates the standing queue on the path this connection is
+// sending into, as the excess of the current one-way delay over the lowest one
+// seen. This is the quantity LEDBAT exists to bound.
+//
+// Both terms come from the same series and the same direction -- the peer's
+// measurement of our outbound path. **They did not.** This subtracted
+// BaseDelay, an outbound figure, from PeerTsDiff, an inbound one, and the
+// difference between two directions is not a queue in either of them. On an
+// asymmetric path -- which is most paths, and every consumer broadband link --
+// it was a constant offset with the actual queue buried in it.
+//
+// The congestion controller was never affected: it compares the current
+// sample against the base from the same series, in hand at the point it acts
+// (congestion.go, defaultController.OnAck). What this fed was the queueing
+// delay netem's Recorder reports, which is diagnostic.
+//
+// The comment here also used to claim this was "the number the M5 gates are
+// judged on". It was not: those gates read the emulated link's own
+// MeanQueueDelay, measured at the bottleneck rather than inferred from
+// timestamps, which is why they stayed sound while this did not.
 //
 // It is only meaningful once BaseDelay has been established; before then it
 // returns zero.
 func (m ConnectionMetrics) QueueingDelay() time.Duration {
-	if m.BaseDelay <= 0 || m.PeerTsDiff <= m.BaseDelay {
+	if m.BaseDelay <= 0 || m.CurrentDelay <= m.BaseDelay {
 		return 0
 	}
-	return m.PeerTsDiff - m.BaseDelay
+	return m.CurrentDelay - m.BaseDelay
 }
 
 // MetricsObserver receives connection snapshots.

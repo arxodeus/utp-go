@@ -1001,7 +1001,30 @@ the size of a `static utp_iovec[1024]` rather than anything the protocol says
 — and silently truncating a caller's buffers to honour an array bound we do
 not have would be a defect, not fidelity.
 
-## PR 39 — two timing assumptions in the differential fuzz harness
+## PR 39 — a queueing-delay metric that subtracted two different directions
+
+`ConnectionMetrics.QueueingDelay` computed `PeerTsDiff - BaseDelay`. Those are
+measurements of opposite paths: `BaseDelay` is the base of the series the peer
+reports about our outbound packets (libutp's `our_hist`,
+`utp_internal.cpp:2016-2021`), `PeerTsDiff` our own measurement of the inbound
+one (`their_delay`, `:2000-2001`). The difference between two directions is not
+a queue in either; on an asymmetric path it is the asymmetry with the real
+queue buried in it.
+
+`ControllerStats` now carries `CurrentDelay`, the newest sample of the same
+series `BaseDelay` is the minimum of, and the metric is their difference. Both
+halves are tested: a 10ms/100ms path with no bottleneck (1.9ms corrected
+against 90.7ms uncorrected, both computed from the same samples so the
+comparison is not a claim about a previous run), and a real bottleneck
+cross-checked against the emulated link's own measurement (78.9ms against
+84.7ms).
+
+The congestion controller was never affected — it compares a sample against the
+base of the same series, in hand at the point it acts. The doc comment claiming
+this was "the number the M5 gates are judged on" was also wrong; those gates
+read the link's `MeanQueueDelay`.
+
+## PR 40 — two timing assumptions in the differential fuzz harness
 
 Not a library change, but it belongs in the same review: both differential
 fuzz targets primed their run with a fixed `time.Sleep(20ms)` and settled each

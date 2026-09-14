@@ -1330,6 +1330,7 @@ func (c *connection) sampleMetrics(now time.Time, force bool) {
 		m.RTTVarianceMicros = cs.RTTVarianceMicros
 		m.Timeout = cs.Timeout
 		m.BaseDelay = cs.BaseDelay
+		m.CurrentDelay = cs.CurrentDelay
 		m.TargetDelayMicros = cs.TargetDelayMicros
 		m.SlowStart = cs.SlowStart
 		m.AppLimitedSince = cs.AppLimitedSince

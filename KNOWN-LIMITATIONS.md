@@ -1472,17 +1472,114 @@ Two deviations, both recorded in [DEVIATIONS.md](DEVIATIONS.md): it blocks
 has no `UTP_IOV_MAX`, because that cap is the size of a static array rather
 than a protocol rule.
 
-### What the audit found still missing
+### What the audit found still missing, and why
 
-Not features, and each already recorded above or in
-[DEVIATIONS.md](DEVIATIONS.md): the MTU ceiling is a fixed 1400 rather than
-`UTP_GET_UDP_MTU`; probes carry no don't-fragment bit; `utp_get_delays`'
-`theirs` is not tracked, since no delay histogram is kept for the peer's own
-measurements; `utp_get_context_stats` and `UTP_ON_OVERHEAD_STATISTICS` have no
-equivalent (packet-size histograms and per-packet overhead accounting), and
-`ConnectionMetrics` otherwise covers `utp_socket_stats` and more, except
-`nduprecv`; and there is no injectable clock, which is why the conformance
-corpus still cannot compare ack *latency*.
+**The MTU ceiling is a fixed 1400 rather than `UTP_GET_UDP_MTU`.** The reason
+is the `Conn` interface — `ReadFrom`, `WriteTo`, `Close` and nothing else —
+which netem's emulated endpoints, the libutp driver and a real UDP socket all
+satisfy. Asking an operating system for an interface MTU has no place in it.
+
+That reason is weaker than it looks, and the earlier phrasing of this section
+overstated it. `ConnectionConfig.MaxPacketSize` is already settable by the
+embedder, and `Bind` produces a concrete `UdpConn` wrapping a real
+`*net.UDPConn` that could be asked. An optional interface — say
+`interface{ PathMTU(ConnectionPeer) (int, bool) }`, implemented by `UdpConn`
+alone — would close it without touching `Conn`. **Not done, rather than not
+possible.**
+
+**Probes carry no don't-fragment bit.** This one is genuinely blocked. Setting
+DF socket-wide is easy and wrong: libutp relies on ordinary data being
+fragmentable — "now we need it to fragment just to get it through"
+(`utp_internal.cpp:898-905`) — and wants DF only on probes. Per-packet DF
+needs `golang.org/x/net/ipv4`/`ipv6` `PacketConn` with per-write control
+messages: a new dependency, platform-specific, and it would still have to
+reach through `Conn`.
+
+**No context-wide statistics.** `utp_get_context_stats` (packet-size
+histograms), `UTP_ON_OVERHEAD_STATISTICS` (per-packet overhead accounting) and
+`utp_socket_stats.nduprecv` have no equivalent. Pure telemetry; nothing has
+needed it. `ConnectionMetrics` covers the rest of `utp_socket_stats` and a
+good deal more.
+
+**No injectable clock.** The connection reads `time.Now()` in dozens of places
+and the retransmit wheel uses real timers. Threading a clock through is
+mechanical but touches the whole timing surface, which is the part of this
+library that has produced the most defects. It is also the gap with the
+largest payoff: it is what stops the conformance corpus comparing ack
+*latency*, and it would remove the settle-loop timing assumptions that had to
+be repaired when the ICMP tests shifted the load.
+
+### `their_hist` is a missing mechanism, not a missing getter
+
+**Open.** This was first recorded as observability — "`utp_get_delays`'
+`theirs` is not tracked" — and that was wrong. `their_hist` has a functional
+role in libutp: correcting for clock skew between the two ends.
+
+```cpp
+uint32 prev_delay_base = conn->their_hist.delay_base;
+if (their_delay != 0) conn->their_hist.add_sample(their_delay, conn->ctx->current_ms);
+
+// if their new delay base is less than their previous one
+// we should shift our delay base in the other direction in order
+// to take the clock skew into account
+if (prev_delay_base != 0 &&
+    wrapping_compare_less(conn->their_hist.delay_base, prev_delay_base, TIMESTAMP_MASK)) {
+    // never adjust more than 10 milliseconds
+    if (prev_delay_base - conn->their_hist.delay_base <= 10000)
+        conn->our_hist.shift(prev_delay_base - conn->their_hist.delay_base);
+}
+                                        (utp_internal.cpp:2002-2014)
+```
+
+Two clocks drifting apart move *both* directions' delay bases together, so a
+drop in the peer's base is evidence of drift rather than of an emptier queue —
+and libutp shifts its own base by the same amount, at once.
+
+This library has the raw value: `connection.peerTsDiff`, reported as
+`ConnectionMetrics.PeerTsDiff`, is exactly libutp's `their_delay`. What it has
+no history of, so no base for, and therefore no correction from. Drift is
+corrected only by the 120-second sliding-window minimum in `delayAccumulator`
+ageing out its stale samples.
+
+**What that costs has not been measured, and no number is claimed here.** The
+emulated network shares one clock between both endpoints, so nothing in this
+repository can currently produce skew at all; measuring it needs a per-endpoint
+clock offset in `netem`, which would be the first piece of work on this.
+
+### A metric that subtracted two different directions
+
+**Fixed.** Found while writing up the reasons above.
+`ConnectionMetrics.QueueingDelay` computed `PeerTsDiff - BaseDelay`, and those
+are measurements of opposite paths: `BaseDelay` is the base of the series the
+peer reports about *our* outbound packets (libutp's `our_hist`,
+`utp_internal.cpp:2016-2021`), while `PeerTsDiff` is our own measurement of the
+*inbound* path (`their_delay`, `:2000-2001`). The difference between two
+directions is not a queue in either.
+
+On a symmetric emulated link the error is small, which is why it survived. On
+an asymmetric one it is the whole asymmetry:
+`netem.TestQueueingDelayMeasuresTheOutboundQueue` runs a 10ms outbound and
+100ms inbound path with no bottleneck at all, and reports both figures from the
+same samples — 1.9ms from the corrected metric, 90.7ms from the old one, on a
+path with no queue.
+
+`ControllerStats` now carries `CurrentDelay`, the newest sample of the same
+series `BaseDelay` is the minimum of, and the metric is their difference.
+`netem.TestQueueingDelayTracksARealQueue` checks the other half against the
+emulated link's own measurement at the bottleneck: 78.9ms reported against
+84.7ms measured.
+
+**The congestion controller was never affected.** It compares a sample against
+the base of the same series, which it has in hand at the point it acts
+(`defaultController.OnAck`). What the broken metric fed was the queueing delay
+`netem.Recorder` reports, which is diagnostic.
+
+The doc comment also claimed this was "the number the M5 gates are judged on".
+It was not — those gates read the emulated link's `MeanQueueDelay`, measured at
+the bottleneck rather than inferred from timestamps, which is why they stayed
+sound while this did not. **A comment asserting that something is load-bearing
+is not evidence that it is**, and this one had been read as such more than
+once.
 
 ## An acknowledgement the connection could not match killed it
 

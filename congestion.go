@@ -138,8 +138,21 @@ type ControllerStats struct {
 	Timeout time.Duration
 	// BaseDelay is the lowest one-way delay observed in the delay window --
 	// LEDBAT's estimate of the path with no queue. Queueing delay is the
-	// difference between the current delay and this.
+	// difference between CurrentDelay and this.
+	//
+	// The series both are drawn from is the peer's measurement of *our*
+	// outgoing path: the timestamp_difference field it puts on every packet,
+	// which is libutp's `our_hist` (utp_internal.cpp:2016-2021). That is the
+	// direction LEDBAT controls, because it is the direction this sender's
+	// packets travel.
 	BaseDelay time.Duration
+	// CurrentDelay is the most recent sample of that same series.
+	//
+	// It is here because there was no way to compute a queueing delay
+	// without it. ConnectionMetrics.QueueingDelay used to subtract BaseDelay
+	// from the *other* direction's measurement, which is not a queue in
+	// either direction. See the note there.
+	CurrentDelay time.Duration
 	// TargetDelayMicros is the standing queue the controller aims for.
 	TargetDelayMicros uint32
 	// SlowStart reports whether the controller is still in slow start.
@@ -199,6 +212,12 @@ type defaultController struct {
 	// application rather than the path, and growing the window further would
 	// be measuring nothing.
 	lastMaxedOutWindow time.Time
+
+	// currentDelay is the most recent delay sample pushed into delayAcc --
+	// the newest value of the series BaseDelay is the minimum of. Reported,
+	// not acted on: the control path already has the sample in hand when it
+	// needs it.
+	currentDelay time.Duration
 
 	// algorithm selects the congestion controller. Everything above is
 	// shared; the LEDBAT++ state below is used only when it is selected.
@@ -289,6 +308,7 @@ func (c *defaultController) Stats() ControllerStats {
 		RTTVarianceMicros:  c.rttVarianceMicros,
 		Timeout:            c.timeout,
 		BaseDelay:          c.delayAcc.BaseDelay(),
+		CurrentDelay:       c.currentDelay,
 		TargetDelayMicros:  c.targetDelayMicros,
 		SlowStart:          c.slowStart,
 		AppLimitedSince:    appLimitedSince,
@@ -358,6 +378,7 @@ func (c *defaultController) OnAck(seqNum uint16, ack Ack) error {
 	c.transmissions[seqNum] = packetInst
 
 	c.delayAcc.Push(ack.Delay, ack.ReceivedAt)
+	c.currentDelay = ack.Delay
 
 	baseDelayMicros := uint32(c.delayAcc.BaseDelay().Microseconds())
 	packetDelayMicros := uint32(ack.Delay.Microseconds())
