@@ -972,7 +972,36 @@ reaching the branch.
 One deliberate narrowing: the selective-ack extension on such a packet is
 dropped with it, where libutp still applies it. Reasoning in DEVIATIONS.md.
 
-## PR 38 — two timing assumptions in the differential fuzz harness
+## PR 38 — the read-side half-close, and the vectored write
+
+An audit of libutp's public surface against this fork found exactly two
+missing features.
+
+**`utp_shutdown(s, SHUT_RD)`.** `UtpStream.CloseRead`, with
+`utpnet.Conn.CloseRead` for type assertion. The subtlety is that libutp's
+`read_shutdown` suppresses *delivery* while `conn->ack_nr++` stays outside the
+guard (`utp_internal.cpp:2344-2355`, `:2392-2395`): incoming data is
+acknowledged and dropped, so the peer is never throttled and can finish its
+own close. Implemented by writing a zero-length payload into the receive
+buffer, which records the sequence number, copies nothing, and consumes no
+window. The test pushes 4MB through a 1MB buffer; the naive
+buffer-and-stop-delivering variant stalls at 31s.
+
+Data already buffered when `CloseRead` is called is discarded. libutp has no
+receive buffer of its own so the question does not arise there; holding it
+would keep the window closed by that much, which is the one thing the feature
+exists to avoid.
+
+**`utp_writev`.** `UtpStream.WriteV`, and `utpnet.Conn.WriteBuffers` in
+`net.Buffers` terms. Not a capability, a copy: ~136KB allocated per 16.5KB
+vectored write against ~155KB for join-then-`Write`, measured back to back.
+Two deviations, both recorded: it blocks (following `Write`'s contract, not
+libutp's partial-write one), and there is no `UTP_IOV_MAX`, since that cap is
+the size of a `static utp_iovec[1024]` rather than anything the protocol says
+— and silently truncating a caller's buffers to honour an array bound we do
+not have would be a defect, not fidelity.
+
+## PR 39 — two timing assumptions in the differential fuzz harness
 
 Not a library change, but it belongs in the same review: both differential
 fuzz targets primed their run with a fixed `time.Sleep(20ms)` and settled each

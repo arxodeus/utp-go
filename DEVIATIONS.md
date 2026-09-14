@@ -139,6 +139,19 @@ with one data packet before feeding them generated input: without that, every
 sequence not starting with data reports this divergence instead of finding a
 new one.
 
+## Read-side half-close discards what is already buffered
+
+`utp_shutdown(SHUT_RD)` sets libutp's `read_shutdown`, and from then on
+arriving data is acknowledged but never handed to the application. libutp has
+no receive buffer of its own -- bytes go straight to the embedder's `on_read`
+callback or nowhere -- so the question of what to do with data already held
+never arises there.
+
+It arises here. `UtpStream.CloseRead` discards it: it is owed to a reader that
+has said it will not come back, and holding it would keep the advertised
+window closed by exactly that much, which is the one thing the feature exists
+to avoid.
+
 ## ~~No half-close~~ — closed
 
 **This was the one place libutp could do something an application here could
@@ -169,6 +182,13 @@ socket whose FIN has been acknowledged only when `close_requested` is set
 `utp_close` does. Without that distinction a half-close would end the moment
 its own FIN came back, which is the opposite of the point. `closeRequested`
 here is the same flag.
+
+**The other direction is implemented too**, as of the parity audit:
+`UtpStream.CloseRead` / `utpnet.Conn.CloseRead` are `utp_shutdown(SHUT_RD)`.
+See the note above on what happens to data already buffered, which is the only
+place the two implementations can differ, and
+[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) for why acknowledging what you
+discard is the whole of it.
 
 ## The selective-ack window
 
@@ -344,6 +364,34 @@ loss detection.
 The cumulative half of the rule is not a deviation -- ignoring the
 acknowledgement is exactly what libutp does, and resetting the connection was
 the bug. See [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
+
+## `WriteV` blocks, and has no 1024-buffer limit
+
+`UtpStream.WriteV` is libutp's `utp_writev` (utp_internal.cpp:3154-3239), with
+two differences.
+
+**It blocks until everything is queued.** libutp's writev is non-blocking: it
+sends what fits in the window, returns how much that was, and leaves the rest
+to the caller. `Write` here has always blocked instead, and two different
+contracts for the same operation in one package would be worse than the
+difference. The deviation is `Write`'s, not this one's.
+
+**It has no `UTP_IOV_MAX`.** libutp caps at 1024 buffers and silently
+truncates beyond that:
+
+```cpp
+static utp_iovec iovec[UTP_IOV_MAX];
+if (num_iovecs > UTP_IOV_MAX)
+    num_iovecs = UTP_IOV_MAX;
+memcpy(iovec, iovec_input, sizeof(struct utp_iovec)*num_iovecs);
+                                        (utp_internal.cpp:3156-3172)
+```
+
+That limit is the size of a fixed static array, not a protocol rule -- the same
+process-wide `static` that forced a global lock around the vendored library in
+the interop harness (see `native/libutp/VENDOR.md`). A Go slice has no such
+constraint, and silently dropping a caller's data to respect an array bound we
+do not have would be a defect rather than fidelity.
 
 ## ICMP: the next-hop MTU is converted from a link MTU to a payload size
 

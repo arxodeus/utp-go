@@ -246,6 +246,16 @@ type connection struct {
 	// the opposite of the point.
 	closeRequested bool
 
+	// readShutdown records that the application has finished reading, while
+	// the connection carries on.
+	//
+	// libutp's `read_shutdown` (utp_internal.cpp:439), set by
+	// utp_shutdown(SHUT_RD) and by utp_close. Its whole effect is that a
+	// payload is not handed upwards -- the acknowledgement number advances
+	// either way (:2344-2355, :2392-2395), so the peer keeps sending at full
+	// rate into a window that never closes.
+	readShutdown bool
+
 	// armIdleRto schedules the wake-up that lets an idle connection's window
 	// decay. Set by the event loop, which owns the timer.
 	armIdleRto func(d time.Duration)
@@ -622,6 +632,8 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			stream.shutdown.Store(true)
 		} else if event.Type == streamICMP {
 			c.onICMP(event.ICMP, time.Now())
+		} else if event.Type == streamCloseRead {
+			c.onCloseRead()
 		}
 		// streamCloseWrite needs no handling beyond having woken the loop:
 		// the flag it refers to is already set, and the pass this event ends
@@ -2366,6 +2378,20 @@ func (c *connection) onData(seqNum uint16, data []byte) error {
 				return nil
 			}
 		}
+		// The application has finished reading, so the bytes go nowhere --
+		// but the sequence number still has to advance, or the peer is
+		// left retransmitting a packet that arrived. libutp runs
+		// `conn->ack_nr++` outside the `!read_shutdown` guard for exactly
+		// this reason (utp_internal.cpp:2344-2355).
+		//
+		// A zero-length write is how that is expressed here: the receive
+		// buffer records the sequence number, copies nothing, and consumes
+		// no space, so the advertised window stays open. Out-of-order
+		// packets still reorder correctly -- an empty entry fills its gap
+		// like any other.
+		if c.readShutdown {
+			data = nil
+		}
 		// not closing should send data
 		if len(data) <= c.state.RecvBuf.Available() {
 			err := c.state.RecvBuf.Write(data, seqNum)
@@ -2393,6 +2419,13 @@ func (c *connection) onFin(seqNum uint16, data []byte) error {
 	case ConnConnected:
 		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			c.logger.Trace("received FIN", "seq", seqNum, "c.cid.send", c.cid.Send, "c.cid.recv", c.cid.Recv)
+		}
+		// A FIN may carry a final payload, and it reaches the application by
+		// the same route as any other, so a shut-down read side drops it the
+		// same way. The sequence number still has to be registered: it is
+		// what marks the end of the stream.
+		if c.readShutdown {
+			data = nil
 		}
 		if c.state.closing != nil {
 			if c.state.closing.RemoteFin != nil {
@@ -2428,6 +2461,29 @@ func (c *connection) onReset() {
 	// If the connection is not already closed or reset, then reset the connection
 	if c.state.stateType != ConnClosed {
 		c.reset(ErrReset)
+	}
+}
+
+// onCloseRead applies libutp's read_shutdown: from here on, what arrives is
+// acknowledged and dropped rather than delivered. See UtpStream.CloseRead for
+// why the acknowledgement half matters.
+func (c *connection) onCloseRead() {
+	if c.readShutdown {
+		return
+	}
+	c.readShutdown = true
+	c.logger.Debug("read side closed; incoming data will be acknowledged and discarded",
+		"cid.send", c.cid.Send, "cid.recv", c.cid.Recv)
+
+	// Whatever is already buffered is owed to a reader that has said it will
+	// not come back, and holding it would keep the advertised window closed
+	// by exactly that much.
+	if c.state.RecvBuf != nil {
+		discarded := c.state.RecvBuf.Readable()
+		if discarded > 0 {
+			buf := make([]byte, discarded)
+			c.state.RecvBuf.Read(buf)
+		}
 	}
 }
 

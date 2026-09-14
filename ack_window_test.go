@@ -126,3 +126,85 @@ func TestAckForAPacketNeverSentIsDropped(t *testing.T) {
 		t.Error("a forged acknowledgement acknowledged a packet")
 	}
 }
+
+// The precise thing read_shutdown does, asserted directly rather than through
+// a transfer: the acknowledgement number advances, and the advertised window
+// does not shrink.
+//
+// libutp runs `conn->ack_nr++` outside the `!read_shutdown` guard
+// (utp_internal.cpp:2344-2355). Everything the feature is worth follows from
+// that one line: a peer whose data is being discarded is never told to stop
+// sending, so it can drain its send buffer and complete its own close.
+func TestReadShutdownAcksWithoutBuffering(t *testing.T) {
+	const syn = uint16(100)
+	const synAck = uint16(101)
+
+	conn := CreateTestConnection(Endpoint{Type: Acceptor, SynNum: syn, SynAck: synAck})
+	congestionCtrl := newDefaultController(fromConnConfig(conn.config))
+	conn.state = &ConnState{
+		stateType:   ConnConnected,
+		SentPackets: newSentPacketsWithoutLogger(synAck, congestionCtrl),
+		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
+		RecvBuf:     newReceiveBuffer(TEST_BUFFER_SIZE, syn),
+	}
+
+	availableBefore := conn.state.RecvBuf.Available()
+	conn.onCloseRead()
+
+	payload := make([]byte, 512)
+	for i := 0; i < 8; i++ {
+		if err := conn.onData(syn+1+uint16(i), payload); err != nil {
+			t.Fatalf("packet %d: %v", i, err)
+		}
+	}
+
+	if got, want := conn.state.RecvBuf.AckNum(), syn+8; got != want {
+		t.Errorf("acknowledgement number is %d after eight packets, want %d: "+
+			"a discarded packet still has to be acknowledged", got, want)
+	}
+	if got := conn.state.RecvBuf.Available(); got != availableBefore {
+		t.Errorf("the receive window shrank from %d to %d; discarded data must not "+
+			"occupy it, or the peer is throttled and eventually stalled",
+			availableBefore, got)
+	}
+	if got := conn.state.RecvBuf.Readable(); got != 0 {
+		t.Errorf("%d bytes are readable after the read side closed", got)
+	}
+}
+
+// Out-of-order packets still reorder correctly when they are being discarded:
+// the sequence number has to be recorded even though the bytes are not.
+func TestReadShutdownStillReorders(t *testing.T) {
+	const syn = uint16(100)
+	const synAck = uint16(101)
+
+	conn := CreateTestConnection(Endpoint{Type: Acceptor, SynNum: syn, SynAck: synAck})
+	congestionCtrl := newDefaultController(fromConnConfig(conn.config))
+	conn.state = &ConnState{
+		stateType:   ConnConnected,
+		SentPackets: newSentPacketsWithoutLogger(synAck, congestionCtrl),
+		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
+		RecvBuf:     newReceiveBuffer(TEST_BUFFER_SIZE, syn),
+	}
+	conn.onCloseRead()
+
+	payload := make([]byte, 128)
+	// The gap first.
+	if err := conn.onData(syn+2, payload); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := conn.state.RecvBuf.AckNum(), syn; got != want {
+		t.Fatalf("acknowledgement number moved to %d on an out-of-order packet, want %d",
+			got, want)
+	}
+	// Then what fills it: both should now be acknowledged.
+	if err := conn.onData(syn+1, payload); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := conn.state.RecvBuf.AckNum(), syn+2; got != want {
+		t.Errorf("acknowledgement number is %d after the gap was filled, want %d", got, want)
+	}
+	if got := conn.state.RecvBuf.Readable(); got != 0 {
+		t.Errorf("%d bytes are readable after the read side closed", got)
+	}
+}

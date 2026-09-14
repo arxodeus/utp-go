@@ -14,6 +14,10 @@ import (
 
 var (
 	ErrNotConnected = errors.New("not connected")
+	// ErrReadClosed is returned by Read after CloseRead. The connection is
+	// still alive and still sending; this end has simply stopped taking
+	// delivery.
+	ErrReadClosed = errors.New("read side closed")
 )
 
 type UtpStream struct {
@@ -28,9 +32,12 @@ type UtpStream struct {
 	// writeClosed is set by CloseWrite: this end has finished sending, but is
 	// still reading. Distinct from shutdown, which means finished entirely.
 	writeClosed atomic.Bool
-	connHandle  *sync.WaitGroup
-	conn        *connection
-	closeOnce   sync.Once
+	// readClosed is set by CloseRead: this end has finished reading, but is
+	// still sending. The mirror of writeClosed, and libutp's read_shutdown.
+	readClosed atomic.Bool
+	connHandle *sync.WaitGroup
+	conn       *connection
+	closeOnce  sync.Once
 	// abandoned is closed by Close, telling the connection that whatever is
 	// still buffered for this reader is owed to nobody.
 	abandoned  chan struct{}
@@ -134,6 +141,9 @@ func (s *UtpStream) start() {
 }
 
 func (s *UtpStream) ReadToEOF(ctx context.Context, buf *[]byte) (int, error) {
+	if s.readClosed.Load() {
+		return 0, ErrReadClosed
+	}
 	s.readLocker.Lock()
 	defer s.readLocker.Unlock()
 	n := 0
@@ -178,6 +188,9 @@ func (s *UtpStream) ReadToEOF(ctx context.Context, buf *[]byte) (int, error) {
 func (s *UtpStream) Read(ctx context.Context, buf []byte) (int, error) {
 	if len(buf) == 0 {
 		return 0, nil
+	}
+	if s.readClosed.Load() {
+		return 0, ErrReadClosed
 	}
 	s.readLocker.Lock()
 	defer s.readLocker.Unlock()
@@ -253,6 +266,51 @@ func (s *UtpStream) Write(ctx context.Context, buf []byte) (int, error) {
 	// show up at all -- see "What the write copy cost" in BENCHMARKS.md.
 	queued := make([]byte, len(buf))
 	copy(queued, buf)
+	return s.writeQueued(ctx, queued, resCh)
+}
+
+// WriteV writes several buffers as one stream write, without the caller
+// having to join them first.
+//
+// libutp's utp_writev (utp_internal.cpp:3154-3239); utp_write is that function
+// with a single iovec (:3241-3245). What it saves is a copy: Write already
+// copies the caller's buffer once, so a caller holding a header and a payload
+// would otherwise concatenate them (one copy) and hand the result to Write
+// (a second). This makes one allocation of the exact total and copies each
+// piece into it once.
+//
+// It returns the number of bytes written, which on success is their sum, and
+// follows Write's contract rather than libutp's in one respect worth stating:
+// libutp's writev is non-blocking and returns however much fitted in the
+// window, leaving the rest to the caller. Write here blocks until everything
+// is queued, and two different contracts for the same operation in one package
+// would be worse than the difference. That deviation is Write's, not this
+// one's, and is already recorded.
+//
+// Empty and nil buffers are skipped. A call with nothing in it writes nothing
+// and returns nil, as a zero-length Write does.
+func (s *UtpStream) WriteV(ctx context.Context, bufs [][]byte) (int, error) {
+	if s.shutdown.Load() || s.writeClosed.Load() {
+		return 0, ErrNotConnected
+	}
+	total := 0
+	for _, b := range bufs {
+		total += len(b)
+	}
+	if total == 0 {
+		return 0, nil
+	}
+	// One allocation, one copy per byte -- the whole point of the call.
+	queued := make([]byte, 0, total)
+	for _, b := range bufs {
+		queued = append(queued, b...)
+	}
+	return s.writeQueued(ctx, queued, make(chan *readOrWriteResult, 1))
+}
+
+// writeQueued hands an already-copied buffer to the connection and waits for
+// it to be accepted. Shared by Write and WriteV so the two cannot drift.
+func (s *UtpStream) writeQueued(ctx context.Context, queued []byte, resCh chan *readOrWriteResult) (int, error) {
 	select {
 	case s.writes <- &queuedWrite{queued, 0, resCh}:
 	case <-ctx.Done():
@@ -261,7 +319,7 @@ func (s *UtpStream) Write(ctx context.Context, buf []byte) (int, error) {
 	if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 		s.logger.Trace("created a new queued write to writes channel",
 			"dst.peer", s.cid.Peer,
-			"buf.len", len(buf),
+			"buf.len", len(queued),
 			"len(s.writes)", len(s.writes),
 			"ptr(s)", fmt.Sprintf("%p", s),
 			"ptr(writes)", fmt.Sprintf("%p", s.writes))
@@ -311,6 +369,43 @@ func (s *UtpStream) CloseWrite() error {
 	// every half-close into a full one. This only has to wake the loop.
 	select {
 	case s.streamEvents <- &streamEvent{Type: streamCloseWrite}:
+	default:
+	}
+	return nil
+}
+
+// CloseRead closes the receiving half of the stream: this end stops taking
+// delivery of what the peer sends, while everything it still has to send goes
+// out normally.
+//
+// libutp's utp_shutdown(s, SHUT_RD), which sets read_shutdown
+// (utp_internal.cpp:3405-3411). What that flag does is precise and worth
+// stating, because the obvious implementation is the wrong one: incoming data
+// is still **acknowledged** -- `conn->ack_nr++` runs whether or not the bytes
+// are delivered (:2344-2355, and again for the reorder buffer at :2392-2395)
+// -- it is simply never handed to the application.
+//
+// So this is not "stop reading and let the window fill". A connection that let
+// its receive window close would stall the peer, and a peer that cannot finish
+// sending cannot finish closing. The peer keeps transmitting at full rate and
+// the bytes are dropped on arrival.
+//
+// Data already buffered here is discarded for the same reason: it is owed to a
+// reader that has said it will not come back. libutp never faces the question
+// because it has no receive buffer of its own -- the bytes go straight to the
+// embedder's callback or nowhere.
+//
+// Read reports ErrReadClosed afterwards. Write is unaffected. The name follows
+// net.TCPConn.CloseRead, as CloseWrite follows its counterpart.
+func (s *UtpStream) CloseRead() error {
+	if s.shutdown.Load() {
+		return ErrNotConnected
+	}
+	if s.readClosed.Swap(true) {
+		return nil
+	}
+	select {
+	case s.streamEvents <- &streamEvent{Type: streamCloseRead}:
 	default:
 	}
 	return nil

@@ -274,3 +274,32 @@ func (d *deadline) wait() (<-chan time.Time, bool, func()) {
 func (c *Conn) CloseWrite() error {
 	return c.stream.CloseWrite()
 }
+
+// WriteBuffers writes several buffers as one stream write, without joining
+// them first. It mirrors net.Buffers' shape, and libutp's utp_writev.
+//
+// The saving is one copy. Writing a header and a payload separately costs two
+// Write calls (and two packets' worth of framing decisions); joining them
+// first costs a copy into the joined slice and another inside Write. This
+// costs one.
+//
+// net.Buffers.WriteTo cannot reach this on its own -- the standard library
+// dispatches to an unexported interface only *net.TCPConn satisfies -- so a
+// caller that wants the saving calls it directly.
+func (c *Conn) WriteBuffers(bufs net.Buffers) (int64, error) {
+	n, err := c.withDeadline(c.writeDeadline, func(ctx context.Context) (int, error) {
+		return c.stream.WriteV(ctx, bufs)
+	})
+	return int64(n), err
+}
+
+// CloseRead finishes the receiving side and leaves the sending side open, as
+// net.TCPConn.CloseRead does. What the peer sends afterwards is still
+// acknowledged -- so the peer is never stalled and can finish its own close --
+// and then discarded.
+//
+// Type-asserted for in the same way as CloseWrite:
+// `interface{ CloseRead() error }`.
+func (c *Conn) CloseRead() error {
+	return c.stream.CloseRead()
+}

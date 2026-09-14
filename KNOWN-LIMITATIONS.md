@@ -1417,6 +1417,73 @@ A probe lost alongside other packets left `probing` set forever, and since
 `eligibleProbe` refuses to start a second probe while one is outstanding, the
 search froze. Now fixed, to match.
 
+## The libutp API surface, audited function by function
+
+**Two features were missing, and both are now implemented.** The audit ran
+libutp's 27 public functions and 15 callbacks against ours rather than against
+memory.
+
+### `utp_shutdown(SHUT_RD)` — the read-side half-close
+
+We had `CloseWrite` and no counterpart. `UtpStream.CloseRead` and
+`utpnet.Conn.CloseRead` are it.
+
+What makes this more than a flag is one line of libutp. `read_shutdown`
+suppresses delivery to the application, but `conn->ack_nr++` sits *outside*
+the guard (`utp_internal.cpp:2344-2355`, and again for the reorder buffer at
+`:2392-2395`). Arriving data is acknowledged and dropped, not refused. The
+obvious implementation — stop delivering, let the receive buffer fill — closes
+the advertised window, and a peer that cannot finish sending cannot finish
+closing either.
+
+Measured: `utpnet.TestCloseReadKeepsThePeerSending` pushes 4MB through a
+connection whose receive buffer is 1MB after the read side has closed, and
+requires the peer to finish. The buffering variant was built and run: it
+stalls, and the test fails at 31 seconds. `TestReadShutdownAcksWithoutBuffering`
+asserts the two properties directly — the acknowledgement number advances, the
+window does not shrink — and `TestReadShutdownStillReorders` covers the gap
+case, since a discarded packet's sequence number still has to be recorded.
+
+Data already buffered when `CloseRead` is called is discarded. libutp never
+faces that question; the reasoning is in [DEVIATIONS.md](DEVIATIONS.md).
+
+### `utp_writev` — the vectored write
+
+`UtpStream.WriteV`, and `utpnet.Conn.WriteBuffers` in `net.Buffers` terms.
+
+It was never a capability gap — `Write` can express anything `writev` can —
+but it is a copy. A caller holding a header and a payload either joins them
+(allocate the total, copy into it) and calls `Write` (which allocates the
+total again and copies again), or calls this. Measured back to back, per
+16.5KB write in three buffers:
+
+| | Allocated per write |
+| --- | --- |
+| join, then `Write` | ~155KB |
+| `WriteV` | ~136KB |
+
+The ~19KB difference is one payload plus the noise of everything else a write
+allocates. The wall-clock figures also favoured `WriteV` in every run, by more
+than one 16KB `memcpy` can account for, so that difference is not claimed:
+loopback throughput here is too noisy to attribute.
+
+Two deviations, both recorded in [DEVIATIONS.md](DEVIATIONS.md): it blocks
+(following `Write`'s contract rather than libutp's partial-write one), and it
+has no `UTP_IOV_MAX`, because that cap is the size of a static array rather
+than a protocol rule.
+
+### What the audit found still missing
+
+Not features, and each already recorded above or in
+[DEVIATIONS.md](DEVIATIONS.md): the MTU ceiling is a fixed 1400 rather than
+`UTP_GET_UDP_MTU`; probes carry no don't-fragment bit; `utp_get_delays`'
+`theirs` is not tracked, since no delay histogram is kept for the peer's own
+measurements; `utp_get_context_stats` and `UTP_ON_OVERHEAD_STATISTICS` have no
+equivalent (packet-size histograms and per-packet overhead accounting), and
+`ConnectionMetrics` otherwise covers `utp_socket_stats` and more, except
+`nduprecv`; and there is no injectable clock, which is why the conformance
+corpus still cannot compare ack *latency*.
+
 ## An acknowledgement the connection could not match killed it
 
 **Fixed.** Found by the ICMP work, not by looking for it: the new tests shifted

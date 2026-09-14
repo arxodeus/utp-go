@@ -10,6 +10,10 @@ const (
 	// the flag to prove it; CloseWrite only needs the loop to notice that the
 	// sending side is done, and must not be mistaken for a full close.
 	streamCloseWrite
+	// streamCloseRead wakes the event loop for the other half-close: this end
+	// has finished reading. libutp's utp_shutdown(SHUT_RD), which sets
+	// read_shutdown (utp_internal.cpp:3409-3411).
+	streamCloseRead
 	// streamICMP carries an ICMP report about a packet this connection sent.
 	// The socket parses the quoted uTP header and finds the connection; the
 	// connection decides what the report means, which is where libutp puts
