@@ -1024,7 +1024,38 @@ base of the same series, in hand at the point it acts. The doc comment claiming
 this was "the number the M5 gates are judged on" was also wrong; those gates
 read the link's `MeanQueueDelay`.
 
-## PR 40 — two timing assumptions in the differential fuzz harness
+## PR 40 — the MTU ceiling, taken from the interface when the Conn can say
+
+libutp sets its path-MTU ceiling from `UTP_GET_UDP_MTU` before the first
+packet goes out (`mtu_reset`, `utp_internal.cpp:1314-1322`). This fork used a
+fixed 1400 for every connection, which is safe on an ordinary path and too
+large on a tunnelled one — and a ceiling above what the path carries is the
+stall in KNOWN-LIMITATIONS.md, which neither implementation can recover from
+once the size is adopted.
+
+`utp.PathMTUProvider` is an **optional** interface — `PathMTU(ConnectionPeer)
+(int, bool)` — implemented by `UdpConn` and by netem's `Endpoint`. The `Conn`
+interface is untouched, so the libutp driver and any other implementation are
+unaffected and keep the configured ceiling. `UdpConn` finds it by asking the
+routing table which local address a datagram to that peer would leave from (a
+UDP "dial", which sends nothing) and reading the MTU of the interface that
+owns it; per peer rather than per socket, because split tunnelling sends two
+peers on one socket out of two interfaces, with a one-minute cache so a client
+opening hundreds of connections does not pay a netlink dump for each.
+
+One deviation, recorded: the answer is combined with `MaxPacketSize` as a
+minimum rather than replacing it, because loopback reports a 65508-byte
+datagram and a jumbo link 8972, and adopting either would put the library on a
+window regime nothing has measured it at — the minimum window is two packets.
+
+Worth it, measured over the 1100-byte link that stalls both implementations:
+1,048,576 bytes in 0.69s with the sender told what its interface carries,
+against 2,800 bytes and a 60-second timeout without. That is the same link as
+the skipped `TestMtuSearchCannotRecoverFromAPathLimitBelowItsChoice`; the
+stall is prevented rather than recovered from, and only where the narrow link
+is the local one.
+
+## PR 41 — two timing assumptions in the differential fuzz harness
 
 Not a library change, but it belongs in the same review: both differential
 fuzz targets primed their run with a fixed `time.Sleep(20ms)` and settled each

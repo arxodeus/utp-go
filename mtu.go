@@ -198,6 +198,11 @@ func (m *mtuSearch) icmpFragmentationNeeded(linkMTU uint32, now time.Time) {
 // ceiling, which is the same correction libutp relies on generally.
 const ipv4HeaderAndUDPOverhead = 28
 
+// ipv6HeaderAndUDPOverhead is the same for IPv6: a 40-byte header and 8 of
+// UDP. Used where the address family is actually known, which the ICMP path
+// above does not know and the interface lookup in path_mtu.go does.
+const ipv6HeaderAndUDPOverhead = 48
+
 // udpPayloadForLinkMTU converts a router's next-hop MTU into the uTP datagram
 // size that fits inside it, and reports whether the figure was usable at all.
 //

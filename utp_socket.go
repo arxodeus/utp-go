@@ -567,7 +567,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
 		connected := make(chan error, 1)
 		newConnStream := make(chan *streamEvent, 1000)
 		s.putConnStream(cidHash, newConnStream)
-		stream := NewUtpStream(s.ctx, s.logger, cid, accept.config, packetPtr, s.socketEvents, newConnStream, connected, s.retransmitTimers)
+		stream := NewUtpStream(s.ctx, s.logger, cid, s.configForPeer(accept.config, cid.Peer), packetPtr, s.socketEvents, newConnStream, connected, s.retransmitTimers)
 		go s.awaitConnected(stream, accept, connected)
 	} else if accept := s.takePendingAccept(); accept != nil {
 		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
@@ -1007,7 +1007,7 @@ func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *Co
 		s.ctx,
 		s.logger,
 		cid,
-		config,
+		s.configForPeer(config, cid.Peer),
 		nil,
 		s.socketEvents,
 		streamEvents,
@@ -1063,7 +1063,7 @@ func (s *UtpSocket) ConnectWithCid(
 		s.ctx,
 		s.logger,
 		cid,
-		config,
+		s.configForPeer(config, cid.Peer),
 		nil,
 		s.socketEvents,
 		streamEvents,
@@ -1154,7 +1154,7 @@ func (s *UtpSocket) selectAcceptHelper(
 		streamCtx,
 		s.logger,
 		cid,
-		accept.config,
+		s.configForPeer(accept.config, cid.Peer),
 		syn,
 		socketEvents,
 		streamEvents,
@@ -1321,6 +1321,28 @@ func (s *UtpSocket) deliverICMP(quoted []byte, peer ConnectionPeer, notice *icmp
 // only two connections libutp's map could have held under that key. The order
 // is otherwise libutp's, which is what decides it when a peer holds several
 // connections whose ids happen to be adjacent.
+// configForPeer returns the connection config to use for a peer, with the
+// path-MTU ceiling lowered when this socket's Conn can say what the local
+// path carries.
+//
+// The caller's config is never modified: a ConnectionConfig belongs to
+// whoever built it and may be reused across connections, so this copies
+// before changing anything. See pathMTUCeiling.
+func (s *UtpSocket) configForPeer(config *ConnectionConfig, peer ConnectionPeer) *ConnectionConfig {
+	if config == nil || s.socket == nil {
+		return config
+	}
+	ceiling := pathMTUCeiling(s.socket, peer, config.MaxPacketSize)
+	if ceiling == config.MaxPacketSize {
+		return config
+	}
+	s.logger.Debug("lowering the path-MTU ceiling to what the local interface carries",
+		"configured", config.MaxPacketSize, "discovered", ceiling, "peer", peer.Hash())
+	adjusted := *config
+	adjusted.MaxPacketSize = ceiling
+	return &adjusted
+}
+
 func (s *UtpSocket) getConnStreamForQuotedId(id uint16, peer ConnectionPeer) chan *streamEvent {
 	candidates := []*ConnectionId{
 		// recv == id (the quoted packet is our SYN), either role

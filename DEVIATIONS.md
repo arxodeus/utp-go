@@ -393,6 +393,37 @@ the interop harness (see `native/libutp/VENDOR.md`). A Go slice has no such
 constraint, and silently dropping a caller's data to respect an array bound we
 do not have would be a defect rather than fidelity.
 
+## A discovered path MTU only lowers the ceiling, never raises it
+
+libutp takes `get_udp_mtu` as its MTU ceiling outright:
+
+```cpp
+void UTPSocket::mtu_reset()
+{
+    mtu_ceiling = get_udp_mtu();
+    // Less would not pass TCP...
+    mtu_floor = 576;
+                                        (utp_internal.cpp:1314-1318)
+```
+
+`utp.PathMTUProvider` is the same callback, but its answer is combined with
+`ConnectionConfig.MaxPacketSize` as a minimum rather than replacing it.
+
+The reason is what the figure actually is on the machines this runs on.
+Loopback reports an MTU of 65536, which is a 65508-byte datagram; a
+jumbo-frame link reports 9000. Adopting either would put this library on a
+probe schedule and a window-sizing regime nothing has measured it at — the
+minimum congestion window is two packets, so a 65-kilobyte packet size makes
+the floor 128KB — and it would do so on the *loopback* path every test in this
+repository runs over. Raising the ceiling is a separate decision from fixing
+the case where 1400 is too big, and only the second one has evidence behind
+it.
+
+So the fixed 1400 ceiling remains as a cap, and the deviation that recorded it
+stands. What has changed is that it is no longer also a *floor* on the
+ceiling: a tunnel that carries 1392 is now discovered before the first packet
+rather than after a stall.
+
 ## ICMP: the next-hop MTU is converted from a link MTU to a payload size
 
 libutp takes the figure an ICMP fragmentation-needed message carries and

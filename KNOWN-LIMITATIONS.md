@@ -1474,18 +1474,33 @@ than a protocol rule.
 
 ### What the audit found still missing, and why
 
-**The MTU ceiling is a fixed 1400 rather than `UTP_GET_UDP_MTU`.** The reason
-is the `Conn` interface — `ReadFrom`, `WriteTo`, `Close` and nothing else —
-which netem's emulated endpoints, the libutp driver and a real UDP socket all
-satisfy. Asking an operating system for an interface MTU has no place in it.
+**~~The MTU ceiling is a fixed 1400 rather than `UTP_GET_UDP_MTU`.~~ Closed.**
+`utp.PathMTUProvider` is the optional interface this section proposed:
+`PathMTU(ConnectionPeer) (int, bool)`, implemented by `UdpConn` and by
+netem's `Endpoint`, and ignored by any other `Conn`. The `Conn` interface
+itself is untouched, so the libutp driver and every other implementation are
+unaffected and keep the configured ceiling.
 
-That reason is weaker than it looks, and the earlier phrasing of this section
-overstated it. `ConnectionConfig.MaxPacketSize` is already settable by the
-embedder, and `Bind` produces a concrete `UdpConn` wrapping a real
-`*net.UDPConn` that could be asked. An optional interface — say
-`interface{ PathMTU(ConnectionPeer) (int, bool) }`, implemented by `UdpConn`
-alone — would close it without touching `Conn`. **Not done, rather than not
-possible.**
+`UdpConn` discovers it by asking the routing table which local address a
+datagram to that peer would leave from — a UDP "dial", which sends nothing —
+and then reading the MTU of the interface that owns that address. Per peer
+rather than per socket, because split tunnelling routes two peers on one
+socket out of two different interfaces.
+
+**It only ever lowers the configured ceiling.** libutp adopts `get_udp_mtu`
+outright; loopback reports 65488 and a jumbo-frame link 8972, and adopting
+either would put this library on a probe schedule nothing has measured it at.
+Raising the ceiling is a separate decision from fixing the case where 1400 is
+too big. Recorded in [DEVIATIONS.md](DEVIATIONS.md).
+
+What it is worth is in the stall section below: on the 1100-byte link that
+defeats both implementations, the full megabyte now arrives.
+
+A kernel's own path-MTU cache would be better still — Linux answers
+`getsockopt(IP_MTU)` with what it has learned from ICMP for that route — but
+it is Linux-only, needs a connected socket, and would make `golang.org/x/sys`
+a direct dependency. Feeding ICMP in directly is the portable route to the
+same information.
 
 **Probes carry no don't-fragment bit.** This one is genuinely blocked. Setting
 DF socket-wide is easy and wrong: libutp relies on ordinary data being
@@ -1673,6 +1688,29 @@ libutp takes its ceiling from the local interface MTU, so the common case is a
 ceiling that already matches the path. This fork uses a fixed 1400 ceiling
 instead, which is recorded in [DEVIATIONS.md](DEVIATIONS.md), and on a tunnelled
 path 1400 is still too big.
+
+### Prevented, where the narrow link is the local one
+
+**This is the case that is now fixed rather than mitigated.** The stall above
+is unrecoverable because the search *adopts* a size the path will not carry;
+the way out is never to adopt it. `utp.PathMTUProvider` sets the ceiling from
+the local interface before the first packet goes out, which is exactly what
+libutp's `UTP_GET_UDP_MTU` callback is for.
+
+Measured over the same 1100-byte link, `netem.TestPathMTUReportPreventsTheStall`
+against the identical run with the report withheld:
+
+| | Delivered | Time | Refused for size | Search settled at |
+| --- | --- | --- | --- | --- |
+| sender told what its interface carries | 1,048,576 / 1,048,576 | 0.69s | 0 | 1084 |
+| not told (the control) | 2,800 / 1,048,576 | timed out at 60s | 29 | 1191, ceiling 1400 |
+
+This covers the common real case — a host behind a VPN or tunnel, where
+WireGuard's default of 1420 and IPv6's floor of 1280 both sit below the
+1400-byte datagram this library would otherwise adopt. It does **not** cover a
+narrow link further along the path, where the local interface is wide and some
+hop in the middle is not. For that, the ceiling still starts too high, and the
+ICMP path below is what there is.
 
 ### Half of it is now addressable: the ICMP path
 

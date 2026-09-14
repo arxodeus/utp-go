@@ -147,7 +147,10 @@ func TestMtuSearchConvergesWhenThePathAllowsIt(t *testing.T) {
 // most VPN and tunnel paths), and a BitTorrent client on one would stall.
 func TestMtuSearchCannotRecoverFromAPathLimitBelowItsChoice(t *testing.T) {
 	t.Skip("known limitation, shared with libutp: the search cannot lower its ceiling " +
-		"once the size it has adopted stalls the connection; see KNOWN-LIMITATIONS.md")
+		"once the size it has adopted stalls the connection; see KNOWN-LIMITATIONS.md. " +
+		"Prevented rather than recovered from where the narrow link is the local " +
+		"interface -- TestPathMTUReportPreventsTheStall runs this same link with the " +
+		"sender told what its interface carries, and the transfer completes")
 
 	const linkMTU = 1100
 	floor, current, ceiling, fwd := mtuTransfer(t, Config{
@@ -163,5 +166,121 @@ func TestMtuSearchCannotRecoverFromAPathLimitBelowItsChoice(t *testing.T) {
 	if current > linkMTU {
 		t.Errorf("the search settled on %d-byte datagrams over a path that drops anything "+
 			"above %d; those packets cannot arrive", current, linkMTU)
+	}
+}
+
+// The stall above, prevented rather than recovered from.
+//
+// TestMtuSearchCannotRecoverFromAPathLimitBelowItsChoice is skipped because
+// once the search has adopted a size the path will not carry, neither this
+// library nor libutp can get back: every packet is too big, nothing is
+// acknowledged, and the ceiling only comes down when a probe times out as the
+// sole outstanding packet.
+//
+// The way out is to never adopt that size, which is what libutp's
+// UTP_GET_UDP_MTU callback is for -- it sets the ceiling from the local
+// interface before the first packet goes out. This library had no equivalent
+// until utp_go.PathMTUProvider; here the endpoint answers it, as a host
+// behind a tunnel would.
+func TestPathMTUReportPreventsTheStall(t *testing.T) {
+	const linkMTU = 1100
+	const payloadLen = 1 << 20
+
+	n := NewNetwork(52)
+	defer n.Close()
+	a := n.MustAddEndpoint("sender")
+	b := n.MustAddEndpoint("receiver")
+	n.Connect(a, b, Config{
+		Delay:        10 * time.Millisecond,
+		BandwidthBps: 20_000_000,
+		QueueBytes:   64 * 1024,
+		MTU:          linkMTU,
+	})
+	// The sender knows what its own interface carries. The receiver is not
+	// told, and does not need to be: it sends only acknowledgements.
+	a.ReportPathMTU(linkMTU)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	sendSock := utp.WithSocket(ctx, a, quiet())
+	defer sendSock.Close()
+	recvSock := utp.WithSocket(ctx, b, quiet())
+	defer recvSock.Close()
+
+	acceptCid := utp.NewConnectionId(a.Addr(), 761, 760)
+	connectCid := utp.NewConnectionId(b.Addr(), 760, 761)
+
+	var (
+		mu      sync.Mutex
+		current uint32
+		ceiling uint32
+		samples int
+	)
+	sendCfg := utp.NewConnectionConfig()
+	sendCfg.MetricsInterval = 5 * time.Millisecond
+	sendCfg.Metrics = func(m utp.ConnectionMetrics) {
+		mu.Lock()
+		defer mu.Unlock()
+		current, ceiling = m.MtuCurrent, m.MtuCeiling
+		samples++
+	}
+
+	payload := make([]byte, payloadLen)
+	for i := range payload {
+		payload[i] = byte(i * 31)
+	}
+
+	var delivered int
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		stream, err := recvSock.AcceptWithCid(ctx, acceptCid, utp.NewConnectionConfig())
+		if err != nil {
+			t.Errorf("accept: %v", err)
+			return
+		}
+		defer stream.Close()
+		buf := make([]byte, 0, payloadLen)
+		if _, err := stream.ReadToEOF(ctx, &buf); err != nil {
+			t.Errorf("read: %v", err)
+		}
+		mu.Lock()
+		delivered = len(buf)
+		mu.Unlock()
+	}()
+	go func() {
+		defer wg.Done()
+		stream, err := sendSock.ConnectWithCid(ctx, connectCid, sendCfg)
+		if err != nil {
+			t.Errorf("connect: %v", err)
+			return
+		}
+		defer stream.Close()
+		if _, err := stream.Write(ctx, payload); err != nil {
+			t.Errorf("write: %v", err)
+		}
+	}()
+	wg.Wait()
+
+	fwd := n.Link("sender", "receiver").Stats()
+	mu.Lock()
+	defer mu.Unlock()
+	if samples == 0 {
+		t.Fatal("no metric samples recorded; the test observed nothing")
+	}
+	t.Logf("link MTU %d, reported to the sender: delivered %d/%d; search current=%d ceiling=%d; link %s",
+		linkMTU, delivered, payloadLen, current, ceiling, fwd)
+
+	if fwd.DroppedByMTU != 0 {
+		t.Errorf("%d datagrams were refused for size on a path whose limit the sender "+
+			"was told; it should never have built one", fwd.DroppedByMTU)
+	}
+	if delivered != payloadLen {
+		t.Errorf("delivered %d of %d bytes", delivered, payloadLen)
+	}
+	if ceiling > linkMTU {
+		t.Errorf("ceiling %d against a %d-byte link", ceiling, linkMTU)
 	}
 }

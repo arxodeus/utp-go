@@ -174,6 +174,41 @@ type Endpoint struct {
 	dropped  uint64 // delivered but the inbox was full
 	received uint64
 	rxBytes  uint64
+	// pathMTU, when non-zero, is the datagram size this endpoint reports
+	// through utp_go.PathMTUProvider. Zero means it declines to answer,
+	// which is the default and what every test written before the provider
+	// existed relies on.
+	pathMTU int
+}
+
+// ReportPathMTU makes this endpoint answer utp_go.PathMTUProvider with
+// datagramSize, as a host whose local interface is that narrow would.
+//
+// Opt-in, deliberately. An endpoint that always reported its link's MTU would
+// hand every connection the right answer for free, which is realistic for a
+// host behind a tunnel and useless for testing what happens without one --
+// the ICMP tests in particular need the search to overshoot before a router
+// can refuse anything.
+//
+// datagramSize is a uTP datagram size, the same unit Config.MTU is in: this
+// emulated path has one hop, so the link limit and the local interface's
+// limit are the same number.
+func (e *Endpoint) ReportPathMTU(datagramSize int) {
+	e.mu.Lock()
+	e.pathMTU = datagramSize
+	e.mu.Unlock()
+}
+
+// PathMTU implements utp_go.PathMTUProvider. It reports the same figure
+// whatever the peer, because ReportPathMTU models a local interface rather
+// than a route.
+func (e *Endpoint) PathMTU(utp.ConnectionPeer) (int, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.pathMTU <= 0 {
+		return 0, false
+	}
+	return e.pathMTU, true
 }
 
 // Addr returns this endpoint's peer identity, for use as a uTP destination.
