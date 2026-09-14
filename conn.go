@@ -102,8 +102,23 @@ type ConnectionConfig struct {
 	MinTimeout      time.Duration
 	MaxTimeout      time.Duration
 	TargetDelay     time.Duration
-	WindowSize      uint32
-	BufferSize      int
+	// DelayWindow is how far back the congestion controller looks for its
+	// base delay -- the lowest one-way delay it has seen, which it treats as
+	// the path with an empty queue.
+	//
+	// libutp's equivalent is a compile-time thirteen one-minute buckets
+	// (DELAY_BASE_HISTORY, utp_internal.cpp:50), so about thirteen minutes.
+	// This is a sliding-window minimum over two.
+	//
+	// Configurable because the window is what bounds the damage clock drift
+	// does: a sender whose clock loses time sees its measured delay grow
+	// without bound, and the base only follows once the inflated samples have
+	// aged out. The steady-state error is the window multiplied by the drift
+	// rate, which is a relationship nothing could test while the window was a
+	// constant two minutes. See netem.TestClockDriftInflatesTheDelaySignal.
+	DelayWindow time.Duration
+	WindowSize  uint32
+	BufferSize  int
 
 	// Metrics, when set, receives periodic snapshots of this connection.
 	// See MetricsObserver for the constraints on the callback.
@@ -153,6 +168,7 @@ func NewConnectionConfig() *ConnectionConfig {
 		MinTimeout:              defaultMinTimeout,
 		MaxTimeout:              defaultMaxTimeout,
 		TargetDelay:             defaultTargetMicros,
+		DelayWindow:             defaultDelayWindow,
 		WindowSize:              DefaultWindowSize,
 		BufferSize:              DefaultBufferSize,
 		KeepAliveInterval:       defaultKeepAliveInterval,
@@ -171,6 +187,9 @@ func fromConnConfig(config *ConnectionConfig) *ctrlConfig {
 	ctrlConfigPtr.MaxTimeout = config.MaxTimeout
 	ctrlConfigPtr.TargetDelayMicros = uint32(config.TargetDelay.Microseconds())
 	ctrlConfigPtr.WindowSize = config.WindowSize
+	if config.DelayWindow > 0 {
+		ctrlConfigPtr.DelayWindow = config.DelayWindow
+	}
 	ctrlConfigPtr.Algorithm = config.CongestionAlgorithm
 	return ctrlConfigPtr
 }

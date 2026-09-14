@@ -1556,10 +1556,77 @@ no history of, so no base for, and therefore no correction from. Drift is
 corrected only by the 120-second sliding-window minimum in `delayAccumulator`
 ageing out its stale samples.
 
-**What that costs has not been measured, and no number is claimed here.** The
-emulated network shares one clock between both endpoints, so nothing in this
-repository can currently produce skew at all; measuring it needs a per-endpoint
-clock offset in `netem`, which would be the first piece of work on this.
+**Now measured.** `netem.DriftingClock` wraps a `Conn` and rewrites the
+timestamp its packets carry, which is exactly what a clock with a rate error
+does; before it, both endpoints read the same process clock and no skew could
+be produced at all.
+
+### The rule
+
+The reported queueing delay settles at **the delay window multiplied by the
+drift rate**. The base delay is a sliding-window minimum, so it does follow the
+drift — but with a lag: if the measured delay grows at rate *r*, the lowest
+sample still inside a window of length *w* is the one from *w* ago, so the
+sender believes in *w × r* of queue that does not exist.
+
+Measured on an application-limited flow over a link carrying a fraction of its
+capacity, so the only queue in the signal is the phantom one
+(`netem.TestClockDriftInflatesTheDelaySignal`):
+
+| Drift | Predicted *w × r* | Measured | |
+| --- | --- | --- | --- |
+| 5000ppm | 10ms | 9.86ms | 0.99x |
+| 10000ppm | 20ms | 19.77ms | 0.99x |
+| 20000ppm | 40ms | 39.63ms | 0.99x |
+
+The link's real queue was 329µs throughout and the undrifted control saw
+782µs. Measured with a 2-second window and large rates rather than the real
+window and real rates, because only the product matters and the real
+combination needs minutes per point; the linearity that extrapolation rests on
+is itself what the three rows measure.
+
+At the default 120-second window: 100ppm (a good crystal) is 12ms of phantom
+queue, 500ppm is 60ms, and 1000ppm — which an oversubscribed virtual machine's
+clock really does reach — is 120ms, above the 100ms target the controller aims
+for.
+
+libutp is exposed to this **6.5x more**, not less: its base is the minimum over
+thirteen one-minute buckets (`DELAY_BASE_HISTORY`, `utp_internal.cpp:50`),
+about 780 seconds against this library's 120. That is a large part of why it
+also carries the `their_hist` correction.
+
+### What it costs, which is not what it looks like
+
+A single flow with the link to itself loses almost nothing. At 139ms of phantom
+queue — well above target — throughput was within **1%** of the undrifted run.
+The controller does back off, and the real queue it left at the bottleneck fell
+from 29ms to 24ms; but a delay-based controller that backs off while still
+filling the pipe has lost nothing worth measuring. That run is not kept as a
+test, because a 1% difference on a saturated link is not distinguishable from
+noise and asserting on it would be asserting on noise.
+
+**The cost is fairness.** LEDBAT exists to yield, and a flow that believes it is
+above target when it is not yields more than its share. Two flows through one
+20Mb/s bottleneck for 14 seconds, one drifted and one not
+(`netem.TestClockDriftYieldsShareAtASharedBottleneck`):
+
+| | Delivered | Share | Queue it believed in |
+| --- | --- | --- | --- |
+| drifted | 12,713,984 | 35.0% | 125ms |
+| clean | 23,658,496 | 65.0% | 28ms |
+
+So the drifted flow takes a little over half what its neighbour does. Real, and
+worth correcting, but a fairness loss rather than the collapse the mechanism's
+absence sounded like.
+
+**The correction itself is still not implemented.** What the measurements have
+changed is that it now has a number to beat, and a clear statement of what it
+is for: a host whose clock drifts gets less than its share of a contended link,
+not a broken connection.
+
+`ConnectionConfig.DelayWindow` was added to make any of this testable —
+the window was a hard-coded two minutes, and no drift experiment can run in a
+reasonable time against that.
 
 ### A metric that subtracted two different directions
 

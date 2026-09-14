@@ -1055,7 +1055,46 @@ the skipped `TestMtuSearchCannotRecoverFromAPathLimitBelowItsChoice`; the
 stall is prevented rather than recovered from, and only where the narrow link
 is the local one.
 
-## PR 41 — two timing assumptions in the differential fuzz harness
+## PR 41 — clock drift, made producible and then measured
+
+Not a library change beyond one config field, but it answers a question the
+ledger had been carrying as an unknown.
+
+LEDBAT's signal is a one-way delay, which is a difference between two clocks.
+If they run at different rates the difference contains an error that grows
+without bound, and the controller reads it as a queue. libutp says so in
+`DelayHist.add_sample` (`utp_internal.cpp:293-298`) and corrects for it twice:
+a delay base rotated every minute across thirteen minutes of history, and a
+shift of its own base whenever the peer's base drops (`:2002-2014`). This fork
+has the first in a different form — a sliding-window minimum — and not the
+second.
+
+Nothing could produce skew to find out what that costs: both endpoints of the
+emulated network read the same process clock. `netem.DriftingClock` wraps a
+`Conn` and rewrites the timestamps its packets carry, which is what a clock
+with a rate error does. `ConnectionConfig.DelayWindow` exposes the window that
+was a hard-coded two minutes, because no drift experiment can run in a
+reasonable time against that.
+
+Three findings.
+
+**The rule.** Phantom queueing delay settles at window x drift rate: 0.99x the
+prediction at 5000, 10000 and 20000ppm, on an application-limited flow whose
+link queued 329µs throughout. A bulk flow cannot measure this — LEDBAT fills
+the bottleneck queue to target by design, so the "uncongested" control sees
+tens of milliseconds of perfectly real queue. That was measured the wrong way
+first.
+
+**libutp is more exposed than we are, not less** — 780 seconds of base history
+against our 120 — which is much of why it needs the correction.
+
+**The cost is fairness, not throughput.** A single flow with the link to
+itself lost about 1% at 139ms of phantom queue; the controller backs off but
+keeps the pipe full. Two flows through one bottleneck, one drifted: 35% of the
+link against 65%. That run is the test; the 1% one is not kept, because
+asserting on a 1% difference over a saturated link is asserting on noise.
+
+## PR 42 — two timing assumptions in the differential fuzz harness
 
 Not a library change, but it belongs in the same review: both differential
 fuzz targets primed their run with a fixed `time.Sleep(20ms)` and settled each
