@@ -1350,6 +1350,7 @@ func (c *connection) sampleMetrics(now time.Time, force bool) {
 		m.Timeout = cs.Timeout
 		m.BaseDelay = cs.BaseDelay
 		m.CurrentDelay = cs.CurrentDelay
+		m.ClockSkewCorrection = cs.ClockSkewCorrection
 		m.TargetDelayMicros = cs.TargetDelayMicros
 		m.SlowStart = cs.SlowStart
 		m.AppLimitedSince = cs.AppLimitedSince
@@ -1923,6 +1924,24 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 		c.peerTsDiff = time.Second
 	} else {
 		c.peerTsDiff = peerTsDiff
+	}
+	// The delay in the peer's direction is not a congestion signal for this
+	// sender -- it describes the other half of the path -- but it is how
+	// clock drift between the two ends becomes visible. libutp feeds its
+	// `their_hist` from exactly this value, on every packet and before the
+	// acknowledgement number is even looked at (utp_internal.cpp:2000-2004).
+	//
+	// The *uncapped*, raw wrapping value is what goes to the controller,
+	// which is what libutp feeds its their_hist (`their_delay`, :2000-2004).
+	// The cap above exists to stop an unusable clock reading being echoed
+	// back to the peer, and applying it here would break the drift detection
+	// at exactly the point it starts to matter: a clock drifting slow makes
+	// this measurement shrink until it passes zero and wraps, and a wrapped
+	// value capped to one second is a base that has stopped moving. See
+	// peerDelayHist.
+	if c.state != nil && c.state.SentPackets != nil {
+		c.state.SentPackets.OnPeerDelay(
+			wrappingSubUint32(NowMicro(), uint32(packet.Header.Timestamp)), now)
 	}
 
 	// libutp validates the acknowledgement number before anything else, and

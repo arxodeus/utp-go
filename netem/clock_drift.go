@@ -77,27 +77,62 @@ func NewDriftingClock(conn utp.Conn, ppm float64) *DriftingClock {
 // two-byte connection id (packet.go, PacketHeaderV1.EncodeToBytes).
 const utpTimestampOffset = 4
 
+// skewNow is the error this clock has accumulated since the connection began.
+func (d *DriftingClock) skewNow() time.Duration {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return time.Duration(float64(time.Since(d.epoch)) * d.ppm / 1e6)
+}
+
 // WriteTo rewrites the outgoing packet's timestamp as the drifting clock
 // would have stamped it, then sends it.
 func (d *DriftingClock) WriteTo(b []byte, dst utp.ConnectionPeer) (int, error) {
 	if len(b) >= utpTimestampOffset+4 {
-		d.mu.Lock()
-		elapsed := time.Since(d.epoch)
-		d.mu.Unlock()
-
-		// The error a clock with this rate error will have accumulated since
-		// the connection began.
-		skew := time.Duration(float64(elapsed) * d.ppm / 1e6)
-
 		// Copied rather than patched in place: the caller owns b, and the
 		// connection above reuses its packet buffers for retransmission. A
 		// patch would compound the skew every time a packet went out again.
 		out := make([]byte, len(b))
 		copy(out, b)
-		ts := binary.BigEndian.Uint32(out[utpTimestampOffset:])
-		binary.BigEndian.PutUint32(out[utpTimestampOffset:],
-			ts+uint32(skew.Microseconds()))
+		addToTimestamp(out, d.skewNow())
 		b = out
 	}
 	return d.Conn.WriteTo(b, dst)
+}
+
+// ReadFrom adjusts the arriving packet's timestamp by the opposite amount, so
+// that the delay this host measures is the delay its own drifting clock would
+// have produced.
+//
+// **This is half the model, and leaving it out makes the model wrong in a way
+// that is easy to miss.** A host does not have one clock for writing
+// timestamps and another for reading them. If its clock runs slow, the times
+// it stamps into its own packets fall behind *and* the `now - peer_timestamp`
+// it computes for arriving packets shrinks by exactly as much. The first half
+// is what inflates the peer's view of this sender and creates the phantom
+// queue; the second is the only evidence from which clock drift can be
+// told apart from a real queue, and it is what libutp's their_hist watches
+// (utp_internal.cpp:2002-2014).
+//
+// Modelling only the first half produces a perfectly convincing phantom queue
+// and no way for any correction to notice it. This wrapper did exactly that
+// at first, and the correction built against it did nothing at all -- for the
+// right reason, which took a while to see.
+//
+// The sign is the mirror of WriteTo's: a clock slow by s stamps `t - s` on
+// the way out, and measures `now - ts` as `true - s` on the way in, which is
+// the same as adding s to the timestamp it reads.
+func (d *DriftingClock) ReadFrom(b []byte) (int, utp.ConnectionPeer, error) {
+	n, peer, err := d.Conn.ReadFrom(b)
+	if err != nil || n < utpTimestampOffset+4 {
+		return n, peer, err
+	}
+	addToTimestamp(b[:n], -d.skewNow())
+	return n, peer, err
+}
+
+// addToTimestamp adds d to the uTP timestamp field of an encoded packet,
+// wrapping as the 32-bit microsecond field does.
+func addToTimestamp(pkt []byte, d time.Duration) {
+	ts := binary.BigEndian.Uint32(pkt[utpTimestampOffset:])
+	binary.BigEndian.PutUint32(pkt[utpTimestampOffset:], ts+uint32(d.Microseconds()))
 }

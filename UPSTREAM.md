@@ -1094,7 +1094,51 @@ keeps the pipe full. Two flows through one bottleneck, one drifted: 35% of the
 link against 65%. That run is the test; the 1% one is not kept, because
 asserting on a 1% difference over a saturated link is asserting on noise.
 
-## PR 42 — two timing assumptions in the differential fuzz harness
+## PR 42 — the clock-skew correction
+
+libutp watches the delay in the *peer's* direction and shifts its own base
+delay whenever the peer's base falls, on the grounds that two clocks drifting
+apart move both directions' bases together
+(`their_hist`, `utp_internal.cpp:2002-2014`). This fork had the raw value and
+no history, so no correction.
+
+Measured before and after, on an application-limited flow with a deliberately
+skewed clock (`netem.DriftingClock`): the phantom queueing delay falls from
+99% of window x drift rate to 0.3-0.5% of it, and a drifted flow's share of a
+shared 20Mb/s bottleneck goes from 35.0% to 51.8%.
+
+Three subtleties, each of which was wrong in a first version and is worth a
+reviewer's attention.
+
+**A drift model must skew both directions.** Rewriting only outgoing
+timestamps produces the phantom queue faithfully and removes the only evidence
+the correction keys on. The first implementation, tested against that model,
+did nothing — correctly.
+
+**The evidence must stay in wrapping arithmetic.** A clock drifting slow makes
+the inbound delay shrink until it passes zero and the `uint32` subtraction
+wraps; this fork capped that at one second as an unusable reading, so the
+peer-direction base stopped moving exactly when the drift grew large enough to
+matter. libutp keeps `their_delay` as a raw wrapping `uint32` and compares
+with `wrapping_compare_less` throughout. `peerDelayHist` mirrors that,
+including the thirteen rotating buckets, and the controller is fed the
+uncapped value.
+
+**The correction must age out.** Shifts accumulate at the full drift rate
+while the error they cancel is a constant, so an unbounded correction
+overshoots by however many windows the connection has been open and leaves the
+flow delay-blind — measured at 4ms of perceived queue against a neighbour's
+40ms, and 56.6% of the shared link, winning by ignoring congestion. libutp
+bounds it without appearing to, by rotating one history bucket onto a fresh
+unshifted sample every minute. Samples here are stored net of the correction
+standing when they were pushed, which is the same thing expressed
+continuously.
+
+`ConnectionStats`/`ConnectionMetrics` gained `ClockSkewCorrection`, because a
+correction that cannot be observed cannot be tested — and the first two
+subtleties above were both found by reading it.
+
+## PR 43 — two timing assumptions in the differential fuzz harness
 
 Not a library change, but it belongs in the same review: both differential
 fuzz targets primed their run with a fixed `time.Sleep(20ms)` and settled each

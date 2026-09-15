@@ -135,6 +135,13 @@ func (s *sentPackets) OnWindowFull(now time.Time) {
 	s.congestionCtrl.OnWindowFull(now)
 }
 
+// OnPeerDelay passes the delay measured on an inbound packet to the
+// controller, which uses it to detect clock drift. See
+// defaultController.OnPeerDelay.
+func (s *sentPackets) OnPeerDelay(sample uint32, now time.Time) {
+	s.congestionCtrl.OnPeerDelay(sample, now)
+}
+
 // OnTick lets a time-driven controller advance without an ack.
 func (s *sentPackets) OnTick(now time.Time) {
 	s.congestionCtrl.OnTick(now)

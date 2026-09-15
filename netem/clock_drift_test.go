@@ -24,6 +24,8 @@ type driftResult struct {
 	lateQueueMean time.Duration
 	lateSamples   int
 	sent          int
+	skewFinal     time.Duration
+	skewMax       time.Duration
 	meanCwnd      uint32
 	minCwnd       uint32
 	finalCwnd     uint32
@@ -35,10 +37,11 @@ type driftResult struct {
 func (r driftResult) String() string {
 	return fmt.Sprintf(
 		"%+.0fppm: %d bytes in %v (%.2f Mb/s); settled queue %v max %v "+
-			"(link actually queued %v); cwnd mean %d min %d final %d; %d samples",
+			"(link actually queued %v); skew correction final %v max %v; cwnd mean %d min %d final %d; %d samples",
 		r.ppm, r.delivered, r.elapsed.Round(time.Millisecond), r.throughputBps/1e6,
 		r.lateQueueMean.Round(time.Microsecond), r.maxQueueSeen.Round(time.Microsecond),
 		r.linkQueueMean.Round(time.Microsecond),
+		r.skewFinal.Round(time.Microsecond), r.skewMax.Round(time.Microsecond),
 		r.meanCwnd, r.minCwnd, r.finalCwnd, r.samples)
 }
 
@@ -119,6 +122,10 @@ func runDriftedWith(t *testing.T, ppm float64, runFor time.Duration, cid uint16,
 		}
 		if q > res.maxQueueSeen {
 			res.maxQueueSeen = q
+		}
+		res.skewFinal = m.ClockSkewCorrection
+		if m.ClockSkewCorrection > res.skewMax {
+			res.skewMax = m.ClockSkewCorrection
 		}
 		cwndSum += uint64(m.CwndBytes)
 		if m.CwndBytes < res.minCwnd {
@@ -222,49 +229,34 @@ func runDriftedWith(t *testing.T, ppm float64, runFor time.Duration, cid uint16,
 	return res
 }
 
-// What clock drift costs the delay signal, and the rule that governs it.
+// The clock-skew correction, measured against the error it exists to cancel.
 //
-// Nothing here could produce skew until DriftingClock existed, so this is the
-// first measurement of a question the design has always had an answer to on
-// paper: LEDBAT's signal is a difference between two clocks, and if they run
-// at different rates that difference grows without bound.
+// LEDBAT's signal is a one-way delay, which is a difference between two
+// clocks, so it carries their relative rate error. Without a correction the
+// reported queueing delay settles at **the delay window multiplied by the
+// drift rate** -- the base is a sliding-window minimum, so it follows the
+// drift but lags by the window. That was measured before the correction
+// existed: 0.99x the prediction at 5000, 10000 and 20000ppm.
 //
-// The base delay is a sliding-window minimum, so it does absorb drift -- but
-// only with a lag. If the measured delay grows at rate r, the lowest sample
-// still inside a window of length w is the one from w ago, so the reported
-// queueing delay settles at **w x r** whether or not there is a queue. That
-// product is the prediction this measures.
+// libutp cancels it by watching the *other* direction. The same slow clock
+// that inflates the peer's view of this sender makes packets from the peer
+// appear to arrive sooner, so a falling base delay in that direction is the
+// visible half of the bias inflating the invisible half
+// (utp_internal.cpp:2002-2014). This is that, and what it should now leave
+// behind is nothing.
 //
-// It is measured with a short window and a large rate rather than the real
-// window and a real rate, because only the product matters and the real
-// combination takes minutes per data point. A 2-second window at 20000ppm is
-// the same 40ms of phantom queue as the default 120-second window at 333ppm,
-// and the second would need a three-minute transfer to reach steady state.
-// The extrapolation is stated rather than assumed: the test checks the
-// product across three rates, so the linearity it rests on is itself measured.
-//
-// For reference at the default 120-second window:
-//
-//	 100ppm (a good crystal)          12ms of phantom queue
-//	 500ppm                           60ms
-//	1000ppm (a loaded VM's clock)    120ms -- above the 100ms target
-//
-// libutp is exposed to this far more: its base is the minimum over thirteen
-// one-minute buckets (DELAY_BASE_HISTORY, utp_internal.cpp:50), so about 780
-// seconds, which is 6.5x this window. That is why it also shifts its own base
-// whenever the peer's base drops (:2002-2014) -- a correction this library
-// does not have, and needs proportionally less.
-func TestClockDriftInflatesTheDelaySignal(t *testing.T) {
-	// Long enough that the window fills and the signal settles: the rule
-	// predicts a steady state, and a transfer shorter than the window can
-	// only show the ramp towards it.
+// Measured with a short window and large rates rather than the real window
+// and real rates, because only the product matters and the real combination
+// takes minutes per point. A 2-second window at 20000ppm is the same 40ms of
+// error as the default 120-second window at 333ppm.
+func TestClockSkewCorrectionCancelsThePhantomQueue(t *testing.T) {
 	const runFor = 14 * time.Second
 	const window = 2 * time.Second
 
 	type point struct {
-		ppm       float64
-		predicted time.Duration
-		got       driftResult
+		ppm         float64
+		uncorrected time.Duration
+		got         driftResult
 	}
 	var points []point
 
@@ -272,61 +264,69 @@ func TestClockDriftInflatesTheDelaySignal(t *testing.T) {
 	// worth having -- see BENCHMARKS.md.
 	for i, ppm := range []float64{0, -5000, -10000, -20000} {
 		r := runDrifted(t, ppm, runFor, uint16(900+i*10), window)
-		predicted := time.Duration(float64(window) * -ppm / 1e6)
-		points = append(points, point{ppm: ppm, predicted: predicted, got: r})
-		t.Logf("%s  (predicted phantom queue %v)", r.String(), predicted.Round(time.Microsecond))
+		points = append(points, point{
+			ppm:         ppm,
+			uncorrected: time.Duration(float64(window) * -ppm / 1e6),
+			got:         r,
+		})
+		t.Logf("%s  (would be %v uncorrected)", r.String(),
+			time.Duration(float64(window)*-ppm/1e6).Round(time.Microsecond))
 	}
 
 	baseline := points[0].got
 	if baseline.samples == 0 {
 		t.Fatal("the undrifted run produced no samples; the test observed nothing")
 	}
-	for _, p := range points {
-		// A paced flow is not a bulk transfer, so the check is that it kept
-		// flowing rather than that a fixed total arrived.
-		if p.got.delivered < p.got.sent/2 {
-			t.Errorf("%+.0fppm delivered %d of the %d bytes written; the connection "+
-				"did not keep up and this run measures a stall, not drift",
-				p.ppm, p.got.delivered, p.got.sent)
-		}
-	}
-	// The link has capacity to spare, so the undrifted run must see almost no
-	// queue -- otherwise there is nothing to attribute to drift.
-	// With the flow paced far below the link rate there should be no real
-	// queue at all, so the control run must sit near zero. If it does not,
-	// the drifted runs are being compared against noise.
-	if baseline.lateQueueMean > 5*time.Millisecond {
-		t.Fatalf("the undrifted run saw %v of queueing delay on a link it is using "+
-			"a fraction of; drift cannot be isolated against that", baseline.lateQueueMean)
-	}
-
-	// The rule: the excess over the undrifted run tracks window x rate.
 	if baseline.lateSamples == 0 {
 		t.Fatal("no samples were taken after the window had filled; the transfer is " +
-			"too short to show a steady state, and the rule is about one")
+			"too short for a steady state")
 	}
-	for _, p := range points[1:] {
-		excess := p.got.lateQueueMean - baseline.lateQueueMean
-		if excess <= 0 {
-			t.Errorf("%+.0fppm saw no more queueing delay than no drift at all "+
-				"(%v against %v); the drift is not reaching the signal",
-				p.ppm, p.got.lateQueueMean, baseline.lateQueueMean)
-			continue
+	for _, p := range points {
+		if p.got.delivered < p.got.sent/2 {
+			t.Errorf("%+.0fppm delivered %d of the %d bytes written; this run measures "+
+				"a stall, not drift", p.ppm, p.got.delivered, p.got.sent)
 		}
-		ratio := float64(excess) / float64(p.predicted)
-		t.Logf("%+.0fppm: %v of phantom queue against %v predicted (%.2fx)",
-			p.ppm, excess.Round(time.Microsecond), p.predicted.Round(time.Microsecond), ratio)
-		// Once settled the figure should be the product itself. Still a
-		// range rather than a number: the sample is a mean over a live
-		// transfer that also carries a little real queue.
-		if ratio < 0.6 || ratio > 1.6 {
-			t.Errorf("%+.0fppm: phantom queue %v is %.2fx the predicted %v, outside "+
-				"the range this rule would explain", p.ppm, excess, ratio, p.predicted)
+	}
+	// Paced far below the link rate, so there is no real queue to confuse
+	// with a phantom one.
+	if baseline.lateQueueMean > 5*time.Millisecond {
+		t.Fatalf("the undrifted run saw %v of queueing delay on a link it is using a "+
+			"fraction of; drift cannot be isolated against that", baseline.lateQueueMean)
+	}
+
+	for _, p := range points[1:] {
+		// The correction has to have actually fired, and by roughly the whole
+		// drift accumulated over the run. Without this the test would pass
+		// for a build where drift never reached the signal at all.
+		wantSkew := time.Duration(float64(p.got.elapsed) * -p.ppm / 1e6)
+		if p.got.skewFinal < wantSkew/2 {
+			t.Errorf("%+.0fppm: the correction reached only %v against the %v of drift "+
+				"accumulated over the run; it is not tracking",
+				p.ppm, p.got.skewFinal, wantSkew)
+		}
+
+		excess := p.got.lateQueueMean - baseline.lateQueueMean
+		if excess < 0 {
+			excess = 0
+		}
+		left := float64(excess) / float64(p.uncorrected)
+		t.Logf("%+.0fppm: %v of phantom queue left, against %v uncorrected (%.1f%%); "+
+			"correction accumulated %v",
+			p.ppm, excess.Round(time.Microsecond),
+			p.uncorrected.Round(time.Microsecond), left*100,
+			p.got.skewFinal.Round(time.Microsecond))
+
+		// A tenth of what it would otherwise be. The residual is the lag
+		// between a fall in the peer's base and the shift that answers it,
+		// and it scales with the rate rather than vanishing.
+		if left > 0.10 {
+			t.Errorf("%+.0fppm: %v of phantom queue survives the correction, %.0f%% of "+
+				"the %v it would be uncorrected", p.ppm, excess, left*100, p.uncorrected)
 		}
 	}
 }
 
-// What the phantom queue actually costs, at a shared bottleneck.
+// Fairness at a shared bottleneck, which is what the correction is for.
 //
 // TestClockDriftInflatesTheDelaySignal establishes the rule -- the reported
 // queueing delay settles at the delay window multiplied by the drift rate.
@@ -493,19 +493,24 @@ func TestClockDriftYieldsShareAtASharedBottleneck(t *testing.T) {
 	if clean.delivered == 0 {
 		t.Fatal("the undrifted flow delivered nothing; there is no comparison")
 	}
-	// The drifted flow must see a substantially larger queue than the clean
-	// one -- otherwise the drift is not reaching the signal and whatever the
-	// shares turn out to be says nothing about drift.
-	if drifted.queueSeen < clean.queueSeen+50*time.Millisecond {
-		t.Fatalf("the drifted flow saw %v of queue against the clean flow's %v; the "+
-			"drift is not reaching the signal", drifted.queueSeen, clean.queueSeen)
+	// Both flows must see the bottleneck. A drifted flow that sees no queue
+	// at all is not being corrected, it is being blinded -- which is what an
+	// unbounded correction does, and it wins the link by ignoring congestion
+	// rather than by being treated fairly. Measured at 4ms against 40ms
+	// before the correction was made to age out.
+	if drifted.queueSeen < clean.queueSeen/2 {
+		t.Errorf("the drifted flow saw %v of queue against the clean flow's %v: it is "+
+			"blind to the bottleneck, not corrected for drift",
+			drifted.queueSeen, clean.queueSeen)
 	}
-	// The finding itself is the share, logged above and recorded in
-	// KNOWN-LIMITATIONS.md. Asserted loosely, as a tripwire: a drifted flow
-	// should not be taking *more* than its half.
-	if share > 0.5 {
-		t.Errorf("the drifted flow took %.1f%% of the link despite believing it was "+
-			"%v above target; the delay signal is not driving the window",
-			share*100, drifted.queueSeen)
+	// Uncorrected this was 35.0%. Half would be perfect; the assertion is
+	// that it is now much nearer half than it was.
+	if share < 0.40 {
+		t.Errorf("the drifted flow took %.1f%% of the link; uncorrected it took 35.0%%, "+
+			"so the correction has not recovered its share", share*100)
+	}
+	if share > 0.60 {
+		t.Errorf("the drifted flow took %.1f%% of the link, more than its share; the "+
+			"correction is over-cancelling and leaving it delay-blind", share*100)
 	}
 }

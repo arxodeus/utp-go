@@ -1524,9 +1524,11 @@ largest payoff: it is what stops the conformance corpus comparing ack
 *latency*, and it would remove the settle-loop timing assumptions that had to
 be repaired when the ICMP tests shifted the load.
 
-### `their_hist` is a missing mechanism, not a missing getter
+### ~~`their_hist` is a missing mechanism~~ — implemented
 
-**Open.** This was first recorded as observability — "`utp_get_delays`'
+**Closed.** The history below is kept because the route to it was instructive.
+
+**Was open.** This was first recorded as observability — "`utp_get_delays`'
 `theirs` is not tracked" — and that was wrong. `their_hist` has a functional
 role in libutp: correcting for clock skew between the two ends.
 
@@ -1619,10 +1621,54 @@ So the drifted flow takes a little over half what its neighbour does. Real, and
 worth correcting, but a fairness loss rather than the collapse the mechanism's
 absence sounded like.
 
-**The correction itself is still not implemented.** What the measurements have
-changed is that it now has a number to beat, and a clear statement of what it
-is for: a host whose clock drifts gets less than its share of a contended link,
-not a broken connection.
+### The correction, and three things that had to be got right
+
+`defaultController.OnPeerDelay` is libutp's `their_hist` bookkeeping and the
+shift it triggers. Result, against the same measurements:
+
+| | Phantom queue left | Share of a shared bottleneck |
+| --- | --- | --- |
+| uncorrected | 9.87 / 19.79 / 40.56ms (99% of *w x r*) | 35.0% |
+| corrected | 51 / 79 / 112µs (0.3-0.5%) | 51.8% |
+
+Three things had to be right, and each was wrong first.
+
+**The drift model was half a clock.** `DriftingClock` rewrote the timestamps on
+outgoing packets and nothing else. That is enough to produce a perfectly
+convincing phantom queue — the peer's view of this sender is what LEDBAT runs
+on — but a host does not have one clock for stamping and another for reading.
+The same slow clock also shrinks the `now - peer_timestamp` it computes for
+arriving packets, and *that* is the only evidence clock drift can be told apart
+from a real queue by. The first correction, built against the half model, did
+nothing at all, for the right reason.
+
+**The evidence was being thrown away by a cap.** `peerTsDiff` is capped at one
+second as an unusable clock reading before being echoed back to the peer. A
+clock drifting slow makes the inbound measurement shrink until it passes zero
+and the subtraction wraps — at 100ppm that is ten milliseconds every hundred
+seconds, so on an ordinary path it happens within minutes — and a wrapped value
+capped to one second is a base that has stopped moving. The correction
+plateaued at about 10ms in every run whatever the drift rate, which is how long
+it took the accumulated skew to pass the emulated path's one-way delay. libutp
+has no such problem: `their_delay` is a raw wrapping `uint32` throughout and
+every comparison goes through `wrapping_compare_less`. `peerDelayHist` now does
+the same, and the controller is fed the uncapped value.
+
+**The correction has to age out.** Shifts arrive for as long as the peer's base
+keeps falling, which under sustained drift is forever, and they accumulate at
+the full drift rate — while the error they cancel is only *w x r*, a constant.
+libutp bounds this without appearing to: its shift raises stored history
+buckets, and one bucket is rotated onto a fresh unshifted sample every minute,
+so no correction outlives its bucket. An unbounded version drove the base past
+every sample and left the flow **delay-blind** — 4ms of perceived queue against
+its undrifted neighbour's 40ms, and **56.6%** of a shared link, winning by
+ignoring congestion rather than by being treated fairly. Samples are now stored
+net of the correction standing when they were pushed, so each carries only what
+has accumulated since it entered the window: libutp's rotation expressed
+continuously.
+
+The residual 0.3-0.5% is the lag between a fall in the peer's base and the
+shift that answers it. It scales with the drift rate rather than vanishing.
 
 `ConnectionConfig.DelayWindow` was added to make any of this testable —
 the window was a hard-coded two minutes, and no drift experiment can run in a

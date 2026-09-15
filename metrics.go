@@ -46,6 +46,10 @@ type ConnectionMetrics struct {
 	// direction entirely.
 	BaseDelay    time.Duration
 	CurrentDelay time.Duration
+	// ClockSkewCorrection is how much has been added to BaseDelay to cancel
+	// clock drift between the two ends, detected from the peer's own base
+	// delay falling. Zero on a pair of clocks running at the same rate.
+	ClockSkewCorrection time.Duration
 	// --- path MTU ---
 
 	// MtuCurrent is the datagram size the search is currently sending, and

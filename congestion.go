@@ -110,6 +110,12 @@ type Controller interface {
 	// OnTick lets a controller act on the passage of time when no acks are
 	// arriving. Only LEDBAT++ needs it, for its slowdowns.
 	OnTick(now time.Time)
+	// OnPeerDelay reports the one-way delay this end measured on a packet
+	// arriving from the peer -- libutp's `their_delay`, in raw wrapping
+	// microseconds. It is not a congestion signal for this sender; it is how
+	// clock drift between the two ends is detected. See
+	// defaultController.OnPeerDelay.
+	OnPeerDelay(sample uint32, now time.Time)
 	Timeout() time.Duration
 	BytesAvailableInWindow() uint32
 	// Stats returns a snapshot of the controller's internal state.
@@ -146,6 +152,14 @@ type ControllerStats struct {
 	// direction LEDBAT controls, because it is the direction this sender's
 	// packets travel.
 	BaseDelay time.Duration
+	// ClockSkewCorrection is how much has been added to the base delay to
+	// cancel clock drift between the two ends. Zero on a pair of clocks
+	// running at the same rate, which is every pair that has not been
+	// deliberately skewed.
+	//
+	// Exposed because a correction that cannot be observed cannot be tested,
+	// and this repository has already learned that the expensive way.
+	ClockSkewCorrection time.Duration
 	// CurrentDelay is the most recent sample of that same series.
 	//
 	// It is here because there was no way to compute a queueing delay
@@ -213,6 +227,12 @@ type defaultController struct {
 	// be measuring nothing.
 	lastMaxedOutWindow time.Time
 
+	// peerDelayHist is the base delay of packets arriving *from* the peer,
+	// libutp's `their_hist` (utp_internal.cpp:507). It is not a congestion
+	// signal for this sender -- it describes the other direction -- and its
+	// only use is detecting clock drift. See OnPeerDelay.
+	peerDelayHist *peerDelayHist
+
 	// currentDelay is the most recent delay sample pushed into delayAcc --
 	// the newest value of the series BaseDelay is the minimum of. Reported,
 	// not acted on: the control path already has the sample in hand when it
@@ -256,6 +276,7 @@ func newDefaultController(config *ctrlConfig) *defaultController {
 		rttVarianceMicros: (800 * time.Millisecond).Microseconds(),
 		transmissions:     make(map[uint16]*packetRecord),
 		delayAcc:          newDelayAccumulator(config.DelayWindow),
+		peerDelayHist:     newPeerDelayHist(config.DelayWindow),
 		// libutp starts every connection in slow start with
 		// `ssthresh = opt_sndbuf` (utp_internal.cpp:2620-2621), and its
 		// default opt_sndbuf is 1 MB (utp_api.cpp:91) -- the same value as
@@ -301,17 +322,18 @@ func (c *defaultController) Stats() ControllerStats {
 		appLimitedSince = time.Since(c.lastMaxedOutWindow)
 	}
 	return ControllerStats{
-		WindowSizeBytes:    c.windowSizeBytes,
-		MaxWindowSizeBytes: c.maxWindowSizeBytes,
-		MinWindowSizeBytes: c.minWindowSizeBytes,
-		RTT:                c.rtt,
-		RTTVarianceMicros:  c.rttVarianceMicros,
-		Timeout:            c.timeout,
-		BaseDelay:          c.delayAcc.BaseDelay(),
-		CurrentDelay:       c.currentDelay,
-		TargetDelayMicros:  c.targetDelayMicros,
-		SlowStart:          c.slowStart,
-		AppLimitedSince:    appLimitedSince,
+		WindowSizeBytes:     c.windowSizeBytes,
+		MaxWindowSizeBytes:  c.maxWindowSizeBytes,
+		MinWindowSizeBytes:  c.minWindowSizeBytes,
+		RTT:                 c.rtt,
+		RTTVarianceMicros:   c.rttVarianceMicros,
+		Timeout:             c.timeout,
+		BaseDelay:           c.delayAcc.BaseDelay(),
+		CurrentDelay:        c.currentDelay,
+		ClockSkewCorrection: c.delayAcc.skew,
+		TargetDelayMicros:   c.targetDelayMicros,
+		SlowStart:           c.slowStart,
+		AppLimitedSince:     appLimitedSince,
 	}
 }
 
@@ -664,6 +686,175 @@ func computeMaxWindowSizeAdjustment(
 	return int64(scaledGain)
 }
 
+// wrappingLessThanUint32 is libutp's wrapping_compare_less over the 32-bit
+// microsecond timestamp space:
+//
+//	bool wrapping_compare_less(uint32 l, uint32 r, uint32 mask) {
+//	    uint32 dist_down = (l - r) & mask;
+//	    uint32 dist_up = (r - l) & mask;
+//	    return dist_up < dist_down;
+//	}
+//	                                        (utp_utils.h)
+func wrappingLessThanUint32(a, b uint32) bool {
+	return (b - a) < (a - b)
+}
+
+// peerDelayBuckets is how many buckets the peer-direction base delay is kept
+// in. libutp uses DELAY_BASE_HISTORY = 13 one-minute buckets
+// (utp_internal.cpp:50, rotated at :367-380); the count is kept and the
+// bucket length is the configured window divided by it.
+const peerDelayBuckets = 13
+
+// peerDelayHist tracks the base delay of packets arriving *from* the peer:
+// libutp's `their_hist`. Its only purpose is noticing that base fall, which
+// is how clock drift becomes visible.
+//
+// It is deliberately not a delayAccumulator, for one reason: these samples
+// must stay in wrapping 32-bit microsecond arithmetic.
+//
+// A clock drifting slow makes the measured inbound delay *shrink*, and it
+// keeps shrinking -- at 100ppm it loses 10ms every 100 seconds, so on an
+// ordinary path it passes zero within minutes and the subtraction wraps. In
+// Duration terms that wrapped value is about 4295 seconds, which the
+// connection then caps to one second as an unusable clock reading, and the
+// base stops moving: precisely when the drift has grown large enough to
+// matter, the evidence for it disappears.
+//
+// That was measured before this type existed. The correction reached about
+// 10ms and then plateaued in every run, whatever the drift rate -- which is
+// how long it took for the accumulated skew to pass the inbound one-way
+// delay of the emulated path.
+//
+// libutp has no such problem: `their_delay` is a raw wrapping uint32
+// throughout and every comparison in DelayHist goes through
+// wrapping_compare_less. This does the same.
+type peerDelayHist struct {
+	buckets     [peerDelayBuckets]uint32
+	idx         int
+	rotatedAt   time.Time
+	bucketLen   time.Duration
+	base        uint32
+	initialised bool
+}
+
+func newPeerDelayHist(window time.Duration) *peerDelayHist {
+	bucketLen := window / peerDelayBuckets
+	if bucketLen <= 0 {
+		bucketLen = time.Second
+	}
+	return &peerDelayHist{bucketLen: bucketLen}
+}
+
+// addSample records one inbound delay and returns the base before and after,
+// so a caller can see how far it fell. Mirrors DelayHist.add_sample
+// (utp_internal.cpp:291-381), with the bucket rotation driven by the
+// configured window rather than a hard-coded minute.
+func (h *peerDelayHist) addSample(sample uint32, now time.Time) (prev, current uint32, ok bool) {
+	if !h.initialised {
+		for i := range h.buckets {
+			h.buckets[i] = sample
+		}
+		h.base = sample
+		h.rotatedAt = now
+		h.initialised = true
+		// No previous base to have fallen from. libutp's `prev_delay_base != 0`.
+		return sample, sample, false
+	}
+
+	prev = h.base
+	if wrappingLessThanUint32(sample, h.buckets[h.idx]) {
+		h.buckets[h.idx] = sample
+	}
+	if wrappingLessThanUint32(sample, h.base) {
+		h.base = sample
+	}
+
+	if now.Sub(h.rotatedAt) > h.bucketLen {
+		h.rotatedAt = now
+		h.idx = (h.idx + 1) % peerDelayBuckets
+		h.buckets[h.idx] = sample
+		h.base = h.buckets[0]
+		for _, b := range h.buckets {
+			if wrappingLessThanUint32(b, h.base) {
+				h.base = b
+			}
+		}
+	}
+	return prev, h.base, true
+}
+
+// maxSkewAdjustment bounds a single clock-drift correction.
+//
+// libutp: "never adjust more than 10 milliseconds" (utp_internal.cpp:2011).
+// A larger apparent fall in the peer's base delay is far more likely to be
+// the reverse path genuinely getting faster -- a route change, or a queue
+// draining -- than a clock jumping, and treating that as skew would blind
+// this sender's own delay signal by however much it moved.
+const maxSkewAdjustment = 10 * time.Millisecond
+
+// OnPeerDelay reports the one-way delay measured on a packet arriving from
+// the peer, and corrects this sender's delay signal for clock drift.
+//
+// libutp:
+//
+//	uint32 prev_delay_base = conn->their_hist.delay_base;
+//	if (their_delay != 0) conn->their_hist.add_sample(their_delay, conn->ctx->current_ms);
+//
+//	// if their new delay base is less than their previous one
+//	// we should shift our delay base in the other direction in order
+//	// to take the clock skew into account
+//	if (prev_delay_base != 0 &&
+//	    wrapping_compare_less(conn->their_hist.delay_base, prev_delay_base, TIMESTAMP_MASK)) {
+//	    // never adjust more than 10 milliseconds
+//	    if (prev_delay_base - conn->their_hist.delay_base <= 10000)
+//	        conn->our_hist.shift(prev_delay_base - conn->their_hist.delay_base);
+//	}
+//	                                        (utp_internal.cpp:2002-2014)
+//
+// # Why a fall in the other direction means drift in this one
+//
+// A one-way delay is a difference between two clocks, so it carries their
+// relative rate error. If this end's clock runs slow, the time it stamps into
+// its own packets falls further behind, and the peer's measurement of this
+// sender's path -- which is what LEDBAT here runs on -- grows without bound.
+// The same slow clock makes packets *from* the peer appear to arrive sooner,
+// so the delay measured in that direction shrinks by exactly as much.
+//
+// So a falling base delay in the peer's direction is the visible half of a
+// bias that is inflating the invisible half. Raising this sender's base by
+// the same amount cancels it.
+//
+// # What it is worth here
+//
+// Measured, before it existed: the phantom queueing delay settles at the
+// delay window multiplied by the drift rate, and what it costs is fairness
+// rather than throughput -- a drifted flow took 35% of a shared bottleneck
+// against an undrifted flow's 65%. See KNOWN-LIMITATIONS.md, and
+// netem.TestClockDriftYieldsShareAtASharedBottleneck.
+func (c *defaultController) OnPeerDelay(sample uint32, now time.Time) {
+	// libutp: `if (their_delay != 0)`. A zero means the peer has not stamped
+	// a usable timestamp, not that the path is instant.
+	if sample == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	prev, current, ok := c.peerDelayHist.addSample(sample, now)
+	if !ok {
+		return
+	}
+	// Only a *fall* is evidence of drift. A rise is a queue building in the
+	// other direction, which says nothing about either clock.
+	if !wrappingLessThanUint32(current, prev) {
+		return
+	}
+	drop := time.Duration(prev-current) * time.Microsecond
+	if drop > 0 && drop <= maxSkewAdjustment {
+		c.delayAcc.shift(drop)
+	}
+}
+
 // absInt64 returns the absolute value of x.
 func absInt64(x int64) int64 {
 	if x < 0 {
@@ -682,6 +873,15 @@ type delay struct {
 type delayAccumulator struct {
 	delays *delayHeap
 	window time.Duration
+	// skew is the total correction applied so far, to cancel clock drift.
+	// See shift. Zero unless a correction has been applied, and every path
+	// through this type is a no-op while it is zero.
+	//
+	// Samples are stored with the correction *as it stood when they were
+	// pushed* already subtracted, so reading them back with the current
+	// total gives each one only the correction accumulated since it entered
+	// the window. That is what stops the correction running away; see shift.
+	skew time.Duration
 }
 
 func newDelayAccumulator(window time.Duration) *delayAccumulator {
@@ -693,9 +893,62 @@ func newDelayAccumulator(window time.Duration) *delayAccumulator {
 
 func (da *delayAccumulator) Push(delayTime time.Duration, receivedAt time.Time) {
 	heap.Push(da.delays, delay{
-		Value:    delayTime,
+		Value:    delayTime - da.skew,
 		Deadline: receivedAt.Add(da.window),
 	})
+}
+
+// shift raises the base delay, cancelling drift that has inflated every
+// sample in it.
+//
+// libutp:
+//
+//	void shift(const uint32 offset)
+//	{
+//	    // increase all of our base delays by this amount
+//	    // this is used to take clock skew into account
+//	    // by observing the other side's changes in its base_delay
+//	    for (size_t i = 0; i < DELAY_BASE_HISTORY; i++) delay_base_hist[i] += offset;
+//	    delay_base += offset;
+//	}
+//	                                        (utp_internal.cpp:277-289)
+//
+// Raising the base lowers the reported queueing delay by the same amount,
+// which is the point: the samples were inflated by a clock running slow, and
+// the queue they appear to show is not there.
+//
+// # Why the correction must age out, and how
+//
+// libutp shifts a *stored* base and thirteen stored history buckets, and
+// rotates one of those buckets onto a fresh, unshifted sample every minute
+// (utp_internal.cpp:367-380). So a correction only ever survives as long as
+// the bucket carrying it, and the history re-bases itself continuously.
+//
+// That bound is not decoration. Shifts arrive for as long as the peer's base
+// keeps falling, which under sustained drift is forever, and they accumulate
+// at the full drift rate -- while the error they exist to cancel is only the
+// window multiplied by that rate, a constant. A correction that never ages
+// out overshoots by however many windows the connection has been open, drives
+// the base past every sample, and leaves the controller reading zero queueing
+// delay whatever the path is doing.
+//
+// **That was measured, not reasoned about.** With an unbounded correction a
+// drifted flow stopped seeing the bottleneck at all -- 4ms of perceived queue
+// against its undrifted neighbour's 40ms -- and took 56.6% of a shared link
+// instead of the 35% it took with no correction at all. Delay-blind, and
+// winning because of it.
+//
+// Here the samples are stored net of the correction that stood when they were
+// pushed, so reading them back against the current total gives each sample
+// only what has accumulated since it entered the window. Old samples age out
+// and take their share of the correction with them, which is libutp's bucket
+// rotation expressed continuously, and the steady state is exactly the error
+// to be cancelled rather than an unbounded multiple of it.
+func (da *delayAccumulator) shift(offset time.Duration) {
+	if offset <= 0 {
+		return
+	}
+	da.skew += offset
 }
 
 func (da *delayAccumulator) BaseDelay() time.Duration {
@@ -704,9 +957,20 @@ func (da *delayAccumulator) BaseDelay() time.Duration {
 		min := (*da.delays)[0]
 		if now.After(min.Deadline) {
 			heap.Pop(da.delays)
-		} else {
-			return min.Value
+			continue
 		}
+		// Each stored sample carries the correction that stood when it was
+		// pushed already subtracted, so adding the current total gives it
+		// only what has accumulated since. libutp's equivalent bound --
+		// `if (sample < delay_base) delay_base = sample`
+		// (utp_internal.cpp:351-355) -- falls out of that: the newest sample
+		// is in this heap too, so the minimum cannot sit more than one
+		// packet's worth of correction above it.
+		base := min.Value + da.skew
+		if base < 0 {
+			base = 0
+		}
+		return base
 	}
 	return time.Duration(0)
 }
