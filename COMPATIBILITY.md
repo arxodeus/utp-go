@@ -173,9 +173,18 @@ so it sent 288-byte packets. Both are written up in
   defect was found, but nothing damages packets between two real UDP sockets.
 - **The initiator role in the hand-written corpus.** The differential fuzzer
   drives both roles; the M2 corpus is responder-only.
-- **Timing beyond retransmission.** Ack *latency* is not compared, only ack
-  *count* — and the count is compared as a bound, because our ack batching is
-  load-dependent where libutp's is embedder-driven. Doing better needs an
-  injectable clock in our connection.
+- **Inbound timing.** *Emission* instants are now compared exactly, on a
+  virtual clock (see the row above). What is not is the timing of a *reply*:
+  the socket's inbound event loop is not a barrier participant, so a test that
+  injects a packet and advances the clock has no guarantee the injection was
+  processed first. The outbound path is covered.
+- **Ack latency, for a reason that is not about clocks.** Ack *count* is
+  compared, as a bound, because our batching is load-dependent where libutp's
+  is embedder-driven. Latency is not, and an injectable clock -- which now
+  exists -- does not unlock it: both implementations flush deferred acks when
+  something external says so, libutp when its embedder calls
+  `utp_issue_deferred_acks` and this library when an event-loop pass ends, so
+  the comparison would measure harness cadence rather than either
+  implementation. This bullet previously claimed the clock was the blocker.
 - **IPv6.** Everything here runs on IPv4 loopback or an emulator with no
   address family at all.
