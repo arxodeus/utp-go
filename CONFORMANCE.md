@@ -66,6 +66,27 @@ differs rather than silently skipping it:
 
 ## What it found
 
+### Retransmission deadlines drift later with each backoff
+
+**Recorded, not fixed.** The first exact comparison of *when* this
+implementation sends, against libutp read the same way, on an unanswered SYN:
+
+| | first | second |
+| --- | --- | --- |
+| ours | 3.025s | 9.05s |
+| libutp | 3.0s | 9.0s |
+
+The retransmission wheel rounds a delay up to a whole 25ms tick and fires up
+to one tick late — deliberately, because early is the wrong direction: it
+resends a packet the peer was still going to acknowledge. Each backoff then
+re-arms relative to the moment the last one fired, so the lateness carries
+forward. libutp cannot accumulate it, comparing the clock against an absolute
+`rto_timeout` (`utp_internal.cpp:1147-1148`) rather than trusting a timer.
+
+Bounded by the retransmission count times the tick, one-directional, in the
+safe direction, and against multi-second timeouts. Left alone for that reason;
+the reasoning is in [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
+
 ### Three divergences in the echoed timestamp difference
 
 **All fixed.** Found together, the moment the two timestamp fields stopped
@@ -363,12 +384,19 @@ none.
   an event-loop pass ends on the real clock. Nothing in this corpus asserts
   *when* a packet was sent, only what it contained, how many there were, and
   in what order.
-  **`NowMicros` is not enough for this.** It governs what is stamped and
-  measured, not scheduling: a connection given the driver's clock still
-  retransmits on real timers and still emits when its goroutine is scheduled.
-  Comparing latency needs the timers to run on the virtual clock too, so that
-  time advances only when the harness says so — which is a different and much
-  larger change than making the clock readable.
+  **The timers are now virtual too** (`Clock`, `IdleBarrier`,
+  `virtualClock`), and emission *instants* are compared exactly —
+  `TestSynRetransmissionInstantsMatchLibutp` reads them off the packets
+  themselves, on both sides, and gets the same numbers on every run. Ack
+  latency is still not compared, and the reason is no longer the clock: both
+  implementations flush deferred acks when something external says so — libutp
+  when its embedder calls `utp_issue_deferred_acks`, ours when an event-loop
+  pass ends — so the comparison would measure harness cadence rather than
+  either implementation.
+
+  What the virtual clock does not yet cover is the *inbound* path: the
+  socket's event loop is not a barrier participant, so the timing of a reply
+  to an injected packet cannot be measured yet. See KNOWN-LIMITATIONS.md.
 - **State is compared only through the wire.** Terminal outcomes are inferred
   from emitted packets, not read out of either implementation. The divergence
   this used to name — a packet with an unmatched `ack_nr` produced silence from

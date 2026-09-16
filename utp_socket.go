@@ -134,9 +134,12 @@ type IncomingPacket struct {
 }
 
 type UtpSocket struct {
-	ctx                      context.Context
-	cancel                   context.CancelFunc
-	logger                   log.Logger
+	ctx    context.Context
+	cancel context.CancelFunc
+	logger log.Logger
+	// clk is this socket's clock, handed to every connection it creates.
+	// Nil means the real one.
+	clk                      Clock
 	connsMutex               sync.RWMutex
 	conns                    map[string]chan *streamEvent
 	accepts                  chan *Accept
@@ -217,6 +220,34 @@ type SocketOption func(*UtpSocket)
 // not call back into the socket.
 func WithFirewall(refuse func(peer ConnectionPeer) bool) SocketOption {
 	return func(s *UtpSocket) { s.firewall = refuse }
+}
+
+// clock is this socket's clock, never nil.
+func (s *UtpSocket) clock() Clock {
+	if s.clk != nil {
+		return s.clk
+	}
+	return RealClock
+}
+
+// WithClock runs this socket's retransmission wheel on the given clock, and
+// makes it the default for every connection the socket creates.
+//
+// The wheel is shared by every connection on a socket, so the clock has to be
+// chosen here rather than per connection: two connections on one socket
+// cannot disagree about when a tick happened.
+//
+// Nothing outside a test should need this. See Clock.
+func WithClock(clk Clock) SocketOption {
+	return func(s *UtpSocket) {
+		if clk == nil {
+			return
+		}
+		s.clk = clk
+		s.retransmitTimers.stop()
+		s.retransmitTimers = newRetransmitTimersWithClock(
+			defaultRetransmitTickInterval, defaultRetransmitSlots, clk)
+	}
 }
 
 // DefaultSocketBufferSize is the size requested for the underlying UDP
@@ -349,7 +380,35 @@ func (s *UtpSocket) readLoop() {
 }
 
 func (s *UtpSocket) writeLoop() {
-	for event := range s.socketEvents {
+	// A packet leaves a connection by being queued here, so this loop is on
+	// the path between "the connection decided to send" and "the bytes
+	// reached the wire". A virtual clock that did not wait for it would
+	// attribute an emission to whatever instant it happened to be advanced to
+	// next. See IdleBarrier.
+	barrier, _ := s.clock().(IdleBarrier)
+	if barrier != nil {
+		barrier.Register()
+	}
+	for {
+		if barrier != nil {
+			barrier.MarkIdle()
+		}
+		event, ok := <-s.socketEvents
+		if barrier != nil {
+			barrier.MarkBusy()
+			if ok {
+				// The handoff a connection noted when it queued this packet.
+				barrier.TakeHandoff()
+			}
+		}
+		if !ok {
+			if barrier != nil {
+				if u, okU := barrier.(interface{ Unregister() }); okU {
+					u.Unregister()
+				}
+			}
+			return
+		}
 		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			s.logger.Trace("a socket event should be sent to target", "socketEvents.len", len(s.socketEvents), "event.type", event.Type, "event.cid", event.ConnectionId)
 		}
@@ -1329,7 +1388,19 @@ func (s *UtpSocket) deliverICMP(quoted []byte, peer ConnectionPeer, notice *icmp
 // whoever built it and may be reused across connections, so this copies
 // before changing anything. See pathMTUCeiling.
 func (s *UtpSocket) configForPeer(config *ConnectionConfig, peer ConnectionPeer) *ConnectionConfig {
-	if config == nil || s.socket == nil {
+	if config == nil {
+		return config
+	}
+	// A socket-wide clock reaches its connections here, so a caller that
+	// configured one does not have to remember to set it on every config it
+	// hands to Connect or Accept. An explicit per-connection Clock still
+	// wins: this only fills a gap.
+	if s.clk != nil && config.Clock == nil {
+		adjusted := *config
+		adjusted.Clock = s.clk
+		config = &adjusted
+	}
+	if s.socket == nil {
 		return config
 	}
 	ceiling := pathMTUCeiling(s.socket, peer, config.MaxPacketSize)

@@ -102,6 +102,15 @@ type ConnectionConfig struct {
 	MinTimeout      time.Duration
 	MaxTimeout      time.Duration
 	TargetDelay     time.Duration
+	// Clock is where this connection reads time and gets its timers.
+	// Defaults to RealClock; see Clock.
+	//
+	// It governs *scheduling* -- every deadline comparison, and the
+	// retransmission, keep-alive, probe and idle timers. NowMicros below
+	// governs what is stamped on the wire. A test that wants a connection
+	// fully off the real clock sets both.
+	Clock Clock
+
 	// NowMicros is where this connection reads the wall clock, in the uint32
 	// microseconds uTP puts on the wire. Defaults to NowMicro.
 	//
@@ -203,6 +212,9 @@ func fromConnConfig(config *ConnectionConfig) *ctrlConfig {
 	ctrlConfigPtr.MaxTimeout = config.MaxTimeout
 	ctrlConfigPtr.TargetDelayMicros = uint32(config.TargetDelay.Microseconds())
 	ctrlConfigPtr.WindowSize = config.WindowSize
+	if config.Clock != nil {
+		ctrlConfigPtr.Clock = config.Clock
+	}
 	if config.DelayWindow > 0 {
 		ctrlConfigPtr.DelayWindow = config.DelayWindow
 	}
@@ -328,6 +340,11 @@ type connection struct {
 	// which is sent once at the end of the event-loop pass that received it.
 	// libutp's schedule_ack / utp_issue_deferred_acks.
 	ackPending bool
+	// clk is this connection's time source: deadlines and timers. Never nil
+	// after newConnection; read through c.now() for the nil-safe path that
+	// struct-literal tests need.
+	clk Clock
+
 	// clock reads the wall clock in the uint32 microseconds uTP puts on the
 	// wire. ConnectionConfig.NowMicros when set, and nil otherwise -- read it
 	// through nowMicros, never directly.
@@ -388,8 +405,12 @@ func newConnection(
 	timers *retransmitTimers,
 ) *connection {
 	var clock func() uint32
+	clk := RealClock
 	if config != nil {
 		clock = config.NowMicros
+		if config.Clock != nil {
+			clk = config.Clock
+		}
 	}
 
 	var endpoint *Endpoint
@@ -445,6 +466,7 @@ func newConnection(
 	return &connection{
 		ctx:            ctx,
 		logger:         logger,
+		clk:            clk,
 		clock:          clock,
 		state:          NewConnState(connected),
 		cid:            cid,
@@ -468,7 +490,7 @@ func newConnection(
 		// once a probe of that size has been acknowledged. That ordering is
 		// why raising the ceiling is safe: nothing large is sent until
 		// something large is known to arrive.
-		mtu: newMtuSearch(uint32(config.MaxPacketSize), time.Now()),
+		mtu: newMtuSearch(uint32(config.MaxPacketSize), clk.Now()),
 	}
 }
 
@@ -481,7 +503,7 @@ func (c *connection) armRetransmit(pkt *packet, delay time.Duration) {
 		// libutp: "Setup initial timeout timer" in write_outgoing_packet,
 		// guarded by `cur_window_packets == 0`
 		// (utp_internal.cpp:994-998).
-		c.rtoDeadline = time.Now().Add(delay)
+		c.rtoDeadline = c.now().Add(delay)
 	}
 	c.armed[seq] = struct{}{}
 	c.timers.arm(
@@ -606,7 +628,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		c.state.SentPackets = sentPacketsHolder
 	}
 
-	idleTimer := time.NewTimer(c.config.MaxIdleTimeout)
+	idleTimer := c.timeSource().NewTimer(c.config.MaxIdleTimeout)
 	resetIdleTimer := func() {
 		idleTimer.Reset(c.config.MaxIdleTimeout)
 	}
@@ -624,27 +646,27 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	// something occasionally, or a NAT drops its mapping and the peer's own
 	// idle timeout eventually kills it. libutp checks this on every timeout
 	// pass (utp_internal.cpp:1271-1274); this ticks at the same interval.
-	keepAliveTicker := time.NewTicker(c.keepAliveIntervalOrDefault())
+	keepAliveTicker := c.timeSource().NewTicker(c.keepAliveIntervalOrDefault())
 	defer keepAliveTicker.Stop()
 
-	probeTimer := time.NewTimer(time.Hour)
+	probeTimer := c.timeSource().NewTimer(time.Hour)
 	if !probeTimer.Stop() {
-		<-probeTimer.C
+		<-probeTimer.C()
 	}
 	defer probeTimer.Stop()
 	c.armProbeTimer = func(d time.Duration) {
 		if !probeTimer.Stop() {
 			select {
-			case <-keepAliveTicker.C:
+			case <-keepAliveTicker.C():
 				// libutp: `if (state >= CS_CONNECTED && !fin_sent)` and the
 				// connection has been silent for the interval
 				// (utp_internal.cpp:1271-1274).
 				if c.state.stateType == ConnConnected &&
 					(c.state.closing == nil || c.state.closing.LocalFin == nil) &&
-					time.Since(c.lastSentPacket) >= c.keepAliveIntervalOrDefault() {
+					c.now().Sub(c.lastSentPacket) >= c.keepAliveIntervalOrDefault() {
 					c.emit(c.keepAlivePacket())
 				}
-			case <-probeTimer.C:
+			case <-probeTimer.C():
 			default:
 			}
 		}
@@ -670,15 +692,15 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	// at one, three and seven RTOs. Ours was unchanged at 55375, so it would
 	// have put a window it last measured 8 seconds ago straight back onto a
 	// path it has not probed since. See netem.TestLibutpIdleWindowDecay.
-	idleRtoTimer := time.NewTimer(time.Hour)
+	idleRtoTimer := c.timeSource().NewTimer(time.Hour)
 	if !idleRtoTimer.Stop() {
-		<-idleRtoTimer.C
+		<-idleRtoTimer.C()
 	}
 	defer idleRtoTimer.Stop()
 	c.armIdleRto = func(d time.Duration) {
 		if !idleRtoTimer.Stop() {
 			select {
-			case <-idleRtoTimer.C:
+			case <-idleRtoTimer.C():
 			default:
 			}
 		}
@@ -698,11 +720,11 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			}
 			// reset idle timeout
 			resetIdleTimer()
-			c.onPacket(event.Packet, time.Now())
+			c.onPacket(event.Packet, c.now())
 		} else if event.Type == streamShutdown {
 			stream.shutdown.Store(true)
 		} else if event.Type == streamICMP {
-			c.onICMP(event.ICMP, time.Now())
+			c.onICMP(event.ICMP, c.now())
 		} else if event.Type == streamCloseRead {
 			c.onCloseRead()
 		}
@@ -727,7 +749,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			"ack", timeoutPkt.Header.AckNum,
 			"item.key", timeoutPkt.Header.SeqNum,
 			"type", timeoutPkt.Header.PacketType.String())
-		c.onTimeout(timeoutPkt, time.Now())
+		c.onTimeout(timeoutPkt, c.now())
 	}
 
 	handleIdleTimeout := func() {
@@ -745,7 +767,24 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		}
 	}
 
+	// A virtual clock needs to know when this loop has finished reacting, so
+	// that it can move time without racing the reaction. Resolved once here
+	// rather than per pass; nil for the real clock. See IdleBarrier.
+	barrier, _ := c.timeSource().(IdleBarrier)
+	if barrier != nil {
+		barrier.Register()
+	}
+
 	var maxStreamEventLen int
+	// Declared outside the loop so the fast-path `goto afterSelect` above does
+	// not jump over them. Reset on every pass by the select that assigns them.
+	var (
+		woke      wakeKind
+		wokeEvent *streamEvent
+		wokeWrite *queuedWrite
+		wokeOK    bool
+		wokeTimer *packet
+	)
 	for {
 		maxStreamEventLen = max(maxStreamEventLen, len(stream.streamEvents))
 		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
@@ -777,35 +816,76 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			goto afterSelect
 		default:
 		}
+		// Tell a virtual clock this loop is about to block, so it knows the
+		// reaction to the last instant is complete and time may move. A real
+		// clock has no barrier and this is nil. See IdleBarrier.
+		if barrier != nil {
+			barrier.MarkIdle()
+		}
+		// The select below only *receives*; every case body runs after it,
+		// through the switch. That shape is what lets a virtual clock be told
+		// the loop is running again before any of those bodies can emit a
+		// packet -- one MarkBusy, on the one path out, rather than one per
+		// case where missing a single one would put the nondeterminism
+		// straight back. See IdleBarrier.
 		select {
-		case event := <-stream.streamEvents:
-			handleIncoming(event)
-		case write, ok := <-stream.writes:
-			handleWrites(write, ok)
+		case wokeEvent = <-stream.streamEvents:
+			woke = wakeStreamEvent
+		case wokeWrite, wokeOK = <-stream.writes:
+			woke = wakeWrite
 		case <-c.readable:
-			c.processReads()
+			woke = wakeReadable
 		case <-c.writable:
-			c.processWrites(time.Now())
-		case timeoutPkt := <-c.unackTimeoutCh:
-			handleTimeout(timeoutPkt)
-		case <-keepAliveTicker.C:
+			woke = wakeWritable
+		case wokeTimer = <-c.unackTimeoutCh:
+			woke = wakeRetransmit
+		case <-keepAliveTicker.C():
+			woke = wakeKeepAlive
+		case <-probeTimer.C():
+			woke = wakeProbe
+		case <-idleRtoTimer.C():
+			woke = wakeIdleRto
+		case <-idleTimer.C():
+			woke = wakeIdleTimeout
+		case <-c.ctx.Done():
+			woke = wakeCtxDone
+		}
+		if barrier != nil {
+			barrier.MarkBusy()
+		}
+		switch woke {
+		case wakeStreamEvent:
+			handleIncoming(wokeEvent)
+		case wakeWrite:
+			handleWrites(wokeWrite, wokeOK)
+		case wakeReadable:
+			c.processReads()
+		case wakeWritable:
+			c.processWrites(c.now())
+		case wakeRetransmit:
+			// This is the handoff the wheel noted when it queued the timeout.
+			if barrier != nil {
+				barrier.TakeHandoff()
+			}
+			handleTimeout(wokeTimer)
+		case wakeKeepAlive:
 			// libutp: `if (state >= CS_CONNECTED && !fin_sent)` and the
 			// connection has been silent for the interval
 			// (utp_internal.cpp:1271-1274).
 			if c.state.stateType == ConnConnected &&
 				(c.state.closing == nil || c.state.closing.LocalFin == nil) &&
-				time.Since(c.lastSentPacket) >= c.keepAliveIntervalOrDefault() {
+				c.now().Sub(c.lastSentPacket) >= c.keepAliveIntervalOrDefault() {
 				c.emit(c.keepAlivePacket())
 			}
-		case <-probeTimer.C:
+		case wakeProbe:
 			// The peer's window has been closed for a whole interval. Let one
 			// packet through, so its acknowledgement carries a fresh window.
-			c.processWrites(time.Now())
-		case <-idleRtoTimer.C:
-			c.onIdleRto(time.Now())
-		case <-idleTimer.C:
+			c.processWrites(c.now())
+		case wakeIdleRto:
+			c.onIdleRto(c.now())
+		case wakeIdleTimeout:
 			handleIdleTimeout()
-		case <-c.ctx.Done():
+		case wakeCtxDone:
 			handleCtxDone()
 			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 				c.logger.Trace("stream context done, will force stop...", "c.cid.peer", c.cid.Peer, "c.cid.Send", c.cid.Send, "c.cid.Recv", c.cid.Recv)
@@ -814,8 +894,8 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		}
 	afterSelect:
 		c.flushAck()
-		c.scheduleIdleRto(time.Now())
-		c.sampleMetrics(time.Now(), false)
+		c.scheduleIdleRto(c.now())
+		c.sampleMetrics(c.now(), false)
 		// shutdown() sends the local FIN once everything queued has drained.
 		// Both flags reach it: Close means finished entirely, CloseWrite means
 		// finished sending. The difference is not here -- it is that a
@@ -842,17 +922,37 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			// never called and the end-of-stream marker was never delivered.
 			// Readers reaching this path blocked in ReadToEOF forever.
 			c.drainReadsForTeardown()
-			c.processWrites(time.Now())
+			c.processWrites(c.now())
 			if c.state.RecvBuf != nil {
 				c.state.RecvBuf.close()
 			}
 			// A final sample, so the last state of a connection is always
 			// observed rather than lost to the throttle.
-			c.sampleMetrics(time.Now(), true)
+			c.sampleMetrics(c.now(), true)
 			return c.state.Err
 		}
 	}
 }
+
+// wakeKind names which case of the event loop's blocking select fired.
+//
+// It exists so the select can receive without acting: the bodies run from a
+// switch afterwards, which gives one place to tell a virtual clock that the
+// loop is no longer parked.
+type wakeKind int
+
+const (
+	wakeStreamEvent wakeKind = iota
+	wakeWrite
+	wakeReadable
+	wakeWritable
+	wakeRetransmit
+	wakeKeepAlive
+	wakeProbe
+	wakeIdleRto
+	wakeIdleTimeout
+	wakeCtxDone
+)
 
 // scheduleIdleRto arms the idle wake-up when there is nothing outstanding, so
 // the retransmission deadline is still honoured on a connection that has gone
@@ -956,11 +1056,11 @@ func (c *connection) rememberLingerState() {
 // nothing left to clean up and blocking here would leak the very goroutine
 // this is trying to tidy up after.
 func (c *connection) notifySocketShutdown() {
-	timer := time.NewTimer(5 * time.Second)
+	timer := c.timeSource().NewTimer(5 * time.Second)
 	defer timer.Stop()
 	select {
 	case c.socketEvents <- newShutdownSocketEvent(c.cid, c.lingerAck()):
-	case <-timer.C:
+	case <-timer.C():
 	}
 }
 
@@ -994,7 +1094,7 @@ func (c *connection) shutdown() {
 					c.logger.Trace("transmitting FIN", "dst.Peer", c.cid.Peer, "dst.Send", c.cid.Send, "dst.Recv", c.cid.Recv, "seq", seqNum)
 				}
 				c.rememberLingerState()
-				c.transmit(fin, time.Now(), true)
+				c.transmit(fin, c.now(), true)
 			}
 		} else {
 			var localFin *uint16
@@ -1019,7 +1119,7 @@ func (c *connection) shutdown() {
 					c.logger.Trace("transmitting FIN", "dst.Peer", c.cid.Peer, "dst.Send", c.cid.Send, "dst.Recv", c.cid.Recv, "seq", seqNum)
 				}
 				c.rememberLingerState()
-				c.transmit(fin, time.Now(), true)
+				c.transmit(fin, c.now(), true)
 			}
 			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 				c.logger.Trace("init localFin of closingRecord", "dst.peer", c.cid.Peer, "dst.send", c.cid.Send, "dst.recv", c.cid.Recv, "localFin", localFin)
@@ -1042,10 +1142,16 @@ func (c *connection) emit(pkt *packet) {
 	if pkt == nil {
 		return
 	}
-	c.lastSentPacket = time.Now()
+	c.lastSentPacket = c.now()
 	if pkt.Header.PacketType == st_state {
 		// Kept for the socket to repeat after this connection is gone.
 		c.lastStateSent = pkt
+	}
+	// A virtual clock must not consider the system quiet while this packet is
+	// queued but not yet taken by the socket's write loop. See
+	// IdleBarrier.NoteHandoff.
+	if b, ok := c.timeSource().(IdleBarrier); ok {
+		b.NoteHandoff()
 	}
 	c.socketEvents <- newOutgoingSocketEvent(pkt, c.cid)
 }
@@ -1237,7 +1343,7 @@ func (c *connection) onWrite(writeReq *queuedWrite) {
 		}
 		writeReq.resultCh <- result
 	}
-	c.processWrites(time.Now())
+	c.processWrites(c.now())
 	select {
 	case c.writable <- struct{}{}:
 	default:
@@ -1250,7 +1356,7 @@ func (c *connection) processReads() {
 	}
 	recvBuf := c.state.RecvBuf
 
-	currentTime := time.Now()
+	currentTime := c.now()
 	if recvBuf != nil && c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 		c.logger.Trace("read data saving in the recvBuf, start...", "available", recvBuf.Available(), "isEmpty", recvBuf.IsEmpty())
 	}
@@ -1297,7 +1403,7 @@ func (c *connection) processReads() {
 		}
 	}
 	if recvBuf != nil && c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-		c.logger.Trace("read data saving in the recvBuf, end...", "duration", time.Since(currentTime), "available", recvBuf.Available(), "isEmpty", recvBuf.IsEmpty())
+		c.logger.Trace("read data saving in the recvBuf, end...", "duration", c.now().Sub(currentTime), "available", recvBuf.Available(), "isEmpty", recvBuf.IsEmpty())
 	}
 
 	// If we have reached eof, hand the reader the end-of-stream marker -- but
@@ -1610,7 +1716,7 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 		// which is what a retransmission timer has to promise, because
 		// resending before the timeout resends a packet the peer was still
 		// going to acknowledge.
-		now := time.Now()
+		now := c.now()
 
 		// A retransmission timeout on the MTU probe, with nothing else
 		// outstanding, says the path will not carry that size -- not that it
@@ -1691,7 +1797,7 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 			c.retransmitCount++
 			c.state.SentPackets.OnTimeout()
 			c.timeouts++
-			currentTime := time.Now()
+			currentTime := c.now()
 			c.latestTimeout = &currentTime
 			// libutp: `rto_timeout = ctx->current_ms + new_timeout`
 			// (utp_internal.cpp:1204), with new_timeout already doubled.
@@ -2702,6 +2808,26 @@ func (c *connection) onICMPUnreachable() {
 // a struct literal -- which several tests do -- would otherwise carry a nil
 // function and panic on its first packet. A clock is not optional behaviour
 // that can be left unset; only its *source* is configurable.
+// now is this connection's current time.
+//
+// The fallback mirrors nowMicros: several tests build a connection as a
+// struct literal, and a nil clock would panic on the first deadline
+// comparison. Time is not optional; only its source is.
+func (c *connection) now() time.Time {
+	if c.clk != nil {
+		return c.clk.Now()
+	}
+	return time.Now()
+}
+
+// clock returns this connection's Clock, never nil.
+func (c *connection) timeSource() Clock {
+	if c.clk != nil {
+		return c.clk
+	}
+	return RealClock
+}
+
 func (c *connection) nowMicros() uint32 {
 	if c.clock != nil {
 		return c.clock()

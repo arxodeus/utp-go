@@ -56,12 +56,29 @@ type retransmitTimers struct {
 }
 
 func newRetransmitTimers(interval time.Duration, slots int) *retransmitTimers {
+	return newRetransmitTimersWithClock(interval, slots, RealClock)
+}
+
+// newRetransmitTimersWithClock is the socket-wide retransmission wheel on a
+// given clock. See newTimeWheelWithClock.
+func newRetransmitTimersWithClock(interval time.Duration, slots int, clk Clock) *retransmitTimers {
 	r := &retransmitTimers{}
-	r.wheel = newTimeWheel[*retransmitTimer](interval, slots, func(key any, t *retransmitTimer) {
+	barrier, _ := clk.(IdleBarrier)
+	r.wheel = newTimeWheelWithClock[*retransmitTimer](interval, slots, clk, func(key any, t *retransmitTimer) {
+		// The connection has not taken this yet. See IdleBarrier.NoteHandoff.
+		if barrier != nil {
+			barrier.NoteHandoff()
+		}
 		select {
 		case t.deliver <- t.packet:
 		case <-t.ctx.Done():
+			if barrier != nil {
+				barrier.TakeHandoff()
+			}
 		default:
+			if barrier != nil {
+				barrier.TakeHandoff()
+			}
 			// This connection's event loop is behind. Re-arm for the next
 			// tick rather than blocking every other connection's timers
 			// behind it, or dropping the timeout and stalling this

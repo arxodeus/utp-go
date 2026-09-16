@@ -39,15 +39,24 @@ type timeWheel[P any] struct {
 	interval         time.Duration
 	slots            []map[any]*timeWheelItem[P]
 	index            map[any]int
-	ticker           *time.Ticker
+	ticker           Ticker
 	current          int
 	slotNum          int
 	handleExpireFunc expireFunc[P]
+	barrier          IdleBarrier
 	mu               sync.RWMutex
 	stopOnce         sync.Once
 }
 
 func newTimeWheel[P any](interval time.Duration, slotNum int, handleExpireFunc expireFunc[P]) *timeWheel[P] {
+	return newTimeWheelWithClock(interval, slotNum, RealClock, handleExpireFunc)
+}
+
+// newTimeWheelWithClock is the wheel on a given clock. The wheel is per
+// socket rather than per connection, so every connection on a socket shares
+// this one's notion of time -- which is what makes a virtual clock for a
+// socket coherent rather than per-connection and contradictory.
+func newTimeWheelWithClock[P any](interval time.Duration, slotNum int, clk Clock, handleExpireFunc expireFunc[P]) *timeWheel[P] {
 	tw := &timeWheel[P]{
 		stopped:          make(chan struct{}),
 		interval:         interval,
@@ -62,7 +71,18 @@ func newTimeWheel[P any](interval time.Duration, slotNum int, handleExpireFunc e
 		tw.slots[i] = make(map[any]*timeWheelItem[P])
 	}
 
-	tw.ticker = time.NewTicker(interval)
+	if clk == nil {
+		clk = RealClock
+	}
+	tw.ticker = clk.NewTicker(interval)
+	// A virtual clock may not move while this goroutine is processing a tick.
+	// Most ticks expire nothing and so never reach a connection, which is
+	// exactly why the wheel has to report for itself: a clock that fired this
+	// ticker and then waited for a *connection* to react would wait forever.
+	tw.barrier, _ = clk.(IdleBarrier)
+	if tw.barrier != nil {
+		tw.barrier.Register()
+	}
 	go tw.run()
 	return tw
 }
@@ -137,8 +157,14 @@ func (tw *timeWheel[P]) contains(key any) bool {
 func (tw *timeWheel[P]) run() {
 	var expired []*timeWheelItem[P]
 	for {
+		if tw.barrier != nil {
+			tw.barrier.MarkIdle()
+		}
 		select {
-		case <-tw.ticker.C:
+		case <-tw.ticker.C():
+			if tw.barrier != nil {
+				tw.barrier.MarkBusy()
+			}
 			// Collect the expired items under the lock, then dispatch them
 			// with the lock released. handleExpireFunc blocks (it hands the
 			// packet to a connection's event loop over a channel), and that
@@ -164,6 +190,14 @@ func (tw *timeWheel[P]) run() {
 				tw.handleExpireFunc(item.key, item.value)
 			}
 		case <-tw.stopped:
+			// Deliberately not marking busy: this goroutine is leaving, and a
+			// participant that never parks again would block the clock
+			// forever. Unregister instead.
+			if tw.barrier != nil {
+				if u, ok := tw.barrier.(interface{ Unregister() }); ok {
+					u.Unregister()
+				}
+			}
 			return
 		}
 	}

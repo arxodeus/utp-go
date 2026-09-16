@@ -1539,7 +1539,93 @@ only when the harness says so, which means the retransmit wheel and the event
 loop running on the virtual clock too. The old text is kept below because the
 reason still stands for that half.
 
-**No virtual timers.** The connection reads `time.Now()` in dozens of places
+**~~No virtual timers.~~ Implemented.** `Clock` and `IdleBarrier`: the
+connection's deadlines, its four event-loop timers and the socket's
+retransmission wheel all come from an injectable clock, and `virtualClock`
+moves only when a test says so.
+
+Making a clock is trivial; knowing when to move it is not. Three things had to
+be right, and each was wrong first.
+
+**The loop must say when it is parked.** From outside there is no way to tell
+"blocked with nothing to do" from "about to emit a packet". The obvious
+design marks idle before the event loop's select and busy in each case body —
+and that select has ten cases, so missing one puts the nondeterminism straight
+back. The select was restructured to *receive without acting*: it records
+which case fired, the barrier is marked busy once, and the bodies run from a
+switch afterwards. The invariant became structural instead of a rule to
+remember.
+
+**A parked state can be stale.** A channel send returns long before the
+receiver runs, so "everything is parked" immediately after a delivery is an
+answer about the past. Acting on it dropped the next fire on a full channel:
+the retransmission wheel ticks every 25ms, so a two-second advance should fire
+it eighty times, and with the stale check it took delivery of one and dropped
+seventy-nine. Nothing ever retransmitted.
+
+**Parked is not the same as idle while something is in flight.** The wheel
+delivers a timeout and parks; the connection has not woken yet; the system
+looks quiet by every observable measure while work is outstanding. Time then
+moved before the connection had re-armed, and the second retransmission landed
+at 9.05s, 9.075s, 9.125s or 9.15s depending on the scheduler. Handoffs are now
+counted — noted by the sender, taken by the receiver at the one point each
+that owns the item — and deliberately *not* folded into MarkBusy, because a
+participant wakes for reasons unrelated to any handoff and would clear the
+count while the item was still queued.
+
+With all three, the same run gives the same instants: bit-identical across
+five runs and five `-race` runs.
+
+### What it made measurable, and what that found
+
+`netem` and the corpus could compare *what* a packet contained. This is the
+first comparison of *when* one was sent. Both sides are read the same way --
+from the timestamp field of the packets themselves, which each implementation
+re-stamps on every transmission -- so neither number is inferred from wall
+time and neither is sampled.
+
+An unanswered SYN, retransmitted:
+
+| | first | second |
+| --- | --- | --- |
+| ours | 3.025s | 9.05s |
+| libutp | 3.0s | 9.0s |
+
+**The error compounds, and that is a real property, not measurement noise.**
+The retransmission wheel rounds a delay up to a whole 25ms tick and so fires
+up to one tick late -- deliberately, since firing early resends a packet the
+peer was still going to acknowledge. Each backoff then re-arms *relative to
+the moment the last one fired*, so the lateness carries forward: one tick,
+then two. libutp cannot accumulate it, because it compares the clock against
+an absolute `rto_timeout` (`utp_internal.cpp:1147-1148`) rather than trusting
+a timer.
+
+The drift is bounded by the number of retransmissions times the tick, is
+one-directional, and is in the safe direction. It is recorded rather than
+fixed: making deadlines absolute is a change to the most defect-prone code in
+this library for an error of tens of milliseconds against multi-second
+timeouts, and the wheel's lateness is already a stated design choice.
+
+### What it does not yet cover
+
+The socket's **inbound** loop is not a barrier participant. The event loop
+that dispatches received packets to connections still runs unsynchronised, so
+a test that injects a packet and then advances the clock has no guarantee the
+injection was processed first. The corpus's existing cases are unaffected --
+they wait for quiet rather than advancing -- but comparing the timing of a
+*reply* needs that loop instrumented too. The outbound path (connection to
+write loop to wire) is covered.
+
+**Ack latency specifically is still uncompared**, and for a reason that is not
+about clocks: both implementations flush deferred acks when something external
+says so -- libutp when its embedder calls `utp_issue_deferred_acks`, ours when
+an event-loop pass ends -- so the comparison would measure harness cadence
+rather than either implementation.
+
+The old text is kept below, because the `time.Now()` count in it is what the
+work above replaced.
+
+**Formerly: no injectable clock at all.** The connection read `time.Now()` in dozens of places
 and the retransmit wheel uses real timers. Threading a clock through is
 mechanical but touches the whole timing surface, which is the part of this
 library that has produced the most defects. It is also the gap with the

@@ -1175,7 +1175,50 @@ governs what is stamped, not scheduling; that needs the retransmit wheel and
 the event loop on a virtual clock too, which is a much larger change and is
 recorded as still open.
 
-## PR 44 — two timing assumptions in the differential fuzz harness
+## PR 44 — virtual timers
+
+`Clock` and `IdleBarrier`. Every deadline the connection compares, its four
+event-loop timers and the socket's retransmission wheel come from an
+injectable clock; `RealClock` is the default and the production path is
+unchanged.
+
+The point is what it makes measurable. Everything in the corpus compared what
+a packet *contained*; this is the first comparison of *when* one was sent.
+Both sides are read from the packets' own timestamp fields, which each
+implementation re-stamps on every transmission, so neither number is inferred
+from wall time.
+
+Three things had to be right, and each was wrong first — they are worth a
+reviewer's attention because each failure mode is silent.
+
+1. **The loop must report when it parks.** Marking busy in each case body of
+   the event loop's select means ten places to get right. The select was
+   restructured to receive without acting — record which case fired, mark
+   busy once, dispatch from a switch — so the invariant is structural.
+2. **A parked state can be stale.** A channel send returns before the receiver
+   runs. Acting on "everything is parked" right after a delivery dropped
+   seventy-nine of eighty wheel ticks in a two-second advance, and nothing
+   retransmitted at all.
+3. **Parked is not idle while something is in flight.** The wheel delivers a
+   timeout and parks before the connection wakes; time then moved before the
+   re-arm, giving 9.05s, 9.075s, 9.125s or 9.15s for the same virtual
+   deadline. Handoffs are counted, noted by the sender and taken by the
+   receiver, and deliberately not folded into MarkBusy — a participant wakes
+   for reasons unrelated to any handoff.
+
+With all three: bit-identical instants across five runs and five `-race` runs.
+
+**What it found.** Our retransmission deadlines drift later with each backoff
+— 3.025s and 9.05s against libutp's 3.0s and 9.0s — because the wheel rounds
+up to a whole tick and each backoff re-arms relative to the last firing, while
+libutp compares against an absolute `rto_timeout`. Bounded, one-directional,
+in the safe direction, and recorded rather than fixed.
+
+**What it does not cover.** The socket's inbound event loop is not a
+participant, so the timing of a reply to an injected packet is not yet
+measurable. The outbound path is.
+
+## PR 45 — two timing assumptions in the differential fuzz harness
 
 Not a library change, but it belongs in the same review: both differential
 fuzz targets primed their run with a fixed `time.Sleep(20ms)` and settled each

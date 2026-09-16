@@ -80,7 +80,10 @@ type ctrlConfig struct {
 	Gain                  float32
 	Algorithm             CongestionAlgorithm
 	DelayWindow           time.Duration
-	WindowSize            uint32
+	// Clock is where the controller reads time: the delay window's expiry
+	// and the age of the application-limited mark. Defaults to RealClock.
+	Clock      Clock
+	WindowSize uint32
 }
 
 func defaultCtrlConfig() *ctrlConfig {
@@ -93,6 +96,7 @@ func defaultCtrlConfig() *ctrlConfig {
 		MaxWindowSizeIncBytes: defaultMaxWindowSizeIncBytes,
 		Gain:                  defaultGain,
 		DelayWindow:           defaultDelayWindow,
+		Clock:                 RealClock,
 		// The window ceiling, libutp's opt_sndbuf, whose default is also
 		// 1 MB (utp_api.cpp:91). This was absent, which was harmless while
 		// nothing read the field and a zero ceiling the moment something
@@ -233,6 +237,10 @@ type defaultController struct {
 	// only use is detecting clock drift. See OnPeerDelay.
 	peerDelayHist *peerDelayHist
 
+	// clk is where this controller reads time. Never nil after
+	// newDefaultController; read through now().
+	clk Clock
+
 	// currentDelay is the most recent delay sample pushed into delayAcc --
 	// the newest value of the series BaseDelay is the minimum of. Reported,
 	// not acted on: the control path already has the sample in hand when it
@@ -257,6 +265,10 @@ type defaultController struct {
 }
 
 func newDefaultController(config *ctrlConfig) *defaultController {
+	clk := config.Clock
+	if clk == nil {
+		clk = RealClock
+	}
 	ctrl := &defaultController{
 		targetDelayMicros:     config.TargetDelayMicros,
 		timeout:               config.InitialTimeout,
@@ -275,7 +287,8 @@ func newDefaultController(config *ctrlConfig) *defaultController {
 		// timeout computed before any ack is conservative rather than zero.
 		rttVarianceMicros: (800 * time.Millisecond).Microseconds(),
 		transmissions:     make(map[uint16]*packetRecord),
-		delayAcc:          newDelayAccumulator(config.DelayWindow),
+		clk:               clk,
+		delayAcc:          newDelayAccumulatorWithClock(config.DelayWindow, clk),
 		peerDelayHist:     newPeerDelayHist(config.DelayWindow),
 		// libutp starts every connection in slow start with
 		// `ssthresh = opt_sndbuf` (utp_internal.cpp:2620-2621), and its
@@ -319,7 +332,7 @@ func (c *defaultController) Stats() ControllerStats {
 	defer c.mu.Unlock()
 	var appLimitedSince time.Duration
 	if !c.lastMaxedOutWindow.IsZero() {
-		appLimitedSince = time.Since(c.lastMaxedOutWindow)
+		appLimitedSince = c.now().Sub(c.lastMaxedOutWindow)
 	}
 	return ControllerStats{
 		WindowSizeBytes:     c.windowSizeBytes,
@@ -855,6 +868,15 @@ func (c *defaultController) OnPeerDelay(sample uint32, now time.Time) {
 	}
 }
 
+// now is this controller's current time, nil-safe for controllers built
+// directly in unit tests.
+func (c *defaultController) now() time.Time {
+	if c.clk != nil {
+		return c.clk.Now()
+	}
+	return time.Now()
+}
+
 // absInt64 returns the absolute value of x.
 func absInt64(x int64) int64 {
 	if x < 0 {
@@ -873,6 +895,9 @@ type delay struct {
 type delayAccumulator struct {
 	delays *delayHeap
 	window time.Duration
+	// clk decides when a sample has aged out of the window. Nil means the
+	// real clock; read it through now().
+	clk Clock
 	// skew is the total correction applied so far, to cancel clock drift.
 	// See shift. Zero unless a correction has been applied, and every path
 	// through this type is a no-op while it is zero.
@@ -889,6 +914,22 @@ func newDelayAccumulator(window time.Duration) *delayAccumulator {
 		delays: &delayHeap{},
 		window: window,
 	}
+}
+
+func newDelayAccumulatorWithClock(window time.Duration, clk Clock) *delayAccumulator {
+	return &delayAccumulator{
+		delays: &delayHeap{},
+		window: window,
+		clk:    clk,
+	}
+}
+
+// now is nil-safe, for the accumulators built directly in unit tests.
+func (da *delayAccumulator) now() time.Time {
+	if da.clk != nil {
+		return da.clk.Now()
+	}
+	return time.Now()
 }
 
 func (da *delayAccumulator) Push(delayTime time.Duration, receivedAt time.Time) {
@@ -952,7 +993,7 @@ func (da *delayAccumulator) shift(offset time.Duration) {
 }
 
 func (da *delayAccumulator) BaseDelay() time.Duration {
-	now := time.Now()
+	now := da.now()
 	for da.delays.Len() > 0 {
 		min := (*da.delays)[0]
 		if now.After(min.Deadline) {

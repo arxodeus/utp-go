@@ -54,6 +54,7 @@ than "verified".
 
 | Area | Evidence | Notes |
 | --- | --- | --- |
+| Emission instants | **Differential** | *When* a packet is sent, compared exactly. The connection's deadlines, timers and wall clock run on a clock the test owns (`Clock`, `IdleBarrier`), and both sides' instants are read from the packets' own timestamp fields rather than from wall time. An unanswered SYN: ours at 3.025s and 9.05s against libutp's 3.0s and 9.0s -- a compounding wheel-resolution drift, recorded in KNOWN-LIMITATIONS.md. Bit-identical across repeated runs |
 | Timestamp fields on the wire | **Differential** | `Timestamp` and `timestamp_difference_microseconds` are now compared byte for byte, which they were not: both sat in the corpus's tolerated-differences list because libutp reads a virtual clock and we read the real one. `ConnectionConfig.NowMicros` closed that, and comparing them found three divergences -- a measured delay echoed on the SYN-ACK where libutp echoes zero, the value being updated from packets libutp rejects, and a one-second cap no libutp would send. See CONFORMANCE.md |
 | In-order data, ack generation | Differential | Corpus, and both differential fuzz targets |
 | Out-of-order data, selective acks | Differential | `Reordering`, `WideReordering` |
