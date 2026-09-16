@@ -102,6 +102,22 @@ type ConnectionConfig struct {
 	MinTimeout      time.Duration
 	MaxTimeout      time.Duration
 	TargetDelay     time.Duration
+	// NowMicros is where this connection reads the wall clock, in the uint32
+	// microseconds uTP puts on the wire. Defaults to NowMicro.
+	//
+	// It governs only what is *stamped and measured* -- the timestamp field,
+	// the timestamp difference echoed back, and the one-way delays derived
+	// from them. Scheduling still runs on real timers: this is not a virtual
+	// clock, and a connection given a frozen NowMicros still retransmits on
+	// time.
+	//
+	// It exists because libutp's driver reads a virtual clock where this
+	// library read the real one, so the conformance corpus could not compare
+	// the two timestamp fields at all and listed both as tolerated
+	// differences. Pinning this to the driver's clock removes the tolerance;
+	// see conformance_harness_test.go.
+	NowMicros func() uint32
+
 	// DelayWindow is how far back the congestion controller looks for its
 	// base delay -- the lowest one-way delay it has seen, which it treats as
 	// the path with an empty queue.
@@ -312,6 +328,15 @@ type connection struct {
 	// which is sent once at the end of the event-loop pass that received it.
 	// libutp's schedule_ack / utp_issue_deferred_acks.
 	ackPending bool
+	// clock reads the wall clock in the uint32 microseconds uTP puts on the
+	// wire. ConnectionConfig.NowMicros when set, and nil otherwise -- read it
+	// through nowMicros, never directly.
+	//
+	// Every timestamp this connection stamps and every one-way delay it
+	// derives goes through that accessor, so a test can pin it. Scheduling
+	// does not: see the note on the config field.
+	clock func() uint32
+
 	// mtu is this connection's path-MTU search. See mtu.go.
 	mtu *mtuSearch
 	// lastSentPacket is when this connection last put a packet on the wire.
@@ -362,6 +387,11 @@ func newConnection(
 	abandoned <-chan struct{},
 	timers *retransmitTimers,
 ) *connection {
+	var clock func() uint32
+	if config != nil {
+		clock = config.NowMicros
+	}
+
 	var endpoint *Endpoint
 	var peerTsDiff time.Duration
 	var peerRecvWindow uint32
@@ -374,9 +404,30 @@ func newConnection(
 			SynAck: synAck,
 		}
 
-		// uint32 wrapping arithmetic: the SYN's timestamp is a uint32 wire
-		// value, so it cannot be subtracted from a full-width int64 clock.
-		peerTsDiff = timestampDiffMicros(NowMicro(), uint32(syn.Header.Timestamp))
+		// No delay is measured from the SYN, and the SYN-ACK therefore
+		// echoes a timestamp difference of zero.
+		//
+		// libutp processes an incoming SYN with `utp_process_incoming(conn,
+		// packet, len, /*syn=*/true)`, and that call returns at
+		//
+		//	if (syn) {
+		//	    return 0;
+		//	}
+		//
+		// before ever reaching `conn->reply_micro = their_delay`
+		// (utp_internal.cpp:2002). So reply_micro keeps the zero it was
+		// initialised with (:2617) until a non-SYN packet arrives, and zero
+		// is a defined signal rather than a measurement: "if the actual delay
+		// is 0, it means the other end hasn't received a sample from us yet".
+		//
+		// This used to measure the SYN and echo it, which gave the initiator
+		// a delay sample a round trip earlier than the reference does -- and
+		// one derived from a single packet, carrying whatever offset stands
+		// between two clocks that have exchanged nothing yet. The corpus
+		// could not see it: the timestamp fields were excluded from
+		// comparison until this connection's clock became injectable, which
+		// is what that exclusion was hiding.
+		peerTsDiff = 0
 		peerRecvWindow = syn.Header.WndSize
 	} else {
 		synNum := RandomUint16()
@@ -394,6 +445,7 @@ func newConnection(
 	return &connection{
 		ctx:            ctx,
 		logger:         logger,
+		clock:          clock,
 		state:          NewConnState(connected),
 		cid:            cid,
 		config:         config,
@@ -932,7 +984,7 @@ func (c *connection) shutdown() {
 				fin := NewPacketBuilder(
 					st_fin,
 					c.cid.Send,
-					NowMicro(),
+					c.nowMicros(),
 					recvWindow,
 					seqNum,
 				).WithAckNum(ackNum).WithSelectiveAck(selectiveAck).Build()
@@ -955,7 +1007,7 @@ func (c *connection) shutdown() {
 				fin := NewPacketBuilder(
 					st_fin,
 					c.cid.Send,
-					NowMicro(),
+					c.nowMicros(),
 					recvWindow,
 					seqNum,
 				).WithAckNum(ackNum).
@@ -1145,7 +1197,7 @@ func (c *connection) processWrites(now time.Time) {
 		packetInst := NewPacketBuilder(
 			st_data,
 			c.cid.Send,
-			NowMicro(),
+			c.nowMicros(),
 			recvWindow,
 			seqNum,
 		).WithPayload(payload).WithTsDiffMicros(uint32(c.peerTsDiff.Microseconds())).WithAckNum(ackNum).WithSelectiveAck(selectiveAck).Build()
@@ -1686,7 +1738,7 @@ func (c *connection) retransmit(originPacket *packet, now time.Time) {
 			ConnectionId:  originPacket.Header.ConnectionId,
 			SeqNum:        originPacket.Header.SeqNum,
 			WndSize:       uint32(c.state.RecvBuf.Available()),
-			Timestamp:     time.Now().UnixMicro(),
+			Timestamp:     int64(c.nowMicros()),
 			TimestampDiff: uint32(c.peerTsDiff.Microseconds()),
 			AckNum:        c.state.RecvBuf.AckNum(),
 		},
@@ -1902,6 +1954,21 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	c.packetsReceived++
 	c.bytesReceived += uint64(len(packet.Body))
 
+	// libutp validates the acknowledgement number before anything else, and
+	// so does this. Order matters: a packet rejected here must not first
+	// draw a re-ack from the reorder-window check below.
+	if c.invalidAckNum(packet) {
+		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+			c.logger.Trace("dropping packet with an out-of-range ack number",
+				"ackNum", packet.Header.AckNum, "type", packet.Header.PacketType.String())
+		}
+		return
+	}
+
+	if c.outsideReorderWindow(packet) {
+		return
+	}
+
 	// Measure how long ago the peer stamped this packet. That value is what we
 	// echo back in timestamp_difference_microseconds, and it is the peer's
 	// only delay signal for congestion control.
@@ -1915,16 +1982,33 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	// all. See KNOWN-LIMITATIONS.md.
 	//
 	// libutp computes reply_micro the same way, as a uint32 subtraction of the
-	// packet's timestamp from the current time (utp_internal.cpp, reply_micro
-	// assignment in UTP_ProcessIncoming).
-	peerTsDiff := timestampDiffMicros(NowMicro(), uint32(packet.Header.Timestamp))
-	// Cap absurd values, which mean the peer's clock is unusable rather than
-	// that the link is slow.
-	if peerTsDiff > c.config.MaxIdleTimeout {
-		c.peerTsDiff = time.Second
-	} else {
-		c.peerTsDiff = peerTsDiff
-	}
+	// packet's timestamp from the current time (utp_internal.cpp:2000-2002).
+	//
+	// **It is measured here, after the validation above, and not before.**
+	// libutp reaches `conn->reply_micro = their_delay` only once the packet
+	// has passed the acknowledgement-number rule (:1794-1807) and the
+	// reorder-window check (:1886-1899); a packet either of those rejects
+	// never touches it. This did it first thing, so a packet the reference
+	// discards still changed what we echoed to the peer -- which is the
+	// peer's whole delay signal, and reachable by anyone who can guess a
+	// connection id and send a packet bad enough to be dropped.
+	//
+	// Found by FuzzDifferentialResponder once the clock became injectable:
+	// libutp's ack carried the *previous* packet's delay where ours carried
+	// the rejected one's. Invisible while the timestamp fields were excluded
+	// from comparison.
+	// Not capped. This used to pin anything above MaxIdleTimeout to exactly
+	// one second, which was protection against the defect described above --
+	// the wrong field, producing ~1.79e15 on every packet -- and outlived it.
+	//
+	// libutp echoes `time - p` raw, however it wraps (utp_internal.cpp:2000).
+	// A peer whose clock is ahead of ours produces a value that wraps to
+	// something enormous, and that is what the reference passes on; the
+	// receiving end has its own rule for it, not the sending end. Capping
+	// here put a number on the wire that no libutp would have sent, and
+	// FuzzDifferentialResponder showed it the moment the timestamp fields
+	// could be compared: ours 1000000 against libutp's 3487502864.
+	c.peerTsDiff = timestampDiffMicros(c.nowMicros(), uint32(packet.Header.Timestamp))
 	// The delay in the peer's direction is not a congestion signal for this
 	// sender -- it describes the other half of the path -- but it is how
 	// clock drift between the two ends becomes visible. libutp feeds its
@@ -1941,22 +2025,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	// peerDelayHist.
 	if c.state != nil && c.state.SentPackets != nil {
 		c.state.SentPackets.OnPeerDelay(
-			wrappingSubUint32(NowMicro(), uint32(packet.Header.Timestamp)), now)
-	}
-
-	// libutp validates the acknowledgement number before anything else, and
-	// so does this. Order matters: a packet rejected here must not first
-	// draw a re-ack from the reorder-window check below.
-	if c.invalidAckNum(packet) {
-		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-			c.logger.Trace("dropping packet with an out-of-range ack number",
-				"ackNum", packet.Header.AckNum, "type", packet.Header.PacketType.String())
-		}
-		return
-	}
-
-	if c.outsideReorderWindow(packet) {
-		return
+			wrappingSubUint32(c.nowMicros(), uint32(packet.Header.Timestamp)), now)
 	}
 
 	// Handle different packet types
@@ -1980,7 +2049,20 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	// Process acknowledgments
 	switch packet.Header.PacketType {
 	case st_state, st_data, st_fin:
-		delay := time.Duration(packet.Header.TimestampDiff) * time.Microsecond
+		// INT_MAX is the peer saying it has no measurement, not a delay of
+		// 35 minutes. libutp:
+		//
+		//	const uint32 actual_delay = (uint32(pf1->reply_micro)==INT_MAX?0:uint32(pf1->reply_micro));
+		//	                                        (utp_internal.cpp:2017)
+		//
+		// Without this the value goes into the delay history as a sample,
+		// where being a maximum it changes nothing for the base but reports a
+		// 35-minute queue for as long as it is the current sample.
+		replyMicros := packet.Header.TimestampDiff
+		if replyMicros == math.MaxInt32 {
+			replyMicros = 0
+		}
+		delay := time.Duration(replyMicros) * time.Microsecond
 		if err = c.processAck(packet.Header.AckNum, packet.Eack, delay, now); err != nil {
 			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 				c.logger.Trace("ack does not correspond to known seq_num",
@@ -2007,7 +2089,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 				c.emit(c.synState)
 			} else {
 				randSeqNum := RandomUint16()
-				resetPacket := NewPacketBuilder(st_reset, packet.Header.ConnectionId, uint32(time.Now().UnixMicro()), 100_000, randSeqNum).Build()
+				resetPacket := NewPacketBuilder(st_reset, packet.Header.ConnectionId, c.nowMicros(), 100_000, randSeqNum).Build()
 				c.emit(resetPacket)
 			}
 		} else {
@@ -2613,6 +2695,20 @@ func (c *connection) onICMPUnreachable() {
 	c.state.Err = err
 }
 
+// nowMicros reads this connection's wall clock, in the uint32 microseconds
+// uTP puts on the wire.
+//
+// The fallback is deliberate rather than an oversight: a connection built as
+// a struct literal -- which several tests do -- would otherwise carry a nil
+// function and panic on its first packet. A clock is not optional behaviour
+// that can be left unset; only its *source* is configurable.
+func (c *connection) nowMicros() uint32 {
+	if c.clock != nil {
+		return c.clock()
+	}
+	return NowMicro()
+}
+
 func (c *connection) reset(err error) {
 	c.logger.Warn("resetting connection", "err", err)
 
@@ -2630,7 +2726,7 @@ func (c *connection) reset(err error) {
 }
 
 func (c *connection) synPacket(seqNum uint16) *packet {
-	nowMicros := time.Now().UnixMicro()
+	nowMicros := int64(c.nowMicros())
 	return NewPacketBuilder(
 		st_syn,
 		c.cid.Recv,
@@ -2641,7 +2737,7 @@ func (c *connection) synPacket(seqNum uint16) *packet {
 }
 
 func (c *connection) statePacket() *packet {
-	now := time.Now().UnixMicro()
+	now := int64(c.nowMicros())
 	tsDiffMicros := uint32(c.peerTsDiff.Microseconds())
 
 	switch c.state.stateType {
@@ -2703,7 +2799,7 @@ func (c *connection) retransmitLostPackets(now time.Time) {
 		return
 	}
 	connID := c.cid.Send
-	nowMicros := time.Now().UnixMicro()
+	nowMicros := int64(c.nowMicros())
 	recvWindow := uint32(c.state.RecvBuf.Available())
 	tsDiffMicros := uint32(c.peerTsDiff.Microseconds())
 

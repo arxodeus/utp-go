@@ -1138,7 +1138,44 @@ continuously.
 correction that cannot be observed cannot be tested — and the first two
 subtleties above were both found by reading it.
 
-## PR 43 — two timing assumptions in the differential fuzz harness
+## PR 43 — an injectable wall clock, and the three divergences it exposed
+
+`ConnectionConfig.NowMicros` is where a connection reads the wall clock, in
+the uint32 microseconds uTP puts on the wire. It defaults to the real one;
+every timestamp stamped and every one-way delay derived goes through it.
+
+The point is not configurability. `Timestamp` and `TimestampDiff` had been
+excluded from the conformance corpus's field-by-field comparison since it was
+written, because libutp's driver reads a virtual clock and this library read
+the real one, so they could never agree whatever either implementation did.
+Pinning our clock to the driver's removes the exclusion — and the first run
+found three divergences, every one of them in
+`timestamp_difference_microseconds`, which is the peer's entire delay signal.
+
+1. **The SYN-ACK echoed a measured delay; libutp echoes zero.** Its SYN path
+   returns at `if (syn) { return 0; }` before `reply_micro` is ever set
+   (`utp_internal.cpp:2002`), and zero is a defined "no sample yet" signal.
+2. **Packets libutp rejects still changed what we echoed.** libutp sets
+   `reply_micro` after the ack-number rule (`:1794-1807`) and the
+   reorder-window check (`:1886-1899`); we set it first thing, so a packet the
+   reference discards silently still moved the peer's delay signal.
+3. **A cap put a value on the wire no libutp would send.** Anything above
+   `MaxIdleTimeout` was pinned to one second — protection against an older
+   defect that had outlived it. Measured as ours `1000000` against libutp's
+   `3487502864`.
+
+The matching receive-side rule was also missing and is now in: a `reply_micro`
+of exactly `INT_MAX` means "no measurement", not 35 minutes (`:2017`).
+
+Each fix was confirmed non-vacuous by restoring the old behaviour
+individually and watching its own failure return.
+
+**What this does not do** is make ack *latency* comparable. `NowMicros`
+governs what is stamped, not scheduling; that needs the retransmit wheel and
+the event loop on a virtual clock too, which is a much larger change and is
+recorded as still open.
+
+## PR 44 — two timing assumptions in the differential fuzz harness
 
 Not a library change, but it belongs in the same review: both differential
 fuzz targets primed their run with a fixed `time.Sleep(20ms)` and settled each

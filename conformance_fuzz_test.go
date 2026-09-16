@@ -307,7 +307,7 @@ func newDifferentialRun(t *testing.T, role differentialRole) *differentialRun {
 	case differentialResponder:
 		drv.Listen()
 		cid := NewConnectionId(r.conn.peer, corpusSynConnID+1, corpusSynConnID)
-		go func() { _, _ = r.sock.AcceptWithCid(ctx, cid, NewConnectionConfig()) }()
+		go func() { _, _ = r.sock.AcceptWithCid(ctx, cid, pinnedClockConfig(drv)) }()
 		// The acceptor emits nothing until a SYN arrives, so the only thing
 		// to wait for is the request being registered to receive one. A
 		// cid-specific Accept parks in the awaiting map until its SYN
@@ -321,7 +321,7 @@ func newDifferentialRun(t *testing.T, role differentialRole) *differentialRun {
 			t.Skipf("libutp connect failed: %v", err)
 		}
 		cid := NewConnectionId(r.conn.peer, initiatorConnSeed, initiatorConnSeed+1)
-		go func() { _, _ = r.sock.ConnectWithCid(ctx, cid, NewConnectionConfig()) }()
+		go func() { _, _ = r.sock.ConnectWithCid(ctx, cid, pinnedClockConfig(drv)) }()
 		// Wait for the SYN itself, not for a fixed interval.
 		//
 		// This used to sleep 20ms and assume the connection goroutine had run

@@ -90,7 +90,7 @@ func runResponderCorpus(t *testing.T, steps []step) {
 	cid := NewConnectionId(conn.peer, corpusSynConnID+1, corpusSynConnID)
 	streamCh := make(chan *UtpStream, 1)
 	go func() {
-		s, err := sock.AcceptWithCid(ctx, cid, NewConnectionConfig())
+		s, err := sock.AcceptWithCid(ctx, cid, pinnedClockConfig(drv))
 		if err == nil {
 			streamCh <- s
 		} else {
@@ -392,6 +392,10 @@ func goResponderForCorpus(t *testing.T) (*scriptedConn, *UtpSocket, context.Canc
 	sock := WithSocket(ctx, conn, conformanceLogger())
 	cid := NewConnectionId(conn.peer, corpusSynConnID+1, corpusSynConnID)
 	go func() {
+		// Not clock-pinned: this helper's callers measure our side's own
+		// behaviour (ack counts, malformed-packet handling) rather than
+		// comparing packet fields against libutp, so there is no virtual
+		// clock to agree with.
 		_, _ = sock.AcceptWithCid(ctx, cid, NewConnectionConfig())
 	}()
 	time.Sleep(100 * time.Millisecond)

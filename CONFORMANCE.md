@@ -66,6 +66,42 @@ differs rather than silently skipping it:
 
 ## What it found
 
+### Three divergences in the echoed timestamp difference
+
+**All fixed.** Found together, the moment the two timestamp fields stopped
+being excluded from comparison. Every one of them is in
+`timestamp_difference_microseconds` — the field that carries the *peer's*
+entire delay signal, and therefore drives its congestion control.
+
+**The SYN-ACK carried a measured delay where libutp carries zero.** libutp
+processes an incoming SYN with `utp_process_incoming(..., syn=true)`, and that
+call returns at `if (syn) { return 0; }` before ever reaching
+`conn->reply_micro = their_delay` (`utp_internal.cpp:2002`). So its SYN-ACK
+echoes the zero the socket was initialised with, and zero is a defined signal:
+"if the actual delay is 0, it means the other end hasn't received a sample
+from us yet". We measured the SYN and echoed it, handing the initiator a delay
+sample a round trip early — one derived from a single packet, carrying
+whatever offset stands between two clocks that have exchanged nothing.
+
+**Packets libutp rejects still changed what we echoed.** libutp sets
+`reply_micro` only after a packet has passed the acknowledgement-number rule
+(`:1794-1807`) and the reorder-window check (`:1886-1899`). We set it first
+thing in `onPacket`. So a packet bad enough for the reference to discard
+silently still moved our echoed delay — reachable by anyone who can guess a
+connection id. `FuzzDifferentialResponder` showed libutp's ack carrying the
+previous packet's delay where ours carried the rejected one's.
+
+**A cap put a number on the wire no libutp would send.** Anything above
+`MaxIdleTimeout` was pinned to exactly one second. That was protection against
+an older defect — the wrong header field, producing ~1.79e15 on every packet —
+and outlived it. libutp echoes `time - p` raw, however it wraps; the receiving
+end has a rule for absurd values, the sending end does not. Measured as ours
+`1000000` against libutp's `3487502864`.
+
+The matching receive-side rule was missing too and is now in: libutp reads a
+`reply_micro` of exactly `INT_MAX` as "no measurement" and substitutes zero
+(`:2017`).
+
 ### The selective-ack bitfield was bit-reversed
 
 **Fixed.** The first run of the reordering case produced `ours=80000000`
@@ -310,6 +346,14 @@ none.
 - **Only the responder role is covered.** Every case drives both
   implementations as the side accepting a connection. The initiator role —
   where we send the SYN and libutp answers — is not in the corpus.
+- **The timestamp fields are now compared, and were not.** `Timestamp` and
+  `TimestampDiff` sat in `allowedToDiffer` because libutp's driver reads a
+  virtual clock where this library read the real one, so the two could never
+  agree whatever the implementations did. `ConnectionConfig.NowMicros` makes
+  this connection's wall clock injectable, the corpus pins it to the driver's,
+  and both fields are compared like every other. That found three real
+  divergences — see "What it found" — and every one of them was in a field a
+  peer reads.
 - **Ack timing is not compared, though ack *count* and retransmission timing
   now are.** `conformance_timing_test.go` measures libutp's retransmission
   schedule on its virtual clock and asserts ours has the same shape — see
@@ -318,8 +362,13 @@ none.
   *latency*: libutp flushes deferred acks when its embedder says so, ours when
   an event-loop pass ends on the real clock. Nothing in this corpus asserts
   *when* a packet was sent, only what it contained, how many there were, and
-  in what order. Comparing latency needs an injectable clock in our
-  connection.
+  in what order.
+  **`NowMicros` is not enough for this.** It governs what is stamped and
+  measured, not scheduling: a connection given the driver's clock still
+  retransmits on real timers and still emits when its goroutine is scheduled.
+  Comparing latency needs the timers to run on the virtual clock too, so that
+  time advances only when the harness says so — which is a different and much
+  larger change than making the clock readable.
 - **State is compared only through the wire.** Terminal outcomes are inferred
   from emitted packets, not read out of either implementation. The divergence
   this used to name — a packet with an unmatched `ack_nr` produced silence from

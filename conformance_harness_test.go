@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/zen-eth/utp-go/native/libutp"
 )
 
 // The M2 conformance harness.
@@ -234,11 +235,26 @@ func (d fieldDiff) String() string {
 // The brief's rule is that a deliberate divergence is asserted explicitly
 // rather than hidden in a tolerance, so these are named here rather than
 // quietly skipped, and the corpus reports when one actually differs.
+// pinnedClockConfig returns a connection config whose wall clock is the
+// libutp driver's virtual one.
+//
+// This is what removed "Timestamp" and "TimestampDiff" from allowedToDiffer.
+// They were tolerated because libutp's driver reads a virtual clock where
+// this library read the real one, so the two could never agree whatever the
+// implementations did -- which meant the corpus compared every field of a
+// packet except the two that carry its timing.
+//
+// ConnectionConfig.NowMicros governs only what is stamped and measured, not
+// scheduling, so a connection given the driver's clock still retransmits on
+// real timers. That is enough for these two fields and not enough for ack
+// *latency*, which is still uncompared; see CONFORMANCE.md.
+func pinnedClockConfig(drv *libutp.Driver) *ConnectionConfig {
+	cfg := NewConnectionConfig()
+	cfg.NowMicros = func() uint32 { return uint32(drv.Now()) }
+	return cfg
+}
+
 var allowedToDiffer = map[string]string{
-	"Timestamp": "wall-clock microseconds; libutp reads a virtual clock here " +
-		"and our implementation reads the real one, so these cannot be made equal " +
-		"without an injectable clock in our connection",
-	"TimestampDiff": "derived from the peer's timestamp, so it inherits the above",
 	"WndSize": "the advertised receive window is a local buffer-size choice, " +
 		"not a protocol requirement; libutp advertises what its read buffer has " +
 		"free and we advertise ours",

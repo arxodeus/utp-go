@@ -1516,7 +1516,30 @@ histograms), `UTP_ON_OVERHEAD_STATISTICS` (per-packet overhead accounting) and
 needed it. `ConnectionMetrics` covers the rest of `utp_socket_stats` and a
 good deal more.
 
-**No injectable clock.** The connection reads `time.Now()` in dozens of places
+**~~No injectable clock.~~ Half of it, and the half that pays.**
+`ConnectionConfig.NowMicros` is where the connection reads the wall clock, in
+the uint32 microseconds uTP puts on the wire. Every timestamp it stamps and
+every one-way delay it derives goes through it — eleven call sites — and the
+conformance corpus pins it to the libutp driver's virtual clock.
+
+That removed `Timestamp` and `TimestampDiff` from the corpus's tolerated
+differences, where they had sat since the corpus was written because the two
+implementations could never agree on a wall clock. Comparing them found three
+real divergences in the field that carries the peer's entire delay signal, all
+now fixed and written up in [CONFORMANCE.md](CONFORMANCE.md): a measured delay
+echoed on the SYN-ACK where libutp echoes zero, that value being updated from
+packets libutp rejects, and a one-second cap that put a number on the wire no
+libutp would send.
+
+**It is not the whole thing, and the remaining half is the larger one.**
+`NowMicros` governs what is stamped and measured, not scheduling: a connection
+handed a frozen clock still retransmits on real timers and still emits when
+its goroutine happens to run. Comparing ack *latency* needs time to advance
+only when the harness says so, which means the retransmit wheel and the event
+loop running on the virtual clock too. The old text is kept below because the
+reason still stands for that half.
+
+**No virtual timers.** The connection reads `time.Now()` in dozens of places
 and the retransmit wheel uses real timers. Threading a clock through is
 mechanical but touches the whole timing surface, which is the part of this
 library that has produced the most defects. It is also the gap with the
