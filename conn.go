@@ -855,6 +855,12 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		}
 		switch woke {
 		case wakeStreamEvent:
+			// The handoff the socket noted when it queued an inbound packet.
+			// Only streamIncoming is noted -- see handleIncomingBuf -- so
+			// only streamIncoming is taken.
+			if barrier != nil && wokeEvent != nil && wokeEvent.Type == streamIncoming {
+				barrier.TakeHandoff()
+			}
 			handleIncoming(wokeEvent)
 		case wakeWrite:
 			handleWrites(wokeWrite, wokeOK)

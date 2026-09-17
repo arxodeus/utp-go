@@ -1606,15 +1606,43 @@ fixed: making deadlines absolute is a change to the most defect-prone code in
 this library for an error of tens of milliseconds against multi-second
 timeouts, and the wheel's lateness is already a stated design choice.
 
-### What it does not yet cover
+### The inbound path, closed
 
-The socket's **inbound** loop is not a barrier participant. The event loop
-that dispatches received packets to connections still runs unsynchronised, so
-a test that injects a packet and then advances the clock has no guarantee the
-injection was processed first. The corpus's existing cases are unaffected --
-they wait for quiet rather than advancing -- but comparing the timing of a
-*reply* needs that loop instrumented too. The outbound path (connection to
-write loop to wire) is covered.
+The socket's read and event loops are barrier participants too, so the whole
+chain from wire to connection and back is accounted for: read loop, socket
+event loop, connection event loop, write loop, with each hop between them
+counted as a handoff.
+
+Two things were needed beyond registering the loops.
+
+**The accounting has to be symmetric by construction, not by convention.** A
+connection's event channel has several writers -- the socket's event loop, the
+ICMP entry points, and the application's own `CloseWrite`, `CloseRead` and
+`Close` -- and only the first is a clock participant. A global count would let
+an application-driven close consume the note belonging to an inbound packet,
+declaring the system quiet while that packet was still queued. Both halves are
+keyed on the event type instead: only `streamIncoming` is noted, and only
+`streamIncoming` is taken.
+
+**A test's own injection is not a participant either.** Injecting a packet and
+then asking whether everything is parked gets an answer about the moment
+before the injection, when everything was indeed parked. `AwaitReactionTo`
+captures the wake count first, so the wait cannot be satisfied by the past.
+
+**What it measured, and it found nothing wrong.** How long after a packet
+arrives the acknowledgement goes out:
+
+| | reply |
+| --- | --- |
+| ours | same instant the packet arrived |
+| libutp | same instant the packet arrived |
+
+Both defer acknowledgements and flush them when something external says so --
+libutp when its embedder calls `utp_issue_deferred_acks`, this library at the
+end of the event-loop pass that received the packet -- so the same instant is
+the right answer for both, and a non-zero delay on either side would have
+meant the acknowledgement had slipped to a later pass than the packet that
+prompted it. That it agrees is now checked rather than assumed.
 
 **Ack latency specifically is still uncompared**, and for a reason that is not
 about clocks: both implementations flush deferred acks when something external

@@ -54,6 +54,7 @@ than "verified".
 
 | Area | Evidence | Notes |
 | --- | --- | --- |
+| Reply timing | **Differential** | How long after a packet arrives the acknowledgement goes out, on a virtual clock covering the whole inbound chain. Both implementations answer at the same instant the packet arrived -- each defers acknowledgements and flushes them on an external trigger, so a non-zero delay would mean the ack had slipped to a later pass than the packet that prompted it. `TestReplyInstantMatchesLibutp` |
 | Emission instants | **Differential** | *When* a packet is sent, compared exactly. The connection's deadlines, timers and wall clock run on a clock the test owns (`Clock`, `IdleBarrier`), and both sides' instants are read from the packets' own timestamp fields rather than from wall time. An unanswered SYN: ours at 3.025s and 9.05s against libutp's 3.0s and 9.0s -- a compounding wheel-resolution drift, recorded in KNOWN-LIMITATIONS.md. Bit-identical across repeated runs |
 | Timestamp fields on the wire | **Differential** | `Timestamp` and `timestamp_difference_microseconds` are now compared byte for byte, which they were not: both sat in the corpus's tolerated-differences list because libutp reads a virtual clock and we read the real one. `ConnectionConfig.NowMicros` closed that, and comparing them found three divergences -- a measured delay echoed on the SYN-ACK where libutp echoes zero, the value being updated from packets libutp rejects, and a one-second cap no libutp would send. See CONFORMANCE.md |
 | In-order data, ack generation | Differential | Corpus, and both differential fuzz targets |
@@ -173,11 +174,10 @@ so it sent 288-byte packets. Both are written up in
   defect was found, but nothing damages packets between two real UDP sockets.
 - **The initiator role in the hand-written corpus.** The differential fuzzer
   drives both roles; the M2 corpus is responder-only.
-- **Inbound timing.** *Emission* instants are now compared exactly, on a
-  virtual clock (see the row above). What is not is the timing of a *reply*:
-  the socket's inbound event loop is not a barrier participant, so a test that
-  injects a packet and advances the clock has no guarantee the injection was
-  processed first. The outbound path is covered.
+- **~~Inbound timing.~~** Covered: the socket's read and event loops are
+  barrier participants, so the whole chain from wire to connection and back is
+  synchronised and reply timing is measurable. `TestReplyInstantMatchesLibutp`
+  finds both implementations answering at the instant the packet arrived.
 - **Ack latency, for a reason that is not about clocks.** Ack *count* is
   compared, as a bound, because our batching is load-dependent where libutp's
   is embedder-driven. Latency is not, and an injectable clock -- which now

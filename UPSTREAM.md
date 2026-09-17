@@ -1218,7 +1218,43 @@ in the safe direction, and recorded rather than fixed.
 participant, so the timing of a reply to an injected packet is not yet
 measurable. The outbound path is.
 
-## PR 45 — two timing assumptions in the differential fuzz harness
+## PR 45 — the inbound path on the virtual clock
+
+The outbound half landed with the virtual timers; this is the other half. The
+socket's read and event loops are barrier participants, so the whole chain --
+read loop, socket event loop, connection event loop, write loop -- is
+synchronised, with every hop between them counted as a handoff. A packet can
+now be injected and the reply to it timed.
+
+Two things were needed beyond registering the loops, and both are the kind of
+thing that fails silently.
+
+**The handoff accounting has to be symmetric by construction.** A connection's
+event channel has several writers: the socket's event loop, the ICMP entry
+points, and the application's own CloseWrite, CloseRead and Close. Only the
+first is a clock participant, so a global count would let an
+application-driven close consume the note belonging to an inbound packet and
+declare the system quiet while that packet was still queued. Both halves are
+keyed on the event type instead -- only `streamIncoming` is noted, only
+`streamIncoming` is taken -- so the pairing cannot drift.
+
+**A test's own injection is not a participant.** Injecting and then asking
+whether everything is parked answers about the moment *before* the injection.
+`AwaitReactionTo` captures the wake count first.
+
+**What it found: nothing wrong, and that is the result.** Both implementations
+answer at the instant the packet arrived. Each defers acknowledgements and
+flushes them on an external trigger -- libutp when its embedder calls
+`utp_issue_deferred_acks`, this library at the end of the event-loop pass that
+received the packet -- so the same instant is correct for both, and a non-zero
+delay on either side would have meant the acknowledgement had slipped a pass.
+It was assumed before and is checked now.
+
+Confirmed non-vacuous: without the final inbound handoff note the test fails
+intermittently, reporting no reply because quiescence is declared before the
+acknowledgement has been emitted.
+
+## PR 46 — two timing assumptions in the differential fuzz harness
 
 Not a library change, but it belongs in the same review: both differential
 fuzz targets primed their run with a fixed `time.Sleep(20ms)` and settled each

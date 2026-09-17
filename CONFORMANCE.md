@@ -394,9 +394,11 @@ none.
   pass ends — so the comparison would measure harness cadence rather than
   either implementation.
 
-  What the virtual clock does not yet cover is the *inbound* path: the
-  socket's event loop is not a barrier participant, so the timing of a reply
-  to an injected packet cannot be measured yet. See KNOWN-LIMITATIONS.md.
+  The inbound path is covered too, as of the following change: the socket's
+  read and event loops are barrier participants, so a packet can be injected
+  and the reply to it timed. `TestReplyInstantMatchesLibutp` finds both
+  implementations answering at the instant the packet arrived — which is the
+  right answer for both, and was previously assumed rather than checked.
 - **State is compared only through the wire.** Terminal outcomes are inferred
   from emitted packets, not read out of either implementation. The divergence
   this used to name — a packet with an unmatched `ack_nr` produced silence from

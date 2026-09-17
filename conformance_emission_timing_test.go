@@ -247,3 +247,135 @@ func TestVirtualClockHoldsTheConnectionStill(t *testing.T) {
 	clk.Advance(4 * time.Second)
 	waitForEmitted(t, conn, 1)
 }
+
+// ourReplyInstant injects one packet and returns how long after it this
+// implementation answered, measured on a clock the test owns.
+//
+// The injection point is the moment the clock is at when the packet is handed
+// to the transport; the reply instant comes from the reply's own timestamp
+// field. Both are exact.
+func ourReplyInstant(t *testing.T) (time.Duration, []byte) {
+	t.Helper()
+
+	start := time.Unix(0, 0).Add(time.Hour)
+	clk := newVirtualClock(start)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer pinRandom(corpusPinnedSeq)()
+
+	conn := newScriptedConn()
+	sock := WithSocket(ctx, conn, conformanceLogger(), WithClock(clk))
+	defer sock.Close()
+
+	cfg := NewConnectionConfig()
+	cfg.Clock = clk
+	cfg.NowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
+
+	cid := NewConnectionId(conn.peer, corpusSynConnID+1, corpusSynConnID)
+	accepted := make(chan error, 1)
+	go func() {
+		_, err := sock.AcceptWithCid(ctx, cid, cfg)
+		accepted <- err
+	}()
+
+	// Four participants register when the socket is built: the retransmission
+	// wheel and the read, write and event loops. An accepting connection does
+	// not exist yet -- AcceptWithCid parks until a SYN arrives, and the event
+	// loop that would be the fifth is created only then.
+	clk.AwaitParticipants(4)
+	clk.AwaitQuiet()
+	conn.takeEmitted()
+
+	// The handshake first, so the connection is established before the packet
+	// whose reply is being timed.
+	clk.AwaitReactionTo(func() {
+		conn.inject(synPacketFor(corpusSynConnID, corpusSynSeq).Encode())
+	})
+	select {
+	case err := <-accepted:
+		if err != nil {
+			t.Fatalf("accept: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the accept neither completed nor failed within 10s of the SYN")
+	}
+	clk.AwaitParticipants(5)
+	clk.AwaitQuiet()
+	conn.takeEmitted()
+
+	// Now one data packet, and the question is when the acknowledgement goes
+	// out. AwaitQuiet is the whole inbound chain settling: read loop, socket
+	// event loop, connection event loop, write loop -- each of which reports
+	// when it parks, and each hop of which is accounted for as a handoff.
+	injectedAt := clk.Now()
+	clk.AwaitReactionTo(func() { conn.inject(fuzzPrimingPacket()) })
+
+	emitted := conn.takeEmitted()
+	if len(emitted) == 0 {
+		t.Fatal("no reply to the injected packet")
+	}
+	instants := emissionInstants(t, emitted[:1], uint64(injectedAt.UnixMicro()))
+	return instants[0], emitted[0]
+}
+
+// libutpReplyInstant is the same measurement against the reference.
+func libutpReplyInstant(t *testing.T) time.Duration {
+	t.Helper()
+
+	drv, err := libutp.NewDriver(1_000_000)
+	if err != nil {
+		t.Skipf("libutp driver unavailable: %v", err)
+	}
+	defer drv.Close()
+	drv.PushRandom(corpusPinnedSeq)
+	drv.Listen()
+
+	drv.Inject(synPacketFor(corpusSynConnID, corpusSynSeq).Encode())
+	drv.IssueAcks()
+	drv.ClearEmitted()
+
+	injectedAt := drv.Now()
+	drv.Inject(fuzzPrimingPacket())
+	drv.IssueAcks()
+	emitted := drv.Emitted()
+	if len(emitted) == 0 {
+		t.Fatal("libutp did not reply to the injected packet")
+	}
+	return emissionInstants(t, emitted[:1], injectedAt)[0]
+}
+
+// How long after a packet arrives the acknowledgement goes out, compared
+// against libutp.
+//
+// This is the inbound half of the timing question, and until the socket's
+// read and event loops became barrier participants it could not be asked at
+// all: a test could inject a packet and advance the clock with no guarantee
+// the injection had even been processed first.
+//
+// Both implementations defer acknowledgements and flush them when something
+// external says so -- libutp when its embedder calls utp_issue_deferred_acks,
+// this library at the end of the event-loop pass that received the packet.
+// So the expected answer for both is *the same instant*: neither waits, and a
+// non-zero delay on either side would mean the acknowledgement had slipped to
+// a later pass than the packet that prompted it.
+func TestReplyInstantMatchesLibutp(t *testing.T) {
+	ours, raw := ourReplyInstant(t)
+	theirs := libutpReplyInstant(t)
+
+	h, err := DecodePacketHeader(raw[:MINIMAL_HEADER_SIZE])
+	if err != nil {
+		t.Fatalf("our reply does not decode: %v", err)
+	}
+	t.Logf("ours:   replied %v after the packet arrived (%s)", ours, h.PacketType.String())
+	t.Logf("libutp: replied %v after the packet arrived", theirs)
+
+	if ours != 0 {
+		t.Errorf("we answered %v after the packet arrived; the acknowledgement is "+
+			"deferred to the end of the pass that received it, so it should carry "+
+			"the same instant", ours)
+	}
+	if ours != theirs {
+		t.Errorf("we answered %v after arrival and libutp %v", ours, theirs)
+	}
+}

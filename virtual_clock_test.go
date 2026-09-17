@@ -212,6 +212,20 @@ func (c *virtualClock) wakeCount() uint64 {
 	return c.wakes
 }
 
+// AwaitReactionTo runs an action that wakes the system -- injecting a packet,
+// typically -- and blocks until the reaction to it is complete.
+//
+// A test's own goroutine is not a participant, so it cannot simply act and
+// then ask whether everything is parked: the answer would describe the state
+// before the action, and every participant would still be parked from the
+// moment before. This captures the wake count first, so the wait cannot be
+// satisfied by the past.
+func (c *virtualClock) AwaitReactionTo(f func()) {
+	before := c.wakeCount()
+	f()
+	c.awaitReaction(before)
+}
+
 // AwaitParticipants blocks until at least n participants have registered.
 //
 // Necessary before the first AwaitQuiet, because "everything registered so

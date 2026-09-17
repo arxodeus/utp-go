@@ -351,12 +351,30 @@ func WithSocket(ctx context.Context, socket Conn, logger log.Logger, opts ...Soc
 func (s *UtpSocket) readLoop() {
 	buf := make([]byte, math.MaxUint16)
 
+	// The inbound path starts here, so a virtual clock must not move while a
+	// packet is between the wire and a connection. See IdleBarrier.
+	barrier, _ := s.clock().(IdleBarrier)
+	if barrier != nil {
+		barrier.Register()
+		defer func() {
+			if u, ok := barrier.(interface{ Unregister() }); ok {
+				u.Unregister()
+			}
+		}()
+	}
+
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
 		default:
+			if barrier != nil {
+				barrier.MarkIdle()
+			}
 			n, from, err := s.socket.ReadFrom(buf)
+			if barrier != nil {
+				barrier.MarkBusy()
+			}
 			if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
 				s.logger.Debug("read data from base socket", "n", n, "from", from)
 			}
@@ -373,6 +391,9 @@ func (s *UtpSocket) readLoop() {
 			}
 			dstBuf := make([]byte, n)
 			copy(dstBuf, buf[:n])
+			if barrier != nil {
+				barrier.NoteHandoff()
+			}
 			s.incomingBuf <- &IncomingPacketRaw{peer: from, payload: dstBuf}
 		}
 
@@ -457,6 +478,15 @@ func (s *UtpSocket) writeLoop() {
 }
 
 func (s *UtpSocket) eventLoop() {
+	barrier, _ := s.clock().(IdleBarrier)
+	if barrier != nil {
+		barrier.Register()
+		defer func() {
+			if u, ok := barrier.(interface{ Unregister() }); ok {
+				u.Unregister()
+			}
+		}()
+	}
 	for {
 		// Serve pending accept requests before incoming packets.
 		//
@@ -480,17 +510,44 @@ func (s *UtpSocket) eventLoop() {
 			continue
 		default:
 		}
+		// Receive without acting, exactly as the connection's event loop
+		// does, so that a virtual clock can be told the loop is running again
+		// before any case body can dispatch a packet onwards. See
+		// IdleBarrier.
+		var (
+			gotAcceptCid *Accept
+			gotAccept    *Accept
+			gotIncoming  *IncomingPacketRaw
+			done         bool
+		)
+		if barrier != nil {
+			barrier.MarkIdle()
+		}
 		select {
-		case acceptWithCid := <-s.acceptsWithCidCh:
-			s.handleNewAcceptWithCidEvent(acceptWithCid)
-		case accept := <-s.accepts:
-			s.handleNewAcceptEvent(accept)
-		case incomingRaw := <-s.incomingBuf:
+		case gotAcceptCid = <-s.acceptsWithCidCh:
+		case gotAccept = <-s.accepts:
+		case gotIncoming = <-s.incomingBuf:
+		case <-s.ctx.Done():
+			done = true
+		}
+		if barrier != nil {
+			barrier.MarkBusy()
+		}
+		switch {
+		case gotAcceptCid != nil:
+			s.handleNewAcceptWithCidEvent(gotAcceptCid)
+		case gotAccept != nil:
+			s.handleNewAcceptEvent(gotAccept)
+		case gotIncoming != nil:
+			// The handoff the read loop noted when it queued this packet.
+			if barrier != nil {
+				barrier.TakeHandoff()
+			}
 			if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 				s.logger.Trace("will handle a packet from remote", "s.incomingBuf.len", len(s.incomingBuf))
 			}
-			s.handleIncomingBuf(incomingRaw)
-		case <-s.ctx.Done():
+			s.handleIncomingBuf(gotIncoming)
+		case done:
 			return
 		}
 	}
@@ -546,12 +603,31 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
 		}
 		// Look for existing connection
 		if connStream := s.getConnStreamWithCids(cid, cidType); connStream != nil {
+			// The last hop of the inbound path: a virtual clock must not
+			// consider the system quiet while this packet is queued for a
+			// connection that has not woken to take it.
+			//
+			// Noted and taken on streamIncoming only, and that is what keeps
+			// the accounting honest rather than approximately right. A
+			// connection's event channel has several writers -- this loop,
+			// the ICMP entry points, and the application's own CloseWrite,
+			// CloseRead and Close -- and only this one is a clock
+			// participant. Keying both halves on the event type makes the
+			// pairing structural: nothing else notes, and the connection
+			// takes for nothing else. See IdleBarrier.
+			barrier, _ := s.clock().(IdleBarrier)
+			if barrier != nil {
+				barrier.NoteHandoff()
+			}
 			select {
 			case connStream <- &streamEvent{
 				Type:   streamIncoming,
 				Packet: packetPtr,
 			}:
 			default:
+				if barrier != nil {
+					barrier.TakeHandoff()
+				}
 				// See droppedFullConnQueue. This is a real packet loss that the
 				// peer has to recover from, and it is ours, not the network's.
 				s.droppedFullConnQueue.Add(1)
