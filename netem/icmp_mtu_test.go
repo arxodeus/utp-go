@@ -161,13 +161,24 @@ func icmpTransfer(t *testing.T, linkMTU int, payloadLen int, cid uint16, withICM
 // ceiling: the search ends up at a size the path carries, instead of parked
 // above it sending datagrams that can never arrive.
 //
-// The control is the same transfer with the router silent, which is the
-// behaviour TestMtuSearchCannotRecoverFromAPathLimitBelowItsChoice records as
-// a known limitation: the ceiling only comes down when a probe times out as
-// the *sole* outstanding packet (utp_internal.cpp:1152-1160), and a
-// connection whose every packet is too big never gets back to one outstanding
-// packet. libutp is measured doing the same thing in
-// TestLibutpStallsOnAPathItCannotFit.
+// The control is the same transfer with the router silent.
+//
+// What that control demonstrates has narrowed, and this comment used to
+// overstate it. It said the ceiling never comes down without a report,
+// because it only falls when a probe times out as the *sole* outstanding
+// packet (utp_internal.cpp:1152-1160), which a connection whose every packet
+// is too big never reaches. libutp's other route -- three duplicate
+// acknowledgements pointing at the packet before the probe (:1927-1940) -- is
+// implemented now and works with the window full, so the silent search does
+// come down: measured repeatedly at floor=982 current=1083 ceiling=1184
+// against this 1100-byte link.
+//
+// It comes down to a workable *size* and not to a workable *ceiling*. 1184 is
+// still above the path, so the search is free to climb back above it. The
+// report is what ends that, because it names the next hop's MTU instead of
+// bisecting towards it: with the router reporting, the ceiling is exactly
+// 1100 every run. That is the difference this case now measures, and it is
+// asserted on the ceiling rather than on the size.
 //
 // **This does not rescue the transfer, and the test says so rather than
 // pretending otherwise.** uTP numbers packets, not bytes, so a packet that has
@@ -180,8 +191,9 @@ func icmpTransfer(t *testing.T, linkMTU int, payloadLen int, cid uint16, withICM
 // IP_PMTUDISC_WANT makes an IPv4 path do, so the packets already in the window
 // stay stuck under either implementation.
 //
-// So what ICMP fixes here is the search, not the window: every packet built
-// from the report onwards fits the path. That is what this asserts.
+// So what ICMP fixes here is the search's ceiling, not the window: every
+// packet built from the report onwards fits the path, and the search cannot
+// wander back above it. That is what this asserts.
 func TestIcmpBringsTheSearchWithinThePath(t *testing.T) {
 	const linkMTU = 1100
 	const payloadLen = 1 << 20
@@ -197,12 +209,12 @@ func TestIcmpBringsTheSearchWithinThePath(t *testing.T) {
 		informed.floor, informed.current, informed.ceiling, informed.fwd,
 		informed.reports, informed.matched)
 
-	// The control has to park above the path, or there is nothing to fix and
-	// the comparison proves nothing.
-	if silent.current <= uint32(linkMTU) {
-		t.Fatalf("with the router silent the search settled on %d bytes, already within the "+
-			"%d-byte link; this path does not exercise what the report is for",
-			silent.current, linkMTU)
+	// The control's ceiling has to stay above the path, or there is nothing
+	// left for the report to fix and the comparison proves nothing.
+	if silent.ceiling <= uint32(linkMTU) {
+		t.Fatalf("with the router silent the search brought its ceiling to %d, already within "+
+			"the %d-byte link; this path does not exercise what the report is for",
+			silent.ceiling, linkMTU)
 	}
 
 	if informed.reports == 0 {

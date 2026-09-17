@@ -17,7 +17,7 @@ all.
 | **M4** — audit transfer paths against libutp | **Done.** The ack path, the loss-recovery path, the retransmission timers and the send path are all audited against libutp — the timers by measurement rather than by reading, see [CONFORMANCE.md](CONFORMANCE.md). Three findings from the send path below; the packet-size one is deliberately left to M6. |
 | **M4b** — exhaustive libutp compatibility sweep | **Done.** [COMPATIBILITY.md](COMPATIBILITY.md) records every protocol area, the *kind* of evidence behind it — differential, measured, interop, cited, or none — and what is unchecked. Writing it found one defect (an ack per data packet, below), and the largest gap it named — libutp had never been run over the emulated network — has since been closed: `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite, which found two more defects. Both were in the harness, and both made libutp look worse than it is. |
 | **M5** — verify LEDBAT, add LEDBAT++ | **Done.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft, opt-in. Deference measured against a loss-based competitor over a shared bottleneck: classic LEDBAT takes 60% of the link from it, LEDBAT++ takes 44%. See [BENCHMARKS.md](BENCHMARKS.md). |
-| **M6** — MTU path discovery | **Done.** Binary search between a 576-byte floor and a 1400-byte ceiling, probing with ordinary data packets, as libutp does. The ceiling could be raised from 1024 only because discovery makes it safe: an untested path still gets 988 bytes. Probes now carry the don't-fragment bit through `utp.DontFragmentWriter`, implemented for a real UDP socket on Linux, Darwin, the BSDs and Windows without adding a dependency, and compiling everywhere else against a stub. One gap remains, and implementing the bit is what exposed it: a probe dropped for size during a bulk transfer still teaches the search nothing, because libutp's duplicate-acknowledgement route to lowering the ceiling is not implemented. See below. |
+| **M6** — MTU path discovery | **Done.** Binary search between a 576-byte floor and a 1400-byte ceiling, probing with ordinary data packets, as libutp does. The ceiling could be raised from 1024 only because discovery makes it safe: an untested path still gets 988 bytes. Probes now carry the don't-fragment bit through `utp.DontFragmentWriter`, implemented for a real UDP socket on Linux, Darwin, the BSDs and Windows without adding a dependency, and compiling everywhere else against a stub. Implementing the bit exposed a second gap, since closed: libutp's duplicate-acknowledgement route to lowering the ceiling (`:1927-1940`) was missing, so a probe dropped for size during a bulk transfer taught the search nothing. With both, the search comes down from 1384 to 996 on a 1000-byte path and fragmentation falls from 3809 datagrams to 32. |
 | **M7** — anacrolix/torrent integration | **Done, with one gap.** `utpnet` presents a uTP socket as `net.PacketConn`/`net.Conn` and satisfies torrent's uTP interface, checked against the real interface by reflection in `integration/anacrolix`. The gap: torrent selects its uTP implementation at build time, so wiring it in needs a `replace` or a patched file — recipes in that module's README. |
 | **M8** — soak and hardening | **Partly done.** Six fuzz targets — three on the decoder, one driving a live connection, and two differential against real libutp covering both the responder and initiator roles — plus three soak tests. Six defects found and fixed. See [FUZZING.md](FUZZING.md). Not done: anything running for hours. |
 
@@ -1540,11 +1540,13 @@ this library's own search at whatever the kernel already believed. The point
 of a probe is to find out whether a size works, not to be told what is
 currently assumed.
 
-**The caveat: the bit reaches the wire, and the search does not yet learn from
-it.** See "A dropped probe teaches the search nothing during a bulk transfer"
-below. Until that is closed this is necessary but not sufficient, and
-`netem.TestDontFragmentReachesTheWire` is written to claim only what is true —
-that a probe is refused for size with the bit and fragmented without it.
+The bit alone was necessary and not sufficient: it makes a probe fail, and
+something has to notice. Implementing it exposed that the noticing was missing
+too, which is the section "A dropped probe teaches the search nothing during a
+bulk transfer" below — now closed. With both,
+`netem.TestDontFragmentBringsTheSearchWithinThePath` measures the search
+coming down from 1384 to 996 on a 1000-byte path, and fragmentation with it
+from 3809 datagrams to 32.
 
 **No context-wide statistics.** `utp_get_context_stats` (packet-size
 histograms), `UTP_ON_OVERHEAD_STATISTICS` (per-packet overhead accounting) and
@@ -2806,7 +2808,7 @@ firewall that fails open is worse than no firewall.
 behaviour with "the dial succeeded against a socket whose firewall refuses
 everything".
 
-## A dropped probe teaches the search nothing during a bulk transfer
+## ~~A dropped probe teaches the search nothing during a bulk transfer~~ — closed
 
 **Found by implementing the don't-fragment bit, which is what made it
 visible.** Before that, a probe was never dropped for being too big on an IPv4
@@ -2822,27 +2824,71 @@ libutp lowers its MTU ceiling from a lost probe in two places:
   the probe was rejected due to its size, but we haven't got an ICMP report
   back yet".
 
-Only the first is implemented. `mtu.go:33-34` cites both, and
-`mtuSearch.onProbeLost`'s own comment describes both, but nothing counts
-duplicate acknowledgements: there is no equivalent of libutp's
-`conn->duplicate_ack`, and the MTU branch that reads it does not exist.
+Only the first was implemented. `mtu.go` cited both and
+`mtuSearch.onProbeLost`'s comment described both, but nothing counted
+duplicate acknowledgements: there was no equivalent of libutp's
+`conn->duplicate_ack`.
 
-The first alone cannot fire during a bulk transfer. `conn.go:1751` requires
-`UnackedCount() == 1`, faithfully — only then does a lost packet say something
-about size rather than congestion — and a saturated send window always has
-more than one packet outstanding. So on a path that drops the probe, the
-probe's retransmission goes out fragmentable, as libutp intends
-(`:898-905`), arrives, and is acknowledged. The search reads that as the size
-being fine.
+The first alone cannot fire during a bulk transfer, because it requires
+`UnackedCount() == 1` — faithfully, since only then does a lost packet say
+something about size rather than congestion — and a saturated send window
+never leaves it that way. So a probe dropped for size was retransmitted
+fragmentable, arrived, was acknowledged, and the search concluded the size was
+fine.
 
-Measured on a 1000-byte emulated path that fragments rather than drops, with a
-1400-byte ceiling: seven probes refused for size with the bit set, zero
-without — and the search settled at 1384 bytes either way.
+`connection.noteDuplicateAck` is the missing half. Three rules, all libutp's:
+only bare `ST_STATE` packets count (an `ST_DATA` carrying an acknowledgement
+was most likely sent because the peer had data of its own, so counting those
+would give three "duplicates" after every payload packet on a bidirectional
+connection — `:1911-1920`); the acknowledgement must repeat the number just
+before the oldest outstanding packet, and anything else resets the count; and
+nothing counts while nothing is outstanding, which is also not a reset.
 
-libutp's other route to the same conclusion is the ICMP report, which this
-library already accepts through `ProcessICMPFragmentation`. That covers the
-case where a router sends one. The duplicate-acknowledgement path covers the
-case where none arrives, which is the common one on the public internet.
+On the third, with a probe outstanding, libutp draws a different conclusion
+from each of two cases, and so does this: if the repeated number is the one
+before the probe, the probe is the hole and the ceiling drops below it; if it
+is anything else, some other packet was lost ahead of the probe, which says
+nothing about size, so the probe is forgotten and the ceiling left alone.
+
+**Measured**, on a 1000-byte emulated path that fragments rather than drops,
+with a 1400-byte ceiling:
+
+| | search settles at | datagrams fragmented |
+| --- | --- | --- |
+| without the don't-fragment bit | 1384 | 3809 |
+| with it, before this | 1384 | 3794 |
+| with it, after this | **996** | **32** |
+
+Disabling the call site puts both columns back to 1384 and zero probe losses.
+
+### What it also changed, two tests over
+
+Two cases were built on the claim this closes, and both had to be rewritten
+rather than left to pass by luck.
+
+`TestMtuSearchCannotRecoverFromAPathLimitBelowItsChoice` was skipped as a
+limitation "shared with libutp" whose fix would mean "deliberately diverging".
+That conclusion was reached without knowing about the duplicate-acknowledgement
+route, and it was wrong: the fix is a libutp mechanism, not a divergence. The
+search does now recover on that path — from `floor=576 current=1191
+ceiling=1400` to `floor=982 current=1083 ceiling=1184`. It stays skipped for a
+narrower reason: the *transfer* still stalls, because uTP numbers packets and
+the ones already built too big cannot be re-cut without renumbering everything
+behind them.
+
+`TestIcmpBringsTheSearchWithinThePath` failed outright, on its own control
+guard — "this path does not exercise what the report is for". Its control
+assumed the silent search stays above the path, which is no longer true. What
+the report is still worth is the *ceiling*: silent, the search comes down to a
+workable size but leaves its ceiling at 1184, free to climb back above the
+1100-byte path; with the report it is exactly 1100, every run, because the
+report names the next hop's MTU instead of bisecting towards it. The case now
+asserts that.
+
+Both are worth noting as a pattern rather than as two incidents: a test whose
+control depends on a limitation will pass or fail for the wrong reason the
+moment the limitation is lifted, and the ones that fail loudly are the lucky
+ones.
 
 ## Things found but deliberately not fixed
 

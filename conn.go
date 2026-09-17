@@ -326,6 +326,14 @@ type connection struct {
 	bytesReceived        uint64
 	timeouts             uint64
 	fastRetransmits      uint64
+	// duplicateAcks counts consecutive bare acknowledgements repeating the
+	// same sequence number. libutp's conn->duplicate_ack; see
+	// noteDuplicateAck.
+	duplicateAcks uint32
+	// mtuProbesLostToDuplicateAcks counts probes the duplicate-acknowledgement
+	// path concluded were too big. Exposed so a test can assert the mechanism
+	// ran rather than inferring it from where the search happened to settle.
+	mtuProbesLostToDuplicateAcks uint64
 	// retransmitCount is consecutive retransmission timeouts with no
 	// intervening ack. libutp calls this retransmit_count.
 	retransmitCount int
@@ -1521,7 +1529,9 @@ func (c *connection) sampleMetrics(now time.Time, force bool) {
 		MtuCurrent:           c.mtu.current,
 		MtuFloor:             c.mtu.floor,
 		MtuCeiling:           c.mtu.ceiling,
-		State:                connStateName(c.state.stateType),
+
+		MtuProbesLostToDuplicateAcks: c.mtuProbesLostToDuplicateAcks,
+		State:                        connStateName(c.state.stateType),
 	}
 	if c.state.SentPackets != nil {
 		cs := c.state.SentPackets.ControllerStats()
@@ -2194,6 +2204,10 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 			replyMicros = 0
 		}
 		delay := time.Duration(replyMicros) * time.Microsecond
+		// Before the acknowledgement retires anything: libutp counts
+		// duplicates against the window as it stood when the packet arrived
+		// (utp_internal.cpp:1921, with ack_packet not reached until :2194).
+		c.noteDuplicateAck(packet.Header.PacketType, packet.Header.AckNum)
 		if err = c.processAck(packet.Header.AckNum, packet.Eack, delay, now); err != nil {
 			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 				c.logger.Trace("ack does not correspond to known seq_num",
@@ -2381,6 +2395,76 @@ func (c *connection) updateClosingState() {
 		c.state.stateType = ConnClosed
 		c.state.Err = nil
 	}
+}
+
+// duplicateAcksBeforeResend is libutp's DUPLICATE_ACKS_BEFORE_RESEND
+// (utp_internal.cpp:64).
+const duplicateAcksBeforeResend = 3
+
+// noteDuplicateAck counts a peer repeating the same acknowledgement, and uses
+// the third one to conclude that an outstanding MTU probe was too big.
+//
+// libutp: utp_internal.cpp:1921-1941. This is the second of its two routes to
+// lowering the MTU ceiling, and the only one that works during a bulk
+// transfer. The other needs the probe to be the only packet outstanding
+// (:1152-1167, and conn.go's retransmission timeout), which a saturated send
+// window never leaves it -- so without this a probe dropped for being too big
+// is retransmitted fragmentable, arrives, is acknowledged, and the search
+// concludes the size was fine. Measured before this existed: on a 1000-byte
+// path with a 1400-byte ceiling, the search settled at 1384 whether or not the
+// probe was refused.
+//
+// Three rules, all libutp's:
+//
+//   - Only bare ST_STATE packets count. libutp is emphatic about why
+//     (:1911-1920): an ST_DATA carrying an acknowledgement was most likely sent
+//     because the peer had data of its own, not in response to anything, so a
+//     bidirectional connection would otherwise see three "duplicates"
+//     immediately after every payload packet it sent.
+//   - The acknowledgement must repeat LastAckedSeqNum, the number just before
+//     the oldest outstanding packet. Anything else resets the count.
+//   - Nothing is counted while nothing is outstanding, and the count is not
+//     reset then either -- libutp wraps the whole block in
+//     `if (cur_window_packets > 0)`.
+//
+// On the third such acknowledgement, with a probe outstanding, there are two
+// cases and libutp draws a different conclusion from each. If the repeated
+// number is the one just before the probe, the probe is the hole: the ceiling
+// drops below it. If it is anything else, some other packet was lost ahead of
+// the probe, which says nothing about size -- the probe is forgotten so
+// another can be sent, and the ceiling is left alone.
+//
+// It fires once per run of duplicates, not once per duplicate, because the
+// test is equality with three rather than "three or more".
+func (c *connection) noteDuplicateAck(packetType PacketType, ackNum uint16) {
+	if c.state.stateType != ConnConnected || c.state.SentPackets == nil {
+		return
+	}
+	if c.state.SentPackets.UnackedCount() == 0 {
+		return
+	}
+	if packetType != st_state || ackNum != c.state.SentPackets.LastAckedSeqNum() {
+		c.duplicateAcks = 0
+		return
+	}
+
+	c.duplicateAcks++
+	if c.duplicateAcks != duplicateAcksBeforeResend || !c.mtu.probing {
+		return
+	}
+
+	if ackNum == c.mtu.probeSeq-1 {
+		c.mtu.onProbeLost(c.now())
+		c.mtuProbesLostToDuplicateAcks++
+		if c.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+			c.logger.Debug("MTU probe presumed too big, from duplicate acks",
+				"floor", c.mtu.floor, "ceiling", c.mtu.ceiling, "current", c.mtu.current,
+				"probeSeq", c.mtu.probeSeq)
+		}
+		return
+	}
+	// A packet ahead of the probe was lost. Nothing follows about size.
+	c.mtu.clearProbe()
 }
 
 func (c *connection) processAck(

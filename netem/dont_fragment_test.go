@@ -19,7 +19,7 @@ type noDontFragment struct{ utp.Conn }
 
 // dfTransfer runs one transfer and reports where the sender's MTU search
 // settled, plus the link's stats. wrap is applied to the sender's Conn.
-func dfTransfer(t *testing.T, cfg Config, wrap func(utp.Conn) utp.Conn, cid uint16) (current uint32, fwd Stats) {
+func dfTransfer(t *testing.T, cfg Config, wrap func(utp.Conn) utp.Conn, cid uint16) (current, floor, ceiling uint32, dupAckProbeLosses uint64, fwd Stats) {
 	t.Helper()
 
 	n := NewNetwork(51)
@@ -52,11 +52,14 @@ func dfTransfer(t *testing.T, cfg Config, wrap func(utp.Conn) utp.Conn, cid uint
 	sendCfg.Metrics = func(m utp.ConnectionMetrics) {
 		mu.Lock()
 		defer mu.Unlock()
-		current = m.MtuCurrent
+		current, floor, ceiling = m.MtuCurrent, m.MtuFloor, m.MtuCeiling
+		if m.MtuProbesLostToDuplicateAcks > dupAckProbeLosses {
+			dupAckProbeLosses = m.MtuProbesLostToDuplicateAcks
+		}
 		samples++
 	}
 
-	payload := make([]byte, 1<<20)
+	payload := make([]byte, 4<<20)
 	for i := range payload {
 		payload[i] = byte(i * 31)
 	}
@@ -95,37 +98,38 @@ func dfTransfer(t *testing.T, cfg Config, wrap func(utp.Conn) utp.Conn, cid uint
 	if samples == 0 {
 		t.Fatal("no metric samples recorded; the test observed nothing")
 	}
-	return current, n.Link("sender", "receiver").Stats()
+	return current, floor, ceiling, dupAckProbeLosses, n.Link("sender", "receiver").Stats()
 }
 
-// The don't-fragment bit reaches the wire, and the router acts on it.
+// The don't-fragment bit, and what it is worth.
 //
 // The path carries 1000-byte uTP datagrams and fragments anything larger
 // rather than dropping it, which is what an IPv4 router does. The sender's
 // search starts from a 1400-byte ceiling, so it probes above what the path
 // carries in one piece.
 //
-// Without the bit every oversized probe is fragmented and delivered, so the
-// path's narrowness is invisible: nothing is ever refused for size. With the
-// bit the router has no choice but to drop the probe. That difference, on the
-// same link with the same seed, is what this measures.
+// Without the bit an oversized probe is fragmented, arrives, and is
+// acknowledged. The search reads that as "1400 bytes is fine" and settles
+// there, on a path that cannot carry 1400 bytes in one piece -- so every data
+// packet after that is fragmented too, which costs headers and turns any one
+// lost fragment into a lost datagram.
 //
-// What it deliberately does NOT claim is that the search then settles lower.
-// It does not, and the reason is a separate missing mechanism rather than
-// anything about this bit. libutp lowers its ceiling from a lost probe in two
-// places: a retransmission timeout with the probe as the only packet
-// outstanding (utp_internal.cpp:1152-1167), and a third duplicate
-// acknowledgement pointing at the packet before the probe (:1927-1940). Only
-// the first is implemented here, and it cannot fire during a bulk transfer,
-// because a saturated window always has more than one packet outstanding. So
-// the probe is dropped, its retransmission goes out fragmentable as libutp
-// intends, arrives, and is acknowledged -- and the search concludes the size
-// was fine.
+// With the bit the router must drop the probe, the peer reports the hole with
+// duplicate acknowledgements, and the search lowers its ceiling onto something
+// the path really carries.
 //
-// Recorded in KNOWN-LIMITATIONS.md. Until it is closed the bit is necessary
-// but not sufficient, and a test claiming the search learns from it would be
-// claiming something false.
-func TestDontFragmentReachesTheWire(t *testing.T) {
+// Both halves are one case because neither proves anything alone: a search
+// that settles low might have done so for any reason, and one that settles
+// high might be on a path that genuinely carries it. It is the difference
+// between them, on the same link with the same seed, that is the evidence.
+//
+// This needed two mechanisms, and having only the first is why an earlier
+// version of this test could claim nothing about where the search settled.
+// The bit makes the probe fail; libutp's duplicate-acknowledgement route
+// (utp_internal.cpp:1927-1940) is what lets the search hear about it during a
+// bulk transfer, because its other route needs the probe to be the only
+// packet outstanding and a saturated window never leaves it that way.
+func TestDontFragmentBringsTheSearchWithinThePath(t *testing.T) {
 	cfg := Config{
 		Delay:             10 * time.Millisecond,
 		BandwidthBps:      20_000_000,
@@ -134,15 +138,17 @@ func TestDontFragmentReachesTheWire(t *testing.T) {
 		FragmentOversized: true,
 	}
 
-	withoutDF, statsWithout := dfTransfer(t, cfg, func(c utp.Conn) utp.Conn {
+	withoutDF, floorWithout, ceilWithout, dupWithout, statsWithout := dfTransfer(t, cfg, func(c utp.Conn) utp.Conn {
 		return noDontFragment{Conn: c}
 	}, 810)
-	withDF, statsWith := dfTransfer(t, cfg, nil, 820)
+	withDF, floorWith, ceilWith, dupWith, statsWith := dfTransfer(t, cfg, nil, 820)
 
-	t.Logf("without the bit: settled at %d; link %s", withoutDF, statsWithout)
-	t.Logf("with the bit:    settled at %d; link %s", withDF, statsWith)
+	t.Logf("without the bit: current=%d floor=%d ceiling=%d, %d probes lost to duplicate acks; link %s",
+		withoutDF, floorWithout, ceilWithout, dupWithout, statsWithout)
+	t.Logf("with the bit:    current=%d floor=%d ceiling=%d, %d probes lost to duplicate acks; link %s",
+		withDF, floorWith, ceilWith, dupWith, statsWith)
 
-	// The control has to present the trap, or there is nothing to detect.
+	// --- the control has to present the trap, or there is nothing to detect
 	if statsWithout.PacketsFragmented == 0 {
 		t.Fatalf("no datagram was fragmented without the bit, so the path never "+
 			"presented the case this is about; link %s", statsWithout)
@@ -151,17 +157,46 @@ func TestDontFragmentReachesTheWire(t *testing.T) {
 		t.Errorf("%d datagrams were refused for size without the don't-fragment bit; "+
 			"this link should have fragmented every one of them", statsWithout.DroppedByMTU)
 	}
+	if withoutDF <= uint32(cfg.MTU) {
+		t.Errorf("without the bit the search settled at %d, at or below the %d bytes the "+
+			"path carries in one piece. It was not fooled, so this case is not "+
+			"measuring what it claims", withoutDF, cfg.MTU)
+	}
+	if dupWithout != 0 {
+		t.Errorf("%d probes were lost to duplicate acks without the bit, where no probe "+
+			"is ever dropped for size", dupWithout)
+	}
 
-	// And the bit has to change what the router does.
+	// --- and the bit has to fix it
 	if statsWith.DroppedByMTU == 0 {
 		t.Errorf("no datagram was refused for size with the don't-fragment bit, on a " +
 			"path narrower than the probes being sent. The bit is not reaching the wire.")
 	}
-
-	// Both transfers still complete -- the bit must not cost delivery. A
-	// dropped probe is retransmitted fragmentable, which is exactly what
-	// libutp relies on (utp_internal.cpp:898-905).
-	if statsWith.PacketsDelivered == 0 || statsWithout.PacketsDelivered == 0 {
-		t.Error("a transfer delivered nothing")
+	if dupWith == 0 {
+		t.Error("the search never concluded a probe was too big from duplicate " +
+			"acknowledgements, so it settled where it did for some other reason")
 	}
+	// The search must come down, and by more than a rounding.
+	//
+	// Not "down to at or below the path MTU", though it usually gets there --
+	// six consecutive runs converged on 996 with floor and ceiling equal. Each
+	// halving of the search range costs one dropped probe, and each dropped
+	// probe costs three duplicate acknowledgements from the peer, which
+	// deferred and coalesced acks do not guarantee for every hole. Roughly one
+	// run in fourteen gets three narrowings instead of four and stops around
+	// 1185, still above the path.
+	//
+	// So convergence inside one transfer is a property of the receiver's ack
+	// cadence, not of the mechanism under test, and asserting it here would
+	// make this case fail for a reason it is not about. What is asserted is
+	// what the mechanism is responsible for: the ceiling moves, and it moves
+	// only when the bit is set. See KNOWN-LIMITATIONS.md.
+	const minimumNarrowing = 100
+	if withoutDF < withDF+minimumNarrowing {
+		t.Errorf("the search barely moved: %d with the bit against %d without, less than "+
+			"the %d bytes a single narrowing is worth", withDF, withoutDF, minimumNarrowing)
+	}
+
+	t.Logf("fragmentation: %d datagrams with the bit, %d without",
+		statsWith.PacketsFragmented, statsWithout.PacketsFragmented)
 }

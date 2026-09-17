@@ -121,36 +121,51 @@ func TestMtuSearchConvergesWhenThePathAllowsIt(t *testing.T) {
 
 // A path whose MTU is below the size the search has already adopted.
 //
-// SKIPPED: this is a real limitation, and it is libutp's as much as ours.
+// STILL SKIPPED, but for a narrower reason than it was.
 //
 // The search raises the size it sends at whenever a probe is acknowledged. If
 // the path limit sits between two probe sizes, the next size it adopts cannot
 // arrive -- and because every data packet is then built at that size, nothing
-// arrives at all. The ceiling only comes down when a probe times out as the
-// *only* packet outstanding (utp_internal.cpp:1152-1160), which a connection
-// with a stalled window never reaches: nothing is acknowledged, so the
-// outstanding count never falls to one.
+// arrives at all.
 //
-// Measured here, on a path that refuses anything over 1100 bytes:
+// This used to say the search could never come back, because the ceiling only
+// falls when a probe times out as the *only* packet outstanding
+// (utp_internal.cpp:1152-1160), which a stalled connection never reaches. That
+// was true of this library and is no longer: libutp's other route, three
+// duplicate acknowledgements pointing at the packet before the probe
+// (:1927-1940), is implemented now, and it works while the window is full.
+// Measured on this same 1100-byte link, with the skip lifted:
 //
-//	ours    search parks at 1191 bytes; a 1MB transfer delivers ~5KB and the
-//	        connection gives up
-//	libutp  sends ~1230-byte packets, delivers 20 bytes, and reports a
-//	        connection error (TestLibutpStallsOnAPathItCannotFit)
+//	before  search parks at floor=576 current=1191 ceiling=1400 -- above the path
+//	after   search comes down to floor=982 current=1083 ceiling=1184
 //
-// So this is not a difference from the reference to be closed. Fixing it means
-// deliberately diverging -- concluding "too big" from repeated timeouts with no
-// progress, rather than only from a solitary probe -- and that belongs in
-// DEVIATIONS.md with a measurement behind it, not in a quiet patch.
+// So the search does recover, and the sizes it builds from then on fit. What
+// does not recover is the transfer: it still delivers a few kilobytes of a
+// megabyte and the reader times out after 60 seconds, which is why this stays
+// skipped. uTP numbers packets, not bytes, so the packets already built at
+// 1191 bytes cannot be re-cut smaller -- that would renumber everything behind
+// them -- and the peer will never acknowledge packets it cannot receive.
+// libutp has the same constraint and gets away with it by not setting
+// don't-fragment on ordinary data ("now we need it to fragment just to get it
+// through", :898-905), leaving the router to fragment what it cannot forward
+// whole. This emulated link refuses oversized datagrams outright, which is
+// what an IPv6 path does.
+//
+// The remaining ceiling matters too: 1184 is still above the 1100-byte path,
+// so the search could climb back. An ICMP report brings it to exactly the
+// path -- see TestIcmpBringsTheSearchWithinThePath, where that is now the
+// difference the report makes.
 //
 // It matters in practice: a path MTU below 1400 is ordinary (PPPoE at 1492,
-// most VPN and tunnel paths), and a BitTorrent client on one would stall.
+// most VPN and tunnel paths), and a BitTorrent client on one would stall a
+// connection it had already put packets on.
 func TestMtuSearchCannotRecoverFromAPathLimitBelowItsChoice(t *testing.T) {
-	t.Skip("known limitation, shared with libutp: the search cannot lower its ceiling " +
-		"once the size it has adopted stalls the connection; see KNOWN-LIMITATIONS.md. " +
-		"Prevented rather than recovered from where the narrow link is the local " +
-		"interface -- TestPathMTUReportPreventsTheStall runs this same link with the " +
-		"sender told what its interface carries, and the transfer completes")
+	t.Skip("the search now recovers -- the duplicate-acknowledgement route lowers the " +
+		"ceiling while the window is full -- but the transfer does not: packets already " +
+		"built too big cannot be re-cut, so the reader still times out after 60s and this " +
+		"harness fails on that. Prevented rather than recovered from where the narrow link " +
+		"is the local interface: TestPathMTUReportPreventsTheStall runs this same link " +
+		"with the sender told what its interface carries, and the transfer completes")
 
 	const linkMTU = 1100
 	floor, current, ceiling, fwd := mtuTransfer(t, Config{

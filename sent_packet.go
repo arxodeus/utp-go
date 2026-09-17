@@ -160,6 +160,22 @@ func (s *sentPackets) UnackedCount() uint16 {
 	return s.NextSeqNum() - 1 - lastAck
 }
 
+// LastAckedSeqNum is the sequence number just before the oldest packet still
+// outstanding -- the number a peer repeats when it is reporting a hole.
+//
+// libutp computes it inline as `seq_nr - cur_window_packets - 1`
+// (utp_internal.cpp:1922). The arithmetic here is the same: UnackedCount is
+// `NextSeqNum() - 1 - lastAck` whenever anything has been acknowledged, so
+// this recovers lastAck, and before the first acknowledgement it gives the
+// number before the first packet sent, which is what libutp's expression
+// gives there too.
+//
+// Wrapping is deliberate and correct: sequence numbers are uint16 and libutp
+// masks with ACK_NR_MASK for the same reason.
+func (s *sentPackets) LastAckedSeqNum() uint16 {
+	return s.NextSeqNum() - 1 - s.UnackedCount()
+}
+
 func (s *sentPackets) HasUnackedPackets() bool {
 	_, err := s.FirstUnackedSeqNum()
 	return err == nil

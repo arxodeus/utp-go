@@ -1364,20 +1364,54 @@ oversized datagram and forward it unless the sender forbade it — an IPv4
 router, where the default models IPv6. Without it the bit changes nothing on
 an emulated path, because the link dropped everything oversized regardless.
 
-**This found a second gap, and it is the more important one.** libutp lowers
-its MTU ceiling from a lost probe in two places: a retransmission timeout with
-the probe as the only packet outstanding (`:1152-1167`), and a third duplicate
-acknowledgement pointing at the packet before the probe (`:1927-1940`). Only
-the first is implemented here, and it cannot fire during a bulk transfer,
-because a saturated window always has more than one packet outstanding. So a
-probe dropped for size is retransmitted fragmentable, arrives, is
-acknowledged, and the search concludes the size was fine.
+**This found a second gap, and it is the more important one.** It is PR 49.
 
-Measured on a 1000-byte path with a 1400-byte ceiling: seven probes refused
-for size with the bit, zero without, and the search settled at 1384 either
-way. The bit is necessary and not sufficient, the test says only what is true,
-and the missing mechanism is written up in KNOWN-LIMITATIONS.md as its own
-section rather than folded into this one.
+## PR 49 — the MTU ceiling from duplicate acknowledgements
+
+libutp lowers its MTU ceiling from a lost probe in two places: a retransmission
+timeout with the probe as the only packet outstanding
+(`utp_internal.cpp:1152-1167`), and a third duplicate acknowledgement pointing
+at the packet before the probe (`:1927-1940`). Only the first was implemented.
+`mtu.go` cited both and `onProbeLost`'s comment described both, but nothing
+counted duplicate acknowledgements.
+
+The first alone cannot fire during a bulk transfer. It requires exactly one
+packet outstanding — faithfully, because only then does a loss say something
+about size rather than congestion — and a saturated send window never leaves it
+that way. So a probe dropped for being too big was retransmitted fragmentable,
+arrived, was acknowledged, and the search concluded the size was fine.
+
+`connection.noteDuplicateAck` is the missing half, with libutp's three rules:
+only bare `ST_STATE` packets count (`:1911-1920` explains why at length — an
+`ST_DATA` carrying an acknowledgement was most likely sent because the peer had
+data of its own); the acknowledgement must repeat the number just before the
+oldest outstanding packet, and anything else resets the count; and nothing
+counts while nothing is outstanding, which is also not a reset. On the third,
+the repeated number either points just before the probe, in which case the
+probe is the hole and the ceiling drops below it, or it does not, in which case
+some other packet was lost ahead of the probe and libutp forgets the probe
+without concluding anything.
+
+Measured on a 1000-byte emulated path that fragments rather than drops, with a
+1400-byte ceiling: the search comes down from 1384 to 996, and fragmentation
+from 3809 datagrams to 32. Disabling the call site restores both to their old
+values exactly.
+
+**Two existing tests were built on the claim this closes.**
+`TestMtuSearchCannotRecoverFromAPathLimitBelowItsChoice` was skipped as a
+limitation "shared with libutp" whose fix would mean "deliberately diverging".
+That was reached without knowing about this route and was wrong: the fix is a
+libutp mechanism. The search does now recover there. It stays skipped for a
+narrower reason — the transfer still stalls, because uTP numbers packets and
+the ones already built too big cannot be re-cut.
+
+`TestIcmpBringsTheSearchWithinThePath` failed on its own control guard, which
+is the best thing it could have done. Its control assumed the silent search
+stays above the path. What the ICMP report is still worth is the *ceiling*:
+silent, the search reaches a workable size but leaves its ceiling at 1184,
+free to climb back above the 1100-byte path; with the report it is exactly
+1100 every run, because the report names the next hop's MTU instead of
+bisecting towards it.
 
 ## Not for upstream
 

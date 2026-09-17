@@ -66,6 +66,16 @@ type ConnectionMetrics struct {
 	MtuFloor   uint32
 	MtuCeiling uint32
 
+	// MtuProbesLostToDuplicateAcks counts probes the duplicate-acknowledgement
+	// path concluded were too big for the path (libutp:1927-1940).
+	//
+	// Exposed for the same reason as the three above: it is the only way to
+	// tell that mechanism ran, as opposed to the search having reached the
+	// same size by some other route. A test that inferred it from where the
+	// search settled would pass whether or not the code it names ever
+	// executed.
+	MtuProbesLostToDuplicateAcks uint64
+
 	// PeerTsDiff is the one-way delay this end measured from the peer's
 	// timestamps: how long the peer's last packet took to arrive here. It is
 	// what gets echoed back in timestamp_difference_microseconds, and it is
