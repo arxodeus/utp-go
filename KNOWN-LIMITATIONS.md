@@ -12,7 +12,7 @@ all.
 | --- | --- |
 | **M0** — pin the reference, prove the two libutp copies agree | **Done.** See [REFERENCE.md](REFERENCE.md) and `scripts/check-libutp-reference.sh`. |
 | **M1** — emulated network harness | **Done.** See [HARNESS.md](HARNESS.md) and `netem/`. |
-| **M2** — conformance harness against real libutp | **Partly done.** Corpus comparing emitted packets field by field, including malformed and hostile headers, plus retransmission-schedule and ack-count comparisons measured against libutp on each run; see [CONFORMANCE.md](CONFORMANCE.md). Responder role only, and ack *latency* is still not compared. |
+| **M2** — conformance harness against real libutp | **Partly done.** Corpus comparing emitted packets field by field, including malformed and hostile headers, plus retransmission-schedule and ack-count comparisons measured against libutp on each run; see [CONFORMANCE.md](CONFORMANCE.md). Both roles are covered: `conformance_initiator_corpus_test.go` adds nine curated cases in the dialling role, on the virtual clock, comparing the SYN itself. Ack *latency* is still not compared, for a reason that is not about clocks — see [COMPATIBILITY.md](COMPATIBILITY.md). |
 | **M3** — fix the failing transfer tests | **Done.** Root causes below; gates in "Verification". |
 | **M4** — audit transfer paths against libutp | **Done.** The ack path, the loss-recovery path, the retransmission timers and the send path are all audited against libutp — the timers by measurement rather than by reading, see [CONFORMANCE.md](CONFORMANCE.md). Three findings from the send path below; the packet-size one is deliberately left to M6. |
 | **M4b** — exhaustive libutp compatibility sweep | **Done.** [COMPATIBILITY.md](COMPATIBILITY.md) records every protocol area, the *kind* of evidence behind it — differential, measured, interop, cited, or none — and what is unchecked. Writing it found one defect (an ack per data packet, below), and the largest gap it named — libutp had never been run over the emulated network — has since been closed: `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite, which found two more defects. Both were in the harness, and both made libutp look worse than it is. |
@@ -39,10 +39,12 @@ That is the difference between conformance by citation -- code read against
 `utp_internal.cpp` and matched by hand -- and evidence that the implementation
 every peer in the wild runs will actually complete a transfer with this one.
 
-What remains unmet in M7 is a hash-verified torrent transfer: the adapter
-exists and is checked against torrent's real interface by reflection, but no
-actual torrent has moved through it. `CGO_ENABLED=0 go build ./...` succeeds
-for the whole module.
+M7's hash-verified torrent transfer is no longer unmet:
+`integration/anacrolix/TestTorrentTransferOverUtp` moves a 4 MiB torrent in
+128 pieces between two `torrent.Client`s with this library as the only
+transport, with BitTorrent's own piece hashes deciding whether what arrived is
+what was sent. See "A real torrent" below. `CGO_ENABLED=0 go build ./...`
+succeeds for the whole module.
 
 Writing the gate immediately found two defects that nothing else had, both
 described below: `Accept` could not accept, and `Close` took up to half a
