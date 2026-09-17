@@ -114,6 +114,43 @@ with the interoperability risk shown to be empty. It is asserted explicitly by
 `TestMalformedSelectiveAckLength` in the M2 corpus, which fails if either side
 changes: if we start accepting these, or if libutp starts rejecting them.
 
+## Unknown extension types in the header are rejected, not skipped
+
+**Both implementations depart from BEP 29 here, in the same direction.**
+
+BEP 29 describes the extension chain as skippable: each extension carries the
+type of the next one and its own length, so a reader that does not know a type
+can step over it. A well-formed extension of an unknown type ought to cost
+nothing.
+
+libutp does not skip one that appears *first*. Its extension loop would —
+there is no default case, and an unrecognised type falls through to
+`data += data[-1]` (`utp_internal.cpp:1844-1866`) — but the packet never gets
+that far. `UTP_Version` (`utp_internal.cpp:2480`) reads:
+
+```c
+return (pf->type() < ST_NUM_STATES && pf->ext < 3 ? pf->version() : 0);
+```
+
+A first extension byte of 3 or more makes the packet report version 0. Version
+0 is not uTP, so the datagram is discarded before any socket sees it.
+
+We reject it too, so there is nothing to reconcile between the two — but the
+shared behaviour is a departure from the specification rather than an
+implementation of it, and that is worth stating rather than leaving for
+someone to rediscover.
+
+The gate reads only the first extension byte. An unknown type reached *through*
+the chain — a selective ack whose `next` field names type 99 — passes
+`UTP_Version` and is then skipped by the loop, exactly as BEP 29 says. Both
+implementations accept that packet. So the rejected packet and the accepted one
+differ only in the order of two extensions.
+
+`TestMalformedUnknownExtensionType` and
+`TestMalformedUnknownExtensionTypeInChain` pin both halves, each with a control
+step that proves the silence is the extension's doing and not a connection that
+had stopped answering for some other reason.
+
 ## Completing an incoming connection
 
 **libutp completes one only on an `ST_DATA` packet. We complete it on the

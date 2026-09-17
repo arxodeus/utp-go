@@ -155,16 +155,74 @@ func TestMalformedExtensionChainLoops(t *testing.T) {
 	malformedCase(t, "an extension chain that never terminates", raw)
 }
 
-// An unknown extension type. BEP 29 says unknown extensions are skipped using
-// their length, so a well-formed one should be tolerated by both.
-func TestMalformedUnknownExtensionType(t *testing.T) {
+// unknownExtensionPacket is a valid ST_DATA whose *first* extension is of an
+// unknown type, well formed and with a payload behind it.
+func unknownExtensionPacket() []byte {
 	raw := dataHeader()
 	raw[1] = 99 // unknown extension type
+	raw = append(raw, 0 /*next: none*/, 4, 0xde, 0xad, 0xbe, 0xef)
+	return append(raw, []byte("payload")...)
+}
+
+// An unknown first extension type. BEP 29 says unknown extensions are skipped
+// using their length, so a well-formed one carrying a payload ought to be
+// accepted and acked. Neither implementation does that: both drop the packet.
+//
+// libutp does not drop it in its extension loop, which has no default case and
+// would skip the type quite happily (utp_internal.cpp:1844-1866). It drops it
+// two steps earlier, in UTP_Version (utp_internal.cpp:2480):
+//
+//	return (pf->type() < ST_NUM_STATES && pf->ext < 3 ? pf->version() : 0);
+//
+// A first extension byte of 3 or more makes the packet report version 0, and a
+// version that is not 1 is not uTP. The packet never reaches a socket.
+//
+// So the two implementations agree, and agree in departing from the
+// specification. Recorded in DEVIATIONS.md.
+//
+// The second step is the assertion and the third is what makes it mean
+// anything: the identical packet without the extension is acked, so the
+// silence above is the extension being rejected and not some unrelated reason
+// the connection had stopped answering. This case asserted nothing at all
+// until that control was added -- it expected an emission, got none from
+// either side, and passed on the match.
+func TestMalformedUnknownExtensionType(t *testing.T) {
+	plain := dataHeader()
+	plain = append(plain, []byte("payload")...)
+	runResponderCorpus(t, []step{
+		{name: "handshake", inject: synPacketFor(corpusSynConnID, corpusSynSeq)},
+		{
+			name:           "an unknown first extension type, well formed",
+			injectRaw:      unknownExtensionPacket(),
+			wantNoEmission: true,
+		},
+		{
+			name:      "the same packet without the extension is acked",
+			injectRaw: plain,
+		},
+	})
+}
+
+// The same unknown type, but second in the chain rather than first.
+//
+// UTP_Version inspects only `pf->ext`, the first extension byte. An unknown
+// type reached through a chain never passes through that gate, and libutp's
+// extension loop skips it by its length as BEP 29 says it should. So the
+// packet libutp rejects and the packet it accepts differ only in the order of
+// two extensions.
+//
+// This is the case that separates "rejects unknown extensions" from "rejects
+// an unknown extension byte in the header", and the two implementations have
+// to agree on which of those they do.
+func TestMalformedUnknownExtensionTypeInChain(t *testing.T) {
+	raw := dataHeader()
+	raw[1] = 1 // first extension: selective ack, which is known
+	raw = append(raw, 99 /*next: the unknown type*/, 4, 0, 0, 0, 0)
 	raw = append(raw, 0 /*next: none*/, 4, 0xde, 0xad, 0xbe, 0xef)
 	raw = append(raw, []byte("payload")...)
 	runResponderCorpus(t, []step{
 		{name: "handshake", inject: synPacketFor(corpusSynConnID, corpusSynSeq)},
-		{name: "an unknown extension type, well formed", injectRaw: raw},
+		{name: "an unknown extension type behind a known one", injectRaw: raw},
 	})
 }
 

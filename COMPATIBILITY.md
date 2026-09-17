@@ -172,8 +172,12 @@ so it sent 288-byte packets. Both are written up in
   still transfers on a clean path. Loss, reordering and jitter against libutp
   are now covered over the emulated network, which is where the close-handshake
   defect was found, but nothing damages packets between two real UDP sockets.
-- **The initiator role in the hand-written corpus.** The differential fuzzer
-  drives both roles; the M2 corpus is responder-only.
+- **~~The initiator role in the hand-written corpus.~~** Covered:
+  `conformance_initiator_corpus_test.go` drives both implementations as the
+  dialling side through nine curated cases — the handshake and the SYN itself,
+  in-order data, reordering, duplicates, a peer that resets instead of
+  answering, an incoming FIN, and a zero window with its control. It runs on
+  the virtual clock, so each step is deterministic rather than a sleep.
 - **~~Inbound timing.~~** Covered: the socket's read and event loops are
   barrier participants, so the whole chain from wire to connection and back is
   synchronised and reply timing is measurable. `TestReplyInstantMatchesLibutp`

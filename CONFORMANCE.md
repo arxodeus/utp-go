@@ -364,9 +364,29 @@ than made.
 Stated plainly, because a conformance harness that overclaims is worse than
 none.
 
-- **Only the responder role is covered.** Every case drives both
-  implementations as the side accepting a connection. The initiator role —
-  where we send the SYN and libutp answers — is not in the corpus.
+- **~~Only the responder role is covered.~~** Both roles are now. The
+  initiator corpus — where we send the SYN and the scripted peer answers — is
+  in `conformance_initiator_corpus_test.go`, and it compares the SYN itself,
+  which nothing else did: the fuzzer clears the handshake before it starts and
+  the responder corpus never sends one.
+- **A differential comparison cannot tell which code path it is on.** It can
+  only tell that both implementations are on the same one. The initiator
+  corpus was first written with its data one sequence number past what the
+  dialling side expects, so every "in order" case was exercising the
+  out-of-order path — and passed, because libutp reordered identically.
+  Breaking that constant deliberately failed only two of nine cases.
+  `step.wantAck` fixes what the comparison cannot see: it is an expected ack
+  number, a claim about this implementation alone, and it fails when the path
+  changes underneath the case. With it, the same deliberate break fails four
+  of nine on the initiator side and eight cases on the responder side, up
+  from four.
+- **A step where both sides are silent used to pass while asserting nothing.**
+  `compareStep` compared emission counts, and 0 == 0. A step that means to
+  observe silence declares `wantNoEmission`; every other step must now produce
+  something, or it fails as vacuous. Adding that guard immediately caught two
+  live cases: `TestConformanceZeroWindow`, which never wrote and so never made
+  the window bite, and `TestMalformedUnknownExtensionType`, which expected an
+  ack and had been getting none from either side since it was written.
 - **The timestamp fields are now compared, and were not.** `Timestamp` and
   `TimestampDiff` sat in `allowedToDiffer` because libutp's driver reads a
   virtual clock where this library read the real one, so the two could never

@@ -1270,6 +1270,61 @@ into the next acknowledgement and never appeared at all.
 Both now wait for the thing itself: the SYN, the accept request's
 registration, and the injected packet actually being read.
 
+## PR 47 — the initiator role in the corpus, and two ways a case can assert nothing
+
+Every hand-written conformance case drove both implementations as the side
+*accepting* a connection. The initiator role — we send the SYN, the peer
+answers — was covered only by the differential fuzzer, which generates its
+inputs rather than naming them and discards the handshake before it starts
+comparing. That is the direction a BitTorrent client is exposed to on every
+dial, and the role in which this library, not its peer, picks the sequence
+numbers and connection ids.
+
+`conformance_initiator_corpus_test.go` adds nine cases in that role, on the
+virtual clock, comparing the SYN itself as step zero.
+
+Writing them turned up two ways a case in this corpus could pass without
+asserting anything, both of which were live:
+
+**Mutual silence compared equal.** `compareStep` compared emission counts, and
+0 == 0, so a step that expected a reply and got none from either side passed
+on the match. A step that means to observe silence declares `wantNoEmission`;
+every other step must now emit something. The guard caught two existing cases
+on its first run. `TestConformanceZeroWindow` advertised a zero window and
+stopped there, never writing, so the window never bit — and libutp was
+refusing the write for an unrelated reason anyway, its responder sitting in
+`CS_SYN_RECV` until an `ST_DATA` arrives (`utp_internal.cpp:2158`), where
+`utp_writev` returns 0 for any state but `CS_CONNECTED`. Both zero-window
+cases now write through the stall and out the other side, each with a control
+that proves the write path works when the window is open.
+
+`TestMalformedUnknownExtensionType` expected an unknown-but-well-formed
+extension to be skipped per BEP 29, and had been getting silence from both
+sides since it was written. Both implementations drop the packet. libutp's
+extension loop would skip it — there is no default case — but `UTP_Version`
+(`utp_internal.cpp:2480`) rejects any packet whose *first* extension byte is 3
+or more before it reaches a socket. The gate reads only that first byte, so
+the same unknown type reached through a chain is skipped as the specification
+says, and both implementations accept that packet. Both halves are now cases,
+each with a control, and the shared departure is in `DEVIATIONS.md`.
+
+**A differential comparison cannot see which path it is on.** Only that both
+sides are on the same one. The initiator corpus was first written with its
+data one sequence number past what the dialling side expects — the SYN-ACK is
+a bare `ST_STATE` and consumes none — so every "in order" case exercised the
+out-of-order path, and passed, because libutp reordered identically.
+Deliberately breaking that constant failed only two of the nine cases.
+
+`step.wantAck` is the fix: an expected ack number, a claim about this
+implementation alone rather than about the two agreeing. With it the same
+deliberate break fails four of nine on the initiator side, and eight cases
+rather than four on the responder side.
+
+Not a library change apart from one fix it exposed: a connection's event loop
+never unregistered from the idle barrier when it exited, so a case whose peer
+answered the SYN with a `RESET` hung waiting for quiescence that could not
+arrive.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

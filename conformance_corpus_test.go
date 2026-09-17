@@ -38,6 +38,16 @@ type step struct {
 	advance time.Duration
 	// wantNoEmission asserts both sides stay silent.
 	wantNoEmission bool
+	// wantAck, when set, asserts the ack number on the last packet we emit.
+	//
+	// The rest of this struct compares us against libutp, which cannot tell
+	// which code path a step took -- only that both took the same one. Feed
+	// the corpus a sequence number one past what the connection expects and
+	// every "in order" case quietly becomes an out-of-order case, agreeing
+	// with libutp the whole way. Seven of the nine initiator cases passed
+	// that way. An expected ack number is a claim about this implementation
+	// alone, so it fails when the path changes underneath it.
+	wantAck *uint16
 	// libutpExtraDuplicates records a deliberate divergence: libutp emits
 	// this many more packets than we do, and each extra one is a duplicate of
 	// the packet before it. Stating the number and the reason here is the
@@ -57,6 +67,9 @@ const (
 	corpusSynSeq    = 900
 	corpusWindow    = 1048576
 )
+
+// ackNum is the pointer wrapper for step.wantAck.
+func ackNum(v uint16) *uint16 { return &v }
 
 // synPacketFor builds the SYN that opens every responder-role case.
 func synPacketFor(connID, seq uint16) *packet {
@@ -211,6 +224,32 @@ func compareStep(t *testing.T, i int, st step, oursOut, libutpOut [][]byte) {
 		return
 	}
 
+	// Two silent sides compare equal, and a step that expected an answer and
+	// got none from either would pass while asserting nothing at all. A step
+	// that means to observe silence says so with wantNoEmission; anything
+	// else has to produce something to compare.
+	//
+	// This guard exists because the initiator corpus was written with its
+	// data packets one sequence number past what the dialling side expects.
+	// Every "in order" case was quietly exercising the out-of-order path, and
+	// all of them passed.
+	if len(oursOut) == 0 {
+		t.Errorf("step %d (%s): neither side emitted anything, so this step compared "+
+			"nothing. Set wantNoEmission if silence is the expected result.",
+			i, st.name)
+		return
+	}
+
+	if st.wantAck != nil {
+		last, err := DecodePacket(oursOut[len(oursOut)-1])
+		if err != nil {
+			t.Errorf("step %d (%s): could not decode our last packet: %v", i, st.name, err)
+		} else if last.Header.AckNum != *st.wantAck {
+			t.Errorf("step %d (%s): we acked %d, expected %d. The step is not exercising "+
+				"the path it was written for.", i, st.name, last.Header.AckNum, *st.wantAck)
+		}
+	}
+
 	for j := range oursOut {
 		ourPkt, err1 := DecodePacket(oursOut[j])
 		theirPkt, err2 := DecodePacket(libutpOut[j])
@@ -246,11 +285,13 @@ func TestConformanceDataAndAck(t *testing.T) {
 			name: "first data packet is acked",
 			inject: NewPacketBuilder(st_data, corpusSynConnID+1, 200000, corpusWindow, corpusSynSeq+1).
 				WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("hello world")).Build(),
+			wantAck: ackNum(corpusSynSeq + 1),
 		},
 		{
 			name: "second data packet is acked",
 			inject: NewPacketBuilder(st_data, corpusSynConnID+1, 210000, corpusWindow, corpusSynSeq+2).
 				WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("second")).Build(),
+			wantAck: ackNum(corpusSynSeq + 2),
 		},
 	})
 }
@@ -261,8 +302,9 @@ func TestConformanceDuplicateData(t *testing.T) {
 		WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("payload")).Build()
 	runResponderCorpus(t, []step{
 		{name: "handshake", inject: synPacketFor(corpusSynConnID, corpusSynSeq)},
-		{name: "data", inject: dup},
-		{name: "the same data again", inject: dup},
+		{name: "data", inject: dup, wantAck: ackNum(corpusSynSeq + 1)},
+		// A duplicate advances nothing; the ack repeats.
+		{name: "the same data again", inject: dup, wantAck: ackNum(corpusSynSeq + 1)},
 	})
 }
 
@@ -274,11 +316,15 @@ func TestConformanceReordering(t *testing.T) {
 			name: "seq+2 arrives first, leaving a gap",
 			inject: NewPacketBuilder(st_data, corpusSynConnID+1, 200000, corpusWindow, corpusSynSeq+2).
 				WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("second")).Build(),
+			// The gap is open, so the ack stays on the SYN.
+			wantAck: ackNum(corpusSynSeq),
 		},
 		{
 			name: "seq+1 fills the gap",
 			inject: NewPacketBuilder(st_data, corpusSynConnID+1, 210000, corpusWindow, corpusSynSeq+1).
 				WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("first")).Build(),
+			// Both are in order now, so the ack jumps over both.
+			wantAck: ackNum(corpusSynSeq + 2),
 		},
 	})
 }
@@ -291,6 +337,7 @@ func TestConformanceIncomingFin(t *testing.T) {
 			name: "data",
 			inject: NewPacketBuilder(st_data, corpusSynConnID+1, 200000, corpusWindow, corpusSynSeq+1).
 				WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("bye")).Build(),
+			wantAck: ackNum(corpusSynSeq + 1),
 		},
 		{
 			name: "FIN",
@@ -302,6 +349,8 @@ func TestConformanceIncomingFin(t *testing.T) {
 				"from the deferred-ack list it also schedules at :2404. The second carries " +
 				"no information the first did not, so we send one. Emitting a gratuitous " +
 				"duplicate would cost a packet and change nothing a peer depends on",
+			// The FIN consumes a sequence number, so the ack covers it.
+			wantAck: ackNum(corpusSynSeq + 2),
 		},
 	})
 }
@@ -320,13 +369,63 @@ func TestConformanceIncomingReset(t *testing.T) {
 }
 
 // A zero-window advertisement from the peer.
+// corpusPeerData is the ST_DATA that completes the handshake from the peer's
+// side. libutp's responder stays in CS_SYN_RECV until an ST_DATA arrives
+// (utp_internal.cpp:2158, "Incoming connection completion"), and utp_writev
+// returns 0 for any state but CS_CONNECTED (utp_internal.cpp:3181). So a
+// responder-role case that wants to write anything has to be given data
+// first, or libutp silently accepts the write and never sends it.
+func corpusPeerData(seq uint16, ts uint32, body []byte) *packet {
+	return NewPacketBuilder(st_data, corpusSynConnID+1, ts, corpusWindow, seq).
+		WithAckNum(corpusPinnedSeq - 1).WithPayload(body).Build()
+}
+
+// A zero receive window stalls the sender until the peer reopens it
+// (utp_internal.cpp:936, where max_window_user is one of the three limits
+// is_full weighs). Advertising the zero window on its own proves nothing -- a
+// bare ST_STATE is answered with silence whatever window it carries -- so the
+// case writes through the stall and out the other side.
+//
+// TestConformanceWriteFlowsWithoutZeroWindow is the control: the same script
+// without the zero window, where the write leaves at once. Without it this
+// case would still pass if writes never went out at all, which is exactly the
+// state it was in before -- libutp was refusing every write for an unrelated
+// reason and the silence read as a zero-window stall.
 func TestConformanceZeroWindow(t *testing.T) {
 	runResponderCorpus(t, []step{
 		{name: "handshake", inject: synPacketFor(corpusSynConnID, corpusSynSeq)},
+		{name: "peer data completes the handshake", inject: corpusPeerData(corpusSynSeq+1, 150000, []byte("hi"))},
 		{
 			name: "peer advertises a zero receive window",
-			inject: NewPacketBuilder(st_state, corpusSynConnID+1, 200000, 0, corpusSynSeq+1).
+			inject: NewPacketBuilder(st_state, corpusSynConnID+1, 200000, 0, corpusSynSeq+2).
 				WithAckNum(corpusPinnedSeq - 1).Build(),
+			wantNoEmission: true,
+		},
+		{
+			name:           "writing against the zero window sends nothing",
+			write:          []byte("stalled behind a zero window"),
+			wantNoEmission: true,
+		},
+		{
+			name: "peer reopens the window and the write goes out",
+			inject: NewPacketBuilder(st_state, corpusSynConnID+1, 300000, corpusWindow, corpusSynSeq+2).
+				WithAckNum(corpusPinnedSeq - 1).Build(),
+		},
+	})
+}
+
+// The control for TestConformanceZeroWindow: identical but for the zero
+// window, and here the write leaves immediately.
+func TestConformanceWriteFlowsWithoutZeroWindow(t *testing.T) {
+	runResponderCorpus(t, []step{
+		{name: "handshake", inject: synPacketFor(corpusSynConnID, corpusSynSeq)},
+		{name: "peer data completes the handshake", inject: corpusPeerData(corpusSynSeq+1, 150000, []byte("hi"))},
+		{name: "the write leaves at once", write: []byte("stalled behind a zero window")},
+		{
+			name: "nothing left to flush when the peer acks",
+			inject: NewPacketBuilder(st_state, corpusSynConnID+1, 300000, corpusWindow, corpusSynSeq+2).
+				WithAckNum(corpusPinnedSeq - 1).Build(),
+			wantNoEmission: true,
 		},
 	})
 }
@@ -415,6 +514,8 @@ func TestConformanceWideReordering(t *testing.T) {
 			name: "data at seq+" + strconv.Itoa(int(offset)) + ", gap still open",
 			inject: NewPacketBuilder(st_data, corpusSynConnID+1, 200000+uint32(offset), corpusWindow, corpusSynSeq+offset).
 				WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("x")).Build(),
+			// seq+1 never arrives, so every ack here stays on the SYN.
+			wantAck: ackNum(corpusSynSeq),
 		})
 	}
 	runResponderCorpus(t, steps)

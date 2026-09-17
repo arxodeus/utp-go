@@ -773,6 +773,15 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	barrier, _ := c.timeSource().(IdleBarrier)
 	if barrier != nil {
 		barrier.Register()
+		// A connection that ends -- reset by its peer, timed out, closed --
+		// can never park again, and a virtual clock waiting for it would
+		// stop. Found by the initiator corpus: a peer that answers a SYN
+		// with a RESET tore the connection down and hung the clock.
+		defer func() {
+			if u, ok := barrier.(interface{ Unregister() }); ok {
+				u.Unregister()
+			}
+		}()
 	}
 
 	var maxStreamEventLen int
