@@ -187,10 +187,14 @@ func TestMtuSearchCannotRecoverFromAPathLimitBelowItsChoice(t *testing.T) {
 // The stall above, prevented rather than recovered from.
 //
 // TestMtuSearchCannotRecoverFromAPathLimitBelowItsChoice is skipped because
-// once the search has adopted a size the path will not carry, neither this
-// library nor libutp can get back: every packet is too big, nothing is
-// acknowledged, and the ceiling only comes down when a probe times out as the
-// sole outstanding packet.
+// once the connection has stalled on a size the path will not carry, neither
+// this library nor libutp gets the transfer back: the packets already built
+// are too big, uTP numbers packets rather than bytes so they cannot be re-cut,
+// and the peer will never acknowledge what it cannot receive.
+//
+// The search itself does recover, since the duplicate-acknowledgement route
+// lowers the ceiling while the window is full. That is not enough, which is
+// the point of this case.
 //
 // The way out is to never adopt that size, which is what libutp's
 // UTP_GET_UDP_MTU callback is for -- it sets the ceiling from the local

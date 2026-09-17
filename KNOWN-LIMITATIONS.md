@@ -1939,35 +1939,47 @@ was failing with no longer exists.
 
 ## A path MTU below the size already adopted stalls the connection
 
-**Open, and it is libutp's limitation as much as ours.** The most serious thing
-the MTU harness found, and the fix is a deliberate divergence rather than a
-correction, which is why it is recorded rather than made.
+**Half closed, and the remaining half is libutp's limitation as much as ours.**
+The most serious thing the MTU harness found.
 
 The search raises the size it sends at whenever a probe is acknowledged. If the
 path limit falls between two probe sizes, the size it adopts next cannot
 arrive -- and because every data packet is then built at that size, nothing
-arrives at all. The ceiling only comes down when a probe times out as the
-*only* packet outstanding (`utp_internal.cpp:1152-1160`), and a connection
-whose window has stalled never gets there: nothing is acknowledged, so the
-outstanding count never falls to one.
+arrives at all.
 
-Measured, on a path that refuses anything above 1100 bytes:
+**What has changed: the search recovers now.** This section used to say the
+ceiling only comes down when a probe times out as the *only* packet outstanding
+(`utp_internal.cpp:1152-1160`), which a stalled window never reaches, and
+concluded that fixing it "means diverging deliberately". That conclusion was
+reached without knowing libutp has a second route -- three duplicate
+acknowledgements pointing at the packet before the probe (`:1927-1940`) -- and
+was wrong on both counts. The route is libutp's own, so implementing it is a
+correction rather than a divergence, and it works with the window full.
+Measured over the same 1100-byte link, with the skip on
+`TestMtuSearchCannotRecoverFromAPathLimitBelowItsChoice` lifted:
 
-| | Result |
-| --- | --- |
-| ours | the search parks at 1191 bytes; a 1MB transfer delivers about 5KB, then the connection gives up |
-| libutp | sends ~1230-byte packets, delivers 20 bytes, and reports a connection error |
+| | floor | current | ceiling |
+| --- | --- | --- | --- |
+| before the duplicate-ack route | 576 | 1191 | 1400 |
+| after it | 982 | **1083** | 1184 |
 
-libutp's number is measured, not read: `TestLibutpStallsOnAPathItCannotFit`
-runs the reference over the same link. That distinction matters here, because
-reading the source alone suggests libutp recovers -- it lowers the ceiling on a
-probe timeout and clears the probe on every RTO so another can go out. Both are
-true. Neither rescues a stalled window.
+**What has not changed: the transfer still stalls.** uTP numbers packets, not
+bytes, so the packets already built at 1191 cannot be re-cut smaller -- that
+would renumber everything behind them -- and the peer will never acknowledge
+packets it cannot receive. The connection recovers its *sizing* and not its
+*window*, so a 1MB transfer on a connection that has already stalled still
+delivers a few kilobytes and times out.
 
-So this is not a difference from the reference to close. Fixing it means
-diverging deliberately: concluding "too big" from repeated timeouts with no
-progress at all, rather than only from a solitary probe. That belongs in
-[DEVIATIONS.md](DEVIATIONS.md) with a measurement behind it.
+That part is genuinely shared with the reference, and libutp's number is
+measured rather than read: `TestLibutpStallsOnAPathItCannotFit` runs it over
+the same link, where it sends ~1230-byte packets, delivers 20 bytes, and
+reports a connection error. The distinction matters, because reading libutp's
+source alone suggests it recovers.
+
+Note also that the recovered ceiling, 1184, is still above the 1100-byte path:
+the search reaches a workable size without being confined to one. Only an ICMP
+report brings the ceiling onto the path exactly -- see below, where that is now
+what the report is measured to be worth.
 
 **It matters in practice.** A path MTU below 1400 is ordinary -- PPPoE at 1492,
 and most VPN and tunnel paths -- and a BitTorrent client on one would stall.
