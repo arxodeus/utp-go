@@ -272,23 +272,67 @@ func ourRetransmitSchedule(t *testing.T, cfg *ConnectionConfig, afterHandshake b
 	waitFor(t, 2*time.Second, func() bool { return conn.emittedCount() > 0 })
 
 	if !afterHandshake {
-		start := time.Now()
-		baseline := conn.emittedCount()
-		deadline := start.Add(cfg.InitialTimeout * 10)
+		// Times come from each packet's own header, not from when this loop
+		// noticed it -- the same correction the data branch below already
+		// carries, and for the same reason.
+		//
+		// This branch kept the older measurement: it took its zero from
+		// time.Now() *after* waitFor had observed the SYN, and timed every
+		// retransmission from there. Both ends of that are the observer
+		// rather than the sender. waitFor polls, this loop sleeps 2ms a pass,
+		// and either can be descheduled, so the zero lands somewhere after
+		// the SYN actually went out and every measured gap is short by that
+		// much.
+		//
+		// Against the 200ms base this test scales libutp's 3000ms down to,
+		// a 19ms late start reads as a retransmission at 181ms -- early,
+		// which the schedule check rejects outright because a real
+		// implementation resending before its timeout would be resending
+		// packets the peer was still going to acknowledge. Measured on the
+		// unfixed test under CPU load: 3 failures in 25 runs, all of them
+		// the observer being late rather than the connection being early.
+		//
+		// Every transmission stamps time.Now().UnixMicro() as it goes out,
+		// so the header carries the send time exactly and the poll interval
+		// stops mattering.
+		wallStart := time.Now()
+		var startMicros int64
+		var haveFirst bool
+
+		collect := func() {
+			for _, raw := range conn.takeEmitted() {
+				pkt, err := DecodePacket(raw)
+				if err != nil {
+					continue
+				}
+				if !haveFirst {
+					startMicros = pkt.Header.Timestamp
+					haveFirst = true
+					continue
+				}
+				since := time.Duration(wrappingSubUint32(
+					uint32(pkt.Header.Timestamp), uint32(startMicros))) * time.Microsecond
+				resends = append(resends, since.Milliseconds())
+			}
+		}
+
+		deadline := wallStart.Add(cfg.InitialTimeout * 10)
 		for time.Now().Before(deadline) {
 			time.Sleep(2 * time.Millisecond)
-			if n := conn.emittedCount(); n > baseline {
-				resends = append(resends, time.Since(start).Milliseconds())
-				baseline = n
-			}
+			collect()
 			select {
 			case err := <-connectErr:
-				gaveUp = time.Since(start)
+				// Anything emitted in the same window as the failure still
+				// counts; without this the last retransmission is lost
+				// whenever it lands alongside the give-up.
+				collect()
+				gaveUp = time.Since(wallStart)
 				_ = err
 				return resends, gaveUp
 			default:
 			}
 		}
+		collect()
 		return resends, 0
 	}
 
