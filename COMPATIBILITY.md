@@ -192,5 +192,18 @@ so it sent 288-byte packets. Both are written up in
   `utp_issue_deferred_acks` and this library when an event-loop pass ends, so
   the comparison would measure harness cadence rather than either
   implementation. This bullet previously claimed the clock was the blocker.
+- **The clock-drift penalty in `apply_ccontrol`.** libutp applies a delay
+  penalty when the estimated clock drift passes -200000 microseconds per five
+  seconds (`utp_internal.cpp:1644-1650`), an anti-cheat measure against a peer
+  running its clock slow. Neither that nor the five-second `average_delay`
+  machinery that drives it exists here. Found by the M4b sweep; see
+  KNOWN-LIMITATIONS.md. The delay-base shift, libutp's *other* drift
+  mechanism, is implemented and measured.
+- **Window-reopening notification (`utp_read_drained`).** libutp acknowledges
+  as soon as its application drains the read buffer; this library says nothing
+  and the peer finds out from an acknowledgement its own retransmission draws.
+  Measured cost on an emulated path: a window closed for 2.0-3.0s where the
+  reader freed it after 2.0s. An implementation was written and reverted when
+  it proved able to hang a connection; see KNOWN-LIMITATIONS.md.
 - **IPv6.** Everything here runs on IPv4 loopback or an emulator with no
   address family at all.

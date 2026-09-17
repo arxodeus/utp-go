@@ -1413,6 +1413,26 @@ free to climb back above the 1100-byte path; with the report it is exactly
 1100 every run, because the report names the next hop's MTU instead of
 bisecting towards it.
 
+## Not a PR — the M4b sweep's findings
+
+Reading libutp end to end against this implementation turned up two missing
+mechanisms and one policy divergence. Neither mechanism is fixed here, so
+there is nothing to send upstream yet; they are listed so the next person does
+not have to find them again. Full write-up in KNOWN-LIMITATIONS.md, "The M4b
+sweep".
+
+- **The clock-drift penalty** (`utp_internal.cpp:1644-1650`) and the
+  five-second `average_delay` machinery that drives it (`:2040-2107`). libutp
+  has two clock-drift mechanisms; this fork implements the delay-base shift
+  and not the penalty.
+- **`utp_read_drained`** (`:3242-3261`). Attempted twice. Ported literally it
+  doubles the reverse traffic, because libutp hands bytes up synchronously
+  inside `utp_process_incoming` and this library does it on a later pass of
+  the event loop. Narrowed to the zero-window branch it measured well and then
+  hung one run in three.
+- **No cap on accepted connections** against libutp's 3000 (`:2967-2974`), a
+  policy choice rather than a defect.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

@@ -27,15 +27,19 @@ transfer-path defects. All three have changed:
 - Every mechanism in the congestion controller now has a measurement behind it
   rather than a citation.
 
-What has still **not** been done is the M4b sweep as originally conceived:
-reading `bittorrent/libutp` end to end and confirming agreement behaviour by
-behaviour. Sections of it have been audited that way — the ack path, loss
-recovery, the congestion controller, the close handshake — and each audit found
-defects, which is the reason to expect the unaudited remainder to contain more.
+The M4b sweep as originally conceived — reading `bittorrent/libutp` end to end
+and confirming agreement behaviour by behaviour — has now been done for the
+areas that were left: `utp_process_incoming`, `utp_process_udp`, the
+ack-deferral and window-reopening path, and the connection defaults. It found
+two missing mechanisms and one policy divergence; see "The M4b sweep" in
+[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md). One of the two was implemented,
+measured, and reverted when it proved able to hang a connection, and that is
+recorded there rather than dropped.
 
 So: the deviations below are recorded deliberately rather than noticed by
-accident, and the list is worth trusting for what it contains. It is not a
-proof that nothing else differs.
+accident, and the list is worth trusting for what it contains. It is still not
+a proof that nothing else differs — the sweep read the paths that carry
+packets, not every line of a 3,500-line file.
 
 ## Intentional deviations
 

@@ -15,7 +15,7 @@ all.
 | **M2** — conformance harness against real libutp | **Partly done.** Corpus comparing emitted packets field by field, including malformed and hostile headers, plus retransmission-schedule and ack-count comparisons measured against libutp on each run; see [CONFORMANCE.md](CONFORMANCE.md). Both roles are covered: `conformance_initiator_corpus_test.go` adds nine curated cases in the dialling role, on the virtual clock, comparing the SYN itself. Ack *latency* is still not compared, for a reason that is not about clocks — see [COMPATIBILITY.md](COMPATIBILITY.md). |
 | **M3** — fix the failing transfer tests | **Done.** Root causes below; gates in "Verification". |
 | **M4** — audit transfer paths against libutp | **Done.** The ack path, the loss-recovery path, the retransmission timers and the send path are all audited against libutp — the timers by measurement rather than by reading, see [CONFORMANCE.md](CONFORMANCE.md). Three findings from the send path below; the packet-size one is deliberately left to M6. |
-| **M4b** — exhaustive libutp compatibility sweep | **Done.** [COMPATIBILITY.md](COMPATIBILITY.md) records every protocol area, the *kind* of evidence behind it — differential, measured, interop, cited, or none — and what is unchecked. Writing it found one defect (an ack per data packet, below), and the largest gap it named — libutp had never been run over the emulated network — has since been closed: `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite, which found two more defects. Both were in the harness, and both made libutp look worse than it is. |
+| **M4b** — exhaustive libutp compatibility sweep | **Done, and the line-by-line sweep it deferred has since been done too** — see "The M4b sweep" below, which found the clock-drift penalty and `utp_read_drained` missing. [COMPATIBILITY.md](COMPATIBILITY.md) records every protocol area, the *kind* of evidence behind it — differential, measured, interop, cited, or none — and what is unchecked. Writing it found one defect (an ack per data packet, below), and the largest gap it named — libutp had never been run over the emulated network — has since been closed: `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite, which found two more defects. Both were in the harness, and both made libutp look worse than it is. |
 | **M5** — verify LEDBAT, add LEDBAT++ | **Done.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft, opt-in. Deference measured against a loss-based competitor over a shared bottleneck: classic LEDBAT takes 60% of the link from it, LEDBAT++ takes 44%. See [BENCHMARKS.md](BENCHMARKS.md). |
 | **M6** — MTU path discovery | **Done.** Binary search between a 576-byte floor and a 1400-byte ceiling, probing with ordinary data packets, as libutp does. The ceiling could be raised from 1024 only because discovery makes it safe: an untested path still gets 988 bytes. Probes now carry the don't-fragment bit through `utp.DontFragmentWriter`, implemented for a real UDP socket on Linux, Darwin, the BSDs and Windows without adding a dependency, and compiling everywhere else against a stub. Implementing the bit exposed a second gap, since closed: libutp's duplicate-acknowledgement route to lowering the ceiling (`:1927-1940`) was missing, so a probe dropped for size during a bulk transfer taught the search nothing. With both, the search comes down from 1384 to 996 on a 1000-byte path and fragmentation falls from 3809 datagrams to 32. |
 | **M7** — anacrolix/torrent integration | **Done, with one gap.** `utpnet` presents a uTP socket as `net.PacketConn`/`net.Conn` and satisfies torrent's uTP interface, checked against the real interface by reflection in `integration/anacrolix`. The gap: torrent selects its uTP implementation at build time, so wiring it in needs a `replace` or a patched file — recipes in that module's README. |
@@ -2901,6 +2901,146 @@ Both are worth noting as a pattern rather than as two incidents: a test whose
 control depends on a limitation will pass or fail for the wrong reason the
 moment the limitation is lifted, and the ones that fail loudly are the lucky
 ones.
+
+## The M4b sweep: reading libutp against this implementation
+
+The M4b milestone was always recorded as incomplete in one specific way:
+`DEVIATIONS.md` said what had **not** been done was "reading
+`bittorrent/libutp` end to end and confirming agreement behaviour by
+behaviour". Sections had been audited that way — the ack path, loss recovery,
+the congestion controller, the close handshake, the send path, the timers, the
+MTU search, the ICMP path, and the API surface function by function — and each
+audit found defects, which is the reason to expect the unaudited remainder to
+contain more.
+
+This is the sweep of that remainder: `utp_process_incoming` (the 700-line
+inbound path), `utp_process_udp` (dispatch, SYN and RESET), the ack-deferral
+and window-reopening path, and the connection defaults.
+
+Four findings, two of them clean.
+
+### 1. The clock-drift penalty in `apply_ccontrol` — missing
+
+libutp has **two** clock-drift mechanisms and this library implements one.
+
+The one it has is the delay-base shift: when the peer's base delay falls,
+`our_hist` is shifted to match (`utp_internal.cpp:2009-2015`), which was
+implemented and measured earlier — see "Clock skew" above.
+
+The one it does not have is a penalty applied directly to the delay the
+congestion controller sees (`:1644-1650`):
+
+```c
+int32 penalty = 0;
+if (clock_drift < -200000) {
+    penalty = (-clock_drift - 200000) / 7;
+    our_delay += penalty;
+}
+```
+
+`clock_drift` is a rolling average (weighted 7:1) of the slope of
+`average_delay`, which is itself a five-second mean of the peer's reported
+`reply_micro`, taken relative to a renormalised `average_delay_base`
+(`:2040-2107`). None of that machinery exists here.
+
+libutp is explicit about what it is for: "to compensate for people trying to
+'cheat' uTP by making their clock run slower, and this definitely catches that
+without any risk of false positives". The threshold is -200000 microseconds
+per five seconds, which is 40,000 ppm — three orders of magnitude beyond
+ordinary crystal drift, so it fires on deliberate manipulation or a badly
+broken clock rather than on a normal path.
+
+**Not implemented, and not because it is hard.** `netem.DriftingClock` already
+exists and could drive the measurement. It is left here because it is a
+distinct mechanism with its own design questions, and because the sweep's job
+was to find it, not to smuggle it in. The M5 claim that classic LEDBAT was
+"verified against `apply_ccontrol`" should be read with this in mind: it was
+verified against the parts of `apply_ccontrol` that were read.
+
+### 2. `utp_read_drained` — missing, attempted, and reverted
+
+libutp tells the peer as soon as its application drains the read buffer
+(`:3242-3261`):
+
+```c
+const size_t rcvwin = conn->get_rcv_window();
+if (rcvwin > conn->last_rcv_win) {
+    if (conn->last_rcv_win == 0) conn->send_ack();
+    else conn->schedule_ack();
+}
+```
+
+This library frees the buffer and says nothing. A sender blocked on a closed
+window learns it has reopened only from an acknowledgement it draws itself —
+and while blocked, the only thing it sends is a retransmission, so recovery
+runs at the retransmission cadence rather than at the speed of the reader.
+
+Measured on an emulated path with a 32KB receive buffer and the reader paused
+for two seconds: the window stayed closed for 2.0s, 2.1s and 3.0s across three
+runs, recovering only when a retransmission happened to arrive.
+
+**An implementation was written, measured, and then reverted.** It is recorded
+here rather than quietly dropped, because both things that went wrong are
+worth knowing before anyone tries again:
+
+- **Ported literally, it doubles the reverse traffic.** libutp hands bytes up
+  *inside* `utp_process_incoming`, synchronously, so by the time it builds the
+  acknowledgement for that packet the buffer has already drained and
+  `utp_read_drained` finds nothing to report. This library hands bytes up on a
+  later pass of the event loop, so the acknowledgement goes out first and the
+  drain that follows always looks like the window growing. Every data packet
+  drew two acknowledgements instead of one. `TestConformanceAckCoalescing` and
+  the corpus caught it on the first run.
+- **Narrowed to libutp's `last_rcv_win == 0` branch, it hung.** The narrowed
+  version fixed the doubling and measured well — the window reopened after
+  1.01s, three runs running, against a control that scattered between 2.0s and
+  3.0s. Then one run in three left the window closed for the full 116-second
+  context timeout. Six control runs never hung. The mechanism of that hang was
+  not established, and a change that can deadlock a connection is not worth a
+  second of recovery latency.
+
+The likely direction, for whoever picks this up: the event loop's `readable`
+signal fires when data *arrives*, not when the application *reads*, so there
+is no wake-up corresponding to libutp's contract. Getting this right probably
+means adding one rather than hooking the drain that happens to run.
+
+### 3. No cap on accepted connections — a divergence, not a defect
+
+libutp refuses a new incoming connection when the context already holds more
+than 3000 sockets (`:2967-2974`). This library has no count bound. The
+pending-SYN map is bounded only by time — `AWAITING_CONNECTION_TIMEOUT` is 20
+seconds — so a SYN flood at rate R leaves R×20 entries where libutp holds at
+most 3000.
+
+Left as a divergence rather than closed, because 3000 is a policy choice and a
+BitTorrent client legitimately wants many connections. A configurable cap
+would be the way to close it.
+
+### 4. Things checked that turned out to be fine
+
+Recorded because a sweep that only lists what it found is indistinguishable
+from a sweep that stopped early.
+
+- **The three-way connection-id lookup.** We derive three candidate ids for an
+  inbound packet where libutp looks up the receive id alone for a non-SYN
+  (`:2884-2892`), which looked like it could deliver a packet carrying our
+  *send* id into an established connection. Tested directly: both
+  implementations answer an identical RESET. The derived id matches no
+  registered connection.
+- **Re-acking an old packet.** libutp schedules an acknowledgement for a
+  packet behind the reorder window that is not a STATE (`:1889-1897`), so a
+  peer still retransmitting something we already have can stop. Present, in
+  `outsideReorderWindow`, found earlier by the differential fuzzer.
+- **Data arriving past a FIN already seen.** libutp drops it (`:2412-2420`);
+  `onData` checks the same range.
+- **Connection defaults.** `rto = 3000`, `rtt_var = 800`, `slow_start = true`,
+  `ssthresh = opt_sndbuf`, target delay from the context. All present and
+  cited.
+- **The initial peer window.** libutp starts `max_window_user` at
+  255 × `PACKET_SIZE` = 365,925 bytes (`:2613`) where this library starts at
+  `math.MaxUint32`. Not reachable: at connection start the congestion window is
+  in slow start and is the binding constraint in
+  `min(max_window, opt_sndbuf, max_window_user)`.
 
 ## Things found but deliberately not fixed
 
