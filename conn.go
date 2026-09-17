@@ -1154,6 +1154,12 @@ func (c *connection) shutdown() {
 // whether the connection has been silent, which is libutp's
 // `last_sent_packet` (utp_internal.cpp:1272).
 func (c *connection) emit(pkt *packet) {
+	c.emitPacket(pkt, false)
+}
+
+// emitPacket queues a packet for the socket's write loop. dontFragment marks
+// it as an MTU probe; see DontFragmentWriter.
+func (c *connection) emitPacket(pkt *packet, dontFragment bool) {
 	if pkt == nil {
 		return
 	}
@@ -1167,6 +1173,10 @@ func (c *connection) emit(pkt *packet) {
 	// IdleBarrier.NoteHandoff.
 	if b, ok := c.timeSource().(IdleBarrier); ok {
 		b.NoteHandoff()
+	}
+	if dontFragment {
+		c.socketEvents <- newOutgoingProbeSocketEvent(pkt, c.cid)
+		return
 	}
 	c.socketEvents <- newOutgoingSocketEvent(pkt, c.cid)
 }
@@ -3017,14 +3027,22 @@ func (c *connection) transmit(packet *packet, now time.Time, firstTransmission b
 	// Use this packet as an MTU probe if the search wants one.
 	//
 	// libutp decides the same thing in send_packet (utp_internal.cpp:906-925)
-	// and sends the probe with fragmentation disabled. This library cannot
-	// set that flag through its abstract Conn, so a probe too large for the
-	// path is fragmented on IPv4 rather than dropped -- it is acknowledged,
-	// the floor rises, and the search settles on a size that works but costs
-	// fragmentation. On IPv6, where routers do not fragment, it is dropped
-	// and the search learns correctly. See KNOWN-LIMITATIONS.md.
+	// and sends the probe with fragmentation disabled, by passing
+	// UTP_UDP_DONTFRAG to its embedder's sendto callback (:925-929). This
+	// carries the same bit the same way: the flag travels with the datagram to
+	// the socket's write loop, which asks the Conn to honour it if it can.
+	//
+	// A Conn that cannot -- the libutp driver, an emulated network that does
+	// not model fragmentation, an operating system with no such socket option
+	// -- sends it normally, which is what every probe did before this existed.
+	// The cost of that is real and is why the bit is worth carrying: on IPv4 a
+	// router may fragment an oversized probe rather than drop it, so the probe
+	// is acknowledged, the floor rises, and the search settles on a size that
+	// works only because every packet at it is being fragmented.
+	isProbe := false
 	if datagramSize := uint32(packet.EncodedLen()); c.mtu.eligibleProbe(datagramSize, firstTransmission) {
 		c.mtu.beginProbe(packet.Header.SeqNum, datagramSize)
+		isProbe = true
 		if c.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
 			c.logger.Debug("MTU probe", "size", datagramSize,
 				"floor", c.mtu.floor, "ceiling", c.mtu.ceiling, "seq", packet.Header.SeqNum)
@@ -3034,5 +3052,5 @@ func (c *connection) transmit(packet *packet, now time.Time, firstTransmission b
 	c.state.SentPackets.OnTransmit(packet.Header.SeqNum, packet.Header.PacketType, payload, length, now)
 	c.armRetransmit(packet, c.state.SentPackets.Timeout())
 
-	c.emit(packet)
+	c.emitPacket(packet, isProbe)
 }

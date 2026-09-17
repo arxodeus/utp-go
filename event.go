@@ -63,6 +63,11 @@ type socketEvent struct {
 	Type         socketEventType
 	Packet       *packet
 	ConnectionId ConnectionPeer
+	// DontFragment marks this datagram as an MTU probe, to be sent with
+	// fragmentation disabled if the Conn can do that. libutp carries the same
+	// bit from send_packet to its embedder's sendto callback as
+	// UTP_UDP_DONTFRAG (utp_internal.cpp:928). See DontFragmentWriter.
+	DontFragment bool
 }
 
 func newOutgoingSocketEvent(p *packet, cid ConnectionPeer) *socketEvent {
@@ -70,6 +75,17 @@ func newOutgoingSocketEvent(p *packet, cid ConnectionPeer) *socketEvent {
 		Type:         outgoing,
 		Packet:       p,
 		ConnectionId: cid,
+	}
+}
+
+// newOutgoingProbeSocketEvent is newOutgoingSocketEvent for a datagram the
+// path-MTU search is using as a probe.
+func newOutgoingProbeSocketEvent(p *packet, cid ConnectionPeer) *socketEvent {
+	return &socketEvent{
+		Type:         outgoing,
+		Packet:       p,
+		ConnectionId: cid,
+		DontFragment: true,
 	}
 }
 

@@ -17,7 +17,7 @@ all.
 | **M4** — audit transfer paths against libutp | **Done.** The ack path, the loss-recovery path, the retransmission timers and the send path are all audited against libutp — the timers by measurement rather than by reading, see [CONFORMANCE.md](CONFORMANCE.md). Three findings from the send path below; the packet-size one is deliberately left to M6. |
 | **M4b** — exhaustive libutp compatibility sweep | **Done.** [COMPATIBILITY.md](COMPATIBILITY.md) records every protocol area, the *kind* of evidence behind it — differential, measured, interop, cited, or none — and what is unchecked. Writing it found one defect (an ack per data packet, below), and the largest gap it named — libutp had never been run over the emulated network — has since been closed: `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite, which found two more defects. Both were in the harness, and both made libutp look worse than it is. |
 | **M5** — verify LEDBAT, add LEDBAT++ | **Done.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft, opt-in. Deference measured against a loss-based competitor over a shared bottleneck: classic LEDBAT takes 60% of the link from it, LEDBAT++ takes 44%. See [BENCHMARKS.md](BENCHMARKS.md). |
-| **M6** — MTU path discovery | **Done.** Binary search between a 576-byte floor and a 1400-byte ceiling, probing with ordinary data packets, as libutp does. The ceiling could be raised from 1024 only because discovery makes it safe: an untested path still gets 988 bytes. One gap: probes are not sent with the don't-fragment bit, so on IPv4 an oversized probe is fragmented rather than dropped. See below. |
+| **M6** — MTU path discovery | **Done.** Binary search between a 576-byte floor and a 1400-byte ceiling, probing with ordinary data packets, as libutp does. The ceiling could be raised from 1024 only because discovery makes it safe: an untested path still gets 988 bytes. Probes now carry the don't-fragment bit through `utp.DontFragmentWriter`, implemented for a real UDP socket on Linux, Darwin, the BSDs and Windows without adding a dependency, and compiling everywhere else against a stub. One gap remains, and implementing the bit is what exposed it: a probe dropped for size during a bulk transfer still teaches the search nothing, because libutp's duplicate-acknowledgement route to lowering the ceiling is not implemented. See below. |
 | **M7** — anacrolix/torrent integration | **Done, with one gap.** `utpnet` presents a uTP socket as `net.PacketConn`/`net.Conn` and satisfies torrent's uTP interface, checked against the real interface by reflection in `integration/anacrolix`. The gap: torrent selects its uTP implementation at build time, so wiring it in needs a `replace` or a patched file — recipes in that module's README. |
 | **M8** — soak and hardening | **Partly done.** Six fuzz targets — three on the decoder, one driving a live connection, and two differential against real libutp covering both the responder and initiator roles — plus three soak tests. Six defects found and fixed. See [FUZZING.md](FUZZING.md). Not done: anything running for hours. |
 
@@ -1504,13 +1504,47 @@ it is Linux-only, needs a connected socket, and would make `golang.org/x/sys`
 a direct dependency. Feeding ICMP in directly is the portable route to the
 same information.
 
-**Probes carry no don't-fragment bit.** This one is genuinely blocked. Setting
-DF socket-wide is easy and wrong: libutp relies on ordinary data being
-fragmentable — "now we need it to fragment just to get it through"
-(`utp_internal.cpp:898-905`) — and wants DF only on probes. Per-packet DF
-needs `golang.org/x/net/ipv4`/`ipv6` `PacketConn` with per-write control
-messages: a new dependency, platform-specific, and it would still have to
-reach through `Conn`.
+**~~Probes carry no don't-fragment bit.~~ Implemented, with a caveat that
+matters.**
+
+The old text called this blocked on `golang.org/x/net/ipv4`'s per-write
+control messages. That was wrong twice over. `x/net/ipv4` has no
+don't-fragment setter at all — its `dgramOpt` covers TTL, TOS, multicast and
+BPF, and `DontFragment` appears only in `header.go`, for raw sockets. And no
+platform offers DF as a per-datagram control message: it is a socket option
+everywhere it exists.
+
+Two things made it tractable. libutp does not set the option either — it
+passes `UTP_UDP_DONTFRAG` to its embedder's sendto callback
+(`utp_internal.cpp:928`) and leaves the mechanism to it — so parity means
+carrying the signal, which `utp.DontFragmentWriter` now does, on the same
+optional-interface pattern as `PathMTUProvider`. And every datagram this
+library sends leaves through one goroutine, `UtpSocket.writeLoop`, so setting
+the option, sending one datagram and clearing it again cannot race with
+another write. That is what makes a socket-wide option usable per packet.
+
+No new dependency. The constants come from the standard library's `syscall`
+package where it has them (Linux, FreeBSD) and are spelled out with their
+header citation where it does not (Darwin, Windows). Darwin's `IP_DONTFRAG` is
+`0x1c` and FreeBSD's is `0x43`, which is why they are separate files. NetBSD
+and OpenBSD get IPv6 only, because neither defines an IPv4 equivalent and
+guessing a number would quietly set some unrelated option. Everything else —
+js/wasm, wasip1, plan9, any future port — compiles against a stub and behaves
+exactly as before. Verified by building 23 GOOS/GOARCH pairs with
+`CGO_ENABLED=0`.
+
+Linux uses `IP_PMTUDISC_PROBE` rather than `IP_PMTUDISC_DO`. Both set the bit;
+the difference is whose estimate wins. `DO` defers to the kernel's cached
+path MTU and refuses the send when the datagram exceeds it, which would cap
+this library's own search at whatever the kernel already believed. The point
+of a probe is to find out whether a size works, not to be told what is
+currently assumed.
+
+**The caveat: the bit reaches the wire, and the search does not yet learn from
+it.** See "A dropped probe teaches the search nothing during a bulk transfer"
+below. Until that is closed this is necessary but not sufficient, and
+`netem.TestDontFragmentReachesTheWire` is written to claim only what is true —
+that a probe is refused for size with the bit and fragmented without it.
 
 **No context-wide statistics.** `utp_get_context_stats` (packet-size
 histograms), `UTP_ON_OVERHEAD_STATISTICS` (per-packet overhead accounting) and
@@ -2771,6 +2805,44 @@ firewall that fails open is worse than no firewall.
 `TestFirewallAdmitsWhatItDoesNotRefuse`. The first fails against the old
 behaviour with "the dial succeeded against a socket whose firewall refuses
 everything".
+
+## A dropped probe teaches the search nothing during a bulk transfer
+
+**Found by implementing the don't-fragment bit, which is what made it
+visible.** Before that, a probe was never dropped for being too big on an IPv4
+path at all — it was fragmented and delivered — so there was nothing to learn
+from and nothing to notice.
+
+libutp lowers its MTU ceiling from a lost probe in two places:
+
+- a retransmission timeout with the probe as the only packet outstanding
+  (`utp_internal.cpp:1152-1167`), and
+- a third duplicate acknowledgement pointing at the packet before the probe
+  (`utp_internal.cpp:1927-1940`), whose comment says why: "It's likely that
+  the probe was rejected due to its size, but we haven't got an ICMP report
+  back yet".
+
+Only the first is implemented. `mtu.go:33-34` cites both, and
+`mtuSearch.onProbeLost`'s own comment describes both, but nothing counts
+duplicate acknowledgements: there is no equivalent of libutp's
+`conn->duplicate_ack`, and the MTU branch that reads it does not exist.
+
+The first alone cannot fire during a bulk transfer. `conn.go:1751` requires
+`UnackedCount() == 1`, faithfully — only then does a lost packet say something
+about size rather than congestion — and a saturated send window always has
+more than one packet outstanding. So on a path that drops the probe, the
+probe's retransmission goes out fragmentable, as libutp intends
+(`:898-905`), arrives, and is acknowledged. The search reads that as the size
+being fine.
+
+Measured on a 1000-byte emulated path that fragments rather than drops, with a
+1400-byte ceiling: seven probes refused for size with the bit set, zero
+without — and the search settled at 1384 bytes either way.
+
+libutp's other route to the same conclusion is the ICMP report, which this
+library already accepts through `ProcessICMPFragmentation`. That covers the
+case where a router sends one. The duplicate-acknowledgement path covers the
+case where none arrives, which is the common one on the public internet.
 
 ## Things found but deliberately not fixed
 

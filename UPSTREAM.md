@@ -1325,6 +1325,60 @@ never unregistered from the idle barrier when it exited, so a case whose peer
 answered the SYN with a `RESET` hung waiting for quiescence that could not
 arrive.
 
+## PR 48 — the don't-fragment bit on MTU probes
+
+libutp sends an MTU probe with fragmentation disabled and everything else
+fragmentable, by passing `UTP_UDP_DONTFRAG` to its embedder's sendto callback
+(`utp_internal.cpp:928`). This fork recorded that as blocked on
+`golang.org/x/net/ipv4`'s per-write control messages. Both halves of that were
+wrong: `x/net/ipv4` has no don't-fragment setter at all, and no platform
+offers one as a per-datagram control message — it is a socket option
+everywhere it exists.
+
+`utp.DontFragmentWriter` is the same optional interface `PathMTUProvider` is:
+a `Conn` that can send one datagram unfragmentable implements it, everything
+else is untouched and keeps today's behaviour. The connection marks the
+datagram the MTU search chose as a probe, the mark travels on the socket
+event, and `UtpSocket.writeLoop` asks the `Conn` to honour it. A `Conn` that
+cannot answers `ErrDontFragmentUnsupported` and the datagram goes out
+normally, so nothing can turn a missing socket option into a lost packet.
+
+`UdpConn` implements it by setting the option, sending one datagram and
+clearing it again. That is only sound because every datagram this library
+sends leaves through one goroutine, so no other write can land between the
+two — worth knowing before anyone adds a second write path.
+
+No dependency is added. Constants come from the standard library's `syscall`
+where it has them and are spelled out with header citations where it does not;
+Darwin's `IP_DONTFRAG` is `0x1c` against FreeBSD's `0x43`, so those are
+separate files. NetBSD and OpenBSD get IPv6 only, since neither defines an
+IPv4 equivalent. Every other port compiles against a stub. 23 GOOS/GOARCH
+pairs build with `CGO_ENABLED=0`.
+
+Linux uses `IP_PMTUDISC_PROBE`, not `IP_PMTUDISC_DO`: `DO` defers to the
+kernel's cached path MTU and refuses the send, which would cap this library's
+own search at whatever the kernel already believed.
+
+`netem` grew `Config.FragmentOversized`, which makes a link fragment an
+oversized datagram and forward it unless the sender forbade it — an IPv4
+router, where the default models IPv6. Without it the bit changes nothing on
+an emulated path, because the link dropped everything oversized regardless.
+
+**This found a second gap, and it is the more important one.** libutp lowers
+its MTU ceiling from a lost probe in two places: a retransmission timeout with
+the probe as the only packet outstanding (`:1152-1167`), and a third duplicate
+acknowledgement pointing at the packet before the probe (`:1927-1940`). Only
+the first is implemented here, and it cannot fire during a bulk transfer,
+because a saturated window always has more than one packet outstanding. So a
+probe dropped for size is retransmitted fragmentable, arrives, is
+acknowledged, and the search concludes the size was fine.
+
+Measured on a 1000-byte path with a 1400-byte ceiling: seven probes refused
+for size with the bit, zero without, and the search settled at 1384 either
+way. The bit is necessary and not sufficient, the test says only what is true,
+and the missing mechanism is written up in KNOWN-LIMITATIONS.md as its own
+section rather than folded into this one.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

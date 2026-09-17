@@ -26,6 +26,15 @@ type Stats struct {
 	// other two for that reason.
 	DroppedByMTU uint64
 
+	// PacketsFragmented counts datagrams larger than the link's MTU that were
+	// forwarded anyway, because Config.FragmentOversized is set and the
+	// sender did not forbid fragmentation. They are delivered, so they are
+	// not dropped and not counted as such -- the number exists because "the
+	// probe arrived" and "the probe arrived in one piece" are different
+	// facts, and a path-MTU search can only tell them apart if something
+	// records the difference.
+	PacketsFragmented uint64
+
 	PacketsReordered uint64
 
 	QueueDelaySum   time.Duration
@@ -62,11 +71,11 @@ func (s Stats) MeanQueueDelay() time.Duration {
 // String renders the stats for a test log.
 func (s Stats) String() string {
 	return fmt.Sprintf(
-		"offered=%d/%dB delivered=%d/%dB dropped=%d (loss=%d queue=%d rcvr=%d mtu=%d) reordered=%d qdelay mean=%v max=%v",
+		"offered=%d/%dB delivered=%d/%dB dropped=%d (loss=%d queue=%d rcvr=%d mtu=%d) fragmented=%d reordered=%d qdelay mean=%v max=%v",
 		s.PacketsOffered, s.BytesOffered,
 		s.PacketsDelivered, s.BytesDelivered,
 		s.PacketsDropped, s.DroppedByLoss, s.DroppedByQueue, s.DroppedByReceiver, s.DroppedByMTU,
-		s.PacketsReordered, s.MeanQueueDelay(), s.QueueDelayMax)
+		s.PacketsFragmented, s.PacketsReordered, s.MeanQueueDelay(), s.QueueDelayMax)
 }
 
 // QueueSample is one observation of the bottleneck's state.

@@ -78,6 +78,10 @@ type Accept struct {
 
 type UdpConn struct {
 	base *net.UDPConn
+	// dfUnsupported records that this platform has no per-packet
+	// don't-fragment option, so the MTU search stops asking. See
+	// WriteToDontFragment.
+	dfUnsupported atomic.Bool
 }
 
 func (c *UdpConn) ReadFrom(b []byte) (int, ConnectionPeer, error) {
@@ -112,6 +116,43 @@ func (c *UdpConn) WriteTo(b []byte, dst ConnectionPeer) (int, error) {
 			dst, dst.Hash(), err)
 	}
 	return c.base.WriteToUDP(b, addr)
+}
+
+// WriteToDontFragment sends one datagram with fragmentation disabled,
+// implementing DontFragmentWriter for a real UDP socket.
+//
+// The bit is a socket option on every platform that has one at all -- there is
+// no per-datagram control message for it -- so it is set, one datagram is
+// sent, and it is cleared again. That is safe here for a structural reason:
+// every datagram this library sends leaves through UtpSocket.writeLoop, a
+// single goroutine, so no other write can land between the two.
+//
+// It is cleared even when the send fails. Leaving it set would make every
+// subsequent datagram on this socket unfragmentable, which is the one thing
+// libutp is explicit about not wanting: ordinary data has to stay
+// fragmentable, "now we need it to fragment just to get it through"
+// (utp_internal.cpp:898-905).
+//
+// A platform with no such option answers ErrDontFragmentUnsupported, and
+// nothing is sent. The caller then sends it normally.
+func (c *UdpConn) WriteToDontFragment(b []byte, dst ConnectionPeer) (int, error) {
+	if c.dfUnsupported.Load() {
+		return 0, ErrDontFragmentUnsupported
+	}
+	if err := setDontFragment(c.base, true); err != nil {
+		// Remember it, so a socket on a platform without the option is not
+		// asked once per probe for the life of the process.
+		c.dfUnsupported.Store(true)
+		return 0, ErrDontFragmentUnsupported
+	}
+	n, err := c.WriteTo(b, dst)
+	if clearErr := setDontFragment(c.base, false); clearErr != nil && err == nil {
+		// The datagram went out, but the socket is now in a state where every
+		// later one would too. Report it rather than carrying on quietly.
+		return n, fmt.Errorf("utp_socket: sent an MTU probe but could not clear "+
+			"the don't-fragment bit, so later packets would not be fragmentable: %w", clearErr)
+	}
+	return n, err
 }
 
 func (c *UdpConn) Close() error {
@@ -273,7 +314,7 @@ func Bind(ctx context.Context, network string, addr *net.UDPAddr, logger log.Log
 	if err := conn.SetWriteBuffer(DefaultSocketBufferSize); err != nil && logger != nil {
 		logger.Debug("could not enlarge UDP write buffer", "err", err)
 	}
-	sock := WithSocket(ctx, &UdpConn{conn}, logger, opts...)
+	sock := WithSocket(ctx, &UdpConn{base: conn}, logger, opts...)
 	sock.ownsSocket = true
 	return sock, nil
 }
@@ -452,7 +493,7 @@ func (s *UtpSocket) writeLoop() {
 			} else {
 				peer = event.ConnectionId
 			}
-			if _, err := s.socket.WriteTo(encoded, peer); err != nil {
+			if _, err := s.writeDatagram(encoded, peer, event.DontFragment); err != nil {
 				var eackEncodeLen int
 				if event.Packet.Eack != nil {
 					eackEncodeLen = event.Packet.Eack.EncodedLen()
@@ -475,6 +516,30 @@ func (s *UtpSocket) writeLoop() {
 			s.removeConnStream(event.ConnectionId.Hash())
 		}
 	}
+}
+
+// writeDatagram sends one datagram, with fragmentation disabled if it is an
+// MTU probe and the Conn can do that.
+//
+// Falling back to an ordinary write is deliberate, and is what makes this
+// safe to add. A Conn with no don't-fragment support probes exactly as it did
+// before -- the search still runs, it just cannot tell a dropped probe from a
+// fragmented one on IPv4. Failing the send instead would turn a missing
+// socket option into a stalled connection.
+func (s *UtpSocket) writeDatagram(b []byte, peer ConnectionPeer, dontFragment bool) (int, error) {
+	if dontFragment {
+		if w, ok := s.socket.(DontFragmentWriter); ok {
+			n, err := w.WriteToDontFragment(b, peer)
+			if !errors.Is(err, ErrDontFragmentUnsupported) {
+				return n, err
+			}
+			if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+				s.logger.Debug("MTU probe sent without the don't-fragment bit; "+
+					"this platform has no per-packet setting for it", "len", len(b))
+			}
+		}
+	}
+	return s.socket.WriteTo(b, peer)
 }
 
 func (s *UtpSocket) eventLoop() {

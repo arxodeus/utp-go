@@ -127,6 +127,23 @@ type Config struct {
 	// end to end at all.
 	OnMTUDrop func(payload []byte, src, dst string, linkMTU int)
 
+	// FragmentOversized makes this link fragment a datagram larger than MTU
+	// and forward it, instead of dropping it -- unless the sender set the
+	// don't-fragment bit, in which case it is dropped as before.
+	//
+	// This is the difference between an IPv4 path and an IPv6 one, and it is
+	// the only condition under which the don't-fragment bit changes anything.
+	// With it false (the default) this link models IPv6: oversized is always
+	// dropped, so a path-MTU search learns the truth whether or not it sets
+	// the bit.
+	//
+	// With it true the link models IPv4, where an MTU probe sent without the
+	// bit is fragmented, arrives, and is acknowledged -- telling the search
+	// that a size the path cannot actually carry in one piece is fine. That
+	// is the failure utp.DontFragmentWriter exists to prevent, and this is
+	// where it can be observed.
+	FragmentOversized bool
+
 	// Seed seeds this link's PRNG. Links in one Network derive distinct seeds
 	// from Network's seed, so a single Seed makes a whole topology
 	// reproducible.
@@ -240,6 +257,25 @@ func (e *Endpoint) ReadFrom(b []byte) (int, utp.ConnectionPeer, error) {
 // is dropped, queued or delivered. The return value reports bytes accepted for
 // transmission, not bytes delivered -- exactly like a real UDP socket.
 func (e *Endpoint) WriteTo(b []byte, dst utp.ConnectionPeer) (int, error) {
+	return e.writeTo(b, dst, false)
+}
+
+// WriteToDontFragment implements utp.DontFragmentWriter: the datagram is sent
+// with fragmentation forbidden, so a link narrower than it drops it instead of
+// fragmenting it.
+//
+// An emulated network can always honour this, which is the point of having it
+// here: on a real socket the answer depends on the operating system, and a
+// test that could only run where the socket option exists would not run in CI
+// on every platform this library builds for.
+//
+// Note that it changes nothing unless Config.FragmentOversized is set. Without
+// it a link drops everything over its MTU regardless, which models IPv6.
+func (e *Endpoint) WriteToDontFragment(b []byte, dst utp.ConnectionPeer) (int, error) {
+	return e.writeTo(b, dst, true)
+}
+
+func (e *Endpoint) writeTo(b []byte, dst utp.ConnectionPeer, dontFragment bool) (int, error) {
 	select {
 	case <-e.closed:
 		return 0, ErrClosed
@@ -259,7 +295,7 @@ func (e *Endpoint) WriteTo(b []byte, dst utp.ConnectionPeer) (int, error) {
 	// Copy: the caller owns b and may reuse it the moment we return.
 	payload := make([]byte, len(b))
 	copy(payload, b)
-	link.enqueue(payload, e, dstEndpoint)
+	link.enqueueWithFlags(payload, e, dstEndpoint, dontFragment)
 	return len(b), nil
 }
 

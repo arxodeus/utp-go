@@ -121,6 +121,11 @@ const icmpHeaderOverhead = 28
 // enqueue applies the link model to a packet and schedules its delivery.
 // It never blocks.
 func (l *Link) enqueue(payload []byte, src, dst *Endpoint) {
+	l.enqueueWithFlags(payload, src, dst, false)
+}
+
+// enqueueWithFlags is enqueue, plus whether the sender forbade fragmentation.
+func (l *Link) enqueueWithFlags(payload []byte, src, dst *Endpoint, dontFragment bool) {
 	now := time.Now()
 	size := len(payload)
 
@@ -135,6 +140,28 @@ func (l *Link) enqueue(payload []byte, src, dst *Endpoint) {
 	//    path-MTU discovery testable: the search's ceiling only comes down
 	//    when a probe is refused for being too big.
 	if cfg.MTU > 0 && size > cfg.MTU {
+		// An IPv4 router with something too big for the next hop has two
+		// choices, and which one it takes is exactly what the don't-fragment
+		// bit decides. Without FragmentOversized this link only ever makes the
+		// second choice, which models IPv6 -- correct, and the reason the
+		// don't-fragment bit made no difference here until now.
+		if cfg.FragmentOversized && !dontFragment {
+			// Fragmented and forwarded. It arrives, so the sender learns
+			// nothing about the path being narrow -- which is the trap: an
+			// MTU probe sent without the bit is acknowledged, the search's
+			// floor rises, and it settles on a size that only works because
+			// every packet at it is being fragmented.
+			//
+			// Counted, not dropped: execution falls through to the rest of
+			// the pipeline, so a fragmented datagram is still subject to
+			// loss, queueing and delay like any other. Nothing here models
+			// the *cost* of fragmentation -- a real path pays in headers and
+			// in a whole datagram lost when any one fragment is -- because
+			// what is being tested is what the search concludes, and it
+			// concludes it from the packet arriving at all.
+			l.stats.PacketsFragmented++
+			goto accepted
+		}
 		l.stats.PacketsDropped++
 		l.stats.DroppedByMTU++
 		l.mu.Unlock()
@@ -153,6 +180,7 @@ func (l *Link) enqueue(payload []byte, src, dst *Endpoint) {
 		}
 		return
 	}
+accepted:
 
 	// 1. Loss on the medium. Drawn before queueing so a lost packet does not
 	//    occupy the bottleneck -- it never made it onto the wire.

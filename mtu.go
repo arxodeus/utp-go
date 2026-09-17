@@ -32,6 +32,15 @@ import "time"
 // probe-acknowledged path (:1969-1974), and the two failure paths --
 // retransmission timeout (:1152-1167) and duplicate acknowledgements
 // (:1927-1940).
+//
+// Of those two failure paths only the first is implemented here, and it
+// cannot fire during a bulk transfer: it requires the probe to be the only
+// packet outstanding (conn.go), which a saturated send window never leaves
+// it. So a probe dropped for being too big is retransmitted fragmentable,
+// arrives, and is read as the size being fine. Nothing counts duplicate
+// acknowledgements -- there is no equivalent of libutp's
+// conn->duplicate_ack. See KNOWN-LIMITATIONS.md, "A dropped probe teaches
+// the search nothing during a bulk transfer".
 
 const (
 	// mtuAbsoluteFloor is the smallest datagram the search will settle on.
@@ -276,6 +285,11 @@ func (m *mtuSearch) onAck(seq uint16, now time.Time) bool {
 // (:1927-1934). Both mean the same thing -- a packet of that size did not
 // arrive -- and neither is a congestion signal, which is why libutp sets
 // `ignore_loss` on the timeout path and does not shrink the window.
+//
+// Only the first calls this. The second has no implementation: see the
+// package comment above, and KNOWN-LIMITATIONS.md. The consequence is that
+// this is never reached during a bulk transfer, which is the case that
+// matters most.
 func (m *mtuSearch) onProbeLost(now time.Time) bool {
 	if !m.probing {
 		return false
