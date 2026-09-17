@@ -528,20 +528,23 @@ func TestConformanceWideReordering(t *testing.T) {
 // application closes it too, and data arriving past the FIN it has already
 // reached is dropped in silence.
 //
-// We have no half-close as a connection state -- once the remote FIN is
-// reached and everything we sent is acked, `connection.eventLoop` moves
-// straight to ConnClosed. The late packet then reaches a socket with no
-// connection for it. What it draws there is the point of this case: it used
-// to draw a RESET, which told a peer exercising a legitimate half-close that
-// its connection had broken. The socket now holds the connection's last
-// acknowledgement in a linger table for `lingerAckTimeout` (utp_socket.go)
-// and, for a packet past that ack, stays silent exactly as libutp does.
+// So does this library. Data past the FIN is data past the end of the stream:
+// there is no sequence space left for it and nothing to deliver it to.
 //
-// So the wire behaviour matches; what still differs is above it. libutp would
-// hand this payload to the application, because in CS_GOT_FIN the connection
-// is still open for reading. We have already closed it, so the payload is
-// dropped. That remains a real difference -- see KNOWN-LIMITATIONS.md -- but
-// it is no longer visible to the peer as an error.
+// What this case pins is the wire answer, which used to be wrong in a way that
+// mattered. A late packet once drew a RESET, telling a peer exercising a
+// legitimate half-close that its connection had broken. The socket now holds
+// the connection's last acknowledgement in a linger table for
+// `lingerAckTimeout` (utp_socket.go) and, for a packet past that ack, stays
+// silent exactly as libutp does.
+//
+// This comment used to end by calling the delivery difference a real one --
+// libutp keeping the socket readable in CS_GOT_FIN where this library closed
+// on reaching the remote FIN. That was true when it was written and is not
+// now: the half-close is implemented, the connection stays in ConnConnected
+// until its own application closes, and the reader goes on being served. See
+// "No half-close -- implemented" in KNOWN-LIMITATIONS.md. Only data genuinely
+// past the FIN is dropped, by both.
 func TestConformanceDataAfterReachedFin(t *testing.T) {
 	raws := [][]byte{
 		NewPacketBuilder(st_data, corpusSynConnID+1, 200000, corpusWindow, corpusSynSeq+1).
