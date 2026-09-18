@@ -86,6 +86,7 @@ than "verified".
 | Don't-fragment on probes | **None** | Not implemented; we write through an abstract `Conn`, and per-packet DF (which is what libutp needs -- ordinary data must stay fragmentable, `utp_internal.cpp:898-905`) requires `golang.org/x/net/ipv4` control messages |
 | Don't-fragment on MTU probes (`UTP_UDP_DONTFRAG`) | **Measured** | `utp.DontFragmentWriter`, libutp's per-packet flag to the embedder's sendto callback (`utp_internal.cpp:928`); optional, so other `Conn`s are unaffected. `netem.TestDontFragmentReachesTheWire` shows a probe refused for size with the bit and fragmented without it, on the same link. `TestDontFragmentActuallySetsTheBit` proves the socket option itself works, on a real socket, by the EMSGSIZE a kernel returns for an oversized datagram it may not fragment. `TestDontFragmentBringsTheSearchWithinThePath` measures the search coming down from 1384 to 996 on a 1000-byte path, and fragmentation from 3809 datagrams to 32. |
 | MTU ceiling from duplicate acks (`:1927-1940`) | **Differential + measured** | `connection.noteDuplicateAck`, libutp's second route to concluding a probe was too big, and the only one that works while the send window is full. Five unit cases pin its rules — bare `ST_STATE` only, consecutive repeats only, the probe-hole and non-probe-hole branches, and no counting with nothing outstanding. Disabling the call site returns the emulated search to its pre-change numbers exactly. |
+| Clock-drift penalty (`clock_drift`) | **Measured** | `driftEstimator` and the penalty in `applyCongestionControl`, libutp's second clock-drift mechanism (`utp_internal.cpp:1646-1650` with the five-second average at `:2040-2107`). Nine unit cases pin the wrapping arithmetic against hand-worked values; `TestDriftPenaltyReachesTheWindow` shows it reaching the congestion window (49,027 bytes against 2,800); `netem.TestClockDriftPenaltyFiresOnlyOnAbsurdDrift` shows it fed from real acknowledgements, firing at 200,000 ppm and staying silent at 100 ppm, which is libutp's "without any risk of false positives". Disabling it fails all three. |
 | ICMP fragmentation-needed | **Measured** | `UtpSocket.ProcessICMPFragmentation`, libutp's `utp_process_icmp_fragmentation`. `netem.TestIcmpBringsTheSearchWithinThePath` runs the same transfer over a 1100-byte link with the router silent and with it reporting: the search settles at 1191 bytes against 1094. The link-MTU-to-payload conversion is a deviation, recorded with its reason |
 | ICMP error teardown | **Measured** | `UtpSocket.ProcessICMPError`, libutp's `utp_process_icmp_error`, including the `UTP_ECONNREFUSED` / `UTP_ECONNRESET` split on whether only the SYN had gone out. `TestProcessICMPErrorResetsAnEstablishedConnection`, `TestProcessICMPErrorRefusesAPendingConnect`, `TestProcessICMPMatchesAnAcceptedConnection` |
 | ICMP connection lookup | **Measured** | libutp's three lookups (`utp_internal.cpp:3056-3058`), including a quoted SYN, which carries a receive id rather than a send id. `TestProcessICMPIgnoresWhatItCannotMatch` covers the runt, wrong-version, unknown-type, unknown-id and wrong-peer cases; `netem.TestIcmpWorksFromAMinimalQuote` covers a router that quotes only the 20 bytes it must |
@@ -192,13 +193,6 @@ so it sent 288-byte packets. Both are written up in
   `utp_issue_deferred_acks` and this library when an event-loop pass ends, so
   the comparison would measure harness cadence rather than either
   implementation. This bullet previously claimed the clock was the blocker.
-- **The clock-drift penalty in `apply_ccontrol`.** libutp applies a delay
-  penalty when the estimated clock drift passes -200000 microseconds per five
-  seconds (`utp_internal.cpp:1644-1650`), an anti-cheat measure against a peer
-  running its clock slow. Neither that nor the five-second `average_delay`
-  machinery that drives it exists here. Found by the M4b sweep; see
-  KNOWN-LIMITATIONS.md. The delay-base shift, libutp's *other* drift
-  mechanism, is implemented and measured.
 - **Window-reopening notification (`utp_read_drained`).** libutp acknowledges
   as soon as its application drains the read buffer; this library says nothing
   and the peer finds out from an acknowledgement its own retransmission draws.

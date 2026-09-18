@@ -212,6 +212,17 @@ func (c *defaultController) applyLedbatPP(
 	if rttMicros := rtt.Microseconds(); rttMicros > 0 && queueingDelayMicros > rttMicros {
 		queueingDelayMicros = rttMicros
 	}
+	// The clock-drift penalty, applied here as well as in classic LEDBAT.
+	//
+	// This one goes beyond libutp, which has no LEDBAT++ and so no opinion.
+	// The reason is that the penalty defends against a peer manipulating its
+	// clock to under-measure the queue, and that attack does not care which
+	// controller this end happens to be running. Leaving it out here would
+	// make the opt-in algorithm the weaker choice, which is not a trade
+	// anyone would be choosing knowingly. Recorded in DEVIATIONS.md.
+	if penalty := c.drift.penaltyMicros(); penalty > 0 {
+		queueingDelayMicros += penalty
+	}
 	queueingDelay := time.Duration(queueingDelayMicros) * time.Microsecond
 	target := time.Duration(c.targetDelayMicros) * time.Microsecond
 	gain := ledbatPPGain(c.minRTT)

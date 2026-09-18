@@ -26,6 +26,9 @@ type driftResult struct {
 	sent          int
 	skewFinal     time.Duration
 	skewMax       time.Duration
+	driftFinal    int64
+	penaltyFinal  time.Duration
+	penaltyMax    time.Duration
 	meanCwnd      uint32
 	minCwnd       uint32
 	finalCwnd     uint32
@@ -37,11 +40,12 @@ type driftResult struct {
 func (r driftResult) String() string {
 	return fmt.Sprintf(
 		"%+.0fppm: %d bytes in %v (%.2f Mb/s); settled queue %v max %v "+
-			"(link actually queued %v); skew correction final %v max %v; cwnd mean %d min %d final %d; %d samples",
+			"(link actually queued %v); skew correction final %v max %v; drift %d penalty final %v max %v; cwnd mean %d min %d final %d; %d samples",
 		r.ppm, r.delivered, r.elapsed.Round(time.Millisecond), r.throughputBps/1e6,
 		r.lateQueueMean.Round(time.Microsecond), r.maxQueueSeen.Round(time.Microsecond),
 		r.linkQueueMean.Round(time.Microsecond),
 		r.skewFinal.Round(time.Microsecond), r.skewMax.Round(time.Microsecond),
+		r.driftFinal, r.penaltyFinal.Round(time.Microsecond), r.penaltyMax.Round(time.Microsecond),
 		r.meanCwnd, r.minCwnd, r.finalCwnd, r.samples)
 }
 
@@ -126,6 +130,11 @@ func runDriftedWith(t *testing.T, ppm float64, runFor time.Duration, cid uint16,
 		res.skewFinal = m.ClockSkewCorrection
 		if m.ClockSkewCorrection > res.skewMax {
 			res.skewMax = m.ClockSkewCorrection
+		}
+		res.driftFinal = m.ClockDrift
+		res.penaltyFinal = m.ClockDriftPenalty
+		if m.ClockDriftPenalty > res.penaltyMax {
+			res.penaltyMax = m.ClockDriftPenalty
 		}
 		cwndSum += uint64(m.CwndBytes)
 		if m.CwndBytes < res.minCwnd {

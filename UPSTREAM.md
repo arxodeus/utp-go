@@ -1421,10 +1421,6 @@ there is nothing to send upstream yet; they are listed so the next person does
 not have to find them again. Full write-up in KNOWN-LIMITATIONS.md, "The M4b
 sweep".
 
-- **The clock-drift penalty** (`utp_internal.cpp:1644-1650`) and the
-  five-second `average_delay` machinery that drives it (`:2040-2107`). libutp
-  has two clock-drift mechanisms; this fork implements the delay-base shift
-  and not the penalty.
 - **`utp_read_drained`** (`:3242-3261`). Attempted twice. Ported literally it
   doubles the reverse traffic, because libutp hands bytes up synchronously
   inside `utp_process_incoming` and this library does it on a later pass of
@@ -1432,6 +1428,44 @@ sweep".
   hung one run in three.
 - **No cap on accepted connections** against libutp's 3000 (`:2967-2974`), a
   policy choice rather than a defect.
+
+## PR 50 — the clock-drift penalty
+
+The second of libutp's two clock-drift mechanisms, and the one this fork was
+missing. The M4b sweep found it; this implements it.
+
+The mechanism it already had is the delay-base shift
+(`utp_internal.cpp:2009-2015`), which corrects the delay *measurement* for
+ordinary drift between honest clocks. This one corrects nothing: it watches
+the long-run slope of the delay the peer reports and, past -200000
+microseconds per five-second slot, adds a penalty to the delay the congestion
+controller sees (`:1646-1650`). libutp is explicit that the threshold is aimed
+at intent rather than hardware — 40,000 ppm, where a crystal drifts by tens.
+
+`driftEstimator` is the `average_delay` / `clock_drift` machinery (`:2040-2107`)
+kept as its own type, because the arithmetic is wrapping uint32 throughout and
+a wrap read the wrong way round would penalise an honest peer on every
+connection, invisibly. Nine cases check it against hand-worked values,
+including both wrap directions and the renormalisation that keeps the average
+bounded over a long connection.
+
+Measured, with the sender's clock drifting over the emulated network: +100 ppm
+gives a drift estimate of -222 and no penalty; +200,000 ppm gives -518,801 and
+a 45.5ms penalty. Both halves of libutp's claim hold. At the controller,
+identical acknowledgements settle on a 49,027-byte window honestly and 2,800
+with the penalty reachable. Disabling the penalty fails every case.
+
+Two properties worth carrying upstream in the commentary rather than
+rediscovering. The estimate converges slowly by design — each slot contributes
+an eighth, so it reaches 1-(7/8)ⁿ of the true slope and a twelve-second run at
+200,000 ppm stops at -179,151, short of the threshold. And the penalty acts on
+the window, not on throughput: a flow that is not window-limited shows a
+tenth off its window and no change in rate at all.
+
+One deviation, in DEVIATIONS.md: the penalty is applied to LEDBAT++ as well,
+where libutp has no opinion because it has no LEDBAT++. A peer manipulating
+its clock does not care which controller this end runs, and leaving the opt-in
+algorithm unprotected would make it the weaker choice.
 
 ## Not for upstream
 

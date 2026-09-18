@@ -50,6 +50,27 @@ type ConnectionMetrics struct {
 	// clock drift between the two ends, detected from the peer's own base
 	// delay falling. Zero on a pair of clocks running at the same rate.
 	ClockSkewCorrection time.Duration
+
+	// ClockDrift is the estimated slope of the delay the peer reports for our
+	// packets, in microseconds per five-second slot, smoothed 7:1 towards its
+	// history. libutp's clock_drift (utp_internal.cpp:2105).
+	//
+	// Negative means the reported delay is falling, which is what a peer whose
+	// clock runs slow looks like. Past -200000 it earns a penalty; see
+	// ClockDriftPenalty.
+	//
+	// This is a different quantity from ClockSkewCorrection above, and the two
+	// are the two halves of libutp's drift handling: that one corrects the
+	// measurement for ordinary drift between honest clocks, this one detects
+	// drift far outside what honest hardware produces.
+	ClockDrift int64
+
+	// ClockDriftPenalty is how much is currently being added to the measured
+	// queueing delay because of ClockDrift. Zero on any ordinary path.
+	//
+	// Exposed so a test can assert the mechanism ran, rather than inferring it
+	// from a throughput number that many other things also move.
+	ClockDriftPenalty time.Duration
 	// --- path MTU ---
 
 	// MtuCurrent is the datagram size the search is currently sending, and

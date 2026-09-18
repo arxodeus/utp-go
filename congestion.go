@@ -164,6 +164,10 @@ type ControllerStats struct {
 	// Exposed because a correction that cannot be observed cannot be tested,
 	// and this repository has already learned that the expensive way.
 	ClockSkewCorrection time.Duration
+	// ClockDrift and ClockDriftPenalty are libutp's clock_drift and the delay
+	// penalty it earns. See ConnectionMetrics for what they mean.
+	ClockDrift        int64
+	ClockDriftPenalty time.Duration
 	// CurrentDelay is the most recent sample of that same series.
 	//
 	// It is here because there was no way to compute a queueing delay
@@ -237,6 +241,11 @@ type defaultController struct {
 	// only use is detecting clock drift. See OnPeerDelay.
 	peerDelayHist *peerDelayHist
 
+	// drift estimates the long-run slope of the delay the peer reports for
+	// our packets: the second of libutp's two clock-drift mechanisms. See
+	// driftEstimator, and applyCongestionControl for what it is used for.
+	drift *driftEstimator
+
 	// clk is where this controller reads time. Never nil after
 	// newDefaultController; read through now().
 	clk Clock
@@ -290,6 +299,10 @@ func newDefaultController(config *ctrlConfig) *defaultController {
 		clk:               clk,
 		delayAcc:          newDelayAccumulatorWithClock(config.DelayWindow, clk),
 		peerDelayHist:     newPeerDelayHist(config.DelayWindow),
+		// libutp starts the first averaging slot five seconds after the
+		// socket is created, not after the first sample arrives
+		// (utp_internal.cpp:2553).
+		drift: newDriftEstimator(clk.Now()),
 		// libutp starts every connection in slow start with
 		// `ssthresh = opt_sndbuf` (utp_internal.cpp:2620-2621), and its
 		// default opt_sndbuf is 1 MB (utp_api.cpp:91) -- the same value as
@@ -344,6 +357,8 @@ func (c *defaultController) Stats() ControllerStats {
 		BaseDelay:           c.delayAcc.BaseDelay(),
 		CurrentDelay:        c.currentDelay,
 		ClockSkewCorrection: c.delayAcc.skew,
+		ClockDrift:          c.drift.drift,
+		ClockDriftPenalty:   time.Duration(c.drift.penaltyMicros()) * time.Microsecond,
 		TargetDelayMicros:   c.targetDelayMicros,
 		SlowStart:           c.slowStart,
 		AppLimitedSince:     appLimitedSince,
@@ -413,6 +428,10 @@ func (c *defaultController) OnAck(seqNum uint16, ack Ack) error {
 	c.transmissions[seqNum] = packetInst
 
 	c.delayAcc.Push(ack.Delay, ack.ReceivedAt)
+	// The same sample libutp feeds to our_hist also drives its clock-drift
+	// estimate (utp_internal.cpp:2025-2107), on the same condition: a zero
+	// means the peer has no measurement yet, and driftEstimator.push drops it.
+	c.drift.push(uint32(ack.Delay.Microseconds()), ack.ReceivedAt)
 	c.currentDelay = ack.Delay
 
 	baseDelayMicros := uint32(c.delayAcc.BaseDelay().Microseconds())
@@ -567,6 +586,24 @@ func (c *defaultController) applyCongestionControl(
 	// controller sees one packet at a time.
 	if rttMicros := rtt.Microseconds(); rttMicros > 0 && ourDelayMicros > rttMicros {
 		ourDelayMicros = rttMicros
+	}
+
+	// A clock drifting fast enough to be dishonest gets a penalty added to
+	// the delay it measures.
+	//
+	// libutp (utp_internal.cpp:1646-1650), applied after the RTT clamp above
+	// and deliberately so: the penalty is allowed to push the delay past the
+	// round trip, because its purpose is to make the flow yield rather than
+	// to describe the path.
+	//
+	// This is the second of libutp's two clock-drift mechanisms and does a
+	// different job from the first. delayAccumulator's shift corrects the
+	// measurement for ordinary drift between honest clocks, bounded and aged
+	// out. This one does not correct anything: past 40,000 ppm, which is
+	// three orders of magnitude beyond crystal drift, it inflates the delay
+	// so that a peer running its clock slow gains nothing by it.
+	if penalty := c.drift.penaltyMicros(); penalty > 0 {
+		ourDelayMicros += penalty
 	}
 
 	target := int64(c.targetDelayMicros)

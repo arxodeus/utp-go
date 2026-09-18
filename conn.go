@@ -1544,6 +1544,8 @@ func (c *connection) sampleMetrics(now time.Time, force bool) {
 		m.BaseDelay = cs.BaseDelay
 		m.CurrentDelay = cs.CurrentDelay
 		m.ClockSkewCorrection = cs.ClockSkewCorrection
+		m.ClockDrift = cs.ClockDrift
+		m.ClockDriftPenalty = cs.ClockDriftPenalty
 		m.TargetDelayMicros = cs.TargetDelayMicros
 		m.SlowStart = cs.SlowStart
 		m.AppLimitedSince = cs.AppLimitedSince

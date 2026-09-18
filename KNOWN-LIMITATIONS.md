@@ -15,7 +15,7 @@ all.
 | **M2** — conformance harness against real libutp | **Partly done.** Corpus comparing emitted packets field by field, including malformed and hostile headers, plus retransmission-schedule and ack-count comparisons measured against libutp on each run; see [CONFORMANCE.md](CONFORMANCE.md). Both roles are covered: `conformance_initiator_corpus_test.go` adds nine curated cases in the dialling role, on the virtual clock, comparing the SYN itself. Ack *latency* is still not compared, for a reason that is not about clocks — see [COMPATIBILITY.md](COMPATIBILITY.md). |
 | **M3** — fix the failing transfer tests | **Done.** Root causes below; gates in "Verification". |
 | **M4** — audit transfer paths against libutp | **Done.** The ack path, the loss-recovery path, the retransmission timers and the send path are all audited against libutp — the timers by measurement rather than by reading, see [CONFORMANCE.md](CONFORMANCE.md). Three findings from the send path below; the packet-size one is deliberately left to M6. |
-| **M4b** — exhaustive libutp compatibility sweep | **Done, and the line-by-line sweep it deferred has since been done too** — see "The M4b sweep" below, which found the clock-drift penalty and `utp_read_drained` missing. [COMPATIBILITY.md](COMPATIBILITY.md) records every protocol area, the *kind* of evidence behind it — differential, measured, interop, cited, or none — and what is unchecked. Writing it found one defect (an ack per data packet, below), and the largest gap it named — libutp had never been run over the emulated network — has since been closed: `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite, which found two more defects. Both were in the harness, and both made libutp look worse than it is. |
+| **M4b** — exhaustive libutp compatibility sweep | **Done, and the line-by-line sweep it deferred has since been done too** — see "The M4b sweep" below. It found the clock-drift penalty missing, now implemented and measured, and `utp_read_drained` missing, attempted and reverted. [COMPATIBILITY.md](COMPATIBILITY.md) records every protocol area, the *kind* of evidence behind it — differential, measured, interop, cited, or none — and what is unchecked. Writing it found one defect (an ack per data packet, below), and the largest gap it named — libutp had never been run over the emulated network — has since been closed: `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite, which found two more defects. Both were in the harness, and both made libutp look worse than it is. |
 | **M5** — verify LEDBAT, add LEDBAT++ | **Done.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft, opt-in. Deference measured against a loss-based competitor over a shared bottleneck: classic LEDBAT takes 60% of the link from it, LEDBAT++ takes 44%. See [BENCHMARKS.md](BENCHMARKS.md). |
 | **M6** — MTU path discovery | **Done.** Binary search between a 576-byte floor and a 1400-byte ceiling, probing with ordinary data packets, as libutp does. The ceiling could be raised from 1024 only because discovery makes it safe: an untested path still gets 988 bytes. Probes now carry the don't-fragment bit through `utp.DontFragmentWriter`, implemented for a real UDP socket on Linux, Darwin, the BSDs and Windows without adding a dependency, and compiling everywhere else against a stub. Implementing the bit exposed a second gap, since closed: libutp's duplicate-acknowledgement route to lowering the ceiling (`:1927-1940`) was missing, so a probe dropped for size during a bulk transfer taught the search nothing. With both, the search comes down from 1384 to 996 on a 1000-byte path and fragmentation falls from 3809 datagrams to 32. |
 | **M7** — anacrolix/torrent integration | **Done, with one gap.** `utpnet` presents a uTP socket as `net.PacketConn`/`net.Conn` and satisfies torrent's uTP interface, checked against the real interface by reflection in `integration/anacrolix`. The gap: torrent selects its uTP implementation at build time, so wiring it in needs a `replace` or a patched file — recipes in that module's README. |
@@ -2917,18 +2917,22 @@ This is the sweep of that remainder: `utp_process_incoming` (the 700-line
 inbound path), `utp_process_udp` (dispatch, SYN and RESET), the ack-deferral
 and window-reopening path, and the connection defaults.
 
-Four findings, two of them clean.
+Four findings, two of them clean. Of the two mechanisms it found missing, one
+is now implemented and measured; the other is not, for reasons recorded below
+rather than glossed.
 
-### 1. The clock-drift penalty in `apply_ccontrol` — missing
+### 1. ~~The clock-drift penalty in `apply_ccontrol`~~ — implemented
 
-libutp has **two** clock-drift mechanisms and this library implements one.
+libutp has **two** clock-drift mechanisms and this library had one.
 
-The one it has is the delay-base shift: when the peer's base delay falls,
-`our_hist` is shifted to match (`utp_internal.cpp:2009-2015`), which was
-implemented and measured earlier — see "Clock skew" above.
+The one it had is the delay-base shift: when the peer's base delay falls,
+`our_hist` is shifted to match (`utp_internal.cpp:2009-2015`). That corrects
+the *measurement* for ordinary drift between two honest clocks, bounded to
+10ms per adjustment and aged out.
 
-The one it does not have is a penalty applied directly to the delay the
-congestion controller sees (`:1644-1650`):
+The one it lacked corrects nothing. It watches the long-run slope and, past a
+threshold, inflates the delay the congestion controller sees
+(`utp_internal.cpp:1646-1650`):
 
 ```c
 int32 penalty = 0;
@@ -2938,24 +2942,43 @@ if (clock_drift < -200000) {
 }
 ```
 
-`clock_drift` is a rolling average (weighted 7:1) of the slope of
-`average_delay`, which is itself a five-second mean of the peer's reported
-`reply_micro`, taken relative to a renormalised `average_delay_base`
-(`:2040-2107`). None of that machinery exists here.
+`clock_drift` is a rolling average weighted 7:1 of the slope of
+`average_delay`, itself a five-second mean of the peer's reported
+`reply_micro` taken relative to a renormalised base (`:2040-2107`). All of
+that is now in `driftEstimator`, kept as its own type with its own tests
+because the arithmetic is wrapping uint32 throughout and a wrap read the wrong
+way round would apply a penalty to an honest peer — a failure that would cost
+throughput on every connection, invisibly.
 
-libutp is explicit about what it is for: "to compensate for people trying to
-'cheat' uTP by making their clock run slower, and this definitely catches that
-without any risk of false positives". The threshold is -200000 microseconds
-per five seconds, which is 40,000 ppm — three orders of magnitude beyond
-ordinary crystal drift, so it fires on deliberate manipulation or a badly
-broken clock rather than on a normal path.
+**The threshold is not about hardware.** -200000 microseconds per five seconds
+is 40,000 ppm, where an ordinary crystal drifts by tens. libutp says what it
+is for: "to compensate for people trying to 'cheat' uTP by making their clock
+run slower, and this definitely catches that without any risk of false
+positives".
 
-**Not implemented, and not because it is hard.** `netem.DriftingClock` already
-exists and could drive the measurement. It is left here because it is a
-distinct mechanism with its own design questions, and because the sweep's job
-was to find it, not to smuggle it in. The M5 claim that classic LEDBAT was
-"verified against `apply_ccontrol`" should be read with this in mind: it was
-verified against the parts of `apply_ccontrol` that were read.
+**Measured**, over the emulated network, with the sender's clock drifting:
+
+| sender's clock | drift estimate | penalty | mean congestion window |
+| --- | --- | --- | --- |
+| +100 ppm (an ordinary crystal) | -222 | **none** | — |
+| +30,000 ppm (below the threshold) | -77,797 | **none** | 338,437 |
+| +200,000 ppm | -518,801 | **45.5 ms** | 307,803 (90.9%) |
+
+Both halves of libutp's claim hold: it fires on the drift it is for, and a
+real crystal at 100 ppm earns nothing. Disabling the penalty fails both cases.
+
+Two things worth keeping. **The estimate converges slowly, by design.** Each
+five-second slot contributes an eighth, so after *n* slots it has reached
+1-(7/8)ⁿ of the true slope — two slots is 23%, six is 55%. Measured at twelve
+seconds and 200,000 ppm the estimate reached -179,151 against a -200,000
+threshold: the mechanism working, and the run ending before it crossed. An
+estimate that reacted within a slot would swing on ordinary delay noise, and
+the penalty it drives costs throughput.
+
+**Throughput did not move, and the test does not pretend it did.** 7.21
+against 7.20 Mb/s, because even unpaced that flow is not window-limited on a
+50 Mb/s link, so a window a tenth smaller still covers the rate. What is
+asserted is the window, which is what the penalty acts on.
 
 ### 2. `utp_read_drained` — missing, attempted, and reverted
 

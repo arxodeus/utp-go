@@ -32,9 +32,10 @@ and confirming agreement behaviour by behaviour — has now been done for the
 areas that were left: `utp_process_incoming`, `utp_process_udp`, the
 ack-deferral and window-reopening path, and the connection defaults. It found
 two missing mechanisms and one policy divergence; see "The M4b sweep" in
-[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md). One of the two was implemented,
-measured, and reverted when it proved able to hang a connection, and that is
-recorded there rather than dropped.
+[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md). The clock-drift penalty has
+since been implemented and measured. The other, `utp_read_drained`, was
+implemented, measured, and reverted when it proved able to hang a connection,
+and that is recorded there rather than dropped.
 
 So: the deviations below are recorded deliberately rather than noticed by
 accident, and the list is worth trusting for what it contains. It is still not
@@ -154,6 +155,24 @@ differ only in the order of two extensions.
 `TestMalformedUnknownExtensionTypeInChain` pin both halves, each with a control
 step that proves the silence is the extension's doing and not a connection that
 had stopped answering for some other reason.
+
+## The clock-drift penalty is applied to LEDBAT++ as well
+
+**libutp has no opinion here, because it has no LEDBAT++.**
+
+libutp applies its clock-drift penalty inside `apply_ccontrol`
+(`utp_internal.cpp:1646-1650`), which is its only congestion controller. This
+library also offers LEDBAT++, opt-in, implemented from the draft. The penalty
+is applied in both.
+
+Reason: the penalty defends against a peer manipulating its clock so that this
+end under-measures the queue, and that attack does not care which controller
+this end happens to be running. Leaving LEDBAT++ unprotected would make the
+opt-in algorithm the weaker choice against a hostile peer, which is not a
+trade anyone would be making knowingly.
+
+The threshold, the formula and the estimator are libutp's unchanged; only the
+second call site is new.
 
 ## Completing an incoming connection
 
