@@ -344,6 +344,14 @@ type connection struct {
 	// acknowledgement reports a zero window (:2149-2151) and acted on in
 	// check_timeouts (:1142-1145).
 	zeroWindowProbeDue time.Time
+	// lastAdvertisedWindow is the receive window on the last packet this
+	// connection put on the wire. libutp's last_rcv_win. See onReadDrained.
+	lastAdvertisedWindow uint32
+	// readDrainedAcks counts the acknowledgements owed because handing bytes
+	// up reopened a window narrower than what is now free. Exposed through
+	// ConnectionMetrics so a test can assert the mechanism ran rather than
+	// inferring it from timing, which many other things also move.
+	readDrainedAcks uint64
 	// ackPending records that a received packet is owed an acknowledgement,
 	// which is sent once at the end of the event-loop pass that received it.
 	// libutp's schedule_ack / utp_issue_deferred_acks.
@@ -882,7 +890,14 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		case wakeWrite:
 			handleWrites(wokeWrite, wokeOK)
 		case wakeReadable:
-			c.processReads()
+			// Nothing to do but wake: the drain happens in afterSelect, for
+			// every pass, so that it precedes the acknowledgement.
+			//
+			// The wake itself is the point. UtpStream.notifyRead signals this
+			// when the application takes a chunk, which is the only thing
+			// that frees room once the read queue has filled -- without it
+			// processReads gives up and waits for a packet that a blocked
+			// peer will not send.
 		case wakeWritable:
 			c.processWrites(c.now())
 		case wakeRetransmit:
@@ -916,6 +931,20 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			return c.ctx.Err()
 		}
 	afterSelect:
+		// Hand bytes up before acknowledging, so the acknowledgement carries
+		// the window that results rather than the one from before the drain.
+		//
+		// This ordering is libutp's. It hands bytes to its embedder inside
+		// utp_process_incoming and acknowledges afterwards, which is why
+		// utp_read_drained finds nothing to report on an ordinary packet.
+		// Draining on a later pass instead -- which is what this loop did --
+		// makes every drain look like the window growing, and reporting that
+		// doubles the reverse traffic. Measured: every data packet drew two
+		// acknowledgements instead of one, which the corpus caught at once.
+		//
+		// ackPending is a bool and flushAck runs once per pass, so the drain
+		// and the data that prompted it now share one acknowledgement.
+		c.processReads()
 		c.flushAck()
 		c.scheduleIdleRto(c.now())
 		c.sampleMetrics(c.now(), false)
@@ -1172,6 +1201,9 @@ func (c *connection) emitPacket(pkt *packet, dontFragment bool) {
 		return
 	}
 	c.lastSentPacket = c.now()
+	if pkt.Header != nil {
+		c.lastAdvertisedWindow = pkt.Header.WndSize
+	}
 	if pkt.Header.PacketType == st_state {
 		// Kept for the socket to repeat after this connection is gone.
 		c.lastStateSent = pkt
@@ -1452,6 +1484,49 @@ func (c *connection) processReads() {
 	if drained && c.eof() {
 		c.deliverTerminalRead()
 	}
+
+	c.onReadDrained()
+}
+
+// onReadDrained tells the peer when handing bytes up has reopened a receive
+// window smaller than the one now available.
+//
+// libutp's utp_read_drained (utp_internal.cpp:3242-3261), which its embedder
+// calls whenever it has drained the socket:
+//
+//	const size_t rcvwin = conn->get_rcv_window();
+//	if (rcvwin > conn->last_rcv_win) {
+//	    if (conn->last_rcv_win == 0) conn->send_ack();
+//	    else conn->schedule_ack();
+//	}
+//
+// Without it the peer finds out only from the next acknowledgement this end
+// happens to send -- and while it is blocked on a window too small to fit a
+// packet it sends nothing, so nothing draws one.
+//
+// **The test is growth, not growth from zero, and the difference is a hang.**
+// An earlier version of this fired only when the window last advertised was
+// zero, on the reasoning that an ordinary drain is already covered by the
+// acknowledgement owed for the data. It deadlocked one run in three. The
+// trace: the window fell to 861 bytes, which is not zero but is less than a
+// packet, so the sender could not fit one and went quiet; nothing arrived, so
+// nothing was acknowledged; the application read and freed the buffer, and the
+// zero-only test declined to mention it. Both ends sat silent for seconds at a
+// time and a 512KB transfer delivered 154KB before the test gave up. A window
+// too small to use is as blocking as a closed one, and libutp's condition
+// covers both because it compares against what was actually last sent.
+//
+// libutp's distinction between acknowledging now and scheduling is not
+// preserved, because it does not exist here: flushAck runs at the end of this
+// same pass either way.
+func (c *connection) onReadDrained() {
+	if c.state == nil || c.state.stateType != ConnConnected || c.state.RecvBuf == nil {
+		return
+	}
+	if uint32(c.state.RecvBuf.Available()) > c.lastAdvertisedWindow {
+		c.ackPending = true
+		c.readDrainedAcks++
+	}
 }
 
 // drainReadsForTeardown hands over everything left in the receive buffer as the
@@ -1531,7 +1606,9 @@ func (c *connection) sampleMetrics(now time.Time, force bool) {
 		MtuCeiling:           c.mtu.ceiling,
 
 		MtuProbesLostToDuplicateAcks: c.mtuProbesLostToDuplicateAcks,
-		State:                        connStateName(c.state.stateType),
+
+		WindowReopenedAcks: c.readDrainedAcks,
+		State:              connStateName(c.state.stateType),
 	}
 	if c.state.SentPackets != nil {
 		cs := c.state.SentPackets.ControllerStats()

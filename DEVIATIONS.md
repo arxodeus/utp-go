@@ -33,9 +33,9 @@ areas that were left: `utp_process_incoming`, `utp_process_udp`, the
 ack-deferral and window-reopening path, and the connection defaults. It found
 two missing mechanisms and one policy divergence; see "The M4b sweep" in
 [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md). The clock-drift penalty has
-since been implemented and measured. The other, `utp_read_drained`, was
-implemented, measured, and reverted when it proved able to hang a connection,
-and that is recorded there rather than dropped.
+since been implemented and measured. The other, `utp_read_drained`, is
+implemented too -- after two reverts that turned out to rest on a
+misattribution, the hang having been present with the mechanism compiled out.
 
 So: the deviations below are recorded deliberately rather than noticed by
 accident, and the list is worth trusting for what it contains. It is still not

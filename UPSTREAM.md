@@ -1421,11 +1421,6 @@ there is nothing to send upstream yet; they are listed so the next person does
 not have to find them again. Full write-up in KNOWN-LIMITATIONS.md, "The M4b
 sweep".
 
-- **`utp_read_drained`** (`:3242-3261`). Attempted twice. Ported literally it
-  doubles the reverse traffic, because libutp hands bytes up synchronously
-  inside `utp_process_incoming` and this library does it on a later pass of
-  the event loop. Narrowed to the zero-window branch it measured well and then
-  hung one run in three.
 - **No cap on accepted connections** against libutp's 3000 (`:2967-2974`), a
   policy choice rather than a defect.
 
@@ -1466,6 +1461,38 @@ One deviation, in DEVIATIONS.md: the penalty is applied to LEDBAT++ as well,
 where libutp has no opinion because it has no LEDBAT++. A peer manipulating
 its clock does not care which controller this end runs, and leaving the opt-in
 algorithm unprotected would make it the weaker choice.
+
+## PR 51 — `utp_read_drained`, and a hang that was never its fault
+
+libutp acknowledges as soon as its application drains the read buffer
+(`utp_internal.cpp:3242-3261`); this fork freed the buffer and said nothing.
+
+The reason this took three attempts is worth more than the patch. The hang
+that caused the first two to be reverted is **pre-existing**: with the
+mechanism compiled out, the same scenario stalls in 4 runs out of 20, against
+about 1 in 20 with it. The earlier revert rested on six control runs of a less
+sensitive test, and six runs cannot see a one-in-five rate.
+
+Two things were genuinely wrong and are fixed. The **ordering**: libutp hands
+bytes up inside `utp_process_incoming` and acknowledges afterwards, so its
+acknowledgement already carries the window the drain produced; draining on a
+later pass made every drain look like growth and doubled the reverse traffic.
+`processReads` now runs immediately before `flushAck` in the same pass. The
+**condition**: firing only when the last advertised window was zero wedged a
+connection, because a window of 861 bytes is not zero but is less than a
+packet — libutp's `rcvwin > last_rcv_win` is right precisely because a window
+too small to use blocks as completely as a closed one.
+
+The end-to-end benefit is **not** claimed. Three network measurements failed to
+hold still and the model they were built on was wrong each time; the rules are
+pinned by unit tests and the stall rate is the measurement that survived.
+
+Two things a reviewer should know before touching this area: the zero-window
+probe arms on a window of exactly zero, so any change that turns a zero window
+into a small one disarms the peer's recovery path; and there is a separate,
+still-open stall in the same scenario, written up in KNOWN-LIMITATIONS.md,
+where the receive buffer appears to fill with out-of-order data that cannot be
+delivered and cannot be completed.
 
 ## Not for upstream
 

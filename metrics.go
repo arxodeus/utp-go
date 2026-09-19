@@ -97,6 +97,18 @@ type ConnectionMetrics struct {
 	// executed.
 	MtuProbesLostToDuplicateAcks uint64
 
+	// WindowReopenedAcks counts the acknowledgements this connection sent
+	// because handing bytes up to the application reopened a receive window
+	// narrower than what became free -- libutp's utp_read_drained
+	// (utp_internal.cpp:3242-3261).
+	//
+	// Zero on a connection whose reader keeps up, which is most of them: the
+	// acknowledgement owed for incoming data already carries a current window,
+	// because the drain happens before the acknowledgement in the same pass of
+	// the event loop. It is non-zero exactly when the peer would otherwise not
+	// have been told.
+	WindowReopenedAcks uint64
+
 	// PeerTsDiff is the one-way delay this end measured from the peer's
 	// timestamps: how long the peer's last packet took to arrive here. It is
 	// what gets echoed back in timestamp_difference_microseconds, and it is
