@@ -61,6 +61,53 @@ func newReceiveBufferWithLogger(size int, initSeqNum uint16, logger log.Logger) 
 	}
 }
 
+// Window is the receive window to advertise to the peer: the capacity, less
+// the bytes already delivered in order and not yet handed up.
+//
+// Deliberately not Available(). Data held out of order is not counted against
+// it, which is libutp's accounting and was not this library's:
+//
+//	UTPSocket::get_rcv_window  (utp_internal.cpp:590-596)
+//	    const size_t numbuf = utp_call_get_read_buffer_size(this->ctx, this);
+//	    return opt_rcvbuf > numbuf ? opt_rcvbuf - numbuf : 0;
+//
+// libutp's window is what its embedder has not yet read. A packet held out of
+// order sits in conn->inbuf and never reaches utp_call_on_read until the gap
+// before it is filled, so it never enters that figure.
+//
+// Charging it, as Available() does, closes the window on the peer for holding
+// data the peer was entitled to send -- and the window is what permits the
+// peer to send, including to retransmit the very packet that would fill the
+// gap and let all of it be delivered. Measured before this split: 40,000
+// bytes held behind a gap cost exactly 40,000 of advertised window where
+// libutp lost none, and 800 packets drove it to 1,376 bytes, under the size of
+// one packet and above the zero that would have armed the peer's zero-window
+// probe. Both ends then sit silent. See KNOWN-LIMITATIONS.md.
+//
+// # Why this does not overrun the buffer
+//
+// Available() still charges the out-of-order bytes, and admission still uses
+// Available(), so the invariant the collapse loop in Write depends on --
+// offset plus pending never exceeding the capacity, or `rb.buf[rb.offset:end]`
+// panics -- is unchanged.
+//
+// A peer respecting this window cannot break it either: the window is the
+// capacity less what has been delivered, so everything the peer is permitted
+// to send fits in what is left, whether it lands in order or behind a gap. A
+// peer ignoring the window is caught by admission, which drops rather than
+// writes. Over-advertising therefore costs a retransmission, never a panic.
+func (rb *receiveBuffer) Window() int {
+	return len(rb.buf) - rb.offset
+}
+
+// Available is the room left for bytes actually arriving, counting data held
+// out of order because that data occupies the buffer when its gap fills.
+//
+// This is admission control, not the advertised window -- see Window. The two
+// differ exactly by the out-of-order bytes, and the difference is load-bearing
+// in both directions: advertising this figure stalls a peer that has done
+// nothing wrong, and admitting on Window's figure would let offset plus
+// pending exceed the capacity and panic the collapse loop in Write.
 func (rb *receiveBuffer) Available() int {
 	available := len(rb.buf) - rb.offset
 

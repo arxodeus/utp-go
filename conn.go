@@ -1128,7 +1128,7 @@ func (c *connection) shutdown() {
 			// If we have not sent our FIN, and there are no pending writes, and there is no
 			// pending data in the send buffer, then send our FIN
 			if localFin == nil && len(c.pendingWrites) == 0 && c.state.SendBuf.IsEmpty() {
-				recvWindow := uint32(c.state.RecvBuf.Available())
+				recvWindow := uint32(c.state.RecvBuf.Window())
 				seqNum := c.state.SentPackets.NextSeqNum()
 				ackNum := c.state.RecvBuf.AckNum()
 				selectiveAck := c.state.RecvBuf.SelectiveAck()
@@ -1151,7 +1151,7 @@ func (c *connection) shutdown() {
 		} else {
 			var localFin *uint16
 			if len(c.pendingWrites) == 0 && c.state.SendBuf.IsEmpty() {
-				recvWindow := uint32(c.state.RecvBuf.Available())
+				recvWindow := uint32(c.state.RecvBuf.Window())
 				seqNum := c.state.SentPackets.NextSeqNum()
 				ackNum := c.state.RecvBuf.AckNum()
 				selectiveAck := c.state.RecvBuf.SelectiveAck()
@@ -1360,7 +1360,7 @@ func (c *connection) processWrites(now time.Time) {
 
 	// transmit data packets
 	seqNum := c.state.SentPackets.NextSeqNum()
-	recvWindow := uint32(c.state.RecvBuf.Available())
+	recvWindow := uint32(c.state.RecvBuf.Window())
 	ackNum := c.state.RecvBuf.AckNum()
 	selectiveAck := c.state.RecvBuf.SelectiveAck()
 
@@ -1432,7 +1432,7 @@ func (c *connection) processReads() {
 	// does not: utp_call_on_read hands the embedder its bytes and returns, and
 	// a slow application is handled by the advertised receive window shrinking
 	// (utp_call_get_read_buffer_size), not by libutp stopping. This connection
-	// advertises RecvBuf.Available(), so leaving unread bytes in the receive
+	// advertises RecvBuf.Window(), so leaving unread bytes in the receive
 	// buffer is exactly that backpressure.
 	//
 	// This goroutine is the only sender on c.reads, so a free slot observed
@@ -1523,7 +1523,7 @@ func (c *connection) onReadDrained() {
 	if c.state == nil || c.state.stateType != ConnConnected || c.state.RecvBuf == nil {
 		return
 	}
-	if uint32(c.state.RecvBuf.Available()) > c.lastAdvertisedWindow {
+	if uint32(c.state.RecvBuf.Window()) > c.lastAdvertisedWindow {
 		c.ackPending = true
 		c.readDrainedAcks++
 	}
@@ -1957,7 +1957,7 @@ func (c *connection) retransmit(originPacket *packet, now time.Time) {
 			Extension:     originPacket.Header.Extension,
 			ConnectionId:  originPacket.Header.ConnectionId,
 			SeqNum:        originPacket.Header.SeqNum,
-			WndSize:       uint32(c.state.RecvBuf.Available()),
+			WndSize:       uint32(c.state.RecvBuf.Window()),
 			Timestamp:     int64(c.nowMicros()),
 			TimestampDiff: uint32(c.peerTsDiff.Microseconds()),
 			AckNum:        c.state.RecvBuf.AckNum(),
@@ -3072,7 +3072,7 @@ func (c *connection) statePacket() *packet {
 		// implementation, STATE packets always include the next sequence number.
 		seqNum := c.state.SentPackets.NextSeqNum()
 		ackNum := c.state.RecvBuf.AckNum()
-		recvWindow := uint32(c.state.RecvBuf.Available())
+		recvWindow := uint32(c.state.RecvBuf.Window())
 
 		// No selective ack once the peer's FIN has been reached in order.
 		//
@@ -3114,7 +3114,7 @@ func (c *connection) retransmitLostPackets(now time.Time) {
 	}
 	connID := c.cid.Send
 	nowMicros := int64(c.nowMicros())
-	recvWindow := uint32(c.state.RecvBuf.Available())
+	recvWindow := uint32(c.state.RecvBuf.Window())
 	tsDiffMicros := uint32(c.peerTsDiff.Microseconds())
 
 	for _, lostPacket := range c.state.SentPackets.TakeLostPackets() {

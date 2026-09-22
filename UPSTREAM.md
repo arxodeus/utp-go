@@ -1489,13 +1489,43 @@ pinned by unit tests and the stall rate is the measurement that survived.
 
 Two things a reviewer should know before touching this area. The zero-window
 probe arms on a window of exactly zero, so any change that turns a zero window
-into a small one disarms the peer's recovery path. And the stall in the same
-scenario has since been root-caused, differentially: this fork charges every
-byte held out of order against the advertised receive window where libutp
-charges none, so a gap plus enough following data drives the window under a
-packet -- 1,376 bytes, measured -- which blocks the sender from retransmitting
-the very packet that would clear it, while staying above the zero that would
-arm the probe. See KNOWN-LIMITATIONS.md; it is not fixed.
+into a small one disarms the peer's recovery path. And the stall in the same scenario is still
+open and is *not* the receive window, though it looked like it: this fork used
+to charge every byte held out of order against the advertised window where
+libutp charges none, driving it to 1,376 bytes with a gap open. That is fixed
+(PR 52) and the stall rate did not move -- about 3 runs in 20 against 4 before
+-- with the window now wide open at its full size while the transfer trickles
+to a stop. See KNOWN-LIMITATIONS.md 2c.
+
+## PR 52 — the receive window stops charging for reordered data
+
+`receiveBuffer.Available()` subtracted every byte held behind a gap from the
+window this fork advertised. libutp's `get_rcv_window`
+(`utp_internal.cpp:590-596`) is `opt_rcvbuf` less what its embedder has not yet
+read, and a packet held out of order sits in `conn->inbuf` and never reaches
+`utp_call_on_read` until the gap is filled, so it never enters that figure.
+
+Measured with both implementations driven through the same packets: 40,000
+bytes held behind a gap cost us exactly 40,000 of advertised window and libutp
+none; 800 packets drove ours to 1,376 bytes, under the size of one packet, so
+the peer could not even retransmit the packet that would have cleared the gap.
+
+The fix is a split, not a deletion. `Window()` is what goes on the wire;
+`Available()` still charges the held bytes and still does admission control,
+because the collapse loop in `Write` indexes `rb.buf[rb.offset:end]` and panics
+if offset plus pending exceeds capacity. Advertising the larger figure cannot
+break that: a peer respecting the window sends only what fits in what has not
+been delivered, and a peer ignoring it is dropped at admission rather than
+written. Over-advertising costs a retransmission, never a panic.
+
+Both now advertise 1,048,576 with 1.12 MB held behind a gap.
+
+**It did not fix the stall it was expected to.** That was the stated
+motivation, and the measurement disproved it: about 3 runs in 20 after,
+against 4 before. What changed is the trace — the window now sits wide open at
+its full size while the transfer trickles to a stop, so whatever holds the
+sender was never the receive window. Written up separately rather than folded
+into this.
 
 ## Not for upstream
 
