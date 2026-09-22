@@ -1487,12 +1487,15 @@ The end-to-end benefit is **not** claimed. Three network measurements failed to
 hold still and the model they were built on was wrong each time; the rules are
 pinned by unit tests and the stall rate is the measurement that survived.
 
-Two things a reviewer should know before touching this area: the zero-window
+Two things a reviewer should know before touching this area. The zero-window
 probe arms on a window of exactly zero, so any change that turns a zero window
-into a small one disarms the peer's recovery path; and there is a separate,
-still-open stall in the same scenario, written up in KNOWN-LIMITATIONS.md,
-where the receive buffer appears to fill with out-of-order data that cannot be
-delivered and cannot be completed.
+into a small one disarms the peer's recovery path. And the stall in the same
+scenario has since been root-caused, differentially: this fork charges every
+byte held out of order against the advertised receive window where libutp
+charges none, so a gap plus enough following data drives the window under a
+packet -- 1,376 bytes, measured -- which blocks the sender from retransmitting
+the very packet that would clear it, while staying above the zero that would
+arm the probe. See KNOWN-LIMITATIONS.md; it is not fixed.
 
 ## Not for upstream
 

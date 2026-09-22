@@ -3038,30 +3038,75 @@ tests — that growth owes an acknowledgement, that no growth owes none, that
 actually sent. The network claim is absent rather than asserted on a
 measurement that would not hold still.
 
-### 2b. A stall this scenario reaches, which is not `utp_read_drained`'s
+### 2b. Out-of-order data shrinks our receive window and not libutp's — confirmed
 
-The 4-in-20 above is a real defect and it is still open.
+The 4-in-20 stall above is a real defect, and this is its cause. It was
+recorded here as a hypothesis; it has since been confirmed differentially,
+and the confirmation is sharper than the guess.
 
-In the hung state the reader is blocked on an empty read queue and both
-connections' event loops are parked in their blocking selects — so nothing is
-moving bytes from the receive buffer into the queue, and nothing will, because
-the only things that wake that loop are an incoming packet (the peer is
-blocked) and the application reading (it has nothing to read).
+**The two accountings.** `receiveBuffer.Available()` (`recv_buffer.go`) is what
+this library advertises:
 
-The unverified but well-supported hypothesis: the receive buffer is full of
-**out-of-order** data. `processReads` drains only contiguous bytes, so
-`Readable()` is zero while `Available()` is also zero, the advertised window is
-zero, and the packet that would fill the hole cannot be sent because the window
-is zero. libutp does not have this shape — its window is the embedder's read
-buffer and reordered packets sit in a separate `inbuf` that does not count
-against it — which would make this a divergence in how the advertised window
-accounts for data it cannot yet deliver.
+```go
+available := len(rb.buf) - rb.offset
+rb.pending.Ascend(func(i btree.Item) bool {
+    available -= len(item.data)   // every byte held out of order
+    return true
+})
+```
 
-Also worth knowing before anyone works on it: the zero-window probe arms on
-`peerRecvWindow == 0` exactly (`conn.go`), so a window of 7 bytes disarms the
-peer's only recovery path. That is a hazard for any change in this area,
-including this one, and it is why the stall rate was measured rather than
-assumed.
+libutp's is `UTPSocket::get_rcv_window` (`utp_internal.cpp:590-596`):
+
+```c
+const size_t numbuf = utp_call_get_read_buffer_size(this->ctx, this);
+return opt_rcvbuf > numbuf ? opt_rcvbuf - numbuf : 0;
+```
+
+libutp's window is its embedder's *unread* bytes. A packet held out of order
+sits in `conn->inbuf` and is never handed to `utp_call_on_read` until the gap
+before it is filled, so it never reaches that count. Ours is charged the
+moment it arrives.
+
+**Measured**, both implementations driven through the same packets with a gap
+left open (`TestReorderedDataShrinksOnlyOurWindow`,
+`TestReorderedDataCanBlockOurWindowEntirely`):
+
+| bytes held behind the gap | we advertise | libutp advertises |
+| --- | --- | --- |
+| 40,000 | 1,008,576 | 1,048,576 |
+| 1,120,000 (800 packets) | **1,376** | 1,048,576 |
+
+The first row is exact: 1,048,576 − 40,000. Every byte. Removing the
+subtraction makes the two windows identical, which is the vacuity check.
+
+**Why it stalls, and why it is worse than a closed window.** The receive
+window is what permits the peer to send, and the packet that would fill the
+gap is one of the things it permits. Drive it low enough and the sender is
+told to stop — including stopping from sending the one packet that would let
+the whole buffer be delivered and freed.
+
+And it does not stop at zero. 800 packets leave it at **1,376 bytes**: under
+the 1,400 a packet needs, but above the zero that would arm the peer's
+zero-window probe, which tests `peerRecvWindow == 0` exactly (`conn.go`). So
+the one mechanism that would eventually break the deadlock never fires. That
+is precisely the state the network traces kept showing — windows of 861 and 7
+bytes, both ends silent for seconds at a time — and it is why those runs
+stalled where a genuinely closed window would have recovered in fifteen
+seconds.
+
+**It is bounded, which is the one comfort.** `outsideReorderWindow` drops
+anything more than 1024 packets past the gap, as libutp does, so the held data
+cannot grow without limit. But 1024 packets is more than a megabyte, so a
+megabyte receive buffer can be driven under a packet by data the peer was
+entitled to send.
+
+**Not fixed here.** The one-line change — stop charging `pending` against
+`Available()` — makes the windows match exactly, and the memory it would stop
+bounding is already bounded by the reorder window at roughly the same figure
+libutp's `inbuf` is. That makes it look safe. It is still a change to flow
+control, in a library where every previous change to flow control in this
+session behaved differently from how it read, and it deserves its own
+measurement rather than being folded into the confirmation that it is needed.
 
 ### 3. No cap on accepted connections — a divergence, not a defect
 
