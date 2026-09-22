@@ -154,8 +154,17 @@ type ConnectionMetrics struct {
 
 	// SendBufferPending is unsent application data still buffered.
 	SendBufferPending int
-	// RecvBufferPending is received data not yet read by the application.
+	// RecvBufferPending is received data not yet read by the application,
+	// contiguous or held behind a gap.
 	RecvBufferPending int
+	// RecvBufferReadable is the contiguous part of it: what can be handed up
+	// now. The difference between the two is data held behind a gap, which
+	// occupies the buffer and cannot be delivered until the gap is filled.
+	//
+	// Exposed because the two being far apart is the signature of a receiver
+	// wedged behind a hole, and telling that apart from a slow reader is not
+	// possible from Pending alone.
+	RecvBufferReadable int
 	// PendingWrites is the number of queued write requests.
 	PendingWrites int
 

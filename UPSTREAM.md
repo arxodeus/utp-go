@@ -1489,13 +1489,13 @@ pinned by unit tests and the stall rate is the measurement that survived.
 
 Two things a reviewer should know before touching this area. The zero-window
 probe arms on a window of exactly zero, so any change that turns a zero window
-into a small one disarms the peer's recovery path. And the stall in the same scenario is still
-open and is *not* the receive window, though it looked like it: this fork used
-to charge every byte held out of order against the advertised window where
-libutp charges none, driving it to 1,376 bytes with a gap open. That is fixed
-(PR 52) and the stall rate did not move -- about 3 runs in 20 against 4 before
--- with the window now wide open at its full size while the transfer trickles
-to a stop. See KNOWN-LIMITATIONS.md 2c.
+into a small one disarms the peer's recovery path. And the stall in the same scenario is
+fixed (PR 53); it was *not* the receive window, though it looked like it. This
+fork used to charge every byte held out of order against the advertised window
+where libutp charges none, driving it to 1,376 bytes with a gap open. Fixing
+that (PR 52) did not move the stall rate at all -- about 3 runs in 20 against 4
+before -- with the window then wide open at its full size while the transfer
+trickled to a stop. The cause was elsewhere entirely.
 
 ## PR 52 — the receive window stops charging for reordered data
 
@@ -1526,6 +1526,43 @@ against 4 before. What changed is the trace — the window now sits wide open at
 its full size while the transfer trickles to a stop, so whatever holds the
 sender was never the receive window. Written up separately rather than folded
 into this.
+
+## PR 53 — reserve room for the packet that fills a gap
+
+A gap in the sequence space was a deadlock. Data arriving behind it was
+admitted until the receive buffer was full, and the packet that would release
+all of it -- the peer's retransmission of the missing one -- was then refused
+for want of space. Refused every time, and the peer sends it forever. Nothing
+else can free the buffer, because nothing behind a gap can be delivered until
+the gap closes.
+
+Instrumented, the receiver showed `pending 32613, readable 0,
+held-behind-gap 32613` unchanged for the rest of the run with packets still
+arriving and being dropped; the sender showed `cwnd 13424, inflight 13424` --
+its window permanently full of bytes that would never be acknowledged, with
+326KB of application data waiting behind them.
+
+`receiveBuffer.Write` now admits the gap-filling packet against the whole of
+what is free, and requires anything arriving out of order to leave a reserve
+behind for it. The reserve is the largest packet this peer has sent, because
+that is exactly what the retransmission will be.
+
+Measured on the same harness both ways: 0 stalls in 40 runs with the reserve,
+3 in 40 without. Forty samples make that suggestive rather than conclusive, so
+the mechanism is pinned deterministically as well --
+`TestGapFillingPacketIsAdmittedWhenTheBufferIsFull` builds the state directly
+and shows the packet refused without the reserve and accepted with it,
+releasing the whole run behind it.
+
+libutp does not have this problem to fix: its reorder buffer is separate from
+its embedder's read buffer and is bounded by entry count rather than by bytes,
+so data behind a gap never competes for the space the gap-filler needs. This
+is a fix for a structure this fork chose, not a port of anything.
+
+It costs one packet's worth of receive buffer to out-of-order data, and
+`largestPacket` only grows, so an unusually large packet early reserves that
+much for the rest of the connection. Both are bounded by the maximum packet
+size.
 
 ## Not for upstream
 

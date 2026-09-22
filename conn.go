@@ -1632,6 +1632,7 @@ func (c *connection) sampleMetrics(now time.Time, force bool) {
 	}
 	if c.state.RecvBuf != nil {
 		m.RecvBufferPending = c.state.RecvBuf.Pending()
+		m.RecvBufferReadable = c.state.RecvBuf.Readable()
 	}
 	c.config.Metrics(m)
 }

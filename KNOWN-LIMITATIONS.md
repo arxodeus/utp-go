@@ -3081,36 +3081,62 @@ behind a gap. `TestReorderedDataCostsUsNoMoreWindowThanLibutp` and
 `TestReorderedDataDoesNotBlockOurWindow` pin the agreement; they were written
 to pin the divergence and were inverted when it went.
 
-### 2c. A stall in the same scenario, still open, and not the receive window
+### 2c. ~~A stall in the same scenario~~ — fixed: no room was held for the packet that fills a gap
 
 The scenario — a 32KB receive buffer, a sender with 512KB to push, a reader
-that pauses two seconds — stalls past a 25-second budget in about 3 runs in
-20. It did so in 4 in 20 before any of this session's work on the area, and
-about 1 in 20 with `utp_read_drained` alone. At twenty samples those figures
-are one rate, not three.
+that pauses two seconds — stalled past a 25-second budget in about 3 runs in
+20, and neither `utp_read_drained` nor the receive-window fix moved it. This is
+what it actually was.
 
-**Fixing the receive-window accounting did not move it**, which is how the
-causal claim in 2b was disproved rather than argued away. What it did change
-is what the stall looks like. Before, the traces showed the window at 1,376,
-861 or 7 bytes, and the window was the obvious suspect. Now:
+**A gap in the sequence space was a deadlock.** Data arriving behind the gap
+was admitted until the receive buffer was full. The packet that would release
+all of it — the peer's retransmission of the missing one — was then refused for
+want of space. It was refused every time the peer sent it, and the peer sent it
+forever. Nothing else could free the buffer, because nothing behind the gap can
+be delivered until the gap closes.
+
+Instrumenting both ends made it unmistakable:
 
 ```
-t= 3.0s  fwd +0   rev +1  peer window 32768
-t= 4.0s  fwd +53  rev +25 peer window 32768
-t= 5.0s  fwd +3   rev +2  peer window 32768
-t= 6.0s  fwd +3   rev +2  peer window 32768
-t= 9.0s  fwd +0   rev +0  peer window 32768
-HUNG: delivered 148751 of 524288 in 25s
+receiver: pending 32613   readable 0   held-behind-gap 32613   pkts-recv 285
+receiver: pending 32613   readable 0   held-behind-gap 32613   pkts-recv 296
+HUNG: delivered 152250 of 524288 in 25s
 ```
 
-The window is wide open at the full 32,768 and the transfer trickles to a
-stop anyway. Whatever holds the sender is not the receive window, and never
-was — the old accounting made it look as though it were. The remaining
-suspects are on the sending side: a congestion window collapsed by the
-retransmission timeouts that fire during the reader's pause, and recovering
-too slowly to finish, or something in the retransmission path itself. Neither
-has been established, and neither should be assumed on the strength of a trace
-that has already misled once here.
+The whole buffer, none of it deliverable, packets still arriving and being
+dropped. On the sending side the matching picture was `cwnd 13424, inflight
+13424` — the congestion window permanently full of bytes that would never be
+acknowledged, with 326KB of application data waiting behind them.
+
+**The fix** is a reserve. `receiveBuffer.Write` admits the packet that fills
+the gap against the whole of what is free; anything arriving out of order must
+leave `gapReserve()` behind for it. The figure is the largest packet this peer
+has sent, because that is exactly what the gap-filling retransmission will be —
+the peer is resending something it already sent.
+
+Memory safety is unchanged. The collapse loop indexes `rb.buf[rb.offset:end]`
+and needs offset plus pending never to exceed the capacity; reserving *more*
+than before can only help.
+
+**Measured**, same harness both ways:
+
+| | stalls in 40 runs |
+| --- | --- |
+| reserve held back | **0** |
+| reserve disabled | 3 |
+
+Forty samples make that suggestive rather than conclusive on its own, which is
+why the mechanism is pinned deterministically as well:
+`TestGapFillingPacketIsAdmittedWhenTheBufferIsFull` builds the state directly
+and shows the gap-filling packet refused without the reserve and accepted with
+it, releasing the whole run behind it.
+
+**Two things it costs, neither of them free.** One packet's worth of receive
+buffer is unavailable to out-of-order data, always. And `largestPacket` only
+grows: a peer that sends one unusually large packet early reserves that much
+for the rest of the connection. Both are bounded by the maximum packet size and
+neither can deadlock anything, but a very small receive buffer will hold
+correspondingly less out-of-order data than it used to.
 
 ### 3. No cap on accepted connections — a divergence, not a defect
 
