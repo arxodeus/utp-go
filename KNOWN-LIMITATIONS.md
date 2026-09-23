@@ -44,7 +44,11 @@ M7's hash-verified torrent transfer is no longer unmet:
 128 pieces between two `torrent.Client`s with this library as the only
 transport, with BitTorrent's own piece hashes deciding whether what arrived is
 what was sent. See "A real torrent" below. `CGO_ENABLED=0 go build ./...`
-succeeds for the whole module.
+succeeds for the whole module, and so does `CGO_ENABLED=0 go vet ./...`. The
+second was not true until recently: the root package's tests failed to compile
+without cgo, because the scripted transport that pure-Go tests share lived in a
+cgo-only file. It now has its own file, and 180 of the root package's 226 tests
+run and pass without cgo. The 46 left out are the comparisons against libutp.
 
 Writing the gate immediately found two defects that nothing else had, both
 described below: `Accept` could not accept, and `Close` took up to half a

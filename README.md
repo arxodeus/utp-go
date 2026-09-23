@@ -63,7 +63,8 @@ which is necessary under `-race`.
 
 The interop tests link a vendored copy of libutp and so need cgo and a C++
 compiler. With `CGO_ENABLED=0` the package builds as an empty stub and the
-rest of the module is unaffected.
+rest of the module is unaffected: its tests still build and run, apart from the
+ones that compare against libutp.
 
 ## Licence
 
