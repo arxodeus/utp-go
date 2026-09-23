@@ -122,6 +122,11 @@ type Controller interface {
 	OnPeerDelay(sample uint32, now time.Time)
 	Timeout() time.Duration
 	BytesAvailableInWindow() uint32
+	// BytesInFlight is libutp's cur_window: payload bytes sent and neither
+	// acknowledged nor given up as lost.
+	BytesInFlight() uint32
+	// CongestionWindow is libutp's max_window.
+	CongestionWindow() uint32
 	// Stats returns a snapshot of the controller's internal state.
 	//
 	// It exists so a test harness can plot the congestion window and RTT
@@ -378,6 +383,18 @@ func (c *defaultController) BytesAvailableInWindow() uint32 {
 		return c.maxWindowSizeBytes - c.windowSizeBytes
 	}
 	return 0
+}
+
+func (c *defaultController) BytesInFlight() uint32 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.windowSizeBytes
+}
+
+func (c *defaultController) CongestionWindow() uint32 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.maxWindowSizeBytes
 }
 
 func (c *defaultController) OnTransmit(seqNum uint16, transmission Transmit, dataLen uint32) error {

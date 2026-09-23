@@ -6,11 +6,11 @@ import (
 
 // utp_read_drained, at the level where its rules can be stated exactly.
 //
-// The end-to-end behaviour of this mechanism resisted three attempts at a
-// stable network measurement. The cause turned out to be elsewhere -- a gap
-// deadlock in the receive buffer, since fixed -- which dominated the scenario
-// those measurements used. See KNOWN-LIMITATIONS.md.
-// What is testable without that is the rule itself: when handing bytes up
+// The end-to-end benefit is measured, not asserted here: a stalled reader's
+// transfer finishes in 2.16s with the mechanism and 29.7s without it, on a
+// network run of about a minute an arm. See KNOWN-LIMITATIONS.md, M4b sweep,
+// section 2.
+// What these cases pin is the rule itself: when handing bytes up
 // reopens a window narrower than what is now free, the peer is owed an
 // acknowledgement -- and when it does not, no extra acknowledgement is sent,
 // because that doubles the reverse traffic.

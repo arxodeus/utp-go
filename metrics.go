@@ -165,6 +165,11 @@ type ConnectionMetrics struct {
 	// wedged behind a hole, and telling that apart from a slow reader is not
 	// possible from Pending alone.
 	RecvBufferReadable int
+	// RecvBufferDrops counts data packets refused because the receive buffer
+	// had no room for them. Each one is a gap the peer has to fill with a
+	// retransmission, so a non-zero figure on a link that is not dropping
+	// anything means this end told the peer it had room it did not have.
+	RecvBufferDrops uint64
 	// PendingWrites is the number of queued write requests.
 	PendingWrites int
 

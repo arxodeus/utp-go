@@ -3,6 +3,7 @@
 package utp_go
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strconv"
@@ -426,6 +427,37 @@ func TestConformanceWriteFlowsWithoutZeroWindow(t *testing.T) {
 			inject: NewPacketBuilder(st_state, corpusSynConnID+1, 300000, corpusWindow, corpusSynSeq+2).
 				WithAckNum(corpusPinnedSeq - 1).Build(),
 			wantNoEmission: true,
+		},
+	})
+}
+
+// libutp sends nothing into less than a full packet of room and never cuts a
+// packet down to fit: flush_packets checks is_full() with no argument, which
+// charges a whole packet_size (utp_internal.cpp:933-936, :974). We used to
+// send whatever the window had room for. The rest of the rule -- bytes in
+// flight spend the peer's window -- cannot be isolated against libutp at
+// connection start and is asserted in peer_window_test.go.
+func TestConformanceWriteIsNotCutToFitPeerWindow(t *testing.T) {
+	runResponderCorpus(t, []step{
+		{name: "handshake", inject: synPacketFor(corpusSynConnID, corpusSynSeq)},
+		{name: "peer data completes the handshake", inject: corpusPeerData(corpusSynSeq+1, 150000, []byte("hi"))},
+		{
+			name: "peer advertises a 300-byte window",
+			inject: NewPacketBuilder(st_state, corpusSynConnID+1, 200000, 300, corpusSynSeq+2).
+				WithAckNum(corpusPinnedSeq - 1).Build(),
+			wantNoEmission: true,
+		},
+		{
+			name:           "a 400-byte write does not go out as 300",
+			write:          bytes.Repeat([]byte("c"), 400),
+			wantNoEmission: true,
+		},
+		{
+			// Wide enough for a full packet on both sides: libutp's first
+			// packet_size is 1452 and ours 962 (KNOWN-LIMITATIONS.md, M6).
+			name: "peer widens the window and all 400 leave in one packet",
+			inject: NewPacketBuilder(st_state, corpusSynConnID+1, 300000, 2000, corpusSynSeq+2).
+				WithAckNum(corpusPinnedSeq - 1).Build(),
 		},
 	})
 }

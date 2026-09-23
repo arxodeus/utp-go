@@ -129,6 +129,14 @@ func (s *sentPackets) Window() uint32 {
 	return s.congestionCtrl.BytesAvailableInWindow()
 }
 
+func (s *sentPackets) CongestionWindow() uint32 {
+	return s.congestionCtrl.CongestionWindow()
+}
+
+func (s *sentPackets) BytesInFlight() uint32 {
+	return s.congestionCtrl.BytesInFlight()
+}
+
 // OnWindowFull records that the sender was blocked by the congestion window
 // rather than by having nothing to send.
 func (s *sentPackets) OnWindowFull(now time.Time) {

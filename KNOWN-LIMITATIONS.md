@@ -15,7 +15,7 @@ all.
 | **M2** — conformance harness against real libutp | **Partly done.** Corpus comparing emitted packets field by field, including malformed and hostile headers, plus retransmission-schedule and ack-count comparisons measured against libutp on each run; see [CONFORMANCE.md](CONFORMANCE.md). Both roles are covered: `conformance_initiator_corpus_test.go` adds nine curated cases in the dialling role, on the virtual clock, comparing the SYN itself. Ack *latency* is still not compared, for a reason that is not about clocks — see [COMPATIBILITY.md](COMPATIBILITY.md). |
 | **M3** — fix the failing transfer tests | **Done.** Root causes below; gates in "Verification". |
 | **M4** — audit transfer paths against libutp | **Done.** The ack path, the loss-recovery path, the retransmission timers and the send path are all audited against libutp — the timers by measurement rather than by reading, see [CONFORMANCE.md](CONFORMANCE.md). Three findings from the send path below; the packet-size one is deliberately left to M6. |
-| **M4b** — exhaustive libutp compatibility sweep | **Done, and the line-by-line sweep it deferred has since been done too** — see "The M4b sweep" below. It found the clock-drift penalty missing, now implemented and measured, and `utp_read_drained` missing, now implemented after two reverts that rested on a misattributed hang. [COMPATIBILITY.md](COMPATIBILITY.md) records every protocol area, the *kind* of evidence behind it — differential, measured, interop, cited, or none — and what is unchecked. Writing it found one defect (an ack per data packet, below), and the largest gap it named — libutp had never been run over the emulated network — has since been closed: `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite, which found two more defects. Both were in the harness, and both made libutp look worse than it is. |
+| **M4b** — exhaustive libutp compatibility sweep | **Done, and the line-by-line sweep it deferred has since been done too** — see "The M4b sweep" below. It found the clock-drift penalty missing, now implemented and measured, and `utp_read_drained` missing, now implemented after two reverts that rested on a misattributed hang, and measured: a stalled reader's transfer finishes in 2.16s with it against 29.7s under libutp's own behaviour without it. Measuring it found two more defects: our sender overran the peer's window (fixed), and our keep-alive can leave 29 seconds late (not yet fixed). [COMPATIBILITY.md](COMPATIBILITY.md) records every protocol area, the *kind* of evidence behind it — differential, measured, interop, cited, or none — and what is unchecked. Writing it found one defect (an ack per data packet, below), and the largest gap it named — libutp had never been run over the emulated network — has since been closed: `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite, which found two more defects. Both were in the harness, and both made libutp look worse than it is. |
 | **M5** — verify LEDBAT, add LEDBAT++ | **Done.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft, opt-in. Deference measured against a loss-based competitor over a shared bottleneck: classic LEDBAT takes 60% of the link from it, LEDBAT++ takes 44%. See [BENCHMARKS.md](BENCHMARKS.md). |
 | **M6** — MTU path discovery | **Done.** Binary search between a 576-byte floor and a 1400-byte ceiling, probing with ordinary data packets, as libutp does. The ceiling could be raised from 1024 only because discovery makes it safe: an untested path still gets 988 bytes. Probes now carry the don't-fragment bit through `utp.DontFragmentWriter`, implemented for a real UDP socket on Linux, Darwin, the BSDs and Windows without adding a dependency, and compiling everywhere else against a stub. Implementing the bit exposed a second gap, since closed: libutp's duplicate-acknowledgement route to lowering the ceiling (`:1927-1940`) was missing, so a probe dropped for size during a bulk transfer taught the search nothing. With both, the search comes down from 1384 to 996 on a 1000-byte path and fragmentation falls from 3809 datagrams to 32. |
 | **M7** — anacrolix/torrent integration | **Done, with one gap.** `utpnet` presents a uTP socket as `net.PacketConn`/`net.Conn` and satisfies torrent's uTP interface, checked against the real interface by reflection in `integration/anacrolix`. The gap: torrent selects its uTP implementation at build time, so wiring it in needs a `replace` or a patched file — recipes in that module's README. |
@@ -3043,12 +3043,55 @@ figures were the gap deadlock, and at twenty samples they are one rate, as 2c
 records. This mechanism did not measurably reduce that stall and should not
 be said to.
 
-So its end-to-end benefit remains **unmeasured**, and the rules are pinned by
-unit tests — that growth owes an acknowledgement, that no growth owes none,
-that 861 bytes counts as growth, and that `lastAdvertisedWindow` follows the
-packet actually sent. With the gap deadlock fixed, the scenario that kept
-failing is no longer dominated by it, and a clean measurement is now possible
-for the first time. It has not been taken.
+The rules are pinned by unit tests: growth owes an acknowledgement, no growth
+owes none, 861 bytes counts as growth, and `lastAdvertisedWindow` follows the
+packet actually sent.
+
+**Measured end to end, once two defects in the way were fixed.** The first
+attempt at a clean scenario was not clean. With the link dropping nothing, the
+receiver refused 54 to 262 packets a run, and the sender timed out once or
+twice. Counting every drop site put all of them in the receive buffer, and the
+cause was our *sender*: it did not count bytes in flight against the peer's
+window (2d). With that fixed, the scenario closes the window only because the
+application is slow, which is what this mechanism is for.
+
+Same harness, all three arms: a 32KB receive buffer, 512KB to send, a reader
+paused for two seconds, and a 5ms, 50 Mb/s link whose queue never overflows.
+10 runs an arm, with the link, connection-queue and receive-buffer drop
+counters at zero in all 30:
+
+| arm | delivered in | drops | sender timeouts |
+| --- | --- | --- | --- |
+| `utp_read_drained` on | **2.158–2.163s** | 0 | 0 |
+| off, keep-alive checked every 500ms, approximating libutp | 29.698–29.702s | 0 | 0 |
+| off, keep-alive on this library's 29s ticker | 58.206–58.212s | 0 | 0 |
+
+In every run the window fell to between 176 and 260 bytes: less than a
+packet, but not zero. The zero-window probe arms only on exactly zero, so it
+never fired. Nothing was in flight either, so no retransmission timer was
+running. With the mechanism off, the connection sat until the receiver's
+keep-alive happened to carry the fresh window. That recovery path was
+**established, not assumed**. With the receiver's keep-alive interval set to 7s
+and then 10s, recovery moved to 14.2s and 20.2s, the second keep-alive tick
+each time. A timeline of both ends shows the sender learning of a
+32,768-byte window at 14.01s and the remaining 358KB leaving within 0.18s.
+
+So, in this scenario, the benefit is about 27.5 seconds per stall against
+libutp's own behaviour without the mechanism (approximated by the 500ms arm), and about 56 seconds against this
+library's. The difference between those two control figures is a separate
+defect, recorded in 2e. It applies whenever a slow reader leaves less than a
+packet of window with nothing in flight. A window of exactly zero is bounded by
+the 15-second zero-window probe instead, and that case was not measured here.
+
+Of the 2.16s, 2.0s is the reader's pause. The rest is the transfer finishing
+after one or two acknowledgements owed to the drain (`WindowReopenedAcks`)
+reopened the sender.
+
+`netem.TestReadDrainedRestartsASenderBlockedBySubPacketWindow` keeps it that
+way. It checks the scenario first: a window under a packet but not zero, and
+no receive-buffer drops. Then it asserts delivery within 10s. With the
+mechanism disabled it fails on delivery (166KB of 512KB at 10s). With the old
+sender rule it fails on the drops check (40 refused packets).
 
 ### 2b. ~~Out-of-order data shrinks our receive window and not libutp's~~ — fixed
 
@@ -3149,6 +3192,65 @@ grows: a peer that sends one unusually large packet early reserves that much
 for the rest of the connection. Both are bounded by the maximum packet size and
 neither can deadlock anything, but a very small receive buffer will hold
 correspondingly less out-of-order data than it used to.
+
+### 2d. ~~Our sender overran the peer's receive window~~ — fixed
+
+libutp sends the next queued packet only while `!is_full()`
+(`utp_internal.cpp:963-985`, `:3197-3212`), and `is_full` refuses when
+`cur_window + packet_size > min(max_window, opt_sndbuf, max_window_user)`
+(`:933-936`, `:956`). This library computed
+`min(cwnd − in_flight, peer_window)`, and differed in two ways:
+
+- **Bytes in flight did not count against the peer's window.** The
+  advertisement is room beyond what the peer has acknowledged, and everything
+  sent since spends it. We compared each packet with the whole advertisement,
+  so a receiver whose application fell behind was overrun by up to a full
+  window. Each packet past its room was dropped and had to be retransmitted.
+  The first logged refusal was a 1358-byte in-order packet against 74 bytes of
+  advertised window, and the five packets already in flight behind it were
+  refused in turn.
+- **Packets were cut down to fit.** libutp calls `is_full()` there with no
+  argument, which charges a whole `packet_size` whatever the queued packet
+  holds (`:934`, `:974`). So nothing is sent into less than a packet of room,
+  and nothing is shrunk to fit. We filled a window to the byte, sending 71-byte
+  and 718-byte fragments into the tail of it.
+
+Measured on the read_drained harness above, with the link dropping nothing.
+Four runs before the fix: 54 to 262 receive-buffer drops a run, 1 or 2 sender
+timeouts, up to 21KB held behind a self-inflicted gap, delivery in 2.33–3.41s.
+Fourteen runs after: no drops, no timeouts, nothing held behind a gap,
+delivery in 2.158–2.163s.
+
+`TestInFlightBytesSpendThePeersWindow` and
+`TestNothingIsSentIntoLessThanAPacketOfRoom` pin the two halves, and each fails
+with its half disabled. `TestAWidePeerWindowSendsEveryPacket` is their control.
+`TestConformanceWriteIsNotCutToFitPeerWindow` checks the second half against
+libutp directly. The first half cannot be isolated against libutp at
+connection start: libutp's congestion window is one packet there (`:2567`),
+which holds a second packet back whatever the peer advertises. Its first packet
+is also 1452 bytes where ours is 962 (M6), so a window that separates the two
+rules for one implementation does not separate them for the other.
+
+`ConnectionMetrics.RecvBufferDrops` now counts data packets refused for want of
+room, excluding duplicates of packets already held. A non-zero figure on a link
+that drops nothing means a peer sent past the window it was given.
+
+### 2e. Keep-alive fires up to 29 seconds late — found, not fixed
+
+libutp checks `current_ms - last_sent_packet >= KEEPALIVE_INTERVAL` on every
+timeout pass (`utp_internal.cpp:1271-1274`), and embedders run that pass
+often: `utp.h` sets no rate, and this repository's bridge runs it every 50ms. So a keep-alive leaves about 29 seconds after the last packet.
+This library checks the same condition only when a 29-second ticker fires,
+counted from connection start. A connection that goes quiet just after a tick
+fails the check at the next one and waits for the one after: anywhere from 29
+to 58 seconds of silence. The comment at the ticker says it "ticks at the same
+interval", which is true of the ticker's period and not of when the keep-alive
+leaves.
+
+Measured, as the control arm above: 58.21s against 29.70s with the ticker's
+period set to 500ms and nothing else changed. It matters beyond this scenario,
+because 29 seconds was chosen to sit under a 30-second NAT mapping timeout, and
+a keep-alive that can wait 58 seconds does not.
 
 ### 3. No cap on accepted connections — a divergence, not a defect
 

@@ -347,6 +347,9 @@ type connection struct {
 	// lastAdvertisedWindow is the receive window on the last packet this
 	// connection put on the wire. libutp's last_rcv_win. See onReadDrained.
 	lastAdvertisedWindow uint32
+	// recvBufferDrops counts data packets refused because the receive buffer
+	// had no room for them. See ConnectionMetrics.RecvBufferDrops.
+	recvBufferDrops uint64
 	// readDrainedAcks counts the acknowledgements owed because handing bytes
 	// up reopened a window narrower than what is now free. Exposed through
 	// ConnectionMetrics so a test can assert the mechanism ran rather than
@@ -1296,33 +1299,52 @@ func (c *connection) processWrites(now time.Time) {
 	default:
 	}
 
-	// Compose data packets
-	windowSize := minUint32(c.state.SentPackets.Window(), c.effectivePeerWindow(now))
+	// Compose data packets.
+	//
+	// libutp queues a write as packets of up to packet_size and flush_packets
+	// sends the next one while !is_full() (utp_internal.cpp:3197-3212,
+	// :963-985). is_full is called there with no argument, so it charges a
+	// whole packet_size whatever the queued packet actually holds (:933-934),
+	// and refuses when cur_window + packet_size > min(max_window, opt_sndbuf,
+	// max_window_user) (:936, :956). Two things follow, and both used to be
+	// different here:
+	//
+	//   - Bytes in flight count against the peer's window, not only against
+	//     the congestion window. The peer's advertisement is how much it can
+	//     take beyond what it has already acknowledged; everything we have
+	//     sent since is already spending it. Without this we overran a
+	//     receiver's buffer by up to a full window whenever its application
+	//     fell behind, and every packet past its room was dropped and had to
+	//     be retransmitted.
+	//   - Nothing is sent into less than a full packet of room, and a packet
+	//     is never cut down to fit what room there is. We used to fill a
+	//     window to the byte with whatever size fitted.
+	//
+	// opt_sndbuf has no counterpart: our send buffer bounds what the
+	// application may queue, not what may be in flight.
+	packetSize := c.mtu.payloadSize()
+	maxSend := minUint32(c.state.SentPackets.CongestionWindow(), c.effectivePeerWindow(now))
+	inFlight := c.state.SentPackets.BytesInFlight()
 	var payloads [][]byte
+	var composed uint32
 
 	// libutp's `is_full` marks the connection application-limited or not
 	// every time it considers sending a packet (utp_internal.cpp:945, :957),
 	// and the congestion controller refuses to grow a window the application
 	// never fills (:1681-1686). The equivalent signal here is "we had data
-	// and no room for it": either no window at all, or the window ran out
-	// before the send buffer did.
-	windowFull := windowSize == 0 && c.state.SendBuf.Pending() > 0
+	// and no room for it".
+	windowFull := false
 
-	for windowSize > 0 {
-		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-			c.logger.Trace("has window size to send a packet data in sendBuffer", "windowSize", windowSize)
-		}
-		maxDataSize := minUint32(windowSize, c.mtu.payloadSize())
-		data := make([]byte, maxDataSize)
-		n := c.state.SendBuf.Read(data)
-		if n == 0 {
+	for c.state.SendBuf.Pending() > 0 {
+		if uint64(inFlight)+uint64(composed)+uint64(packetSize) > uint64(maxSend) {
+			windowFull = true
 			break
 		}
+		n := minUint32(uint32(c.state.SendBuf.Pending()), packetSize)
+		data := make([]byte, n)
+		n = uint32(c.state.SendBuf.Read(data))
 		payloads = append(payloads, data[:n])
-		windowSize -= uint32(n)
-		if windowSize == 0 && c.state.SendBuf.Pending() > 0 {
-			windowFull = true
-		}
+		composed += n
 	}
 	if windowFull {
 		c.state.SentPackets.OnWindowFull(now)
@@ -1633,6 +1655,7 @@ func (c *connection) sampleMetrics(now time.Time, force bool) {
 	if c.state.RecvBuf != nil {
 		m.RecvBufferPending = c.state.RecvBuf.Pending()
 		m.RecvBufferReadable = c.state.RecvBuf.Readable()
+		m.RecvBufferDrops = c.recvBufferDrops
 	}
 	c.config.Metrics(m)
 }
@@ -2812,6 +2835,7 @@ func (c *connection) onData(seqNum uint16, data []byte) error {
 		if len(data) <= c.state.RecvBuf.Available() {
 			err := c.state.RecvBuf.Write(data, seqNum)
 			if err != nil {
+				c.recvBufferDrops++
 				c.logger.Warn("write data to recv buffer, but available space is not enough",
 					"src.peer", c.cid.Peer, "seqNum", seqNum, "data.len", len(data))
 			}
@@ -2820,6 +2844,9 @@ func (c *connection) onData(seqNum uint16, data []byte) error {
 					"src.peer", c.cid.Peer, "seqNum", seqNum, "data.len", len(data), "nextAckNum", c.state.RecvBuf.AckNum())
 			}
 			return err
+		}
+		if !c.state.RecvBuf.WasWritten(seqNum) {
+			c.recvBufferDrops++
 		}
 	default:
 		// do nothing

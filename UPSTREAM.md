@@ -1483,11 +1483,18 @@ connection, because a window of 861 bytes is not zero but is less than a
 packet — libutp's `rcvwin > last_rcv_win` is right precisely because a window
 too small to use blocks as completely as a closed one.
 
-The end-to-end benefit is **not** claimed. Three network measurements failed to
-hold still, and the cause was found later: the scenario was dominated by a gap
-deadlock in the receive buffer (PR 53), which also retracts the stall-rate
-figures first credited to this change. The rules are pinned by unit tests; a
-clean end-to-end measurement is now possible and has not been taken.
+The end-to-end benefit is now measured, on a scenario cleared of two other
+defects first: the gap deadlock (PR 53), and this fork's sender overrunning the
+peer's window (PR 54). A 32KB receive buffer, 512KB to send, a reader paused
+two seconds, nothing dropped on the link, 10 runs each. With the change the
+transfer finished in 2.158–2.163s. Without it, it finished in 29.698–29.702s,
+with the keep-alive checked every 500ms to approximate libutp, which checks
+it on every timeout pass. The window fell to 176–260
+bytes, which is less than a packet but not zero, so the zero-window probe never
+armed, and the only recovery was the receiver's keep-alive. That was shown by
+moving the keep-alive interval and watching recovery move with it. The
+stall-rate figures first credited to this change are still retracted: they
+were the gap deadlock.
 
 Two things a reviewer should know before touching this area. The zero-window
 probe arms on a window of exactly zero, so any change that turns a zero window
@@ -1565,6 +1572,32 @@ It costs one packet's worth of receive buffer to out-of-order data, and
 `largestPacket` only grows, so an unusually large packet early reserves that
 much for the rest of the connection. Both are bounded by the maximum packet
 size.
+
+## PR 54 — the sender spends the peer's window as libutp does
+
+libutp sends the next queued packet only while
+`cur_window + packet_size <= min(max_window, opt_sndbuf, max_window_user)`:
+that is `is_full()` with no argument, as `flush_packets` calls it
+(`utp_internal.cpp:933-936`, `:956`, `:974`). This fork computed
+`min(cwnd - in_flight, peer_window)`, which differs twice:
+
+- Bytes in flight did not count against the peer's window, so a receiver whose
+  application fell behind was overrun by up to a full window, and every packet
+  past its room was dropped and retransmitted.
+- Packets were cut down to fit the room left, down to tens of bytes. libutp
+  sends nothing into less than a full packet of room.
+
+On a link that dropped nothing, a slow reader's receive buffer refused 54 to
+262 packets a run before the change, with 1 or 2 sender timeouts; after it,
+none and none. The second half is checked against libutp by the conformance
+corpus. The first cannot be isolated against libutp at connection start,
+where libutp's one-packet congestion window hides it, so it is asserted on
+this side by two unit tests, each of which fails with its half disabled.
+
+The controller gains `BytesInFlight` and `CongestionWindow`, the two halves of
+the old `BytesAvailableInWindow` that the rule needs separately. Libutp's
+Nagle check in the same loop is not ported; that is an existing, measured
+deviation.
 
 ## Not for upstream
 
