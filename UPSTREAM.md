@@ -502,6 +502,9 @@ correctly; on IPv4 it is fragmented and acknowledged, so the search settles on
 a size that works but costs fragmentation. And the ceiling is a fixed 1400
 rather than the interface MTU, so a jumbo-frame path is not found.
 
+Since done: the don't-fragment bit is PR 48, and the interface MTU as a ceiling
+is PR 40. The 1400 cap remains, as a recorded deviation.
+
 ## PR 23 — deferred acks
 
 Upstream sends one STATE packet for every ST_DATA packet received. libutp

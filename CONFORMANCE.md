@@ -215,9 +215,15 @@ byte comparison only because both sides do answer such a packet.
 ## Path MTU
 
 Implemented as libutp does it (M6) — a binary search between a 576-byte floor
-and a ceiling, probing with ordinary data packets. What is not matched: probes
-do not carry the don't-fragment bit, and the ceiling is a fixed 1400 rather
-than the interface MTU. Both are in [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
+and a ceiling, probing with ordinary data packets. Probes carry the
+don't-fragment bit where the `Conn` supports it (`utp.DontFragmentWriter`),
+and the ceiling is taken from the interface where the `Conn` can report it
+(`utp.PathMTUProvider`). What is still not matched: the ceiling is capped at
+1400, where libutp takes the interface MTU outright (a recorded deviation, see
+[DEVIATIONS.md](DEVIATIONS.md)); and the search starts at the midpoint, where
+libutp starts at the ceiling (`utp_internal.cpp:2562`), which is explained in
+[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md), M6, but not yet recorded as a
+deviation.
 
 The other half of libutp's MTU handling is the ICMP path, and it is now here
 too: `UtpSocket.ProcessICMPFragmentation` and `UtpSocket.ProcessICMPError`.

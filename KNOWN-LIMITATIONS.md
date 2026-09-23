@@ -954,9 +954,15 @@ below the 1024 this library used before — and grows only once a probe of a
 given size has been acknowledged. An untested path gets a smaller packet than
 it did before this change. A path that drops every probe settles on 576.
 
-Two things libutp does that this does not:
+Two things libutp did that this did not, when this was written. The first is
+now closed and the second partly; what remains of it is recorded as a
+deviation.
 
-- **Probes are not sent with the don't-fragment bit.** libutp passes
+- **~~Probes are not sent with the don't-fragment bit.~~ Closed.** Probes now
+  carry it through the optional `utp.DontFragmentWriter`, implemented for a
+  real UDP socket on Linux, Darwin, the BSDs and Windows (PR 48; "The libutp
+  API surface, audited function by function" in this file). What follows is
+  the original note. libutp passes
   `UTP_UDP_DONTFRAG` for the probe (`utp_internal.cpp:925`). This library
   writes through an abstract `Conn` — a UDP socket in production, an emulated
   link or a scripted transport in tests — and has nowhere to put that flag.
@@ -965,9 +971,13 @@ Two things libutp does that this does not:
   fragmented and acknowledged, so the search settles on a size that works but
   costs fragmentation. That is a performance loss, not a failure, which is why
   it is recorded rather than blocking.
-- **The ceiling is a fixed 1400, not the interface MTU.** libutp asks the
-  socket (`get_udp_mtu`, `:1316`). A fixed conservative ceiling cannot find a
-  jumbo-frame path, and gives up about 6% of a 1500-byte one.
+- **~~The ceiling is a fixed 1400, not the interface MTU.~~ Partly closed.**
+  libutp asks the socket (`get_udp_mtu`, `:1316`). The ceiling is now the
+  smaller of 1400 and what the interface reports, through the optional
+  `utp.PathMTUProvider` (PR 40), so a narrow local link is found before the
+  first packet. 1400 stays as a cap, which is recorded in DEVIATIONS.md ("A
+  discovered path MTU only lowers the ceiling"). So a jumbo-frame path is still
+  not found, and about 6% of a 1500-byte one is still given up.
 
 Measured with discovery, against the fixed 1024 it replaces: +2.1% on the long
 transfer, +11% on reordering, +2.6% on two flows sharing a bottleneck, flat on
@@ -1989,9 +1999,10 @@ what the report is measured to be worth.
 and most VPN and tunnel paths -- and a BitTorrent client on one would stall.
 The reason it is not already a known disaster in the wild is presumably that
 libutp takes its ceiling from the local interface MTU, so the common case is a
-ceiling that already matches the path. This fork uses a fixed 1400 ceiling
-instead, which is recorded in [DEVIATIONS.md](DEVIATIONS.md), and on a tunnelled
-path 1400 is still too big.
+ceiling that already matches the path. This fork caps its ceiling at 1400,
+recorded in [DEVIATIONS.md](DEVIATIONS.md), and lowers it to the interface MTU
+where the `Conn` can report one (below). On a tunnel whose narrow link is not
+the local interface, 1400 can still be too big.
 
 ### Prevented, where the narrow link is the local one
 
