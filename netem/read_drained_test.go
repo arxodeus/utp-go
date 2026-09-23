@@ -127,7 +127,7 @@ func TestReadDrainedRestartsASenderBlockedBySubPacketWindow(t *testing.T) {
 
 	if got != payloadSize {
 		t.Fatalf("delivered %d of %d within %v: the drain did not reopen the "+
-			"sender (without utp_read_drained this takes ~29.7s)", got, payloadSize, budget)
+			"sender (without utp_read_drained this takes ~29.3s, one keep-alive interval)", got, payloadSize, budget)
 	}
 	if reopenAcks == 0 {
 		t.Errorf("delivered, but no acknowledgement was counted as owed to the drain")

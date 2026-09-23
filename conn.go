@@ -663,10 +663,41 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	// checked.
 	// An established connection that has gone quiet still has to say
 	// something occasionally, or a NAT drops its mapping and the peer's own
-	// idle timeout eventually kills it. libutp checks this on every timeout
-	// pass (utp_internal.cpp:1271-1274); this ticks at the same interval.
-	keepAliveTicker := c.timeSource().NewTicker(c.keepAliveIntervalOrDefault())
-	defer keepAliveTicker.Stop()
+	// idle timeout eventually kills it. libutp checks
+	// `current_ms - last_sent_packet >= KEEPALIVE_INTERVAL` on every timeout
+	// pass (utp_internal.cpp:1271-1274), so its keep-alive leaves one
+	// interval after the last packet, to within however often the embedder
+	// runs that pass.
+	//
+	// This is a timer aimed at that instant, re-aimed from lastSentPacket
+	// every time it fires. It used to be a ticker at the interval, counted
+	// from connection start, which checked the same condition but only on
+	// the tick: a connection that went quiet just after one failed the check
+	// at the next and waited for the one after -- up to twice the interval,
+	// 58 seconds where libutp's is 29 and a NAT mapping commonly lasts 30.
+	// Measured: 58.21s against 29.70s. See KNOWN-LIMITATIONS.md, section 2e.
+	keepAliveTimer := c.timeSource().NewTimer(c.keepAliveIntervalOrDefault())
+	defer keepAliveTimer.Stop()
+	onKeepAliveTimer := func() {
+		interval := c.keepAliveIntervalOrDefault()
+		now := c.now()
+		// libutp: `if (state >= CS_CONNECTED && !fin_sent)` and the
+		// connection has been silent for the interval
+		// (utp_internal.cpp:1271-1274).
+		if c.state.stateType == ConnConnected &&
+			(c.state.closing == nil || c.state.closing.LocalFin == nil) &&
+			now.Sub(c.lastSentPacket) >= interval {
+			c.emit(c.keepAlivePacket())
+		}
+		// Aim at the moment the silence will reach the interval. Anything
+		// sent since the timer was armed has moved that later; nothing sent,
+		// or nothing sendable in this state, means one interval from now.
+		next := c.lastSentPacket.Add(interval).Sub(now)
+		if next <= 0 {
+			next = interval
+		}
+		keepAliveTimer.Reset(next)
+	}
 
 	probeTimer := c.timeSource().NewTimer(time.Hour)
 	if !probeTimer.Stop() {
@@ -676,15 +707,6 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	c.armProbeTimer = func(d time.Duration) {
 		if !probeTimer.Stop() {
 			select {
-			case <-keepAliveTicker.C():
-				// libutp: `if (state >= CS_CONNECTED && !fin_sent)` and the
-				// connection has been silent for the interval
-				// (utp_internal.cpp:1271-1274).
-				if c.state.stateType == ConnConnected &&
-					(c.state.closing == nil || c.state.closing.LocalFin == nil) &&
-					c.now().Sub(c.lastSentPacket) >= c.keepAliveIntervalOrDefault() {
-					c.emit(c.keepAlivePacket())
-				}
 			case <-probeTimer.C():
 			default:
 			}
@@ -867,7 +889,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			woke = wakeWritable
 		case wokeTimer = <-c.unackTimeoutCh:
 			woke = wakeRetransmit
-		case <-keepAliveTicker.C():
+		case <-keepAliveTimer.C():
 			woke = wakeKeepAlive
 		case <-probeTimer.C():
 			woke = wakeProbe
@@ -910,14 +932,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			}
 			handleTimeout(wokeTimer)
 		case wakeKeepAlive:
-			// libutp: `if (state >= CS_CONNECTED && !fin_sent)` and the
-			// connection has been silent for the interval
-			// (utp_internal.cpp:1271-1274).
-			if c.state.stateType == ConnConnected &&
-				(c.state.closing == nil || c.state.closing.LocalFin == nil) &&
-				c.now().Sub(c.lastSentPacket) >= c.keepAliveIntervalOrDefault() {
-				c.emit(c.keepAlivePacket())
-			}
+			onKeepAliveTimer()
 		case wakeProbe:
 			// The peer's window has been closed for a whole interval. Let one
 			// packet through, so its acknowledgement carries a fresh window.

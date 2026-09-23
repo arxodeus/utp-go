@@ -1599,6 +1599,25 @@ the old `BytesAvailableInWindow` that the rule needs separately. Libutp's
 Nagle check in the same loop is not ported; that is an existing, measured
 deviation.
 
+## PR 55 — the keep-alive leaves one interval after the last packet
+
+libutp sends a keep-alive when `current_ms - last_sent_packet >=
+KEEPALIVE_INTERVAL` at a timeout pass (`utp_internal.cpp:1271-1274`), so it
+leaves 29 seconds after the last packet. This fork checked the same condition
+only when a 29-second ticker fired, counted from connection start. A
+connection that went quiet just after a tick waited for the tick after next:
+up to 58 seconds, against a NAT mapping that commonly lasts 30.
+
+The ticker becomes a timer aimed at the instant the silence reaches the
+interval, re-aimed from `lastSentPacket` whenever it fires. Measured end to
+end, a connection recovered by a keep-alive went from 58.21s to 29.34-29.36s.
+`TestKeepAliveLeavesOneIntervalAfterTheLastPacket` asserts the instant on a
+virtual clock at the real 29 seconds and fails against the ticker.
+
+It also removes a case from the zero-window probe timer's drain that received
+from the keep-alive ticker. Harmless with a ticker; with a timer it would take
+a firing without re-aiming it and silence the keep-alive for good.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

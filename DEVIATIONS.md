@@ -38,8 +38,8 @@ implemented too -- after two reverts that turned out to rest on a
 misattribution, the hang having been present with the mechanism compiled out --
 and measured: 2.16s against 29.7s for a stalled reader. Measuring it found two
 defects the sweep had missed, both in the sending path: the sender did not
-count bytes in flight against the peer's window (fixed), and the keep-alive can
-leave up to 29 seconds late (not yet fixed). Neither is a deviation; both are
+count bytes in flight against the peer's window, and the keep-alive could
+leave up to 29 seconds late. Both are fixed. Neither was a deviation; both are
 recorded in KNOWN-LIMITATIONS.md.
 
 So: the deviations below are recorded deliberately rather than noticed by

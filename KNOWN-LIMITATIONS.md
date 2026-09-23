@@ -15,7 +15,7 @@ all.
 | **M2** — conformance harness against real libutp | **Partly done.** Corpus comparing emitted packets field by field, including malformed and hostile headers, plus retransmission-schedule and ack-count comparisons measured against libutp on each run; see [CONFORMANCE.md](CONFORMANCE.md). Both roles are covered: `conformance_initiator_corpus_test.go` adds nine curated cases in the dialling role, on the virtual clock, comparing the SYN itself. Ack *latency* is still not compared, for a reason that is not about clocks — see [COMPATIBILITY.md](COMPATIBILITY.md). |
 | **M3** — fix the failing transfer tests | **Done.** Root causes below; gates in "Verification". |
 | **M4** — audit transfer paths against libutp | **Done.** The ack path, the loss-recovery path, the retransmission timers and the send path are all audited against libutp — the timers by measurement rather than by reading, see [CONFORMANCE.md](CONFORMANCE.md). Three findings from the send path below; the packet-size one is deliberately left to M6. |
-| **M4b** — exhaustive libutp compatibility sweep | **Done, and the line-by-line sweep it deferred has since been done too** — see "The M4b sweep" below. It found the clock-drift penalty missing, now implemented and measured, and `utp_read_drained` missing, now implemented after two reverts that rested on a misattributed hang, and measured: a stalled reader's transfer finishes in 2.16s with it against 29.7s under libutp's own behaviour without it. Measuring it found two more defects: our sender overran the peer's window (fixed), and our keep-alive can leave 29 seconds late (not yet fixed). [COMPATIBILITY.md](COMPATIBILITY.md) records every protocol area, the *kind* of evidence behind it — differential, measured, interop, cited, or none — and what is unchecked. Writing it found one defect (an ack per data packet, below), and the largest gap it named — libutp had never been run over the emulated network — has since been closed: `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite, which found two more defects. Both were in the harness, and both made libutp look worse than it is. |
+| **M4b** — exhaustive libutp compatibility sweep | **Done, and the line-by-line sweep it deferred has since been done too** — see "The M4b sweep" below. It found the clock-drift penalty missing, now implemented and measured, and `utp_read_drained` missing, now implemented after two reverts that rested on a misattributed hang, and measured: a stalled reader's transfer finishes in 2.16s with it against 29.7s under libutp's own behaviour without it. Measuring it found two more defects: our sender overran the peer's window (fixed), and our keep-alive could leave 29 seconds late (also fixed). [COMPATIBILITY.md](COMPATIBILITY.md) records every protocol area, the *kind* of evidence behind it — differential, measured, interop, cited, or none — and what is unchecked. Writing it found one defect (an ack per data packet, below), and the largest gap it named — libutp had never been run over the emulated network — has since been closed: `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite, which found two more defects. Both were in the harness, and both made libutp look worse than it is. |
 | **M5** — verify LEDBAT, add LEDBAT++ | **Done.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft, opt-in. Deference measured against a loss-based competitor over a shared bottleneck: classic LEDBAT takes 60% of the link from it, LEDBAT++ takes 44%. See [BENCHMARKS.md](BENCHMARKS.md). |
 | **M6** — MTU path discovery | **Done.** Binary search between a 576-byte floor and a 1400-byte ceiling, probing with ordinary data packets, as libutp does. The ceiling could be raised from 1024 only because discovery makes it safe: an untested path still gets 988 bytes. Probes now carry the don't-fragment bit through `utp.DontFragmentWriter`, implemented for a real UDP socket on Linux, Darwin, the BSDs and Windows without adding a dependency, and compiling everywhere else against a stub. Implementing the bit exposed a second gap, since closed: libutp's duplicate-acknowledgement route to lowering the ceiling (`:1927-1940`) was missing, so a probe dropped for size during a bulk transfer taught the search nothing. With both, the search comes down from 1384 to 996 on a 1000-byte path and fragmentation falls from 3809 datagrams to 32. |
 | **M7** — anacrolix/torrent integration | **Done, with one gap.** `utpnet` presents a uTP socket as `net.PacketConn`/`net.Conn` and satisfies torrent's uTP interface, checked against the real interface by reflection in `integration/anacrolix`. The gap: torrent selects its uTP implementation at build time, so wiring it in needs a `replace` or a patched file — recipes in that module's README. |
@@ -3077,9 +3077,12 @@ each time. A timeline of both ends shows the sender learning of a
 32,768-byte window at 14.01s and the remaining 358KB leaving within 0.18s.
 
 So, in this scenario, the benefit is about 27.5 seconds per stall against
-libutp's own behaviour without the mechanism (approximated by the 500ms arm), and about 56 seconds against this
-library's. The difference between those two control figures is a separate
-defect, recorded in 2e. It applies whenever a slow reader leaves less than a
+libutp's own behaviour without the mechanism (approximated by the 500ms arm).
+Against this library as it then was, it was about 56 seconds. The difference
+between those two control figures was a separate defect, since fixed (2e).
+With that fix, the control arm on the unmodified keep-alive finishes in
+29.34–29.36s (3 runs): one keep-alive interval after the connection went
+quiet, as libutp's would. The benefit applies whenever a slow reader leaves less than a
 packet of window with nothing in flight. A window of exactly zero is bounded by
 the 15-second zero-window probe instead, and that case was not measured here.
 
@@ -3235,22 +3238,46 @@ rules for one implementation does not separate them for the other.
 room, excluding duplicates of packets already held. A non-zero figure on a link
 that drops nothing means a peer sent past the window it was given.
 
-### 2e. Keep-alive fires up to 29 seconds late — found, not fixed
+### 2e. ~~Keep-alive fires up to 29 seconds late~~ — fixed
 
 libutp checks `current_ms - last_sent_packet >= KEEPALIVE_INTERVAL` on every
 timeout pass (`utp_internal.cpp:1271-1274`), and embedders run that pass
-often: `utp.h` sets no rate, and this repository's bridge runs it every 50ms. So a keep-alive leaves about 29 seconds after the last packet.
-This library checks the same condition only when a 29-second ticker fires,
-counted from connection start. A connection that goes quiet just after a tick
-fails the check at the next one and waits for the one after: anywhere from 29
-to 58 seconds of silence. The comment at the ticker says it "ticks at the same
-interval", which is true of the ticker's period and not of when the keep-alive
-leaves.
+often: `utp.h` sets no rate, and this repository's bridge runs it every 50ms.
+So a keep-alive leaves about 29 seconds after the last packet. This library
+checked the same condition only when a 29-second ticker fires,
+counted from connection start. A connection that went quiet just after a tick
+failed the check at the next one and waited for the one after: anywhere from
+29 to 58 seconds of silence. The comment at the ticker said it "ticks at the
+same interval", which was true of the ticker's period and not of when the
+keep-alive left.
 
 Measured, as the control arm above: 58.21s against 29.70s with the ticker's
-period set to 500ms and nothing else changed. It matters beyond this scenario,
+period set to 500ms and nothing else changed. It mattered beyond that scenario,
 because 29 seconds was chosen to sit under a 30-second NAT mapping timeout, and
 a keep-alive that can wait 58 seconds does not.
+
+**The fix** is a timer aimed at the instant the silence reaches the interval,
+re-aimed from `lastSentPacket` each time it fires. Anything sent in between
+moves the instant later; a keep-alive sent resets it to one interval. The
+keep-alive now leaves exactly one interval after the last packet. libutp's
+leaves at the first timeout pass after that, so it can be one embedder tick
+later than ours; this repository's bridge ticks every 50ms.
+
+`TestKeepAliveLeavesOneIntervalAfterTheLastPacket` runs on the virtual clock
+at libutp's 29 seconds. The connection goes quiet 5 seconds in, away from any
+multiple of the interval. The test asserts nothing at 29s less a millisecond
+and one keep-alive at 29s, three times over, with the peer answering each one
+as a live peer would. Against the ticker it fails at the first: nothing at 29
+seconds. The old `TestKeepAlive` could not see the defect, because it gives
+the keep-alive six intervals to turn up.
+
+End to end, the read_drained control arm went from 58.21s to 29.34–29.36s.
+
+The ticker's replacement also dropped a stray case from the zero-window probe
+timer's drain. That `select` received from the keep-alive ticker as well as
+from its own timer, and handled a keep-alive there. With a timer, taking its
+firing there without re-aiming it would silence the keep-alive for good. No
+other drain in the loop touches another timer's channel.
 
 ### 3. No cap on accepted connections — a divergence, not a defect
 
