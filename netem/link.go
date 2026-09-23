@@ -130,6 +130,13 @@ func (l *Link) enqueueWithFlags(payload []byte, src, dst *Endpoint, dontFragment
 	size := len(payload)
 
 	l.mu.Lock()
+	onOffered := l.cfg.OnOffered
+	l.mu.Unlock()
+	if onOffered != nil {
+		onOffered(append([]byte(nil), payload...), now)
+	}
+
+	l.mu.Lock()
 	cfg := l.cfg
 	l.stats.PacketsOffered++
 	l.stats.BytesOffered += uint64(size)

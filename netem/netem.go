@@ -127,6 +127,16 @@ type Config struct {
 	// end to end at all.
 	OnMTUDrop func(payload []byte, src, dst string, linkMTU int)
 
+	// OnOffered, if set, sees every datagram offered to this link, before
+	// anything decides whether it is carried, dropped or delayed, with the
+	// instant it was offered. The payload is a copy.
+	//
+	// It runs on the sender's goroutine with no lock held, and must not
+	// block. It exists so a test can see what a sender puts on the wire and
+	// when -- a retransmission burst is invisible in delivered-packet counts,
+	// because the burst is exactly what a blackout drops.
+	OnOffered func(payload []byte, at time.Time)
+
 	// FragmentOversized makes this link fragment a datagram larger than MTU
 	// and forward it, instead of dropping it -- unless the sender set the
 	// don't-fragment bit, in which case it is dropped as before.

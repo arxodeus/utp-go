@@ -3290,6 +3290,46 @@ from its own timer, and handled a keep-alive there. With a timer, taking its
 firing there without re-aiming it would silence the keep-alive for good. No
 other drain in the loop touches another timer's channel.
 
+### 2f. A retransmission timeout resends the whole window — found, not fixed
+
+libutp, on a retransmission timeout, marks every packet in flight
+`need_resend`, stops counting its bytes in `cur_window`, and resends only the
+oldest (`utp_internal.cpp:1230-1252`). The rest wait for `flush_packets`,
+which sends them oldest first and only while `is_full()` allows, against a
+congestion window the timeout has just cut to one packet (`:1225`). Each is
+counted in flight again when it is resent (`:878`).
+
+This library arms a timer per packet and resends each one as its timer fires,
+with no window check. Its in-flight count never drops a lost packet either:
+the only loss call passes `retransmitting=true`, which leaves the bytes
+counted. And only the timers that fire after the new, doubled deadline count
+as a timeout. The rest were armed at the old value, so the window is resent
+again an undoubled interval later.
+
+Measured with `netem.TestRTOBurstMeasure` (opt-in:
+`UTP_RTO_BURST_MEASURE=1`). A 16MB transfer over a 10ms, 20 Mb/s link, the
+data direction blacked out for 3 seconds from 1 second in, and the receiver
+ours in both runs. Data packets the sender offered during the blackout,
+three runs each:
+
+| | libutp sending | this library sending |
+| --- | --- | --- |
+| first timeout | 1 packet, the oldest (at 2.0–2.5s) | the whole window, 75 packets, out of order (at ~2.0s) |
+| ~1s later | nothing | 48–66 packets again |
+
+On a path that is congested or down, that is the opposite of what a timeout is
+for. The comment above `onTimeout`'s resend cites libutp marking every packet
+`need_resend` as the reason to resend them all, which conflates marking with
+sending. That comment also records why the obvious fix is not safe on its own:
+an earlier change that skipped the sibling resends left holes fast retransmit
+could not fill, and the 5%-loss benchmark stopped completing. libutp fills
+those holes from the marked set as the window regrows, and a fix has to do the
+same.
+
+A third difference, not investigated: our first timeout came about 1.0s after
+the last send, libutp's after 1.0–1.46s. It may be only different RTT
+estimates.
+
 ### 3. No cap on accepted connections — a divergence, not a defect
 
 libutp refuses a new incoming connection when the context already holds more
