@@ -3027,16 +3027,24 @@ Two things were genuinely wrong with the earlier attempts, and both are fixed:
   small to use blocks exactly as a closed one does.
 
 **What is not claimed.** Three attempts at a stable network measurement of the
-end-to-end benefit failed, and the honest reason is that the model of the
-receive path they were built on was wrong each time. The window does not
-reopen while the reader is paused, even with the mechanism and a 100-slot read
-queue that should be able to absorb the whole buffer; the traces show it
-coming off zero and returning, and the reason has not been established. So
-what is measured is the stall rate above, and the rules are pinned by unit
-tests — that growth owes an acknowledgement, that no growth owes none, that
-861 bytes counts as growth, and that `lastAdvertisedWindow` follows the packet
-actually sent. The network claim is absent rather than asserted on a
-measurement that would not hold still.
+end-to-end benefit failed. When this was written the reason was unknown: the
+window would not reopen while the reader was paused, even with a 100-slot read
+queue that should have absorbed the whole buffer.
+
+**The reason has since been found, and it was not this mechanism.** The buffer
+was full of data held behind a gap — `readable 0` — so there was nothing for
+any drain to hand up and no window for this mechanism to report; see 2c. That
+also retracts the stall-rate credit given above: the 4-in-20 and 1-in-20
+figures were the gap deadlock, and at twenty samples they are one rate, as 2c
+records. This mechanism did not measurably reduce that stall and should not
+be said to.
+
+So its end-to-end benefit remains **unmeasured**, and the rules are pinned by
+unit tests — that growth owes an acknowledgement, that no growth owes none,
+that 861 bytes counts as growth, and that `lastAdvertisedWindow` follows the
+packet actually sent. With the gap deadlock fixed, the scenario that kept
+failing is no longer dominated by it, and a clean measurement is now possible
+for the first time. It has not been taken.
 
 ### 2b. ~~Out-of-order data shrinks our receive window and not libutp's~~ — fixed
 

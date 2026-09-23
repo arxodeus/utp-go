@@ -1484,8 +1484,10 @@ packet — libutp's `rcvwin > last_rcv_win` is right precisely because a window
 too small to use blocks as completely as a closed one.
 
 The end-to-end benefit is **not** claimed. Three network measurements failed to
-hold still and the model they were built on was wrong each time; the rules are
-pinned by unit tests and the stall rate is the measurement that survived.
+hold still, and the cause was found later: the scenario was dominated by a gap
+deadlock in the receive buffer (PR 53), which also retracts the stall-rate
+figures first credited to this change. The rules are pinned by unit tests; a
+clean end-to-end measurement is now possible and has not been taken.
 
 Two things a reviewer should know before touching this area. The zero-window
 probe arms on a window of exactly zero, so any change that turns a zero window

@@ -7,7 +7,9 @@ import (
 // utp_read_drained, at the level where its rules can be stated exactly.
 //
 // The end-to-end behaviour of this mechanism resisted three attempts at a
-// stable network measurement, for reasons written up in KNOWN-LIMITATIONS.md.
+// stable network measurement. The cause turned out to be elsewhere -- a gap
+// deadlock in the receive buffer, since fixed -- which dominated the scenario
+// those measurements used. See KNOWN-LIMITATIONS.md.
 // What is testable without that is the rule itself: when handing bytes up
 // reopens a window narrower than what is now free, the peer is owed an
 // acknowledgement -- and when it does not, no extra acknowledgement is sent,
