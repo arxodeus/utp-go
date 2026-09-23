@@ -3290,7 +3290,7 @@ from its own timer, and handled a keep-alive there. With a timer, taking its
 firing there without re-aiming it would silence the keep-alive for good. No
 other drain in the loop touches another timer's channel.
 
-### 2f. A retransmission timeout resends the whole window — found, not fixed
+### 2f. ~~A retransmission timeout resends the whole window~~ — fixed
 
 libutp, on a retransmission timeout, marks every packet in flight
 `need_resend`, stops counting its bytes in `cur_window`, and resends only the
@@ -3326,7 +3326,76 @@ could not fill, and the 5%-loss benchmark stopped completing. libutp fills
 those holes from the marked set as the window regrows, and a fix has to do the
 same.
 
-A third difference, not investigated: our first timeout came about 1.0s after
+**The fix** is libutp's, in three parts:
+
+- At the timeout, every packet in flight is marked to be resent and stops
+  counting in flight (`sentPackets.MarkAllForResend`, and the controller's
+  `MarkForResend`), and only the oldest is resent. A marked packet counts
+  again when it is resent, and its acknowledgement does not subtract it twice
+  (`:877-881`, `:1390-1396`).
+- Another packet's timer firing before the connection's deadline resends
+  nothing. It re-arms against the deadline, which is what libutp's single
+  `rto_timeout` amounts to.
+- The marked packets come back two ways, as in libutp. `processWrites` sends
+  them oldest first, ahead of any new data and under the same window rule
+  (`flush_packets`, `:970-985`). And libutp's fast-timeout retry, which this
+  library did not have, resends the oldest on each acknowledgement that
+  leaves it next in line (`fast_timeout`, `:1247`, `:2256-2282`).
+
+`TestRetransmissionTimeoutResendsOnlyTheOldest` pins it on the virtual clock,
+with three packets in flight and nothing acknowledged. Exactly one packet, the
+oldest, goes at the timeout, and nothing more before the next deadline. The
+acknowledgement for it brings the rest back first, in order, before any new
+data. A second variant sends that acknowledgement with less than a packet of
+window, so only the fast-timeout retry can send anything. Each part fails on
+its own when disabled: the old `conn.go` sends several packets at the timeout;
+without the fast-timeout retry nothing comes back through the narrow window;
+without the resend loop new data goes out ahead of an owed packet.
+
+On the blackout above, after the fix: one packet, the oldest, at 2.04–2.06s,
+and nothing more (two runs), as libutp.
+
+**What it costs, measured, and how not to measure it.** The first comparison
+ran the lossy benchmark profiles seven times on each side and showed LEDBAT++
+at 1% loss falling from 2.14 to 1.46 Mb/s with ranges that did not overlap.
+That was not the fix. A profile's seed fixes which packets the emulator drops,
+*as long as the sender offers the same packets in the same order*. The fix
+changes what is sent at the first timeout, and every later loss then lands on
+different packets. Timelines of one run each confirm it: identical up to the
+timeout at 3.68s, different afterwards. Seven repeats of one seed are one loss
+pattern, not seven samples. `UTP_BENCHMARK_SEED` now overrides a profile's
+seed so the comparison can sweep it.
+
+Twelve seeds, one run each per side, paired by seed (geometric mean of the
+per-seed ratio, and how many seeds the fix won):
+
+| profile | LEDBAT | LEDBAT++ |
+| --- | --- | --- |
+| LAN, no loss | 0.997 (6/12) | 0.998 (5/12) |
+| 1% loss | 1.002 (5/12) | 0.977 (6/12) |
+| 5% loss | **0.943** (4/12); timeouts 32 → 47 | **0.826** (2/12); timeouts 77 → 155 |
+| 16KB queue | 0.991 (4/12) | 1.053 (6/12) |
+
+No measurable change except at 5% loss. There it costs about 6% under classic
+LEDBAT, the default, and about 17% under LEDBAT++. The cause was traced rather
+than assumed. On two seeds of LEDBAT++ at 5%, 15 of 22 and 18 of 19 timeouts
+were for a packet already resent after the previous timeout, whose resend or
+its acknowledgement was lost again. After a timeout there are only one or two
+packets in flight, too few for fast retransmit, which needs three later
+packets acknowledged. So only another timeout, with the backoff doubled,
+recovers it. The old code sidestepped that by resending the whole window,
+which drew enough selective acknowledgements to fast retransmit the lost
+resend. The burst was the cost of that, and it is the behaviour removed here.
+
+libutp is more exposed to this than we are, not less: its post-timeout window
+is one packet (`:1225`), where ours cannot fall below two
+(`minWindowSizeBytes`, an unrecorded difference found during the parity
+review). Against real libutp as sender, on the same 5%-loss link, the same
+twelve seeds and the same receiver, classic LEDBAT only: libutp 1.27 Mb/s
+median, this library 1.69 before the fix and 1.68 after (1.28 and 1.22 times
+libutp, geometric mean).
+
+Not investigated: our first timeout came about 1.0s after
 the last send, libutp's after 1.0–1.46s. It may be only different RTT
 estimates.
 

@@ -37,6 +37,28 @@ That also means the loss rows in the historical tables below are not
 comparable with the ones above: they were measured on the shorter profiles,
 and were mostly reporting how one RTO happened to fall.
 
+**A fixed seed is one loss pattern, and it is only the same pattern for the
+same sender.** The seed decides which offered packets are dropped, in the order
+they are offered. Change what the sender puts on the wire -- a different
+retransmission, one packet more or less at some instant -- and every later
+loss lands on different packets. Repeats on one seed are then samples of one
+pattern, not of the sender. Comparing two versions of the library this way
+compares two patterns as much as two implementations. It did exactly that
+once: LEDBAT++ at 1% loss looked 32% slower after the retransmission-timeout
+fix, with ranges that did not overlap, and across twelve seeds it was 2%
+(KNOWN-LIMITATIONS.md, 2f). To compare versions, sweep the seed:
+
+```sh
+for seed in $(seq 1 12); do
+  UTP_BENCHMARK_SEED=$seed UTP_BENCHMARK_REPEATS=1 go test ./netem -run 'TestBenchmarkSuite/.*/Broadband,_5%_loss$' -v
+done
+```
+
+**The tables below predate that fix.** Measured across twelve seeds, it changes
+nothing outside the 5%-loss profile, and costs about 6% there under classic
+LEDBAT and about 17% under LEDBAT++. The 5%-loss rows have not been
+regenerated since.
+
 Two columns describe queueing, and they are not the same thing:
 
 - **`standing queue p50`** is the round trip above the lowest round trip this

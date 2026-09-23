@@ -29,6 +29,10 @@ type sentPacket struct {
 	transmission   time.Time
 	retransmission time.Time
 	acks           []time.Time
+	// needResend is libutp's need_resend: given up as lost by a
+	// retransmission timeout and waiting to be sent again. See
+	// MarkAllForResend.
+	needResend bool
 }
 
 func (s *sentPacket) rtt(now time.Time) time.Duration {
@@ -262,6 +266,9 @@ func (s *sentPackets) OnTransmit(
 	if index < len(s.packets) {
 		// Update existing packet
 		s.packets[index].retransmission = now
+		// Sent again, so no longer waiting to be: libutp clears need_resend
+		// in send_packet (utp_internal.cpp:881).
+		s.packets[index].needResend = false
 	} else {
 		// Create new packet
 		sent := &sentPacket{
@@ -571,6 +578,58 @@ func (s *sentPackets) Outstanding(seqNum uint16) bool {
 		return false
 	}
 	return len(s.packets[i].acks) == 0
+}
+
+// MarkAllForResend gives up every packet still outstanding as lost, as libutp
+// does on a retransmission timeout: "every packet should be considered lost"
+// (utp_internal.cpp:1230-1237). Each is flagged to be sent again and stops
+// counting in flight. Nothing is sent here: the caller resends the oldest,
+// and the rest go out oldest first as the window allows -- see
+// NextNeedingResend.
+func (s *sentPackets) MarkAllForResend() {
+	first, err := s.FirstUnackedSeqNum()
+	if err != nil {
+		return
+	}
+	for i := s.SeqNumIndex(first); i >= 0 && i < len(s.packets); i++ {
+		pkt := s.packets[i]
+		if len(pkt.acks) != 0 || pkt.needResend {
+			continue
+		}
+		pkt.needResend = true
+		s.congestionCtrl.MarkForResend(pkt.seqNum)
+	}
+}
+
+// NextNeedingResend is the oldest outstanding packet waiting to be sent again
+// after a retransmission timeout, if any. libutp's flush_packets walks the
+// same packets in the same order (utp_internal.cpp:970-985).
+func (s *sentPackets) NextNeedingResend() (*sentPacket, bool) {
+	first, err := s.FirstUnackedSeqNum()
+	if err != nil {
+		return nil, false
+	}
+	for i := s.SeqNumIndex(first); i >= 0 && i < len(s.packets); i++ {
+		pkt := s.packets[i]
+		if pkt.needResend && len(pkt.acks) == 0 {
+			return pkt, true
+		}
+	}
+	return nil, false
+}
+
+// OldestOutstanding is the packet a retransmission timeout resends: libutp's
+// `outbuf.get(seq_nr - cur_window_packets)` (utp_internal.cpp:1249).
+func (s *sentPackets) OldestOutstanding() (*sentPacket, bool) {
+	first, err := s.FirstUnackedSeqNum()
+	if err != nil {
+		return nil, false
+	}
+	i := s.SeqNumIndex(first)
+	if i < 0 || i >= len(s.packets) {
+		return nil, false
+	}
+	return s.packets[i], true
 }
 
 func (s *sentPackets) FirstUnackedSeqNum() (uint16, error) {

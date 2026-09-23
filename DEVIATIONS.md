@@ -570,6 +570,27 @@ Linux the usual source is `IP_RECVERR` on the UDP socket.
 This is not a deviation; it is recorded here because the capability is easy to
 mistake for automatic.
 
+## A selective ack does not restart the retransmission timeout
+
+libutp restarts `rto_timeout` in `ack_packet` (`utp_internal.cpp:1388-1389`),
+which runs for every newly acknowledged packet: the cumulative acknowledgement
+(`:2195`) and each packet a selective ack covers (`:1529`). Here only the
+cumulative acknowledgement restarts it. A packet acknowledged selectively
+cancels its own timer but leaves the connection's deadline where it was.
+
+**Why.** Adopting libutp's rule was measured, and it was slower. Twelve seeds
+of the 5%-loss profile under classic LEDBAT, with the retransmission-timeout
+fix in KNOWN-LIMITATIONS.md 2f in place, each compared with the code before
+that fix on the same seed. Without libutp's rule, 0.943 of the old throughput
+(geometric mean); with it, 0.883, and a median of 1.59 Mb/s against 1.70.
+LEDBAT++ was no better with it either. Against real libutp on the same links
+and seeds (1.27 Mb/s median), both variants are faster, so this is not a case
+where matching libutp would have brought us to libutp.
+
+The likely reason, not separately measured: at 5% loss the holes that fast
+retransmit cannot fill are recovered only by the timeout, and a deadline that
+every selective ack pushes back fires later for them.
+
 ## Inherited notes that claim consistency with the reference
 
 Two comments in `conn.go` describe behaviour as matching the reference

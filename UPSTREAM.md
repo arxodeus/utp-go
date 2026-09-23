@@ -1621,6 +1621,39 @@ It also removes a case from the zero-window probe timer's drain that received
 from the keep-alive ticker. Harmless with a ticker; with a timer it would take
 a firing without re-aiming it and silence the keep-alive for good.
 
+## PR 56 — a retransmission timeout resends one packet, not the window
+
+libutp, on a retransmission timeout, marks every packet in flight
+`need_resend`, stops counting its bytes in flight, and resends only the oldest
+(`utp_internal.cpp:1230-1252`). The rest come back oldest first from
+`flush_packets` under a congestion window just cut to one packet, or one per
+acknowledgement through the fast-timeout retry (`:2256-2282`). This fork
+resent every packet whose own timer fired, without a window check. On a link
+blacked out for three seconds that was the whole window, 75 packets, at the
+timeout, and most of it again a second later, because only the first callback
+counted as a timeout and the backoff did not double for the rest. libutp sent
+one packet.
+
+The change is the need-resend flag in `sentPackets` and the controller, a
+single resend at the timeout, callbacks before the deadline re-arming instead
+of resending, marked packets sent ahead of new data in `processWrites`, and
+libutp's fast-timeout retry, which this fork did not have at all.
+`TestRetransmissionTimeoutResendsOnlyTheOldest` covers each part, and each
+part fails it on its own when disabled.
+
+Measured across twelve seeds, paired, because a fixed benchmark seed stops
+being one loss pattern once the sender changes what it sends: no change on
+LAN, at 1% loss or with a shallow queue. At 5% loss it costs about 6% under
+classic LEDBAT and 17% under LEDBAT++, traced to consecutive timeouts on a
+resend lost again with too few packets in flight for fast retransmit. The old
+burst avoided that, and the burst is what is being removed. Against real libutp
+on the same 5%-loss links the fork is still faster: 1.68 Mb/s median against
+libutp's 1.27.
+
+Reviewers should know that restarting the deadline on selective acks, as
+libutp does, was tried alongside and measured slower (0.883 of the old
+throughput against 0.943). It is recorded as a deviation rather than adopted.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

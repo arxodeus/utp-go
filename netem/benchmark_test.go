@@ -240,7 +240,7 @@ func TestBenchmarkSuite(t *testing.T) {
 // it achieved.
 func runProfileOnce(t *testing.T, profile linkProfile, algo utp.CongestionAlgorithm) (*TransferResult, Summary) {
 	t.Helper()
-	n := NewNetwork(profile.seed)
+	n := NewNetwork(benchmarkSeed(profile.seed))
 	defer n.Close()
 	a := n.MustAddEndpoint("sender")
 	b := n.MustAddEndpoint("receiver")
@@ -337,4 +337,21 @@ func runTwoFlowBottleneck(t *testing.T, seed int64, algo utp.CongestionAlgorithm
 		rates = append(rates, float64(out.res.Goodput.Bps()))
 	}
 	return FairnessIndex(rates), throughputs
+}
+
+// benchmarkSeed is the profile's seed, or UTP_BENCHMARK_SEED when set.
+//
+// A profile's seed fixes which packets the emulator drops, so every repeat of
+// a profile sees the same loss pattern -- as long as the sender offers the
+// same packets in the same order. A change to what the sender puts on the
+// wire moves every later loss onto different packets, and a comparison of
+// two implementations on one seed is then partly a comparison of two loss
+// patterns. Sweeping the seed is how to separate them.
+func benchmarkSeed(profileSeed int64) int64 {
+	if v := os.Getenv("UTP_BENCHMARK_SEED"); v != "" {
+		if seed, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return seed
+		}
+	}
+	return profileSeed
 }

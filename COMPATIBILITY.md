@@ -75,7 +75,7 @@ than "verified".
 
 | Area | Evidence | Notes |
 | --- | --- | --- |
-| Data retransmission schedule | **Measured** | 1x, 3x, 7x, 15x its 1000ms floor. Ours matches for a single packet. **With a window in flight it does not:** at a timeout libutp resends only the oldest packet and lets the rest follow under the congestion window; we resend the whole window at once, and again an undoubled interval later. Measured, not fixed: KNOWN-LIMITATIONS.md, section 2f |
+| Data retransmission schedule | **Measured** | 1x, 3x, 7x, 15x its 1000ms floor. Ours matches. With a window in flight it did not: we resent the whole window at a timeout, and again an undoubled interval later. Now libutp's: the oldest at the timeout, the rest oldest first under the window or one per acknowledgement through the fast-timeout retry, which was missing. `TestRetransmissionTimeoutResendsOnlyTheOldest`; the blackout measurement shows one packet at the timeout on both sides. Costs about 6% at 5% loss (classic LEDBAT, 12 seeds), still faster than libutp there: KNOWN-LIMITATIONS.md, section 2f |
 | Retransmission timeout computation | Cited | `rto = max(rtt + rtt_var*4, 1000)`, `:1380` |
 | Fast retransmit threshold and cap | Cited | Three duplicate acks, at most four packets per ack, `:1538`, `:1605-1606` |
 | `fast_resend_seq_nr` | Cited | Was absent; one packet was resent up to 16 extra times |

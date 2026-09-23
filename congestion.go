@@ -56,6 +56,11 @@ type packetRecord struct {
 	SizeBytes        uint32
 	NumTransmissions uint32
 	Acked            bool
+	// NeedResend is libutp's need_resend: the packet was given up as lost
+	// and its bytes no longer count in flight. Resending it counts them
+	// again (utp_internal.cpp:877-881); acknowledging it does not subtract
+	// them a second time (:1390-1396).
+	NeedResend bool
 }
 
 type Ack struct {
@@ -127,6 +132,11 @@ type Controller interface {
 	BytesInFlight() uint32
 	// CongestionWindow is libutp's max_window.
 	CongestionWindow() uint32
+	// MarkForResend gives a packet up as lost: its bytes stop counting in
+	// flight until it is sent again. libutp does this to every packet in
+	// flight on a retransmission timeout (utp_internal.cpp:1230-1237). A
+	// packet already acknowledged or already marked is left alone.
+	MarkForResend(seqNum uint16)
 	// Stats returns a snapshot of the controller's internal state.
 	//
 	// It exists so a test harness can plot the congestion window and RTT
@@ -397,6 +407,17 @@ func (c *defaultController) CongestionWindow() uint32 {
 	return c.maxWindowSizeBytes
 }
 
+func (c *defaultController) MarkForResend(seqNum uint16) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	packetInst, exists := c.transmissions[seqNum]
+	if !exists || packetInst.Acked || packetInst.NeedResend {
+		return
+	}
+	packetInst.NeedResend = true
+	c.windowSizeBytes -= packetInst.SizeBytes
+}
+
 func (c *defaultController) OnTransmit(seqNum uint16, transmission Transmit, dataLen uint32) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -419,6 +440,15 @@ func (c *defaultController) OnTransmit(seqNum uint16, transmission Transmit, dat
 			return ErrUnknownSeqNum
 		}
 		packetInst.NumTransmissions++
+		// A packet given up as lost counts in flight again once it is
+		// resent: `if (pkt->transmissions == 0 || pkt->need_resend)
+		// cur_window += pkt->payload` (utp_internal.cpp:877-881). Not
+		// window-checked, as libutp's send_packet is not: the caller has
+		// already decided it may go.
+		if packetInst.NeedResend {
+			packetInst.NeedResend = false
+			c.windowSizeBytes += packetInst.SizeBytes
+		}
 	}
 	if packetInst.NumTransmissions == 1 {
 		if c.windowSizeBytes+packetInst.SizeBytes > c.maxWindowSizeBytes {
@@ -459,7 +489,12 @@ func (c *defaultController) OnAck(seqNum uint16, ack Ack) error {
 		c.applyCongestionControl(baseDelayMicros, packetDelayMicros, packetInst.SizeBytes, ack.RTT, ack.ReceivedAt)
 	}
 
-	c.windowSizeBytes -= packetInst.SizeBytes
+	// "if need_resend is set, this packet has already been considered
+	// timed-out, and is not included in the cur_window anymore"
+	// (utp_internal.cpp:1390-1396).
+	if !packetInst.NeedResend {
+		c.windowSizeBytes -= packetInst.SizeBytes
+	}
 
 	// Only unretransmitted packets update the RTT estimate: an ack for a
 	// packet sent more than once cannot be attributed to a particular
@@ -528,7 +563,8 @@ func (c *defaultController) OnLostPacket(seqNum uint16, retransmitting bool, now
 		}
 	}
 
-	if !retransmitting {
+	if !retransmitting && !packetInst.NeedResend {
+		packetInst.NeedResend = true
 		c.windowSizeBytes -= packetInst.SizeBytes
 	}
 

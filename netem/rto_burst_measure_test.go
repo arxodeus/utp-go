@@ -22,18 +22,23 @@ import (
 // link during the blackout is logged, grouped into bursts. The receiver is
 // ours in both modes; only the sender differs.
 //
-// Observed, three runs each (see KNOWN-LIMITATIONS.md):
+// Observed (see KNOWN-LIMITATIONS.md, section 2f):
 //
-//	libutp: one packet at the timeout (2.0-2.5s) -- the oldest -- and
-//	        nothing more before the blackout ends.
-//	ours:   the whole window, 75 packets, at ~2.0s, out of order; then
-//	        48-66 of them again at ~3.0s, without the backoff doubling.
+//	libutp:        one packet at the timeout (2.0-2.5s) -- the oldest -- and
+//	               nothing more before the blackout ends.
+//	ours, before:  the whole window, 75 packets, at ~2.0s, out of order;
+//	               then 48-66 of them again at ~3.0s, without the backoff
+//	               doubling. Three runs.
+//	ours, after:   one packet, the oldest, at 2.04-2.06s, and nothing more.
+//	               Two runs.
 //
 // libutp marks every packet in flight need_resend and resends only the
 // oldest (utp_internal.cpp:1230-1252); the rest wait for flush_packets and
-// the congestion window. Not yet fixed. This is a measurement, not an
-// assertion, and it takes about 25 seconds, so it runs only when
-// UTP_RTO_BURST_MEASURE is set.
+// the congestion window, or come back one per acknowledgement through the
+// fast-timeout retry. The regression test for that is
+// TestRetransmissionTimeoutResendsOnlyTheOldest, which is deterministic. This
+// is the measurement behind it, and it takes about 25 seconds, so it runs
+// only when UTP_RTO_BURST_MEASURE is set.
 func TestRTOBurstMeasure(t *testing.T) {
 	if os.Getenv("UTP_RTO_BURST_MEASURE") == "" {
 		t.Skip("measurement; set UTP_RTO_BURST_MEASURE=1 to run")

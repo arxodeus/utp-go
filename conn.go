@@ -405,6 +405,14 @@ type connection struct {
 	// conformance_timing_test.go.
 	rtoDeadline time.Time
 
+	// fastTimeout is libutp's fast_timeout (utp_internal.cpp:444): set by a
+	// retransmission timeout (:1247), it makes each acknowledgement that
+	// leaves the oldest outstanding packet next in line for a fast resend
+	// send that packet again at once (:2256-2282). It is how the packets a
+	// timeout gave up as lost come back one per round trip, rather than all
+	// at the timeout. See onFastTimeout.
+	fastTimeout bool
+
 	// synTimeout is the current retransmission timeout for the SYN, doubled
 	// on each attempt. libutp calls this retransmit_timeout.
 	synTimeout    time.Duration
@@ -1339,6 +1347,25 @@ func (c *connection) processWrites(now time.Time) {
 	// application may queue, not what may be in flight.
 	packetSize := c.mtu.payloadSize()
 	maxSend := minUint32(c.state.SentPackets.CongestionWindow(), c.effectivePeerWindow(now))
+
+	// Packets a retransmission timeout gave up as lost go first, oldest
+	// first, under the same rule as new data. libutp's flush_packets walks
+	// its outgoing buffer from the oldest packet and sends each one that is
+	// unsent or need_resend while !is_full() (utp_internal.cpp:970-985), so
+	// a resend always precedes the new data behind it.
+	resendsWaiting := false
+	for {
+		pkt, ok := c.state.SentPackets.NextNeedingResend()
+		if !ok {
+			break
+		}
+		if uint64(c.state.SentPackets.BytesInFlight())+uint64(packetSize) > uint64(maxSend) {
+			// No room even for what is owed; new data waits behind it.
+			resendsWaiting = true
+			break
+		}
+		c.resendSentPacket(pkt, now)
+	}
 	inFlight := c.state.SentPackets.BytesInFlight()
 	var payloads [][]byte
 	var composed uint32
@@ -1348,9 +1375,9 @@ func (c *connection) processWrites(now time.Time) {
 	// and the congestion controller refuses to grow a window the application
 	// never fills (:1681-1686). The equivalent signal here is "we had data
 	// and no room for it".
-	windowFull := false
+	windowFull := resendsWaiting
 
-	for c.state.SendBuf.Pending() > 0 {
+	for !resendsWaiting && c.state.SendBuf.Pending() > 0 {
 		if uint64(inFlight)+uint64(composed)+uint64(packetSize) > uint64(maxSend) {
 			windowFull = true
 			break
@@ -1835,40 +1862,35 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 			return
 		}
 
-		// One timeout event per RTO expiry, measured against the clock.
+		// One timeout per RTO expiry, measured against the clock, and one
+		// packet resent for it.
 		//
-		// This connection arms one timer per outstanding packet, and the
-		// wheel that fires them has a resolution of its own, so a callback
-		// arriving is not by itself evidence that the retransmission timeout
-		// has elapsed. libutp asks the clock: `current_ms - rto_timeout >= 0`
-		// (utp_internal.cpp:1147-1148). So does this.
+		// libutp keeps a single deadline per connection and acts only when
+		// `current_ms - rto_timeout >= 0` (utp_internal.cpp:1147-1148). Then
+		// it marks every packet in flight need_resend, which takes their bytes
+		// out of cur_window, and resends only the oldest (:1230-1252). The
+		// rest go out oldest first from flush_packets, as the congestion
+		// window -- which the timeout has just cut to one packet (:1225) --
+		// allows, or one per acknowledgement through the fast-timeout path
+		// (:2256-2282).
 		//
-		// The guard it replaces compared the time since the *last* timeout
-		// against the current RTO, which is a different question and gave a
-		// different answer: after a timeout doubled the RTO, the next
-		// expiry arrived exactly one (old) RTO later, which is not more than
-		// the new one -- so it was not counted, the backoff did not double,
-		// and the packet was resent anyway. The result was two
-		// retransmissions per RTO value instead of one. Measured against
-		// libutp with a 50ms floor: ours resent at 29, 128, 231, 429, 629,
-		// 1030, 1430 ms where libutp resends at 50, 150, 350, 750 ms.
-		// The *backoff* happens once per expiry; the retransmission happens
-		// for every packet whose timer fired.
+		// This connection arms a timer per packet, so an expiry arrives as
+		// several callbacks. It used to resend every packet whose callback
+		// came, on the reasoning that libutp "marks every outstanding packet
+		// need_resend". Marking is not sending. Measured with the data
+		// direction blacked out for three seconds (netem.TestRTOBurstMeasure):
+		// libutp resent one packet at the timeout; this resent its whole
+		// window, 75 packets, and most of them again a second later, because
+		// the callbacks after the first were measured against the old
+		// deadline and never counted as a timeout. On a path that is
+		// congested or down, that is the opposite of what a timeout is for.
 		//
-		// That split matters, and getting it wrong cost a benchmark run to
-		// discover. An earlier attempt returned without retransmitting when
-		// the deadline had not passed, on the theory that only one callback
-		// per expiry is a real timeout. It is -- but the others are still
-		// packets that need resending: libutp marks every outstanding packet
-		// need_resend on an RTO (utp_internal.cpp:1230-1237). Skipping them
-		// left holes that fast retransmit could not fill, and the 5%-loss
-		// benchmark stopped completing at all.
-		//
-		// Earliness is not this check's job either. The wheel guarantees it
-		// now: an item is never fired before its delay (see timeWheel.put),
-		// which is what a retransmission timer has to promise, because
-		// resending before the timeout resends a packet the peer was still
-		// going to acknowledge.
+		// An earlier attempt at this went wrong the other way: it skipped the
+		// other callbacks' resends and nothing replaced them, which left holes
+		// fast retransmit could not fill, and the 5%-loss benchmark stopped
+		// completing. What replaces them here is libutp's own two routes:
+		// processWrites resends marked packets ahead of new data, and
+		// fastTimeout resends the oldest on each acknowledgement.
 		now := c.now()
 
 		// A retransmission timeout on the MTU probe, with nothing else
@@ -1889,77 +1911,60 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 			return
 		}
 
-		// A callback that arrived before the retransmission timeout has
-		// actually elapsed, with nothing else outstanding, is the wheel
-		// running ahead of the clock rather than a timeout. Wait out the
-		// remainder instead of resending.
-		//
-		// The wheel counts ticks, not time. Its `put` places an item so that
-		// it fires a whole number of ticks away and never early *in ticks*,
-		// which is what its comment promises -- but under scheduling pressure
-		// the wheel's goroutine is descheduled past a tick and processes the
-		// pending one immediately on resume, so eight ticks can pass in
-		// slightly under eight intervals of wall clock. Measured: a 200ms
-		// timer delivered at 198.6ms.
-		//
-		// libutp cannot do this. It re-reads the clock and acts only when
-		// `current_ms - rto_timeout >= 0` (utp_internal.cpp:1147-1148); an
-		// early wake-up does nothing at all. Here the backoff was already
-		// guarded that way, but the resend below it was not, so an early
-		// callback resent the packet and re-armed at the *undoubled* RTO.
-		// The schedule then ran 1, 2, 4, 8, 16 times the floor instead of
-		// libutp's 1, 3, 7, 15 -- one extra transmission, and every
-		// subsequent one early.
-		//
-		// The guard is deliberately narrow. When several packets are
-		// outstanding they share an expiry: the first callback is the real
-		// timeout and the rest arrive just after it, already past the new
-		// deadline this branch sets, and every one of them still needs
-		// resending because libutp marks all outstanding packets need_resend
-		// on an RTO (:1230-1237). Skipping those left holes fast retransmit
-		// could not fill and stopped the 5%-loss benchmark completing at all.
-		// With one packet outstanding there are no siblings, so there is
-		// nothing to be careful of.
-		if now.Before(c.rtoDeadline) && c.state.SentPackets.UnackedCount() == 1 {
-			if remaining := c.rtoDeadline.Sub(now); remaining > 0 {
-				c.armRetransmit(originPacket, remaining)
-				return
-			}
+		// Not yet the connection's timeout: this packet's callback came
+		// before the deadline, because it was armed before the deadline last
+		// moved, or because the wheel ran ahead of the clock (it counts
+		// ticks, and a descheduled wheel catches up in a burst; measured, a
+		// 200ms timer delivered at 198.6ms). libutp would do nothing at all
+		// here. Keep this packet's timer alive against the deadline and send
+		// nothing.
+		if now.Before(c.rtoDeadline) {
+			c.armRetransmit(originPacket, c.rtoDeadline.Sub(now))
+			return
 		}
 
-		if isTimeout := !now.Before(c.rtoDeadline); isTimeout {
-			// Give up once enough consecutive RTOs have passed with the peer
-			// acking nothing, as libutp does (utp_internal.cpp:1191). The
-			// check precedes the increment there, so the connection dies on
-			// the RTO after the fourth retransmission.
-			if c.retransmitCount >= maxConsecutiveTimeouts {
-				c.logger.Warn("giving up on connection",
-					"consecutiveTimeouts", c.retransmitCount,
-					"cid.send", c.cid.Send, "cid.recv", c.cid.Recv)
-				c.state.stateType = ConnClosed
-				c.state.Err = ErrTimedOut
-				return
-			}
-			// Forget any outstanding MTU probe, whether or not it was the
-			// one that timed out. libutp clears it on every RTO, outside the
-			// branch that lowers the ceiling (utp_internal.cpp:1166-1167):
-			// the probe is gone either way, and a search that keeps waiting
-			// for it never sends another.
-			c.mtu.clearProbe()
-
-			c.retransmitCount++
-			c.state.SentPackets.OnTimeout()
-			c.timeouts++
-			currentTime := c.now()
-			c.latestTimeout = &currentTime
-			// libutp: `rto_timeout = ctx->current_ms + new_timeout`
-			// (utp_internal.cpp:1204), with new_timeout already doubled.
-			c.rtoDeadline = currentTime.Add(c.state.SentPackets.Timeout())
+		// Give up once enough consecutive RTOs have passed with the peer
+		// acking nothing, as libutp does (utp_internal.cpp:1191). The check
+		// precedes the increment there, so the connection dies on the RTO
+		// after the fourth retransmission.
+		if c.retransmitCount >= maxConsecutiveTimeouts {
+			c.logger.Warn("giving up on connection",
+				"consecutiveTimeouts", c.retransmitCount,
+				"cid.send", c.cid.Send, "cid.recv", c.cid.Recv)
+			c.state.stateType = ConnClosed
+			c.state.Err = ErrTimedOut
+			return
 		}
-		c.packetsRetransmitted++
-		c.bytesRetransmitted += uint64(len(originPacket.Body))
+		// Forget any outstanding MTU probe, whether or not it was the one
+		// that timed out. libutp clears it on every RTO, outside the branch
+		// that lowers the ceiling (utp_internal.cpp:1166-1167): the probe is
+		// gone either way, and a search that keeps waiting for it never sends
+		// another.
+		c.mtu.clearProbe()
 
-		c.retransmit(originPacket, now)
+		c.retransmitCount++
+		c.state.SentPackets.OnTimeout()
+		c.timeouts++
+		currentTime := c.now()
+		c.latestTimeout = &currentTime
+		// libutp: `rto_timeout = ctx->current_ms + new_timeout`
+		// (utp_internal.cpp:1204), with new_timeout already doubled.
+		c.rtoDeadline = currentTime.Add(c.state.SentPackets.Timeout())
+
+		// "every packet should be considered lost" (:1230-1237), and the
+		// oldest resent (:1249-1251).
+		c.state.SentPackets.MarkAllForResend()
+		c.fastTimeout = true
+		oldest, ok := c.state.SentPackets.OldestOutstanding()
+		if !ok {
+			return
+		}
+		c.resendSentPacket(oldest, now)
+		if oldest.seqNum != originPacket.Header.SeqNum {
+			// This packet's callback is spent. Keep a timer on it, against
+			// the new deadline, so every outstanding packet stays armed.
+			c.armRetransmit(originPacket, c.rtoDeadline.Sub(now))
+		}
 	default:
 	}
 }
@@ -2005,6 +2010,62 @@ func (c *connection) retransmit(originPacket *packet, now time.Time) {
 		Eack: c.state.RecvBuf.SelectiveAck(),
 	}
 	c.transmit(retransmissionPacket, now, false)
+}
+
+// resendSentPacket sends a packet again from what was recorded when it was
+// first sent, with its acknowledgement fields brought up to date. It is the
+// resend for a packet a retransmission timeout gave up as lost, whether the
+// timeout itself, processWrites or onFastTimeout is sending it.
+func (c *connection) resendSentPacket(pkt *sentPacket, now time.Time) {
+	builder := NewPacketBuilder(pkt.packetType, c.cid.Send, c.nowMicros(),
+		uint32(c.state.RecvBuf.Window()), pkt.seqNum)
+	if pkt.data != nil {
+		builder.WithPayload(pkt.data)
+	}
+	resend := builder.
+		WithTsDiffMicros(uint32(c.peerTsDiff.Microseconds())).
+		WithAckNum(c.state.RecvBuf.AckNum()).
+		WithSelectiveAck(c.state.RecvBuf.SelectiveAck()).
+		Build()
+	c.packetsRetransmitted++
+	c.bytesRetransmitted += uint64(len(pkt.data))
+	// Not a first transmission, so never an MTU probe (utp_internal.cpp:911).
+	c.transmit(resend, now, false)
+}
+
+// onFastTimeout is libutp's fast-timeout retry, run on every acknowledgement
+// (utp_internal.cpp:2256-2282):
+//
+//	if (((conn->seq_nr - conn->cur_window_packets) & ACK_NR_MASK) != conn->fast_resend_seq_nr) {
+//	    conn->fast_timeout = false;
+//	} else {
+//	    OutgoingPacket *pkt = (OutgoingPacket*)conn->outbuf.get(conn->seq_nr - conn->cur_window_packets);
+//	    if (pkt && pkt->transmissions > 0) {
+//	        conn->fast_resend_seq_nr++;
+//	        conn->send_packet(pkt);
+//	    }
+//	}
+//
+// After a timeout resends the oldest packet, the acknowledgement for it moves
+// fast_resend_seq_nr up to the next one (:2186-2188), which is then the oldest
+// outstanding, so it is resent at once -- and so on, one per acknowledgement,
+// until a packet turns out to have arrived after all. That ends it: the
+// oldest outstanding is then past fast_resend_seq_nr.
+//
+// libutp runs it after the cumulative acknowledgement and before the
+// selective one; here it runs after both, before any fast retransmission,
+// which sees fast_resend_seq_nr already moved on exactly as libutp's does.
+func (c *connection) onFastTimeout(now time.Time) {
+	if !c.fastTimeout || c.state.stateType != ConnConnected || c.state.SentPackets == nil {
+		return
+	}
+	oldest, ok := c.state.SentPackets.OldestOutstanding()
+	if !ok || oldest.seqNum != c.state.SentPackets.fastResendSeqNum {
+		c.fastTimeout = false
+		return
+	}
+	c.state.SentPackets.fastResendSeqNum++
+	c.resendSentPacket(oldest, now)
 }
 
 // defaultZeroWindowProbeInterval is how long libutp tolerates a closed peer
@@ -2326,7 +2387,9 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 		// duplicates against the window as it stood when the packet arrived
 		// (utp_internal.cpp:1921, with ack_packet not reached until :2194).
 		c.noteDuplicateAck(packet.Header.PacketType, packet.Header.AckNum)
-		if err = c.processAck(packet.Header.AckNum, packet.Eack, delay, now); err != nil {
+		err = c.processAck(packet.Header.AckNum, packet.Eack, delay, now)
+		c.onFastTimeout(now)
+		if err != nil {
 			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 				c.logger.Trace("ack does not correspond to known seq_num",
 					"packet.type", packet.Header.PacketType,
@@ -2699,6 +2762,12 @@ func (c *connection) processAck(
 	// Measured: with the reset unconditional, the 5%-loss and broadband
 	// profiles in the netem benchmark suite stopped completing, the receiver
 	// timing out after 76 seconds on a transfer that takes one.
+	//
+	// One deliberate difference: libutp's ack_packet also runs for a packet
+	// acknowledged selectively (:1529), so a selective ack moves its deadline
+	// too. Here only the cumulative acknowledgement does. Adopting libutp's
+	// rule was measured and was slower -- see DEVIATIONS.md, "A selective
+	// ack does not restart the retransmission timeout".
 	if retired > 0 {
 		c.rtoDeadline = now.Add(c.state.SentPackets.Timeout())
 	}
