@@ -238,6 +238,69 @@ type UtpSocket struct {
 	// Reporting true refuses the connection. Set once at construction and
 	// only read afterwards.
 	firewall func(ConnectionPeer) bool
+	// maxConns is the incoming-connection cap: a new incoming connection is
+	// refused while the socket already holds more than this many. Zero or
+	// less means no cap. See WithMaxConnections.
+	maxConns int
+	// refusedAtCapacity counts SYNs refused because the socket was at its
+	// connection cap. It exists so a test can tell "refused" from "lost".
+	refusedAtCapacity atomic.Uint64
+}
+
+// DefaultMaxConnections is libutp's cap on the sockets one context may hold
+// before it refuses a new incoming connection (utp_internal.cpp:2967-2974).
+const DefaultMaxConnections = 3000
+
+// WithMaxConnections caps the connections this socket holds before it refuses
+// a new incoming one.
+//
+// libutp refuses a SYN when its context already holds more than 3000 sockets:
+//
+//	if (ctx->utp_sockets->GetCount() > 3000) {
+//	    ...
+//	    return 1;
+//	}
+//	                                        (utp_internal.cpp:2967-2974)
+//
+// This is the same check in the same place -- after the duplicate-connection
+// lookup and before the firewall -- with the figure configurable, because 3000
+// is a policy choice rather than a protocol rule. The comparison is libutp's
+// too: a SYN is refused while the socket holds *more than* n, so it admits
+// one past n, exactly as libutp admits a 3001st socket.
+//
+// What is counted is libutp's count. Every connection this socket has, dialled
+// or accepted, established or still closing, plus every SYN parked waiting for
+// Accept -- the state libutp holds as a socket in CS_SYN_RECV.
+//
+// A refusal is silent, as libutp's `return 1` is. A RESET would tell the peer
+// something is listening, and at capacity there is nothing to offer it.
+//
+// n == 0 means DefaultMaxConnections, which is also what a socket gets without
+// this option. n < 0 means no cap.
+func WithMaxConnections(n int) SocketOption {
+	return func(s *UtpSocket) {
+		switch {
+		case n == 0:
+			s.maxConns = DefaultMaxConnections
+		case n < 0:
+			s.maxConns = 0
+		default:
+			s.maxConns = n
+		}
+	}
+}
+
+// ConnectionsRefusedAtCapacity reports how many incoming connections were
+// refused because the socket was at its connection cap. See
+// WithMaxConnections.
+func (s *UtpSocket) ConnectionsRefusedAtCapacity() uint64 {
+	return s.refusedAtCapacity.Load()
+}
+
+// connectionCount is what the incoming-connection cap is measured against:
+// libutp's `utp_sockets->GetCount()`. See WithMaxConnections.
+func (s *UtpSocket) connectionCount() int {
+	return s.NumConnections() + s.incomingConns.len()
 }
 
 // SocketOption configures a UtpSocket at construction.
@@ -374,6 +437,7 @@ func WithSocket(ctx context.Context, socket Conn, logger log.Logger, opts ...Soc
 		socket:                   socket,
 		readNextCh:               make(chan struct{}, 1000000),
 		incomingBuf:              make(chan *IncomingPacketRaw, 1000000),
+		maxConns:                 DefaultMaxConnections,
 	}
 
 	// Applied before the loops start, so nothing can observe a half-built
@@ -735,6 +799,25 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
 		return
 	}
 
+	cid := cids[2]
+	cidHash := cid.Hash()
+
+	// The connection cap is checked here, where libutp checks it: after the
+	// duplicate lookup above and before the firewall
+	// (utp_internal.cpp:2967-2974). A SYN for a connection already parked
+	// waiting for Accept is the peer retransmitting, not a new connection,
+	// and does not count against the cap.
+	if s.maxConns > 0 {
+		if _, parked := s.incomingConns.get(cidHash); !parked && s.connectionCount() > s.maxConns {
+			s.refusedAtCapacity.Add(1)
+			if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+				s.logger.Debug("refusing an incoming connection: at capacity",
+					"src.peer", incomingRaw.peer, "cap", s.maxConns)
+			}
+			return
+		}
+	}
+
 	// The firewall is asked here: every lookup above has missed, so this is a
 	// connection the socket does not have, and nothing has been created for it
 	// yet. libutp asks in the same place, after its duplicate-connection check
@@ -750,8 +833,6 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
 		return
 	}
 
-	cid := cids[2]
-	cidHash := cid.Hash()
 	s.logger.Debug("receive a syn packet from a new conn stream",
 		"src.peer", incomingRaw.peer,
 		"cid.Send", cid.Send,

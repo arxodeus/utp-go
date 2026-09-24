@@ -3399,7 +3399,7 @@ Not investigated: our first timeout came about 1.0s after
 the last send, libutp's after 1.0–1.46s. It may be only different RTT
 estimates.
 
-### 3. No cap on accepted connections — a divergence, not a defect
+### 3. ~~No cap on accepted connections~~ — closed
 
 libutp refuses a new incoming connection when the context already holds more
 than 3000 sockets (`:2967-2974`). This library has no count bound. The
@@ -3407,10 +3407,23 @@ pending-SYN map is bounded only by time — `AWAITING_CONNECTION_TIMEOUT` is 20
 seconds — so a SYN flood at rate R leaves R×20 entries where libutp holds at
 most 3000.
 
-Left as a divergence rather than closed, because 3000 is a policy choice and a
-BitTorrent client legitimately wants many connections. A configurable cap
-would be the way to close it. Recorded in DEVIATIONS.md ("No cap on incoming
-connections"), where it is classed as a cost rather than an improvement.
+It was left open because 3000 is a policy choice and a BitTorrent client can
+legitimately want more. It is now closed with a configurable cap, defaulting
+to libutp's 3000: `utp.WithMaxConnections`, `utpnet.Options.MaxConnections`.
+The count, the "more than" comparison, the position before the firewall and
+the silent refusal are libutp's. A negative value removes the cap.
+
+Six unit cases on the scripted transport pin it, and each rule has one that
+fails when that rule is broken: no check at all, `>=` for libutp's `>`, a
+retransmitted SYN for a parked connection counted as new, parked SYNs not
+counted, dialled connections not counted. `utpnet.TestMaxConnectionsRefusesPastTheCap`
+runs it over real UDP: under a cap of 1 two dials succeed and the third times
+out, with nothing accepted and no RESET sent; with the option not passed
+through, the third gets in.
+
+**It changes a default.** A socket used to take any number of incoming
+connections; it now refuses a SYN while it holds more than 3000. That matches
+every libutp peer, and a client that needs more has to say so.
 
 ### 4. Things checked that turned out to be fine
 

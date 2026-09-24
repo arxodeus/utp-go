@@ -104,6 +104,12 @@ type Options struct {
 	// It runs on the socket's receive path: it must not block, and must not
 	// call back into the socket.
 	Firewall func(net.Addr) bool
+	// MaxConnections caps the connections this socket holds before it
+	// refuses a new incoming one, silently, as libutp does past 3000
+	// (utp_internal.cpp:2967-2974). Zero means utp.DefaultMaxConnections,
+	// libutp's 3000; a negative value means no cap. See
+	// utp.WithMaxConnections for exactly what is counted.
+	MaxConnections int
 }
 
 // Listen binds a UDP port and returns a uTP socket on it.
@@ -182,6 +188,7 @@ func NewSocket(ctx context.Context, conn *net.UDPConn, opts *Options) (*Socket, 
 			return refuse(addr)
 		}))
 	}
+	sockOpts = append(sockOpts, utp.WithMaxConnections(opts.MaxConnections))
 	s.sock = utp.WithSocket(ctx, s.inner, logger, sockOpts...)
 
 	s.readLoop.Add(1)

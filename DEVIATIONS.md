@@ -117,8 +117,6 @@ consequence, or equivalent on the wire.
   silence; libutp's `utp_close` returns at once.
 - *The delay clamp uses one packet's RTT:* never tighter than libutp's, and
   possibly looser. Not measured.
-- *No cap on incoming connections:* libutp refuses past 3000 sockets; a SYN
-  flood here leaves up to 20 seconds' worth of pending entries.
 
 ## Intentional deviations
 
@@ -597,19 +595,23 @@ it, the ceiling start sooner. Kept as the midpoint: the gain from matching
 libutp is 1-2% on long transfers over healthy paths, and the cost lands on the
 paths that already fail.
 
-## No cap on incoming connections
+## ~~No cap on incoming connections~~ — closed
 
 libutp refuses a new incoming connection when its context already holds more
-than 3000 sockets (`utp_internal.cpp:2967-2974`). This library has no count
-bound. Pending SYNs are bounded only by time -- `AWAITING_CONNECTION_TIMEOUT`,
-20 seconds -- so a SYN flood at rate R holds R×20 entries where libutp holds at
+than 3000 sockets (`utp_internal.cpp:2967-2974`). This library had no count
+bound, so a SYN flood at rate R held R×20 pending entries where libutp holds at
 most 3000.
 
-**Why.** 3000 is a policy choice rather than a protocol rule, and a BitTorrent
-client can legitimately want more connections than that. A configurable cap is
-how to close it. Until then this is a cost, not an improvement: the exposure to
-a flood is larger than libutp's. Also recorded in KNOWN-LIMITATIONS.md ("No cap
-on accepted connections").
+It now has libutp's: `utp.WithMaxConnections`, and `utpnet.Options.MaxConnections`,
+with the same count (every connection the socket holds, dialled or accepted,
+plus SYNs parked waiting for Accept), the same comparison (refused while it
+holds *more than* the cap), the same position (after the duplicate lookup,
+before the firewall), and the same silent refusal. The default is libutp's
+3000.
+
+The only difference is that the figure can be changed, or the cap removed with
+a negative value, because 3000 is a policy choice and a client may want more.
+At its default this is not a deviation.
 
 ## A discovered path MTU only lowers the ceiling, never raises it
 

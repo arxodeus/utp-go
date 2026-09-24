@@ -1654,6 +1654,22 @@ Reviewers should know that restarting the deadline on selective acks, as
 libutp does, was tried alongside and measured slower (0.883 of the old
 throughput against 0.943). It is recorded as a deviation rather than adopted.
 
+## PR 57 — a cap on incoming connections, libutp's by default
+
+libutp refuses a SYN when its context already holds more than 3000 sockets
+(`utp_internal.cpp:2967-2974`), silently, after its duplicate check and before
+its firewall callback. This fork had no bound: pending SYNs expired after 20
+seconds, so a flood at rate R held R×20 entries.
+
+`utp.WithMaxConnections(n)` and `utpnet.Options.MaxConnections` add libutp's
+check with the figure configurable. The count is every connection the socket
+holds, dialled or accepted, plus parked SYNs; the comparison is libutp's
+"more than"; a SYN retransmitted for a connection already parked is not
+counted as new. Zero means the default, 3000; a negative value removes the cap.
+
+Reviewers should note it changes a default: a socket that took any number of
+incoming connections now refuses past 3000, as every libutp peer does.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it
