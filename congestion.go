@@ -702,14 +702,7 @@ func (c *defaultController) applyCongestionControl(
 	// this, an idle-but-trickling connection grows its window without bound
 	// and then dumps it all at once when the application speeds up.
 	//
-	// libutp initialises last_maxed_out_window to zero and compares it
-	// against a millisecond counter that also starts near zero, so early in a
-	// connection the difference is small and growth is allowed. A zero
-	// time.Time here is far in the past instead, which would block all growth
-	// until the window was first filled, so an unset value means "not yet
-	// application-limited" and permits growth.
-	if scaledGain > 0 && !c.lastMaxedOutWindow.IsZero() &&
-		now.Sub(c.lastMaxedOutWindow) > time.Second {
+	if scaledGain > 0 && c.applicationLimited(now) {
 		scaledGain = 0
 	}
 
@@ -738,6 +731,27 @@ func (c *defaultController) applyCongestionControl(
 
 	// utp_internal.cpp:1710.
 	c.maxWindowSizeBytes = clampUint32(c.maxWindowSizeBytes, c.minWindowSizeBytes, c.maxWindowUpperBytes)
+}
+
+// applicationLimited reports whether the sender has gone more than a second
+// without filling its window: libutp's `current_ms - last_maxed_out_window >
+// 1000` (utp_internal.cpp:1681).
+//
+// A sender that has never filled its window counts as application-limited, as
+// it does in libutp. libutp initialises last_maxed_out_window to 0 (:2603) and
+// reads current_ms from a clock that counts from boot, not from the process or
+// the connection (CLOCK_MONOTONIC on POSIX, utp_utils.cpp:158-175), so unless
+// the host booted within the last second the difference is already past 1000
+// and the gain is zeroed until the window first fills. This used to be the
+// other way round here, on the mistaken reading that libutp's counter starts
+// near zero; TestConformanceLedbatRules replays libutp's own trace and caught
+// it. A bulk sender is unaffected, because its first write fills the window
+// and records the time before any acknowledgement arrives. What changes is a
+// sender that never fills its window: it now grows only by the slow-start
+// step, and not at all after slow start, where it used to take the LEDBAT
+// gain as well.
+func (c *defaultController) applicationLimited(now time.Time) bool {
+	return c.lastMaxedOutWindow.IsZero() || now.Sub(c.lastMaxedOutWindow) > time.Second
 }
 
 // OnWindowFull records that the sender had data to send and no window to send

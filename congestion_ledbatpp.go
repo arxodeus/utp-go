@@ -290,8 +290,7 @@ func (c *defaultController) applyLedbatPP(
 		// A sender that never fills its window is limited by the
 		// application, not the path, and learns nothing from the delay it
 		// measures. Same rule as classic LEDBAT, same reason.
-		if adjusted > float64(c.maxWindowSizeBytes) && !c.lastMaxedOutWindow.IsZero() &&
-			now.Sub(c.lastMaxedOutWindow) > time.Second {
+		if adjusted > float64(c.maxWindowSizeBytes) && c.applicationLimited(now) {
 			adjusted = float64(c.maxWindowSizeBytes)
 		}
 

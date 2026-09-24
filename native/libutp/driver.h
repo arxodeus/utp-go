@@ -34,6 +34,14 @@ void libutp_driver_destroy(libutp_driver *d);
 void libutp_driver_push_random(libutp_driver *d, uint32_t value);
 void libutp_driver_set_udp_mtu(libutp_driver *d, uint16_t mtu);
 
+// libutp's congestion-control log: one line per apply_ccontrol, captured once
+// enabled. Enabling it turns on UTP_LOG_NORMAL, which libutp checks at run
+// time; nothing in libutp is rebuilt or changed.
+void libutp_driver_enable_cc_log(libutp_driver *d);
+int libutp_driver_cc_log_count(libutp_driver *d);
+const char *libutp_driver_cc_log_get(libutp_driver *d, int i);
+void libutp_driver_cc_log_clear(libutp_driver *d);
+
 // The virtual clock. Nothing advances it but these.
 void libutp_driver_set_time(libutp_driver *d, uint64_t now_micros);
 void libutp_driver_advance(libutp_driver *d, uint64_t micros);

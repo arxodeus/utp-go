@@ -5,6 +5,8 @@ package utp_go
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
 	"testing"
 	"time"
 
@@ -541,5 +543,362 @@ func TestConformanceFastRetransmitDecisions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ccEntry is one line of libutp's congestion-control log: the inputs
+// apply_ccontrol acted on and the window that resulted
+// (utp_internal.cpp:1713-1730).
+type ccEntry struct {
+	raw        string
+	ourDelayMs int64
+	targetMs   int64
+	acked      uint32
+	maxWindow  uint32
+	packetSize uint32
+	lastMaxed  int64
+	nowMs      int64
+	sndbuf     uint32
+	penaltyMs  int64
+	gain       float64
+}
+
+var ccField = regexp.MustCompile(`([a-z_]+):(-?[0-9.]+)`)
+
+func parseCCLog(t *testing.T, lines []string) []ccEntry {
+	t.Helper()
+	var out []ccEntry
+	for _, l := range lines {
+		f := map[string]string{}
+		for _, m := range ccField.FindAllStringSubmatch(l, -1) {
+			f[m[1]] = m[2]
+		}
+		num := func(k string) int64 {
+			v, err := strconv.ParseInt(f[k], 10, 64)
+			if err != nil {
+				t.Fatalf("libutp cc log: field %q in %q: %v", k, l, err)
+			}
+			return v
+		}
+		g, err := strconv.ParseFloat(f["scaled_gain"], 64)
+		if err != nil {
+			t.Fatalf("libutp cc log: scaled_gain in %q: %v", l, err)
+		}
+		out = append(out, ccEntry{
+			raw: l, ourDelayMs: num("our_delay"), targetMs: num("target_delay"),
+			acked: uint32(num("acked_bytes")), maxWindow: uint32(num("max_window")),
+			packetSize: uint32(num("packet_size")), lastMaxed: num("last_maxed_out_window"),
+			nowMs: num("current_ms"), sndbuf: uint32(num("opt_sndbuf")),
+			penaltyMs: num("delay_penalty"), gain: g,
+		})
+	}
+	return out
+}
+
+// ccPhase is a stretch of acknowledgements with one queueing delay.
+type ccPhase struct {
+	name    string
+	acks    int
+	delayMs uint32        // queueing delay the peer reports, over a fixed base
+	gap     time.Duration // between acknowledgements
+	// appLimited writes 100 bytes before each acknowledgement instead of
+	// keeping a large write queued, so the window is never full.
+	appLimited bool
+}
+
+// libutpCCTrace drives libutp alone through the phases, acknowledging its
+// oldest outstanding packet one at a time with the given delays, and returns
+// its congestion-control log. initialWrite bytes are written before the first
+// phase.
+//
+// Delays are whole milliseconds over a whole-millisecond base, and the clock
+// moves in whole milliseconds, so every delay libutp acts on is a whole
+// number of milliseconds -- which the log prints exactly.
+func libutpCCTrace(t *testing.T, initialWrite int, phases []ccPhase) []ccEntry {
+	t.Helper()
+	drv, err := libutp.NewDriver(1_000_000)
+	if err != nil {
+		t.Skipf("libutp driver unavailable: %v", err)
+	}
+	defer drv.Close()
+	drv.EnableCCLog()
+	drv.PushRandom(uint32(initiatorConnSeed))
+	if err := drv.Connect(); err != nil {
+		t.Fatalf("libutp connect: %v", err)
+	}
+	drv.Inject(initiatorSynAck())
+	drv.IssueAcks()
+
+	var outstanding []uint16
+	sent := map[uint16]bool{}
+	take := func() {
+		drv.IssueAcks()
+		for _, raw := range drv.Emitted() {
+			p, err := DecodePacket(raw)
+			if err != nil || p.Header.PacketType != st_data || sent[p.Header.SeqNum] {
+				continue
+			}
+			sent[p.Header.SeqNum] = true
+			outstanding = append(outstanding, p.Header.SeqNum)
+		}
+		drv.ClearEmitted()
+	}
+	if initialWrite > 0 {
+		if _, err := drv.Write(make([]byte, initialWrite)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	take()
+	const baseMicros = 20000
+	ts := uint32(300000)
+	for _, ph := range phases {
+		for i := 0; i < ph.acks; i++ {
+			if ph.appLimited {
+				if _, err := drv.Write(make([]byte, 100)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			take()
+			if len(outstanding) == 0 {
+				t.Fatalf("phase %q ack %d: nothing outstanding to acknowledge", ph.name, i)
+			}
+			drv.Advance(uint64(ph.gap.Microseconds()))
+			drv.CheckTimeouts()
+			ts += uint32(ph.gap.Microseconds())
+			seq := outstanding[0]
+			outstanding = outstanding[1:]
+			drv.Inject(NewPacketBuilder(st_state, initiatorConnSeed, ts, corpusWindow, initiatorFirstInOrder).
+				WithAckNum(seq).WithTsDiffMicros(baseMicros + ph.delayMs*1000).Build().Encode())
+			take()
+		}
+	}
+	return parseCCLog(t, drv.CCLog())
+}
+
+// ccReplay is what replaying a libutp trace into our controller found.
+type ccReplay struct {
+	mismatches []string
+	// slowStartEnd is the entry at which our controller, fed libutp's
+	// inputs, left slow start, and -1 if it never did.
+	slowStartEnd int
+}
+
+// replayCC feeds libutp's logged inputs, one acknowledgement at a time, to our
+// classic-LEDBAT update, and records every entry where the window we compute
+// differs from the window libutp logged.
+//
+// Our controller starts, at entry `from`, from libutp's state: the window
+// libutp had before that entry (its first window is one packet_size), its
+// target, its opt_sndbuf as both ssthresh and ceiling, and slow start on
+// (utp_internal.cpp:2567, :2620-2621). From there it evolves by its own rules;
+// only the inputs come from libutp. The delay is fed as the delay libutp acted
+// on, after its clamp to the round trip, with no clamp of our own;
+// last_maxed_out_window and the clock come from the log, 0 included.
+//
+// One documented deviation has to be neutralised for the rules to be
+// compared at all. Our slow-start step is half our window floor, and libutp's
+// is one current packet_size; setting our floor to two of libutp's packets
+// makes the steps equal. The floor itself then differs from libutp's 10 bytes
+// (DEVIATIONS.md), so the replay fails the case if libutp's window is ever
+// below it, where the floor rather than the rules would decide.
+func replayCC(t *testing.T, entries []ccEntry, from int) ccReplay {
+	t.Helper()
+	if len(entries) <= from {
+		t.Fatalf("libutp logged %d congestion-control updates; the replay starts at %d", len(entries), from)
+	}
+	c := newDefaultController(fromConnConfig(NewConnectionConfig()))
+	first := entries[from]
+	c.targetDelayMicros = uint32(first.targetMs * 1000)
+	c.minWindowSizeBytes = 2 * first.packetSize
+	c.maxWindowSizeBytes = first.packetSize
+	if from > 0 {
+		c.maxWindowSizeBytes = entries[from-1].maxWindow
+	}
+	c.ssthreshBytes = first.sndbuf
+	c.maxWindowUpperBytes = first.sndbuf
+	c.slowStart = true
+	r := ccReplay{slowStartEnd: -1}
+	for i := from; i < len(entries); i++ {
+		e := entries[i]
+		if e.penaltyMs != 0 {
+			t.Fatalf("entry %d: libutp applied a drift penalty; this replay assumes none", i)
+		}
+		if e.packetSize*2 != c.minWindowSizeBytes {
+			t.Fatalf("entry %d: packet_size changed from %d to %d mid-trace", i, first.packetSize, e.packetSize)
+		}
+		if e.maxWindow < c.minWindowSizeBytes || (i > from && entries[i-1].maxWindow < c.minWindowSizeBytes) {
+			t.Fatalf("entry %d: libutp's window %d is below our floor %d; the floor would "+
+				"decide this comparison, not the rules", i, e.maxWindow, c.minWindowSizeBytes)
+		}
+		if e.lastMaxed == 0 {
+			c.lastMaxedOutWindow = time.Time{}
+		} else {
+			c.lastMaxedOutWindow = time.UnixMilli(e.lastMaxed)
+		}
+		before := c.maxWindowSizeBytes
+		wasSlow := c.slowStart
+		c.applyCongestionControl(0, uint32(e.ourDelayMs*1000), e.acked, time.Hour, time.UnixMilli(e.nowMs))
+		if wasSlow && !c.slowStart {
+			r.slowStartEnd = i
+		}
+		if c.maxWindowSizeBytes != e.maxWindow {
+			r.mismatches = append(r.mismatches, fmt.Sprintf(
+				"entry %d: from %d, delay %dms, acked %d, last full at %dms, now %dms: libutp -> %d (gain %.1f), ours -> %d",
+				i, before, e.ourDelayMs, e.acked, e.lastMaxed, e.nowMs, e.maxWindow, e.gain, c.maxWindowSizeBytes))
+			// Carry on from libutp's window, so one difference does not
+			// show up as every later entry differing.
+			c.maxWindowSizeBytes = e.maxWindow
+		}
+	}
+	return r
+}
+
+// LEDBAT's window adjustment, rule by rule, against libutp.
+//
+// COMPATIBILITY.md rated these rules "partly measured": the controller's
+// overall response to a queue was compared against libutp's, but each rule
+// in apply_ccontrol (utp_internal.cpp:1615-1712) was only read. Here libutp
+// is driven through phases that each exercise a rule, and every update it
+// makes is replayed into ours (replayCC). A delay registers with libutp only
+// once three acknowledgements carry it, since it acts on the least of its
+// last three samples (CUR_DELAY_SIZE, :75), so each phase is longer than
+// that. The first phase carries no queueing delay, so libutp's base delay is
+// the fixed one and each later phase's delay is the queueing delay it names.
+// The round trip must exceed that delay or libutp's clamp to the minimum
+// round trip (:1617-1621) decides it instead; with the window full the queue
+// of unacknowledged packets makes the round trip long, and with it never
+// full the gap between acknowledgements is the round trip.
+func TestConformanceLedbatRules(t *testing.T) {
+	t.Run("window full: slow start, delay exit, increase, decrease", func(t *testing.T) {
+		entries := libutpCCTrace(t, 4<<20, []ccPhase{
+			{name: "slow start", acks: 25, delayMs: 0, gap: 30 * time.Millisecond},
+			{name: "slow start exits on delay over 0.9 target", acks: 6, delayMs: 95, gap: 30 * time.Millisecond},
+			{name: "increase below target", acks: 30, delayMs: 40, gap: 30 * time.Millisecond},
+			{name: "decrease above target", acks: 12, delayMs: 160, gap: 30 * time.Millisecond},
+			{name: "at target", acks: 6, delayMs: 100, gap: 30 * time.Millisecond},
+		})
+		r := replayCC(t, entries, 0)
+		checkCCCoverage(t, entries, r)
+		for _, m := range r.mismatches {
+			t.Error(m)
+		}
+	})
+
+	// The application never fills the window, so libutp's is_full never
+	// records a time (utp_internal.cpp:945, :957) and last_maxed_out_window
+	// keeps its initial 0 (:2603). Slow start grows the window regardless
+	// (:1691-1702 do not look at scaled_gain); after it, the gain is zeroed
+	// by the application-limited guard (:1681-1686).
+	t.Run("never full: the guard from the start", func(t *testing.T) {
+		entries := libutpCCTrace(t, 0, []ccPhase{
+			{name: "slow start past our floor", acks: 30, delayMs: 0, gap: 30 * time.Millisecond, appLimited: true},
+			{name: "slow start exits on delay", acks: 6, delayMs: 95, gap: 150 * time.Millisecond, appLimited: true},
+			{name: "below target, window never full", acks: 20, delayMs: 20, gap: 150 * time.Millisecond, appLimited: true},
+		})
+		floor := 2 * entries[0].packetSize
+		from := -1
+		for i := 1; i < len(entries); i++ {
+			if entries[i-1].maxWindow >= floor {
+				from = i
+				break
+			}
+		}
+		if from < 0 {
+			t.Fatalf("libutp's window never reached %d; the replay has nothing to start from", floor)
+		}
+		for i := 0; i < from; i++ {
+			if entries[i].ourDelayMs*10 > entries[i].targetMs*9 {
+				t.Fatalf("libutp saw a high delay at entry %d, before the replay starts at %d", i, from)
+			}
+		}
+		guarded := 0
+		for _, e := range entries[from:] {
+			if e.lastMaxed != 0 {
+				t.Fatalf("libutp recorded a full window at %dms; this case needs it never full", e.lastMaxed)
+			}
+			if e.gain == 0 && e.ourDelayMs < e.targetMs {
+				guarded++
+			}
+		}
+		r := replayCC(t, entries, from)
+		t.Logf("%d updates replayed from entry %d; slow start ended at %d; %d below target with the gain zeroed",
+			len(entries)-from, from, r.slowStartEnd, guarded)
+		if r.slowStartEnd < 0 || guarded == 0 {
+			t.Fatalf("the trace did not leave slow start and reach the guard")
+		}
+		for _, m := range r.mismatches {
+			t.Error(m)
+		}
+	})
+
+	// The window fills, the write drains, and the application then trickles.
+	// is_full records the time the window was last full (:957); a second
+	// later the guard zeroes the gain (:1681).
+	t.Run("full, then application-limited for over a second", func(t *testing.T) {
+		entries := libutpCCTrace(t, 40000, []ccPhase{
+			{name: "slow start with the window full", acks: 20, delayMs: 0, gap: 30 * time.Millisecond},
+			{name: "the write drains, then a trickle", acks: 25, delayMs: 20, gap: 150 * time.Millisecond, appLimited: true},
+		})
+		// libutp's window starts at one packet, below our floor: start where
+		// it has passed it.
+		floor := 2 * entries[0].packetSize
+		from := -1
+		for i := 1; i < len(entries); i++ {
+			if entries[i-1].maxWindow >= floor {
+				from = i
+				break
+			}
+		}
+		if from < 0 {
+			t.Fatalf("libutp's window never reached %d", floor)
+		}
+		var grewWhileRecent, guardedAfterFull int
+		for _, e := range entries[from:] {
+			if e.lastMaxed == 0 {
+				continue
+			}
+			if e.nowMs-e.lastMaxed > 1000 && e.gain == 0 && e.ourDelayMs < e.targetMs {
+				guardedAfterFull++
+			}
+			if e.nowMs-e.lastMaxed <= 1000 && e.gain > 0 {
+				grewWhileRecent++
+			}
+		}
+		r := replayCC(t, entries, from)
+		t.Logf("%d updates replayed from entry %d: %d with gain while the window was full within the second, "+
+			"%d with the gain zeroed more than a second after it", len(entries)-from, from, grewWhileRecent, guardedAfterFull)
+		if grewWhileRecent == 0 || guardedAfterFull == 0 {
+			t.Fatalf("the trace did not cross from a recently full window to the guard")
+		}
+		for _, m := range r.mismatches {
+			t.Error(m)
+		}
+	})
+}
+
+// checkCCCoverage fails the case if the trace did not exercise the rules it
+// was built for, so a harness change cannot quietly turn it into a
+// comparison of nothing.
+func checkCCCoverage(t *testing.T, entries []ccEntry, r ccReplay) {
+	t.Helper()
+	var grewAfterSS, shrank int
+	for i := 1; i < len(entries); i++ {
+		if entries[i].maxWindow > entries[i-1].maxWindow && r.slowStartEnd >= 0 && i > r.slowStartEnd {
+			grewAfterSS++
+		}
+		if entries[i].maxWindow < entries[i-1].maxWindow {
+			shrank++
+		}
+	}
+	t.Logf("%d updates: slow start ended at %d; window grew %d times after it, shrank %d",
+		len(entries), r.slowStartEnd, grewAfterSS, shrank)
+	if r.slowStartEnd < 0 {
+		t.Fatalf("the trace never left slow start")
+	}
+	if e := entries[r.slowStartEnd]; e.ourDelayMs*10 <= e.targetMs*9 {
+		t.Fatalf("slow start ended at entry %d with delay %dms, not on the 0.9-target exit", r.slowStartEnd, e.ourDelayMs)
+	}
+	if grewAfterSS == 0 || shrank == 0 {
+		t.Fatalf("the trace did not exercise both the increase and the decrease")
 	}
 }

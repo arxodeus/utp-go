@@ -57,6 +57,26 @@ func (d *Driver) PushRandom(v uint32) { C.libutp_driver_push_random(d.c, C.uint3
 // callback gets. It must be set before Connect or the first SYN arrives.
 func (d *Driver) SetUDPMTU(mtu uint16) { C.libutp_driver_set_udp_mtu(d.c, C.uint16_t(mtu)) }
 
+// EnableCCLog starts capturing libutp's congestion-control log: the line
+// apply_ccontrol writes after every acknowledgement it acts on
+// (utp_internal.cpp:1713), with the delay it used, the bytes acknowledged,
+// when the window was last full and the window that resulted. It turns on
+// UTP_LOG_NORMAL, a run-time option; libutp itself is unchanged.
+func (d *Driver) EnableCCLog() { C.libutp_driver_enable_cc_log(d.c) }
+
+// CCLog returns the captured lines, oldest first.
+func (d *Driver) CCLog() []string {
+	n := int(C.libutp_driver_cc_log_count(d.c))
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, C.GoString(C.libutp_driver_cc_log_get(d.c, C.int(i))))
+	}
+	return out
+}
+
+// ClearCCLog discards the captured lines.
+func (d *Driver) ClearCCLog() { C.libutp_driver_cc_log_clear(d.c) }
+
 // SetTime and Advance move the virtual clock, in microseconds.
 func (d *Driver) SetTime(micros uint64) { C.libutp_driver_set_time(d.c, C.uint64_t(micros)) }
 func (d *Driver) Advance(micros uint64) { C.libutp_driver_advance(d.c, C.uint64_t(micros)) }

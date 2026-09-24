@@ -24,10 +24,10 @@ transfer-path defects. All three have changed:
   the same links, a real-socket interop gate including concurrent connections,
   the standard library's own `net.Conn` suite, and a hash-verified torrent
   transfer through `anacrolix/torrent`.
-- Most mechanisms in the congestion controller have a measurement behind them
-  rather than a citation. Not all: COMPATIBILITY.md rates LEDBAT's window
-  adjustment "partly measured", its individual rules still only read against
-  `apply_ccontrol`.
+- Every mechanism in the congestion controller has a measurement behind it
+  rather than a citation. The last to get one was LEDBAT's window adjustment,
+  now compared rule by rule by replaying libutp's own `apply_ccontrol`
+  decisions into ours (`TestConformanceLedbatRules`); it found one defect.
 
 The M4b sweep as originally conceived — reading `bittorrent/libutp` end to end
 and confirming agreement behaviour by behaviour — has now been done for the
@@ -875,6 +875,10 @@ What differs in classic LEDBAT, each with its own entry above:
 
 Everything else in `apply_ccontrol` and the timeout branch matches. Seven
 differences that were defects rather than choices were found and closed; they
-are in [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md), not here. The individual
-window-adjustment rules are checked by reading, not by measurement:
-COMPATIBILITY.md rates them "partly measured".
+are in [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md), not here, and an eighth
+-- a sender not yet application-limited before its window first filled, where
+libutp's is (2h) -- was found when the rules were finally compared against
+libutp rather than read. `TestConformanceLedbatRules` replays libutp's own
+`apply_ccontrol` decisions into ours and matches every one; the one deviation
+above that it has to neutralise to do so is the window floor, whose value also
+sets our slow-start step.

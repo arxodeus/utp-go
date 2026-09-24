@@ -48,6 +48,14 @@ struct libutp_driver {
 	// udp_mtu is what UTP_GET_UDP_MTU reports; zero means 1472. See
 	// drv_get_udp_mtu.
 	uint16_t udp_mtu;
+
+	// cc_log holds libutp's congestion-control log lines -- the one
+	// apply_ccontrol writes after every acknowledgement it acts on
+	// (utp_internal.cpp:1713) -- when enabled. See
+	// libutp_driver_enable_cc_log.
+	char **cc_log;
+	int cc_log_count;
+	int cc_log_cap;
 	int want_close;
 	int close_sent;
 
@@ -215,7 +223,20 @@ static uint64 drv_get_random(utp_callback_arguments *a) {
 }
 
 static uint64 drv_log(utp_callback_arguments *a) {
-	(void)a;
+	libutp_driver *d = drv_of(a);
+	if (!d->cc_log_cap || !a->buf) return 0;
+	const char *line = (const char *)a->buf;
+	// Only apply_ccontrol's line: it is the one that starts with the delay
+	// it acted on.
+	if (!strstr(line, "actual_delay:") || !strstr(line, "max_window:")) return 0;
+	if (d->cc_log_count >= d->cc_log_cap) {
+		int cap = d->cc_log_cap * 2;
+		char **grown = (char **)realloc(d->cc_log, sizeof(char *) * (size_t)cap);
+		if (!grown) return 0;
+		d->cc_log = grown;
+		d->cc_log_cap = cap;
+	}
+	d->cc_log[d->cc_log_count++] = strdup(line);
 	return 0;
 }
 
@@ -259,6 +280,8 @@ void libutp_driver_destroy(libutp_driver *d) {
 	if (!d) return;
 	if (d->ctx) utp_destroy(d->ctx);
 	libutp_driver_emitted_clear(d);
+	libutp_driver_cc_log_clear(d);
+	free(d->cc_log);
 	free(d->rx);
 	free(d->tx);
 	free(d);
@@ -271,6 +294,25 @@ void libutp_driver_push_random(libutp_driver *d, uint32_t value) {
 
 void libutp_driver_set_udp_mtu(libutp_driver *d, uint16_t mtu) {
 	d->udp_mtu = mtu;
+}
+
+void libutp_driver_enable_cc_log(libutp_driver *d) {
+	if (d->cc_log_cap) return;
+	d->cc_log_cap = 64;
+	d->cc_log = (char **)calloc((size_t)d->cc_log_cap, sizeof(char *));
+	utp_context_set_option(d->ctx, UTP_LOG_NORMAL, 1);
+}
+
+int libutp_driver_cc_log_count(libutp_driver *d) { return d->cc_log_count; }
+
+const char *libutp_driver_cc_log_get(libutp_driver *d, int i) {
+	if (i < 0 || i >= d->cc_log_count) return NULL;
+	return d->cc_log[i];
+}
+
+void libutp_driver_cc_log_clear(libutp_driver *d) {
+	for (int i = 0; i < d->cc_log_count; i++) free(d->cc_log[i]);
+	d->cc_log_count = 0;
 }
 
 void libutp_driver_set_time(libutp_driver *d, uint64_t now_micros) {

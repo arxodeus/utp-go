@@ -3468,6 +3468,27 @@ passes across the interval and taking the shortest time to the resend. Section
 2e said earlier that libutp's pass ran as often as the embedder called it; it
 does not, and 2e now says so.
 
+### 2h. ~~A sender that never filled its window grew it anyway~~ — fixed
+
+Found by replaying libutp's own congestion-control decisions into ours
+(`TestConformanceLedbatRules`). libutp's application-limited guard zeroes the
+LEDBAT gain when `current_ms - last_maxed_out_window > 1000`
+(`utp_internal.cpp:1681`). `last_maxed_out_window` starts at 0 (`:2603`), and
+`current_ms` comes from a clock that counts from boot -- `CLOCK_MONOTONIC` on
+POSIX (`utp_utils.cpp:158-175`) -- so until the window first fills, the guard
+is already on. Ours treated "never full" as "not application-limited" and
+permitted growth, and its comment said libutp's counter starts near zero. It
+does not.
+
+It mattered only to a sender that never fills its window: request and
+response, a trickle of protocol messages. A bulk sender fills the window with
+its first write, before any acknowledgement, and is unaffected. In the replay,
+a sender acknowledged 100 bytes at a time grew its window about twice as fast
+as libutp's during slow start (the LEDBAT gain exceeded the slow-start step,
+and slow start takes the larger), and after slow start kept growing where
+libutp's held flat. The same rule in LEDBAT++ had the same reading and is
+fixed with it; they share `defaultController.applicationLimited`.
+
 ### 3. ~~No cap on accepted connections~~ — closed
 
 libutp refuses a new incoming connection when the context already holds more

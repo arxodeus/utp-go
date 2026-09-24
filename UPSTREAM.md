@@ -1695,6 +1695,23 @@ against it: fast-retransmit decisions (threshold, four-per-ack cap,
 matches at libutp's default MTU and shows libutp never probing at an Ethernet
 MTU. The libutp driver gained `SetUDPMTU` for that.
 
+## PR 59 — a sender that never filled its window is application-limited
+
+libutp's guard zeroes the LEDBAT gain when `current_ms - last_maxed_out_window
+> 1000` (`utp_internal.cpp:1681`), with `last_maxed_out_window` starting at 0
+(`:2603`) and `current_ms` counting from boot. So a sender that has never
+filled its window is already application-limited. Ours read an unset time as
+"not limited" and let such a sender grow its window by the LEDBAT gain, twice
+as fast as libutp's in slow start and without limit after it. A bulk sender is
+unaffected: its first write fills the window. Both classic LEDBAT and LEDBAT++
+now share `defaultController.applicationLimited`.
+
+Found by `TestConformanceLedbatRules`, which captures the line libutp logs for
+each `apply_ccontrol` (a runtime log level; nothing in libutp is changed),
+replays the inputs into our controller, and compares the resulting window to
+the byte. Three traces, every update matching after the fix. The driver gained
+`EnableCCLog` / `CCLog` / `ClearCCLog` for it.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it
