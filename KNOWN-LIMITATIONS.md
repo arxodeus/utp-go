@@ -3389,8 +3389,8 @@ resend. The burst was the cost of that, and it is the behaviour removed here.
 
 libutp is more exposed to this than we are, not less: its post-timeout window
 is one packet (`:1225`), where ours cannot fall below two
-(`minWindowSizeBytes`, an unrecorded difference found during the parity
-review). Against real libutp as sender, on the same 5%-loss link, the same
+(`minWindowSizeBytes`, a recorded deviation: see DEVIATIONS.md, "The
+congestion window starts at, and never falls below, two packets"). Against real libutp as sender, on the same 5%-loss link, the same
 twelve seeds and the same receiver, classic LEDBAT only: libutp 1.27 Mb/s
 median, this library 1.69 before the fix and 1.68 after (1.28 and 1.22 times
 libutp, geometric mean).

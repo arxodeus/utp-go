@@ -221,9 +221,8 @@ and the ceiling is taken from the interface where the `Conn` can report it
 (`utp.PathMTUProvider`). What is still not matched: the ceiling is capped at
 1400, where libutp takes the interface MTU outright (a recorded deviation, see
 [DEVIATIONS.md](DEVIATIONS.md)); and the search starts at the midpoint, where
-libutp starts at the ceiling (`utp_internal.cpp:2562`), which is explained in
-[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md), M6, but not yet recorded as a
-deviation.
+libutp starts at the ceiling (`utp_internal.cpp:2562`), which is a recorded
+deviation, measured, in [DEVIATIONS.md](DEVIATIONS.md).
 
 The other half of libutp's MTU handling is the ICMP path, and it is now here
 too: `UtpSocket.ProcessICMPFragmentation` and `UtpSocket.ProcessICMPError`.

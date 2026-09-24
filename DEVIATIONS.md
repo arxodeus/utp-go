@@ -458,6 +458,72 @@ the interop harness (see `native/libutp/VENDOR.md`). A Go slice has no such
 constraint, and silently dropping a caller's data to respect an array bound we
 do not have would be a defect rather than fidelity.
 
+## The congestion window starts at, and never falls below, two packets
+
+libutp starts a connection at one packet (`max_window = get_packet_size()`,
+`utp_internal.cpp:2567`), resets to one packet on a retransmission timeout
+(`:1225`), and lets loss and delay take the window down to `MIN_WINDOW_SIZE`,
+10 bytes (`:614`, `:1710`). A window under one packet sends nothing until the
+next timeout, which libutp's own comment describes ("preventing us from
+sending anything for one time-out period", `:1223-1224`). Its "packet" is the
+current `get_packet_size()`, which follows the MTU search. Classic LEDBAT here
+starts at two maximum-size packets (2,800 bytes), resets to that on a timeout,
+and never goes below it; slow start grows by a maximum-size packet.
+
+LEDBAT++ is not affected by this entry: its draft specifies the two-packet
+start (§4.1).
+
+**Why.** libutp's rule was implemented behind a switch and measured against
+ours, classic LEDBAT, twelve seeds per profile, paired by seed:
+
+| profile | libutp's window / ours (geometric mean) | seeds it won |
+| --- | --- | --- |
+| LAN, no loss | 1.013 | 9/12 |
+| Broadband, no loss | 0.989 | 0/12 |
+| 1% loss | 0.983 | 3/12 |
+| 5% loss | **0.850**; timeouts 45 → 60 | 4/12 |
+| High BDP | 0.997 | 1/12 |
+| 16KB queue | 0.990 | 1/12 |
+
+It is no better anywhere that matters and 15% worse at 5% loss, where the
+window falls under a packet and waits for a timeout. Deference to a Reno flow
+on a shared bottleneck was unchanged within noise: libutp's window took 59-60%
+of the link in three runs, ours 60-62%. Combined with libutp's MTU start
+(below), a path that fragments ordinary packets but not the don't-fragment
+probe costs 3.8 seconds per 1MB transfer against 0.7: the first packet is a
+full-size probe, the one-packet window lets nothing else out, and the
+connection waits out the 3-second initial timeout.
+
+## The MTU search starts at the midpoint, not at the ceiling
+
+libutp sends its first packets at the ceiling: `mtu_last = mtu_ceiling` when a
+socket is created (`utp_internal.cpp:2562`), and the first of them is the
+probe. The search here starts at the midpoint between 576 and the ceiling --
+988 bytes against a 1400 ceiling -- and moves up only as probes are
+acknowledged. The reasoning is in KNOWN-LIMITATIONS.md, M6: an untested path
+gets a smaller packet.
+
+**Why, measured.** libutp's start was implemented behind a switch. On healthy
+paths it is slightly faster, consistently: twelve seeds, classic LEDBAT,
+geometric mean of the per-seed ratio 1.006 on broadband (12/12 seeds), 1.021
+on high BDP (12/12), 1.016 at 1% loss (11/12), 1.091 at 5% loss (8/12), within
+1-2% elsewhere. These transfers are 1-8MB; a shorter one would gain more.
+
+On a path narrower than 1400 past the local link, where the interface report
+(`utp.PathMTUProvider`) cannot help, it is never better. 1MB, report withheld:
+
+| path | midpoint (ours) | ceiling (libutp) |
+| --- | --- | --- |
+| IPv6-like, 1000-1350 bytes: oversized packets dropped | stalls, 1.9-19.6KB delivered | stalls, **0 bytes** delivered |
+| IPv4-like, 1000-1350 bytes: ordinary packets fragmented | 0.72-0.77s | 0.77-0.78s |
+| wider than 1400 | 0.69s | 0.68s |
+
+The IPv6-like stall is the shared limitation in KNOWN-LIMITATIONS.md ("A path
+MTU below the size already adopted stalls the connection"); both starts hit
+it, the ceiling start sooner. Kept as the midpoint: the gain from matching
+libutp is 1-2% on long transfers over healthy paths, and the cost lands on the
+paths that already fail.
+
 ## A discovered path MTU only lowers the ceiling, never raises it
 
 libutp takes `get_udp_mtu` as its MTU ceiling outright:
