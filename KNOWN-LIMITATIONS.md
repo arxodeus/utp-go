@@ -3409,7 +3409,8 @@ most 3000.
 
 Left as a divergence rather than closed, because 3000 is a policy choice and a
 BitTorrent client legitimately wants many connections. A configurable cap
-would be the way to close it.
+would be the way to close it. Recorded in DEVIATIONS.md ("No cap on incoming
+connections"), where it is classed as a cost rather than an improvement.
 
 ### 4. Things checked that turned out to be fine
 

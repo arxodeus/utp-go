@@ -24,8 +24,10 @@ transfer-path defects. All three have changed:
   the same links, a real-socket interop gate including concurrent connections,
   the standard library's own `net.Conn` suite, and a hash-verified torrent
   transfer through `anacrolix/torrent`.
-- Every mechanism in the congestion controller now has a measurement behind it
-  rather than a citation.
+- Most mechanisms in the congestion controller have a measurement behind them
+  rather than a citation. Not all: COMPATIBILITY.md rates LEDBAT's window
+  adjustment "partly measured", its individual rules still only read against
+  `apply_ccontrol`.
 
 The M4b sweep as originally conceived — reading `bittorrent/libutp` end to end
 and confirming agreement behaviour by behaviour — has now been done for the
@@ -46,6 +48,77 @@ So: the deviations below are recorded deliberately rather than noticed by
 accident, and the list is worth trusting for what it contains. It is still not
 a proof that nothing else differs — the sweep read the paths that carry
 packets, not every line of a 3,500-line file.
+
+## What kind of deviation each one is
+
+"Intentional" means chosen, not better. Only some of these are improvements on
+libutp; many are simply different, and several are costs this library carries
+knowingly. A reader should not assume which from the fact of an entry.
+
+**Better than libutp, measured.** A libutp-matching variant was built and ran
+worse.
+
+- *The congestion window starts at, and never falls below, two packets.*
+  libutp's rule ran 15% slower at 5% loss and no faster anywhere; deference to
+  a loss-based flow was unchanged.
+- *A selective ack does not restart the retransmission timeout.* libutp's rule
+  ran slower at 5% loss (0.883 of the old throughput against 0.943). Measured
+  on that profile only, under classic LEDBAT.
+
+**Better on reasoning.** libutp has a defect or a hazard here that was not
+copied. Not measured as an improvement.
+
+- *Completing an incoming connection:* libutp never completes a zero-length
+  transfer.
+- *`WriteV` has no 1024-buffer limit:* libutp silently drops buffers past 1024.
+- *ICMP: the next-hop MTU is converted to a payload size:* libutp's ceiling
+  ends up 28 bytes too large. The tests measure what an ICMP report saves, not
+  this conversion against libutp's.
+- *Selective acks whose length is not a multiple of 4 bytes are rejected:*
+  stricter, and libutp never sends one, so it costs nothing against libutp.
+- *A selective ack riding on an unmatched acknowledgement is dropped:* a
+  defence against a spoofed acknowledgement, at the cost of information the
+  next acknowledgement repeats. The cost is not measured.
+- *The clock-drift penalty is applied to LEDBAT++ as well:* libutp has no
+  LEDBAT++ to compare.
+
+**Different, neither better nor worse.** An API choice, a structural
+consequence, or equivalent on the wire.
+
+- *Larger default UDP socket buffers* (this library owns the socket; libutp
+  does not), *`ReadToEOF` returns nil*, *`Controller.Stats()`*,
+  *`MaxConnAttempts` counts transmissions*, *the selective-ack window* (always
+  30 entries), *read-side half-close discards what is buffered* (libutp has no
+  buffer to discard), *ICMP: no CS_IDLE state*, *`WriteV` blocks*.
+- *Unknown extension types are rejected:* libutp does the same. It is a shared
+  departure from BEP 29, not a departure from libutp.
+- *ICMP collection is the embedder's job:* the same in both; listed so it is
+  not mistaken for automatic.
+
+**A trade-off.** Better on one measure, worse on another.
+
+- *LEDBAT++* (opt-in): about 7 times less standing queue, 22% less
+  throughput.
+- *The MTU search starts at the midpoint.* libutp's start is 1-2% faster on
+  healthy paths, winning every one of twelve seeds. Ours is better only on
+  paths narrower than 1400, and on the IPv6-like ones both starts stall.
+
+**Worse than libutp, accepted.** Each has a stated reason for being carried.
+
+- *Acks are not batched the way libutp's are:* up to 0.82 acknowledgements per
+  data packet at 20 Mb/s, where libutp sends one per batch.
+- *No Nagle:* many small writes become many small packets. Implementing it
+  showed no benefit on the workloads tried; the likely BitTorrent case, small
+  messages written faster than a round trip, was not among them.
+- *A discovered path MTU only lowers the ceiling:* capped at 1400, so about 6%
+  of the packet is given up on a 1500-byte path (arithmetic, not a throughput
+  measurement), and jumbo frames are never used.
+- *Close waits:* a caller is held for up to one flush or two seconds of peer
+  silence; libutp's `utp_close` returns at once.
+- *The delay clamp uses one packet's RTT:* never tighter than libutp's, and
+  possibly looser. Not measured.
+- *No cap on incoming connections:* libutp refuses past 3000 sockets; a SYN
+  flood here leaves up to 20 seconds' worth of pending entries.
 
 ## Intentional deviations
 
@@ -524,6 +597,20 @@ it, the ceiling start sooner. Kept as the midpoint: the gain from matching
 libutp is 1-2% on long transfers over healthy paths, and the cost lands on the
 paths that already fail.
 
+## No cap on incoming connections
+
+libutp refuses a new incoming connection when its context already holds more
+than 3000 sockets (`utp_internal.cpp:2967-2974`). This library has no count
+bound. Pending SYNs are bounded only by time -- `AWAITING_CONNECTION_TIMEOUT`,
+20 seconds -- so a SYN flood at rate R holds R×20 entries where libutp holds at
+most 3000.
+
+**Why.** 3000 is a policy choice rather than a protocol rule, and a BitTorrent
+client can legitimately want more connections than that. A configurable cap is
+how to close it. Until then this is a cost, not an improvement: the exposure to
+a flood is larger than libutp's. Also recorded in KNOWN-LIMITATIONS.md ("No cap
+on accepted connections").
+
 ## A discovered path MTU only lowers the ceiling, never raises it
 
 libutp takes `get_udp_mtu` as its MTU ceiling outright:
@@ -726,10 +813,25 @@ trips; measured, that turned a 1.3 s transfer into 2.8 s. The initial slow
 start is gain-scaled per §4.1; the slowdown ramp is not, and it stops at a
 window this connection was using a moment earlier.
 
-## Not a deviation: nothing else in the congestion controller
+## The congestion controller: what still differs
 
-Apart from LEDBAT++ above, the controller now matches libutp's
-`apply_ccontrol` (`utp_internal.cpp:1615-1712`) and its timeout branch
-(`:1206-1228`). Seven differences were found and closed; they are listed in
-[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md), not here, because they were
-defects rather than choices.
+This section used to say that, apart from LEDBAT++, the controller matched
+libutp's `apply_ccontrol` (`utp_internal.cpp:1615-1712`) and its timeout
+branch (`:1206-1228`). That stopped being true as the parity review went on.
+What differs in classic LEDBAT, each with its own entry above:
+
+- The window starts at two maximum-size packets and never falls below them,
+  where libutp starts at one current-size packet and can fall to 10 bytes.
+  Slow start grows by a maximum-size packet here and by libutp's current
+  `get_packet_size()` there. ("The congestion window starts at, and never
+  falls below, two packets.")
+- The delay clamp uses one packet's round trip, not the minimum across the
+  acknowledgement's batch. ("The delay clamp uses one packet's RTT.")
+- A selective ack does not restart the retransmission timeout. ("A selective
+  ack does not restart the retransmission timeout.")
+
+Everything else in `apply_ccontrol` and the timeout branch matches. Seven
+differences that were defects rather than choices were found and closed; they
+are in [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md), not here. The individual
+window-adjustment rules are checked by reading, not by measurement:
+COMPATIBILITY.md rates them "partly measured".
