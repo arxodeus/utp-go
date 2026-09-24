@@ -3489,6 +3489,16 @@ and slow start takes the larger), and after slow start kept growing where
 libutp's held flat. The same rule in LEDBAT++ had the same reading and is
 fixed with it; they share `defaultController.applicationLimited`.
 
+End to end, on the emulated network (20ms each way, 3Mb/s): a sender writing
+1KB every 100ms, which never has more than one packet in flight, had a window
+of 17.1KB after ten seconds with the fix against 24.8KB before it, three runs
+each and within 0.2% of each other. Both were still in slow start, which
+grows the window in either case, as it does in libutp. At 1KB every 20ms the
+two did not differ: at the 2800-byte starting window that rate does fill the
+window, so the guard never saw an unset time. A bulk transfer never reaches
+the changed branch at all: counted directly in
+`netem.TestClockDriftYieldsShareAtASharedBottleneck`, zero times.
+
 ### 3. ~~No cap on accepted connections~~ — closed
 
 libutp refuses a new incoming connection when the context already holds more
