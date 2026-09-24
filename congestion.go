@@ -959,8 +959,8 @@ const maxSkewAdjustment = 10 * time.Millisecond
 //
 // Measured, before it existed: the phantom queueing delay settles at the
 // delay window multiplied by the drift rate, and what it costs is fairness
-// rather than throughput -- a drifted flow took 35% of a shared bottleneck
-// against an undrifted flow's 65%. See KNOWN-LIMITATIONS.md, and
+// rather than throughput -- a drifted flow took 32-33% of a shared bottleneck
+// against an undrifted flow's 67-68%, and 50-51% with the correction. See KNOWN-LIMITATIONS.md, and
 // netem.TestClockDriftYieldsShareAtASharedBottleneck.
 func (c *defaultController) OnPeerDelay(sample uint32, now time.Time) {
 	// libutp: `if (their_delay != 0)`. A zero means the peer has not stamped

@@ -1820,6 +1820,19 @@ shift it triggers. Result, against the same measurements:
 | uncorrected | 9.87 / 19.79 / 40.56ms (99% of *w x r*) | 35.0% |
 | corrected | 51 / 79 / 112µs (0.3-0.5%) | 51.8% |
 
+**The share figures are single runs, and on the queue they were measured on
+they could not be trusted.** The shared bottleneck had a 256KB queue, 105ms at
+20Mb/s, barely above one flow's 100ms target. Two flows overflowed it, and
+whichever took the tail drop halved its window and spent seconds catching up:
+loss recovery, not the delay-based yielding the test is about. Measured later,
+with neither flow drifted, the split ranged 44-58% over six runs; corrected,
+38.5-57.5% over twenty; uncorrected, 28.5-43.4% over eight. The two
+overlapped, the test's 40% threshold sat inside the overlap, and it failed
+about one run in ten, first seen in a full-suite run at 38.5%. On a 1MB queue
+nothing is dropped: undrifted 49.8-50.2%, corrected 50.2-50.7%, uncorrected
+32.0-33.3%, six runs each, and 49.4-50.6% corrected with two other test
+suites running alongside. The test now uses that queue and asserts 45-55%.
+
 Three things had to be right, and each was wrong first.
 
 **The drift model was half a clock.** `DriftingClock` rewrote the timestamps on

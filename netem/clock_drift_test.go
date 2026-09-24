@@ -373,10 +373,23 @@ func TestClockDriftYieldsShareAtASharedBottleneck(t *testing.T) {
 
 	// One bottleneck, both flows through it, both directions so that
 	// acknowledgements travel too.
+	//
+	// The queue is large enough that it never overflows, and the test depends
+	// on that. It was 256KB, 105ms at this rate, barely above one flow's
+	// 100ms target, so two flows overflowed it, and whichever took the tail
+	// drop halved its window and spent seconds catching up. That is loss
+	// recovery, not delay-based yielding, and it swamped what this test
+	// measures: with *neither* flow drifted, the split ranged 44-58% over
+	// six runs, 26-76% within single seconds; with the correction on, 38.5-
+	// 57.5% over twenty; with it off, 28.5-43.4% over eight. The two
+	// overlapped, so no threshold separated them, and the test failed about
+	// one run in ten. At 1MB (420ms) no packet is dropped and the flows yield
+	// to each other on delay alone: undrifted 49.8-50.2%, corrected 50.2-
+	// 50.7%, uncorrected 32.0-33.3%, six runs each.
 	cfg := Config{
 		Delay:        10 * time.Millisecond,
 		BandwidthBps: 20_000_000,
-		QueueBytes:   256 * 1024,
+		QueueBytes:   1024 * 1024,
 	}
 	n.ConnectShared(cfg,
 		[2]*Endpoint{driftedSrc, driftedDst},
@@ -512,13 +525,13 @@ func TestClockDriftYieldsShareAtASharedBottleneck(t *testing.T) {
 			"blind to the bottleneck, not corrected for drift",
 			drifted.queueSeen, clean.queueSeen)
 	}
-	// Uncorrected this was 35.0%. Half would be perfect; the assertion is
-	// that it is now much nearer half than it was.
-	if share < 0.40 {
-		t.Errorf("the drifted flow took %.1f%% of the link; uncorrected it took 35.0%%, "+
+	// Uncorrected it takes 32.0-33.3%, corrected 50.2-50.7% (see the queue
+	// above). The bounds sit well clear of both.
+	if share < 0.45 {
+		t.Errorf("the drifted flow took %.1f%% of the link; uncorrected it takes 32-33%%, "+
 			"so the correction has not recovered its share", share*100)
 	}
-	if share > 0.60 {
+	if share > 0.55 {
 		t.Errorf("the drifted flow took %.1f%% of the link, more than its share; the "+
 			"correction is over-cancelling and leaving it delay-blind", share*100)
 	}
