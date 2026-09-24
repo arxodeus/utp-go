@@ -3074,7 +3074,7 @@ counters at zero in all 30:
 | arm | delivered in | drops | sender timeouts |
 | --- | --- | --- | --- |
 | `utp_read_drained` on | **2.158–2.163s** | 0 | 0 |
-| off, keep-alive checked every 500ms, approximating libutp | 29.698–29.702s | 0 | 0 |
+| off, keep-alive checked every 500ms, which is libutp's own cadence | 29.698–29.702s | 0 | 0 |
 | off, keep-alive on this library's 29s ticker | 58.206–58.212s | 0 | 0 |
 
 In every run the window fell to between 176 and 260 bytes: less than a
@@ -3088,7 +3088,7 @@ each time. A timeline of both ends shows the sender learning of a
 32,768-byte window at 14.01s and the remaining 358KB leaving within 0.18s.
 
 So, in this scenario, the benefit is about 27.5 seconds per stall against
-libutp's own behaviour without the mechanism (approximated by the 500ms arm).
+libutp's own behaviour without the mechanism (the 500ms arm, which checks the keep-alive at libutp's cadence).
 Against this library as it then was, it was about 56 seconds. The difference
 between those two control figures was a separate defect, since fixed (2e).
 With that fix, the control arm on the unmodified keep-alive finishes in
@@ -3252,8 +3252,10 @@ that drops nothing means a peer sent past the window it was given.
 ### 2e. ~~Keep-alive fires up to 29 seconds late~~ — fixed
 
 libutp checks `current_ms - last_sent_packet >= KEEPALIVE_INTERVAL` on every
-timeout pass (`utp_internal.cpp:1271-1274`), and embedders run that pass
-often: `utp.h` sets no rate, and this repository's bridge runs it every 50ms.
+timeout pass (`utp_internal.cpp:1271-1274`), and it runs that pass at most
+every 500ms however often its embedder calls it (`TIMEOUT_CHECK_INTERVAL`,
+`:37`, `:3284`). This said earlier that the rate was the embedder's, which
+was wrong; found while measuring the retransmission timeout (2g).
 So a keep-alive leaves about 29 seconds after the last packet. This library
 checked the same condition only when a 29-second ticker fires,
 counted from connection start. A connection that went quiet just after a tick
@@ -3271,8 +3273,8 @@ a keep-alive that can wait 58 seconds does not.
 re-aimed from `lastSentPacket` each time it fires. Anything sent in between
 moves the instant later; a keep-alive sent resets it to one interval. The
 keep-alive now leaves exactly one interval after the last packet. libutp's
-leaves at the first timeout pass after that, so it can be one embedder tick
-later than ours; this repository's bridge ticks every 50ms.
+leaves at the first timeout pass after that, so it can be up to 500ms later
+than ours.
 
 `TestKeepAliveLeavesOneIntervalAfterTheLastPacket` runs on the virtual clock
 at libutp's 29 seconds. The connection goes quiet 5 seconds in, away from any
@@ -3398,6 +3400,73 @@ libutp, geometric mean).
 Not investigated: our first timeout came about 1.0s after
 the last send, libutp's after 1.0–1.46s. It may be only different RTT
 estimates.
+
+### 2g. ~~The retransmission timeout ran from the wrong place~~ — fixed
+
+Two defects, found by comparing the retransmission timeout with libutp's on
+virtual clocks (`TestConformanceRetransmissionTimeoutComputation`). The
+estimator itself was right: our RTT smoothing is libutp's arithmetic line for
+line (`utp_internal.cpp:1362-1380`). What fed it and what used it were not.
+
+**Every acknowledgement that retired everything in flight stopped half way.**
+After acknowledging, the sent-packet bookkeeping asks for the first packet
+still unacknowledged, and when there was none it returned that as an error.
+`processAck` then returned before it disarmed the retired packets' timers,
+restarted the retransmission deadline, reset the consecutive-timeout count, or
+told the MTU search a probe had arrived. On a connection sending flat out an
+acknowledgement rarely retires everything; on any other -- request and
+response, a trickle of protocol messages, the end of every transfer -- it
+retires everything every time. The next packet then found stale timers still
+armed, so it started no deadline of its own, and was timed from whatever
+deadline an earlier packet had left. In the trace that found it, a packet
+sent with a 1.15s timeout was resent after 2.0s, from a deadline set at the
+handshake. libutp's `ack_packet` has no such exit and restarts `rto_timeout`
+for every packet it retires (`:1388-1389`).
+
+`TestAckRetiringEverythingRestartsTheDeadline` pins it without libutp: one
+packet acknowledged after 100ms, a second sent, and the second must be resent
+within a wheel tick of the 1-second timeout. It fails without the fix. Fixing
+it also exposed that the unit-test connection fixture had no MTU search, which
+nothing had reached before.
+
+**No RTT sample was taken from the SYN.** libutp's SYN sits in its outgoing
+buffer like any packet, and the SYN-ACK acknowledges it through the same
+`ack_packet`, which samples any packet sent once (`:1362`). Ours built its
+congestion controller when the SYN-ACK arrived and started it with no
+estimate, so a connection's first timeout was the 3-second initial value where
+libutp's was computed from the handshake: 1 second on any path under about
+330ms. A SYN sent more than once still gives no sample, as in libutp.
+
+Measured after both fixes, five chains of round trips, libutp to 10ms and ours
+to the 25ms wheel tick:
+
+| round trips (SYN first) | libutp | ours |
+| --- | --- | --- |
+| 0 | 1.00s | 1.025s |
+| 800ms | 2.40s | 2.425s |
+| 0, 800ms | 2.40s | 2.425s |
+| 500, 300, 1200, 200ms | 1.97s | 2.00s |
+| 100, 100, 900ms | 1.12s | 1.15s |
+
+Before the fixes ours was 3.025, 3.025, 2.425, 1.65 and 2.025 seconds: one
+right in five.
+
+**Throughput: no measurable change.** Classic LEDBAT, paired by seed against
+the code before: LAN 1.006, broadband 1.002, 1% loss 1.000 (eight seeds
+each). At 5% loss two sweeps disagreed -- 0.914 over eight seeds, then 1.075
+over twelve with the same binaries on the same first eight seeds -- which
+says that profile's run-to-run noise from real goroutine scheduling is larger
+than any effect these fixes have on it. Each fix alone, same twelve seeds:
+the acknowledgement fix 1.142, the SYN sample 1.006.
+
+**Measuring libutp needed care, and it corrected an earlier claim.** libutp
+runs its timeout pass at most every 500ms however often its embedder calls it
+(`TIMEOUT_CHECK_INTERVAL`, `:37`, `:3284`), so it resends on the first pass
+after its deadline, not on it. Measured naively, its timeouts all looked like
+multiples of 500ms. The deadline is recovered by moving the phase of those
+passes across the interval and taking the shortest time to the resend. Section
+2e said earlier that libutp's pass ran as often as the embedder called it; it
+does not, and 2e now says so.
 
 ### 3. ~~No cap on accepted connections~~ — closed
 

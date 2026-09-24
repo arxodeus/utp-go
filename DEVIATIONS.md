@@ -64,6 +64,8 @@ worse.
 - *A selective ack does not restart the retransmission timeout.* libutp's rule
   ran slower at 5% loss (0.883 of the old throughput against 0.943). Measured
   on that profile only, under classic LEDBAT.
+- *The zero-window probe fits a packet at any MTU.* At an Ethernet interface's
+  MTU libutp's probe never fires; ours fires at 15s. Measured against libutp.
 
 **Better on reasoning.** libutp has a defect or a hazard here that was not
 copied. Not measured as an improvement.
@@ -90,6 +92,9 @@ consequence, or equivalent on the wire.
   *`MaxConnAttempts` counts transmissions*, *the selective-ack window* (always
   30 entries), *read-side half-close discards what is buffered* (libutp has no
   buffer to discard), *ICMP: no CS_IDLE state*, *`WriteV` blocks*.
+- *Timeouts act when due, not on a 500ms pass:* retransmissions, keep-alives
+  and the zero-window probe fire within our 25ms timer tick of their
+  deadline; libutp's fire on the first of its 500ms passes after it.
 - *Unknown extension types are rejected:* libutp does the same. It is a shared
   departure from BEP 29, not a departure from libutp.
 - *ICMP collection is the embedder's job:* the same in both; listed so it is
@@ -612,6 +617,42 @@ before the firewall), and the same silent refusal. The default is libutp's
 The only difference is that the figure can be changed, or the cap removed with
 a negative value, because 3000 is a policy choice and a client may want more.
 At its default this is not a deviation.
+
+## The zero-window probe fits a packet at any MTU
+
+When a peer's window has been zero for 15 seconds libutp lets one packet
+through by opening the window to PACKET_SIZE (`utp_internal.cpp:1142-1145`),
+which is 1435 (`:57`). The flush that should send it charges a whole
+`get_packet_size()` against that (is_full with no argument, `:933-936`,
+`:974`): the embedder's MTU less the 20-byte header. With libutp's default MTU
+callback, 1402 on IPv4 (`utp_utils.cpp:228`), a packet is 1382 bytes and the
+probe goes. With an embedder reporting a real Ethernet interface, 1472, a
+packet is 1452 bytes, never fits, and the probe never goes: a peer that
+advertised a zero window and then fell silent leaves the connection stalled
+until it dies.
+
+Ours opens the window to `MaxPacketSize`, the ceiling the payload is always
+below, so it probes whatever the MTU.
+
+**Measured** (`TestConformanceZeroWindowProbeTiming`): at MTU 1402 both probe
+after 15 seconds, libutp at 15.01s on its first timeout pass after the
+deadline; at 1472 libutp sends nothing in 40 seconds and ours probes at 15s.
+The test asserts libutp's failure as well as our success, so a change in the
+vendored libutp shows.
+
+## Timeouts act when due, not on a 500ms pass
+
+libutp runs its timeout pass -- retransmission, keep-alive, the zero-window
+probe, idle window decay -- at most every 500ms, however often its embedder
+calls it (`TIMEOUT_CHECK_INTERVAL`, `utp_internal.cpp:37`, `:3284`). Each of
+those fires on the first pass after its deadline: up to 500ms late. Ours are
+timers aimed at the deadline, fired by a wheel with a 25ms tick, so they fire
+within 25ms of it.
+
+Nothing is gained by reproducing the delay, and it is not a protocol rule: it
+is how often libutp's sockets are walked. The measurements that compare the
+two account for it (`libutpRTO` in `conformance_recovery_test.go` recovers
+libutp's deadline from under it).
 
 ## A discovered path MTU only lowers the ceiling, never raises it
 

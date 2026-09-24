@@ -57,6 +57,11 @@ func CreateTestConnection(endpoint Endpoint) *connection {
 		pendingWrites:  make([]*queuedWrite, 0),
 		writable:       make(chan struct{}, 1),
 		latestTimeout:  nil,
+		// As newConnection has it. The fixture left it out, and nothing
+		// noticed while every acknowledgement that retired all it covered
+		// returned early from processAck, before the MTU search was
+		// consulted. See TestAckRetiringEverythingRestartsTheDeadline.
+		mtu: newMtuSearch(uint32(NewConnectionConfig().MaxPacketSize), time.Now()),
 	}
 
 	return conn

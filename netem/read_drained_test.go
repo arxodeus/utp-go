@@ -17,7 +17,7 @@ import (
 // the reader drains, only this end speaking can restart the sender.
 //
 // Measured, 10 runs an arm: 2.158-2.163s with the mechanism; 29.698-29.702s
-// without it, with the keep-alive checked every 500ms to approximate libutp,
+// without it, with the keep-alive checked every 500ms as libutp checks it,
 // the keep-alive being the only thing that recovered the control. See KNOWN-LIMITATIONS.md, M4b sweep,
 // section 2. The budget below sits between them with room on both sides.
 func TestReadDrainedRestartsASenderBlockedBySubPacketWindow(t *testing.T) {

@@ -49,6 +49,14 @@ func (d *Driver) Close() {
 // what pins them. Once the queue is exhausted the last value repeats.
 func (d *Driver) PushRandom(v uint32) { C.libutp_driver_push_random(d.c, C.uint32_t(v)) }
 
+// SetUDPMTU sets what the driver reports to libutp as the path MTU
+// (UTP_GET_UDP_MTU), which libutp takes as the ceiling of its MTU search and
+// as its first packet size. The default is 1472, a 1500-byte Ethernet MTU
+// less the IPv4 and UDP headers. libutp's own default callback reports 1402
+// on IPv4 (utp_utils.cpp:228), which is what an embedder that registers no
+// callback gets. It must be set before Connect or the first SYN arrives.
+func (d *Driver) SetUDPMTU(mtu uint16) { C.libutp_driver_set_udp_mtu(d.c, C.uint16_t(mtu)) }
+
 // SetTime and Advance move the virtual clock, in microseconds.
 func (d *Driver) SetTime(micros uint64) { C.libutp_driver_set_time(d.c, C.uint64_t(micros)) }
 func (d *Driver) Advance(micros uint64) { C.libutp_driver_advance(d.c, C.uint64_t(micros)) }

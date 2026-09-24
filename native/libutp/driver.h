@@ -32,6 +32,7 @@ void libutp_driver_destroy(libutp_driver *d);
 // is exhausted the last value repeats. libutp draws its connection id and
 // initial sequence number from here, so this is what pins them.
 void libutp_driver_push_random(libutp_driver *d, uint32_t value);
+void libutp_driver_set_udp_mtu(libutp_driver *d, uint16_t mtu);
 
 // The virtual clock. Nothing advances it but these.
 void libutp_driver_set_time(libutp_driver *d, uint64_t now_micros);

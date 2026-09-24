@@ -67,10 +67,20 @@ func (r *initiatorRun) close() {
 // the handshake before it begins, and the responder corpus never sends one.
 func newInitiatorRun(t *testing.T) (*initiatorRun, [][]byte, [][]byte) {
 	t.Helper()
+	return newInitiatorRunMTU(t, 0)
+}
+
+// newInitiatorRunMTU is newInitiatorRun with the MTU libutp's driver reports
+// set to udpMTU; zero leaves the driver's default, 1472.
+func newInitiatorRunMTU(t *testing.T, udpMTU uint16) (*initiatorRun, [][]byte, [][]byte) {
+	t.Helper()
 
 	drv, err := libutp.NewDriver(1_000_000)
 	if err != nil {
 		t.Skipf("libutp driver unavailable: %v", err)
+	}
+	if udpMTU != 0 {
+		drv.SetUDPMTU(udpMTU)
 	}
 	drv.PushRandom(uint32(initiatorConnSeed))
 

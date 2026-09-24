@@ -1491,8 +1491,8 @@ defects first: the gap deadlock (PR 53), and this fork's sender overrunning the
 peer's window (PR 54). A 32KB receive buffer, 512KB to send, a reader paused
 two seconds, nothing dropped on the link, 10 runs each. With the change the
 transfer finished in 2.158–2.163s. Without it, it finished in 29.698–29.702s,
-with the keep-alive checked every 500ms to approximate libutp, which checks
-it on every timeout pass. The window fell to 176–260
+with the keep-alive checked every 500ms, which is how often libutp runs its
+timeout pass (`TIMEOUT_CHECK_INTERVAL`). The window fell to 176–260
 bytes, which is less than a packet but not zero, so the zero-window probe never
 armed, and the only recovery was the receiver's keep-alive. That was shown by
 moving the keep-alive interval and watching recovery move with it. The
@@ -1669,6 +1669,31 @@ counted as new. Zero means the default, 3000; a negative value removes the cap.
 
 Reviewers should note it changes a default: a socket that took any number of
 incoming connections now refuses past 3000, as every libutp peer does.
+
+## PR 58 — two retransmission-timeout defects, found by measuring against libutp
+
+A virtual-clock comparison of the retransmission timeout against libutp's found
+the estimator right and its inputs wrong:
+
+- **An acknowledgement that retired everything in flight stopped half way.**
+  The sent-packet bookkeeping returned "nothing left unacknowledged" as an
+  error, and `processAck` returned before disarming the retired packets'
+  timers, restarting the deadline, resetting the consecutive-timeout count, or
+  reporting an MTU probe's arrival. That is every acknowledgement on a
+  connection not sending flat out. The next packet was then timed from a stale
+  deadline -- a 1.15s timeout resent after 2.0s in the trace that found it.
+- **No RTT sample was taken from the SYN**, so the first timeout was the
+  3-second initial value where libutp's is computed from the handshake.
+
+Both fixed; the five cases in `TestConformanceRetransmissionTimeoutComputation`
+went from one in five matching libutp to all five within our 25ms timer tick.
+`TestAckRetiringEverythingRestartsTheDeadline` pins the first without libutp.
+
+The same work moved three more areas from "read against libutp" to measured
+against it: fast-retransmit decisions (threshold, four-per-ack cap,
+`fast_resend_seq_nr`), which match exactly, and the zero-window probe, which
+matches at libutp's default MTU and shows libutp never probing at an Ethernet
+MTU. The libutp driver gained `SetUDPMTU` for that.
 
 ## Not for upstream
 

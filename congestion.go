@@ -132,6 +132,10 @@ type Controller interface {
 	BytesInFlight() uint32
 	// CongestionWindow is libutp's max_window.
 	CongestionWindow() uint32
+	// OnRTTSample feeds a round trip measured outside OnAck: the SYN's, on
+	// the dialling side. libutp takes it through the same ack_packet as any
+	// other (utp_internal.cpp:1362-1380).
+	OnRTTSample(rtt time.Duration)
 	// MarkForResend gives a packet up as lost: its bytes stop counting in
 	// flight until it is sent again. libutp does this to every packet in
 	// flight on a retransmission timeout (utp_internal.cpp:1230-1237). A
@@ -501,28 +505,38 @@ func (c *defaultController) OnAck(seqNum uint16, ack Ack) error {
 	// transmission. libutp applies the same rule
 	// (`if (pk->transmissions == 1)`, utp_internal.cpp:1362).
 	if packetInst.NumTransmissions == 1 {
-		ertt := ack.RTT.Microseconds()
-
-		if c.rtt == 0 {
-			// First sample: adopt it outright rather than easing an average
-			// up from zero, which would take about twenty samples to
-			// converge and leave the RTO wrong for all of them
-			// (utp_internal.cpp:1364-1367).
-			c.rtt = time.Duration(ertt) * time.Microsecond
-			c.rttVarianceMicros = ertt / 2
-		} else {
-			// utp_internal.cpp:1370-1372.
-			rttMicros := c.rtt.Microseconds()
-			delta := rttMicros - ertt
-			c.rttVarianceMicros = maxInt64(0, c.rttVarianceMicros+(absInt64(delta)-c.rttVarianceMicros)/4)
-			rttMicros = rttMicros - rttMicros/8 + ertt/8
-			c.rtt = time.Duration(maxInt64(rttMicros, 0)) * time.Microsecond
-		}
-
-		c.applyTimeoutAdjustment()
+		c.updateRTT(ack.RTT.Microseconds())
 	}
 
 	return nil
+}
+
+func (c *defaultController) OnRTTSample(rtt time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.updateRTT(rtt.Microseconds())
+}
+
+// updateRTT is libutp's RTT estimator and timeout (utp_internal.cpp:1362-1380),
+// for one sample in microseconds. Called with the lock held.
+func (c *defaultController) updateRTT(ertt int64) {
+	if c.rtt == 0 {
+		// First sample: adopt it outright rather than easing an average
+		// up from zero, which would take about twenty samples to
+		// converge and leave the RTO wrong for all of them
+		// (utp_internal.cpp:1364-1367).
+		c.rtt = time.Duration(ertt) * time.Microsecond
+		c.rttVarianceMicros = ertt / 2
+	} else {
+		// utp_internal.cpp:1370-1372.
+		rttMicros := c.rtt.Microseconds()
+		delta := rttMicros - ertt
+		c.rttVarianceMicros = maxInt64(0, c.rttVarianceMicros+(absInt64(delta)-c.rttVarianceMicros)/4)
+		rttMicros = rttMicros - rttMicros/8 + ertt/8
+		c.rtt = time.Duration(maxInt64(rttMicros, 0)) * time.Microsecond
+	}
+
+	c.applyTimeoutAdjustment()
 }
 
 // maxWindowDecayInterval is the shortest gap between two halvings of the

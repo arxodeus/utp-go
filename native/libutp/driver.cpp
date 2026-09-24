@@ -45,6 +45,9 @@ struct libutp_driver {
 	int state;
 	int err;
 	int listening;
+	// udp_mtu is what UTP_GET_UDP_MTU reports; zero means 1472. See
+	// drv_get_udp_mtu.
+	uint16_t udp_mtu;
 	int want_close;
 	int close_sent;
 
@@ -189,8 +192,8 @@ static uint64 drv_get_read_buffer_size(utp_callback_arguments *a) {
 // 1472 is a standard 1500-byte Ethernet MTU less 20 bytes of IPv4 header and
 // 8 of UDP, which is what an embedder on an ordinary path reports.
 static uint64 drv_get_udp_mtu(utp_callback_arguments *a) {
-	(void)a;
-	return 1472;
+	libutp_driver *d = drv_of(a);
+	return d->udp_mtu ? d->udp_mtu : 1472;
 }
 
 static uint64 drv_get_milliseconds(utp_callback_arguments *a) {
@@ -264,6 +267,10 @@ void libutp_driver_destroy(libutp_driver *d) {
 void libutp_driver_push_random(libutp_driver *d, uint32_t value) {
 	if (d->random_count >= DRIVER_MAX_RANDOM) return;
 	d->randoms[d->random_count++] = value;
+}
+
+void libutp_driver_set_udp_mtu(libutp_driver *d, uint16_t mtu) {
+	d->udp_mtu = mtu;
 }
 
 void libutp_driver_set_time(libutp_driver *d, uint64_t now_micros) {

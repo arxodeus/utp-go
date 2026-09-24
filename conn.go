@@ -415,7 +415,10 @@ type connection struct {
 
 	// synTimeout is the current retransmission timeout for the SYN, doubled
 	// on each attempt. libutp calls this retransmit_timeout.
-	synTimeout    time.Duration
+	synTimeout time.Duration
+	// synSentAt is when the SYN first went out, for the RTT sample the
+	// SYN-ACK gives. See onState.
+	synSentAt     time.Time
 	lastMetricsAt time.Time
 }
 
@@ -626,6 +629,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		}
 		c.synTimeout = c.config.InitialTimeout
 		c.armRetransmit(synPkt, c.synTimeout)
+		c.synSentAt = c.now()
 
 		c.endpoint.Attempts = 1
 	} else {
@@ -674,8 +678,9 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	// idle timeout eventually kills it. libutp checks
 	// `current_ms - last_sent_packet >= KEEPALIVE_INTERVAL` on every timeout
 	// pass (utp_internal.cpp:1271-1274), so its keep-alive leaves one
-	// interval after the last packet, to within however often the embedder
-	// runs that pass.
+	// interval after the last packet, to within the 500ms libutp allows
+	// between passes however often its embedder calls it
+	// (TIMEOUT_CHECK_INTERVAL, :37, :3284).
 	//
 	// This is a timer aimed at that instant, re-aimed from lastSentPacket
 	// every time it fires. It used to be a ticker at the interval, counted
@@ -2837,6 +2842,20 @@ func (c *connection) onState(seqNum, ackNum uint16) {
 		sendBuf := newSendBuffer(c.config.BufferSize)
 
 		congestionCtrl := newDefaultController(fromConnConfig(c.config))
+		// The SYN's round trip is the first RTT sample, as it is in libutp:
+		// the SYN sits in its outgoing buffer like any packet, and the
+		// SYN-ACK acknowledges it through the same ack_packet, which samples
+		// a packet sent once (`if (pkt->transmissions == 1)`,
+		// utp_internal.cpp:1362). A SYN sent more than once gives no sample,
+		// because the answer cannot be matched to one transmission.
+		//
+		// Without it a connection's first timeout was the 3-second initial
+		// value where libutp's was computed from the handshake -- 1 second on
+		// any path under about 330ms. Measured against libutp:
+		// TestConformanceRetransmissionTimeoutComputation.
+		if c.endpoint.Attempts == 1 && !c.synSentAt.IsZero() {
+			congestionCtrl.OnRTTSample(c.now().Sub(c.synSentAt))
+		}
 		sentPacketsHolder := newSentPackets(c.endpoint.SynNum, congestionCtrl, c.logger)
 
 		// Report success the same way the acceptor path does, at line ~351:

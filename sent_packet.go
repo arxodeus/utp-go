@@ -371,14 +371,24 @@ func (s *sentPackets) OnAckNum(
 		return err
 	}
 
-	firstUnacked, err := s.FirstUnackedSeqNum()
-	if err != nil {
-		return err
-	}
-
 	// An ACK for ackNum implicitly ACKs all sequence numbers that precede ackNum
 	// Account for any preceding innerMap packets
-	if err = s.AckPriorUnacked(ackNum, firstUnacked, delay, now); err != nil {
+	//
+	// Nothing left unacknowledged is the ordinary outcome of an ack that
+	// retires everything in flight, not an error. It used to be returned as
+	// one, and processAck then stopped short of everything after the ack
+	// itself: the timers of the retired packets stayed armed, the
+	// retransmission deadline was not restarted, the consecutive-timeout
+	// count was not reset, and an MTU probe's acknowledgement was never seen.
+	// On any connection not sending flat out, that was every ack. libutp's
+	// ack_packet has no such failure (utp_internal.cpp:1329-1400).
+	firstUnacked, err := s.FirstUnackedSeqNum()
+	switch {
+	case err == nil:
+		if err = s.AckPriorUnacked(ackNum, firstUnacked, delay, now); err != nil {
+			return err
+		}
+	case !errors.Is(err, ErrNoneAckNum):
 		return err
 	}
 
