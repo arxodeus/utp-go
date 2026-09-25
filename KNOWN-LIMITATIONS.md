@@ -1833,6 +1833,23 @@ nothing is dropped: undrifted 49.8-50.2%, corrected 50.2-50.7%, uncorrected
 32.0-33.3%, six runs each, and 49.4-50.6% corrected with two other test
 suites running alongside. The test now uses that queue and asserts 45-55%.
 
+Every other netem test that runs more than one flow through one link was
+checked for the same weakness. None asserts inside its own noise:
+
+- `TestDeferenceToLossBasedFlow`, `TestLatecomerShare`, `TestBaseDelayTracking`
+  and `TestTwoUtpFlowsShareBottleneck` report the split and assert only that
+  each flow moved data. The deference competitor is loss-based and needs the
+  queue to overflow, so there the drops are the experiment, not noise.
+- `TestTwoFlowsShareBottleneck` is about the emulator's queue, not congestion
+  control: one feeder alternating between two tagged flows at 160% of the
+  link, so drops fall on both alike. Jain 0.975-0.995 over twenty runs alone
+  and 0.981-0.996 over ten under load, against a floor of 0.90.
+- The benchmark's two-flow row asserts nothing. Its queue, 64KB at 8Mb/s, is
+  65ms, below LEDBAT's 100ms target, so the fairness it reports (Jain
+  0.999-1.000) is of two flows that overflow the queue, not of delay-based
+  yielding. Left as it is: changing the profile would break comparison with
+  every figure already recorded against it.
+
 Three things had to be right, and each was wrong first.
 
 **The drift model was half a clock.** `DriftingClock` rewrote the timestamps on
