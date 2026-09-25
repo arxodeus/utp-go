@@ -1844,11 +1844,16 @@ checked for the same weakness. None asserts inside its own noise:
   control: one feeder alternating between two tagged flows at 160% of the
   link, so drops fall on both alike. Jain 0.975-0.995 over twenty runs alone
   and 0.981-0.996 over ten under load, against a floor of 0.90.
-- The benchmark's two-flow row asserts nothing. Its queue, 64KB at 8Mb/s, is
-  65ms, below LEDBAT's 100ms target, so the fairness it reports (Jain
-  0.999-1.000) is of two flows that overflow the queue, not of delay-based
-  yielding. Left as it is: changing the profile would break comparison with
-  every figure already recorded against it.
+- The benchmark's two-flow row asserts nothing. It was written up here, at
+  first, as measuring two flows that overflow its queue (64KB at 8Mb/s, 65ms,
+  below LEDBAT's 100ms target). That was inferred, not measured, and for
+  classic LEDBAT it is wrong: counted, its two flows drop nothing in seven
+  runs of seven. LEDBAT++'s drop 8-10 a run. What the row did hide was the
+  split: it reported Jain over each flow's goodput, and a flow that finishes
+  first leaves the link to the other, which evens the goodputs out. The row
+  now also reports each flow's share while both ran, and a second row with a
+  2MB queue removes drops altogether. See BENCHMARKS.md, "Two flows: the
+  split while both ran".
 
 Three things had to be right, and each was wrong first.
 
@@ -3580,6 +3585,30 @@ from a sweep that stopped early.
   `math.MaxUint32`. Not reachable: at connection start the congestion window is
   in slow start and is the binding constraint in
   `min(max_window, opt_sndbuf, max_window_user)`.
+
+## LEDBAT++ splits a link unevenly between two of its own flows — open
+
+Two identical LEDBAT++ flows, started together through one 8Mb/s bottleneck,
+do not share it. Measured as each flow's share of the bytes delivered while
+both ran, seven runs each (BENCHMARKS.md, "Two flows: the split while both
+ran"):
+
+- 64KB queue: 34.2-38.8% for the smaller, with 8-10 queue drops a run.
+- 2MB queue, nothing dropped: two modes, 17.8-20.1% in four runs and
+  33.4-33.9% in three.
+
+Classic LEDBAT on the same links: 47.5-48.4% and 49.0-49.9%, no drops.
+
+The benchmark had reported this row as Jain 0.999, because it computed Jain
+over each flow's whole-transfer goodput, which the squeezed flow recovers
+once the other finishes. The split was measured only once the benchmark
+started recording it.
+
+Not yet investigated. Candidates, none checked: the periodic slowdown (§4.4)
+landing on one flow while the other takes the drained queue, and the two
+flows' slowdowns falling out of phase; LEDBAT++'s multiplicative decrease
+acting on a delay estimate one flow has inflated for the other. LEDBAT++ is
+opt-in, and classic LEDBAT, the default, is unaffected.
 
 ## Things found but deliberately not fixed
 

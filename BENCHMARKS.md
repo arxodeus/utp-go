@@ -402,6 +402,37 @@ in one full run and 89.46 in an isolated one. Cross-run comparisons in this
 harness are only worth anything back to back; HARNESS.md says why, and this is
 what ignoring it looks like.
 
+## Two flows: the split while both ran
+
+The two-flow rows in the tables above report Jain's index over each flow's
+goodput, and that number cannot see an unfair split. Both flows carry the same
+payload and start together, so whichever is squeezed finishes later, with the
+link to itself for the last part, and its goodput catches up. A 60/40 split
+while both ran still scores about 0.99. The rows now also report each flow's
+share of the bytes delivered while both were running, and the link's
+queue-overflow drops, and a second row runs the same two flows on a queue deep
+enough that nothing is dropped.
+
+Seven runs each, on the same build:
+
+| | Queue | Split while both ran | Worst | Queue drops | Jain |
+| --- | --- | --- | --- | --- | --- |
+| LEDBAT | 64KB (65ms) | 48/52 | 47.5/52.5 | 0 | 1.000 |
+| LEDBAT | 2MB (2.1s) | 50/50 | 49.0/51.0 | 0 | 1.000 |
+| LEDBAT++ | 64KB (65ms) | 36/64 | 34.2/65.8 | 8-10 | 0.916-0.948 |
+| LEDBAT++ | 2MB (2.1s) | 20/80 or 34/66 | 17.8/82.2 | 0 | 0.926-0.970 |
+
+Classic LEDBAT, the default, splits the link evenly on both queues and never
+fills the shallow one. LEDBAT++ does not: about 36/64 on the shallow queue,
+and on the deep one, with nothing dropped, worse, in two modes -- four runs
+near 19/81 and three near 34/66. Its Jain figure in the table above, 0.999,
+was taken from goodputs and did not show it. Why it happens is not yet
+investigated; LEDBAT++ is opt-in, and this is recorded as a known defect of it
+rather than of the default.
+
+`go test ./netem -run 'TestBenchmarkSuite/.*/Two_flows' -v` with
+`UTP_BENCHMARK_REPEATS=7` reproduces it.
+
 ## What these numbers are not
 
 - **Not a comparison against libutp.** The interoperability gate proves the

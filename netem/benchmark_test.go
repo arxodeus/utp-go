@@ -3,6 +3,7 @@ package netem
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -208,21 +209,32 @@ func TestBenchmarkSuite(t *testing.T) {
 			}
 
 			// Two flows over one bottleneck: the fairness number LEDBAT is
-			// judged on.
-			t.Run("Two flows, 8Mbps bottleneck", func(t *testing.T) {
-				var totals, fairnesses []float64
-				for run := 0; run < benchmarkRepeatCount(); run++ {
-					fairness, throughputs := runTwoFlowBottleneck(t, 108, alg.algo)
-					total := throughputs[0].Mbps() + throughputs[1].Mbps()
-					totals = append(totals, total)
-					fairnesses = append(fairnesses, fairness)
-					t.Logf("run %d: %.2f + %.2f Mbps, total %.2f, Jain fairness %.3f",
-						run+1, throughputs[0].Mbps(), throughputs[1].Mbps(), total, fairness)
-				}
-				lo, hi := minMaxFloat(totals)
-				rows = append(rows, fmt.Sprintf("| Two flows, 8Mbps bottleneck | %.2f Mbps total | %.2f-%.2f | | | | | | | | Jain %.3f |",
-					medianFloat(totals), lo, hi, medianFloat(fairnesses)))
-			})
+			// judged on. See twoFlowProfiles for why there are two.
+			for _, tp := range twoFlowProfiles() {
+				tp := tp
+				t.Run(tp.name, func(t *testing.T) {
+					var totals, fairnesses, shared, drops []float64
+					for run := 0; run < benchmarkRepeatCount(); run++ {
+						r := runTwoFlowBottleneck(t, benchmarkSeed(108), tp, alg.algo)
+						total := r.throughputs[0].Mbps() + r.throughputs[1].Mbps()
+						totals = append(totals, total)
+						fairnesses = append(fairnesses, r.fairness)
+						shared = append(shared, r.shared)
+						drops = append(drops, float64(r.queueDrops))
+						t.Logf("run %d: %.2f + %.2f Mbps, total %.2f, Jain fairness %.3f, "+
+							"split while both ran %.1f/%.1f, %d queue drops",
+							run+1, r.throughputs[0].Mbps(), r.throughputs[1].Mbps(), total, r.fairness,
+							100*r.shared, 100*(1-r.shared), r.queueDrops)
+					}
+					lo, hi := minMaxFloat(totals)
+					slo, _ := minMaxFloat(shared)
+					rows = append(rows, fmt.Sprintf("| %s | %.2f Mbps total | %.2f-%.2f | | | | | | | | "+
+						"Jain %.3f; split while both ran %.0f/%.0f (worst %.0f/%.0f); %.0f queue drops |",
+						tp.name, medianFloat(totals), lo, hi, medianFloat(fairnesses),
+						100*medianFloat(shared), 100*(1-medianFloat(shared)), 100*slo, 100*(1-slo),
+						medianFloat(drops)))
+				})
+			}
 
 			t.Logf("%s:\n%s", alg.name, strings.Join(rows, "\n"))
 			if dir := os.Getenv("UTP_BENCHMARK_OUT_DIR"); dir != "" {
@@ -291,20 +303,63 @@ func medianDuration(values []time.Duration) time.Duration {
 	return sorted[len(sorted)/2]
 }
 
-func runTwoFlowBottleneck(t *testing.T, seed int64, algo utp.CongestionAlgorithm) (fairness float64, throughputs []Throughput) {
+// twoFlowProfile is a bottleneck shared by two identical flows that start
+// together.
+type twoFlowProfile struct {
+	name       string
+	queueBytes int
+	payload    int
+}
+
+// twoFlowProfiles are the two-flow rows.
+//
+// The first is the original row and is kept as it was, so it stays
+// comparable with every figure recorded against it. Its queue, 64KB at
+// 8Mb/s, is 65ms, below LEDBAT's 100ms target, so whether it overflows
+// depends on the controller: classic LEDBAT's two flows keep the queue short
+// enough never to drop a packet, LEDBAT++'s drop 8-10 a run.
+//
+// The second takes the queue out of the question. It holds 2MB, about two
+// seconds at 8Mb/s, which no controller here fills, so nothing is dropped
+// under either and the flows can only yield to each other on delay. The
+// payload is larger so the shared period outlasts slow start.
+func twoFlowProfiles() []twoFlowProfile {
+	return []twoFlowProfile{
+		{"Two flows, 8Mbps bottleneck", 64 * 1024, 512 * 1024},
+		{"Two flows, 8Mbps, 2MB queue", 2 << 20, 4 << 20},
+	}
+}
+
+// twoFlowResult is one run of a two-flow profile.
+type twoFlowResult struct {
+	throughputs []Throughput
+	// fairness is Jain's index over the two flows' goodputs. Each flow's
+	// goodput covers its whole transfer, including any time it had the link
+	// to itself after the other finished, which evens the two out: a 60/40
+	// split while both ran still scores about 0.99.
+	fairness float64
+	// shared is the smaller flow's share of the bytes delivered while both
+	// were running, which is the split itself.
+	shared float64
+	// queueDrops counts packets the bottleneck discarded because its queue
+	// was full.
+	queueDrops uint64
+}
+
+func runTwoFlowBottleneck(t *testing.T, seed int64, profile twoFlowProfile, algo utp.CongestionAlgorithm) twoFlowResult {
 	t.Helper()
 	n := NewNetwork(seed)
 	defer n.Close()
 	sender := n.MustAddEndpoint("sender")
 	receiver := n.MustAddEndpoint("receiver")
-	cfg := Config{Delay: 20 * time.Millisecond, BandwidthBps: 8_000_000, QueueBytes: 64 * 1024}
+	cfg := Config{Delay: 20 * time.Millisecond, BandwidthBps: 8_000_000, QueueBytes: profile.queueBytes}
 	n.ConnectAsymmetric(sender, receiver, cfg, cfg)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 	defer cancel()
 	pair := NewUtpPair(ctx, n, sender, receiver, quiet())
 
-	data := make([]byte, 512*1024)
+	data := make([]byte, profile.payload)
 	for i := range data {
 		data[i] = byte(i)
 	}
@@ -327,16 +382,59 @@ func runTwoFlowBottleneck(t *testing.T, seed int64, algo utp.CongestionAlgorithm
 		}(i, cid)
 	}
 
+	var out twoFlowResult
 	var rates []float64
+	var received [][]utp.ConnectionMetrics
 	for i := 0; i < 2; i++ {
-		out := <-results
-		if out.err != nil {
-			t.Fatalf("flow %d: %v", i, out.err)
+		o := <-results
+		if o.err != nil {
+			t.Fatalf("flow %d: %v", i, o.err)
 		}
-		throughputs = append(throughputs, out.res.Goodput)
-		rates = append(rates, float64(out.res.Goodput.Bps()))
+		out.throughputs = append(out.throughputs, o.res.Goodput)
+		rates = append(rates, float64(o.res.Goodput.Bps()))
+		received = append(received, o.res.Receiver.Samples())
 	}
-	return FairnessIndex(rates), throughputs
+	out.fairness = FairnessIndex(rates)
+	out.shared = sharedPeriodSplit(received[0], received[1])
+	out.queueDrops = n.Link("sender", "receiver").Stats().DroppedByQueue
+	return out
+}
+
+// sharedPeriodSplit is the smaller of two flows' shares of the bytes their
+// receivers took in while both flows were running: from the later flow's
+// first sample to the earlier flow's last. It is 0 if the two never overlap.
+func sharedPeriodSplit(a, b []utp.ConnectionMetrics) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	from := a[0].At
+	if b[0].At.After(from) {
+		from = b[0].At
+	}
+	until := a[len(a)-1].At
+	if b[len(b)-1].At.Before(until) {
+		until = b[len(b)-1].At
+	}
+	if !until.After(from) {
+		return 0
+	}
+	// Bytes received as of t: the last sample at or before it.
+	at := func(s []utp.ConnectionMetrics, t time.Time) uint64 {
+		var v uint64
+		for _, m := range s {
+			if m.At.After(t) {
+				break
+			}
+			v = m.BytesReceived
+		}
+		return v
+	}
+	da := float64(at(a, until) - at(a, from))
+	db := float64(at(b, until) - at(b, from))
+	if da+db == 0 {
+		return 0
+	}
+	return math.Min(da, db) / (da + db)
 }
 
 // benchmarkSeed is the profile's seed, or UTP_BENCHMARK_SEED when set.
