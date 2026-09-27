@@ -3743,8 +3743,32 @@ Not applied.
 So the open question is the one the logs point at: how LEDBAT++ is meant to
 undo an imbalance set in the latecomer's initial slow start. The draft's
 answer is multiplicative decrease with `Constant` = 1, which it says
-implementations "MAY experiment with"; a larger constant converges faster at
-some cost in stability. Not tried.
+implementations "MAY experiment with".
+
+**Tried: a larger decrease constant.** A first pass at 1, 2 and 4, five runs
+each, found no measurable change to deference, to two flows starting
+together, or to the single-flow profiles, and a smaller latecomer share at 2
+and 4. Then 1 against 4, fifteen runs each, the two arms interleaved run by
+run so any drift in the machine falls on both:
+
+| | `Constant` = 1 (draft) | `Constant` = 4 |
+| --- | --- | --- |
+| 4 MB latecomer, share while both ran | 67.4-70.8% (median 69.8) | 54.6-62.4% (median 59.1), and one run at 25.4% |
+| 16 MB latecomer, whole run | 51.8-71.7% (median 68.2) | 50.9-64.8% (median 58.0) |
+| 16 MB latecomer, last two seconds | 49-70% (median 60) | 31-66% (median 56) |
+| Broadband, runs with a retransmission timeout | 0 of 15 | 1 of 15 (2.15 Mbps against about 6.05) |
+
+A larger constant takes about ten points off the latecomer's share, reliably,
+but does not remove the advantage -- still about 58-60% on a typical run --
+and by the end of a 16 MB transfer the two are close. Against that, the
+Broadband profile had a timeout at 4 in two runs of twenty across both passes
+and in none of twenty at 1, and one 4 MB run at 4 over-corrected, squeezing
+the latecomer to 25%. Neither is proven at these counts; both recurred or
+went the wrong way.
+
+**Kept at 1**, the draft's recommended value: a partial improvement to an
+unsolved problem does not justify leaving the draft and risking stability.
+`ledbatPPDecreaseConstant` is the one line to change to revisit it.
 
 ## Things found but deliberately not fixed
 
