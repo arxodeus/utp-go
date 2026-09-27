@@ -3715,9 +3715,36 @@ it did -- deferring to a loss-based flow in fourteen runs of fifteen where
 the one-way delay deferred in five (BENCHMARKS.md) -- and is now how LEDBAT++
 measures delay.
 
-What is left to look at is whether the slowdowns of competing flows should be
-made to overlap, so that a latecomer's freeze coincides with the incumbent's
-and the queue can drain.
+**Not what it looked like: the latecomer's base is corrected.** Logging each
+slowdown's base round trip and the lowest round trip seen during its freeze
+(16 MB run): the latecomer's first slowdown finds the real base -- 85.7 ms to
+41.5 ms -- and from there both flows measure the same base, about 41.5 ms. So
+making slowdowns overlap, the next idea, would repair something already
+repaired, and was not built.
+
+What persists is a window imbalance set before any slowdown. During the
+latecomer's initial slow start, sized against its inflated base, the
+incumbent's multiplicative decrease takes it from 142 KB to 18 KB (another
+run: 141 KB to 16 KB). After that, with both measuring the same delay, the
+§4.3 decrease -- proportional to each window and to how far the delay is over
+target -- closes a 97 KB against 18 KB gap slowly, because the queue sits near
+the target where that decrease is small: the latecomer's share falls from
+about 85% to 60-64% over twenty seconds.
+
+**Tried: distrusting the saved window.** If a freeze lowered the base by more
+than a quarter of the target, the ramp stopped on delay, on the reasoning
+that the window it returns to was sized against a wrong base. Small and
+inconsistent: 58.5-69.2% over three 16 MB runs, 56.3-71.0% over five 4 MB
+runs. Logged, it almost never fires: by the time the latecomer ramps, the
+incumbent is already small, and its ramp reaches the saved window before the
+delay -- a round trip behind a doubling ramp -- crosses 3/4 of the target.
+Not applied.
+
+So the open question is the one the logs point at: how LEDBAT++ is meant to
+undo an imbalance set in the latecomer's initial slow start. The draft's
+answer is multiplicative decrease with `Constant` = 1, which it says
+implementations "MAY experiment with"; a larger constant converges faster at
+some cost in stability. Not tried.
 
 ## Things found but deliberately not fixed
 
