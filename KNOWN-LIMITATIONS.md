@@ -16,7 +16,7 @@ all.
 | **M3** — fix the failing transfer tests | **Done.** Root causes below; gates in "Verification". |
 | **M4** — audit transfer paths against libutp | **Done.** The ack path, the loss-recovery path, the retransmission timers and the send path are all audited against libutp — the timers by measurement rather than by reading, see [CONFORMANCE.md](CONFORMANCE.md). Three findings from the send path below; the packet-size one is deliberately left to M6. |
 | **M4b** — exhaustive libutp compatibility sweep | **Done, and the line-by-line sweep it deferred has since been done too** — see "The M4b sweep" below. It found the clock-drift penalty missing, now implemented and measured, and `utp_read_drained` missing, now implemented after two reverts that rested on a misattributed hang, and measured: a stalled reader's transfer finishes in 2.16s with it against 29.7s under libutp's own behaviour without it. Measuring it found two more defects: our sender overran the peer's window (fixed), and our keep-alive could leave 29 seconds late (also fixed). [COMPATIBILITY.md](COMPATIBILITY.md) records every protocol area, the *kind* of evidence behind it — differential, measured, interop, cited, or none — and what is unchecked. Writing it found one defect (an ack per data packet, below), and the largest gap it named — libutp had never been run over the emulated network — has since been closed: `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite, which found two more defects. Both were in the harness, and both made libutp look worse than it is. |
-| **M5** — verify LEDBAT, add LEDBAT++ | **Done.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft, opt-in. Deference measured against a loss-based competitor over a shared bottleneck: classic LEDBAT takes 60% of the link from it, LEDBAT++ takes 44%. See [BENCHMARKS.md](BENCHMARKS.md). |
+| **M5** — verify LEDBAT, add LEDBAT++ | **Done.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft, opt-in. Deference measured against a loss-based competitor over a shared bottleneck: while both send, classic LEDBAT takes about 69% of the link from it, LEDBAT++ usually 21-33% (re-measured; the first figures were 60% and 44% by goodput share). See [BENCHMARKS.md](BENCHMARKS.md). |
 | **M6** — MTU path discovery | **Done.** Binary search between a 576-byte floor and a 1400-byte ceiling, probing with ordinary data packets, as libutp does. The ceiling could be raised from 1024 only because discovery makes it safe: an untested path still gets 988 bytes. Probes now carry the don't-fragment bit through `utp.DontFragmentWriter`, implemented for a real UDP socket on Linux, Darwin, the BSDs and Windows without adding a dependency, and compiling everywhere else against a stub. Implementing the bit exposed a second gap, since closed: libutp's duplicate-acknowledgement route to lowering the ceiling (`:1927-1940`) was missing, so a probe dropped for size during a bulk transfer taught the search nothing. With both, the search comes down from 1384 to 996 on a 1000-byte path and fragmentation falls from 3809 datagrams to 32. |
 | **M7** — anacrolix/torrent integration | **Done, with one gap.** `utpnet` presents a uTP socket as `net.PacketConn`/`net.Conn` and satisfies torrent's uTP interface, checked against the real interface by reflection in `integration/anacrolix`. The gap: torrent selects its uTP implementation at build time, so wiring it in needs a `replace` or a patched file — recipes in that module's README. |
 | **M8** — soak and hardening | **Partly done.** Six fuzz targets — three on the decoder, one driving a live connection, and two differential against real libutp covering both the responder and initiator roles — plus three soak tests. Six defects found and fixed. See [FUZZING.md](FUZZING.md). Not done: anything running for hours. |
@@ -812,6 +812,12 @@ started first and given time to fill it:
 | --- | --- | --- | --- |
 | LEDBAT | **60%** | 69% | **24.6 ms** |
 | LEDBAT++ | **44%** | 77% | **2.5 ms** |
+
+One run each, on the build of the time, by goodput share. Re-measured over
+seven runs after the LEDBAT++ fixes, as the split while both send: classic
+LEDBAT about 69%, LEDBAT++ usually 21-33% but two runs of seven at 64% and
+84%, and queues of about 24 ms and 13 ms; the 2.5 ms does not reproduce. See
+BENCHMARKS.md, "Deference to a loss-based flow".
 
 Classic LEDBAT takes more than half the link from the traffic it is supposed
 to defer to, and leaves 25 ms of queue for everyone else. It is faster than
@@ -3664,6 +3670,43 @@ overlapping); reordering 2.38 and 2.39 Mbps. The 16KB-queue profile is
 bimodal in both, runs landing near 1.4 or near 3.4 Mbps: 5 of 15 in the fast
 mode before, 10 of 15 after. That leans towards an improvement but fifteen
 runs do not settle it. Nothing measured got worse.
+
+## LEDBAT++'s latecomer takes most of the link — open
+
+Found while re-measuring the latecomer experiment after the fixes above. A
+LEDBAT++ flow that joins a link another LEDBAT++ flow has already filled takes
+70.2-71.9% of it while both run (seven runs), where the build before those
+fixes gave it 45.7-47.3%. The change that moved it is the first of them: the
+ramp out of a slowdown now runs to its target, as the draft says, rather than
+stopping on delay. Put back alone, the latecomer returns to 45.6-46.1%.
+
+Logged, the mechanism: the latecomer's base delay includes the incumbent's
+standing queue, so it reads about 36 ms less queueing delay than there is; it
+leaves slow start late, at 124 KB, and its ramp restores that window. The
+incumbent, whose base is right, sees the real queue and its multiplicative
+decrease takes it from 141 KB to 17 KB. The two flows' slowdowns do not
+overlap, so the latecomer never sees the path empty and its base is never
+corrected. Over 16 MB transfers the advantage decays only slowly, 85% to 62%
+over twenty seconds.
+
+The 46% before was not fairness either. Stopping the ramp on delay collapsed
+*every* first ramp to two packets -- the incumbent's, with no other flow on
+the link, read 74 ms of its own undrained queue -- and the two flows then
+climbed back together. Over 16 MB that variant swung between 14% and 72%.
+
+Why a flow reads its own queue after a freeze: the freeze is two *minimum*
+round trips (86 ms here) and the queue a slow start leaves is about 115 ms.
+The draft's "2 RTT" is a measured RTT, which includes the queue. Tried: a
+freeze of two smoothed RTTs. It did not fix the latecomer (72% over 4 MB; one
+16 MB run swung to 25%) and is not applied.
+
+So the two readings of the ramp trade one unfairness for another: two flows
+starting together, fair only with the draft's ramp; a latecomer, fair only
+without it. Neither is the fix. What is left to look at is how the latecomer's
+base delay is meant to be corrected -- the draft's §4.5 measures RTT and takes
+the minimum of the last four samples, where this implementation uses one-way
+delay against a two-minute minimum -- and whether the slowdowns of competing
+flows should be made to overlap.
 
 ## Things found but deliberately not fixed
 

@@ -168,18 +168,29 @@ Both flows share one bottleneck (`Network.ConnectShared`, added for this),
 given 1.5 s to fill the queue, so the uTP flow arrives at a link that is
 already busy. Baseline: the competitor alone gets **5.67 Mbps**.
 
-| | uTP | Competitor | Competitor kept | uTP's share | Bottleneck queue p50 |
-| --- | --- | --- | --- | --- | --- |
-| LEDBAT | 5.79 Mbps | 3.94 Mbps | 69% | **60%** | **24.6 ms** |
-| LEDBAT++ | 3.37 Mbps | 4.34 Mbps | 77% | **44%** | **2.5 ms** |
+Re-measured after the LEDBAT++ fixes, seven runs each, medians with ranges.
+The competitor alone: **5.66 Mbps** (5.60-6.00). "uTP's share" is from each
+flow's whole-transfer goodput, as before, and counts the competitor's head
+start and whichever flow finishes alone; "while both ran" is the split of the
+bytes delivered while both were sending, which is the split itself.
 
-Classic LEDBAT does not yield. It takes 60% of a shared link from a
-loss-based flow -- more than an equal share, against the traffic it is
-supposed to defer to -- and costs that flow nearly a third of its throughput,
-while leaving 25 ms of queue for anything else on the path.
+| | uTP | Competitor | Competitor kept | uTP's share | While both ran | Bottleneck queue p50 |
+| --- | --- | --- | --- | --- | --- | --- |
+| LEDBAT | 5.72 Mbps | 3.79 Mbps | 65% (62-70) | 60% | **69%** (65-75) | 23.7 ms (16-27) |
+| LEDBAT++ | 3.71 Mbps | 4.60 Mbps | 79% (60-98) | 45% | **33%** (21-33; two runs 64, 84) | 13.2 ms (11-26) |
 
-LEDBAT++ takes 44%, leaves the competitor 77% of what it had alone, and
-leaves a tenth of the queue.
+Classic LEDBAT does not yield. While both are sending it takes about 69% of a
+shared link from a loss-based flow -- more than an equal share, against the
+traffic it is supposed to defer to -- and costs that flow a third of its
+throughput, while leaving about 24 ms of queue for anything else on the path.
+
+LEDBAT++ usually defers: five runs of seven took 21-33% while both ran. Two did
+not, taking 64% and 84%. The build before the LEDBAT++ fixes did the same, one
+run in seven at 62%, so that is not new; it is not yet explained.
+
+The first measurement here, one run on an older build, gave 60% and 44% by
+goodput share and 24.6 ms and 2.5 ms of queue. The goodput shares still agree;
+the 2.5 ms does not reproduce.
 
 This is the measurement that was missing, and it reverses the reading of the
 throughput tables. Classic LEDBAT is faster in those tables *because it is not
@@ -192,17 +203,25 @@ queue; a second joins 1.5 s later, so every delay sample it will ever take
 begins against a full queue. Its idea of the empty path is wrong from its
 first packet -- the failure RFC 6817 acknowledges and LEDBAT++ §4.4 answers.
 
-| | Incumbent | Latecomer | Ratio | Jain |
-| --- | --- | --- | --- | --- |
-| LEDBAT | 7.30 Mbps | 5.69 Mbps | 0.78 | 0.985 |
-| LEDBAT++ | 3.77 Mbps | 3.89 Mbps | 1.03 | 1.000 |
+Re-measured, seven runs each, medians; the latecomer's share is of the bytes
+delivered while both were sending.
 
-LEDBAT++ splits the link evenly and classic LEDBAT does not, but the honest
-reading is that this difference is small (0.985 against 1.000) next to the
-aggregate throughput difference (12.99 Mbps against 7.66). Between two uTP
-flows, classic LEDBAT's unfairness costs less than LEDBAT++'s deference does.
-The deference experiment above is the one that decides the question, because
-competing with itself is not what uTP is for.
+| | Incumbent | Latecomer | Ratio | Latecomer's share while both ran |
+| --- | --- | --- | --- | --- |
+| LEDBAT | 7.43 Mbps | 5.75 Mbps | 0.77 | **20.5%** (20.3-20.7) |
+| LEDBAT++ | 4.16 Mbps | 6.57 Mbps | 1.58 | **71%** (70.2-71.9) |
+| LEDBAT++, before its fixes | 4.04 Mbps | 4.25 Mbps | 1.05 | 46.8% (45.7-47.3) |
+
+Classic LEDBAT's incumbent keeps about 80% of the link while both run: here
+the flow already holding the queue wins, not the latecomer.
+
+**LEDBAT++'s latecomer takes 71%, and that is a regression.** It was 46.8% on
+the build before the fixes to LEDBAT++'s slowdowns, and the change that moved
+it is letting the ramp out of a slowdown run to its target rather than stop on
+delay -- which is what the draft says, and what fixed two flows that start
+together. See KNOWN-LIMITATIONS.md, "LEDBAT++'s latecomer takes most of the
+link"; it is open. The first measurement here, one run on an older build, was
+a ratio of 1.03.
 
 ### Why the default is still classic LEDBAT
 

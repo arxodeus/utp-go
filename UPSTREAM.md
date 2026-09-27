@@ -322,7 +322,11 @@ The result upstream should see first is the deference one. Over a shared
 bottleneck against a loss-based competitor, classic LEDBAT takes 60% of the
 link and leaves 25ms of queue; LEDBAT++ takes 44% and leaves 2.5ms. libutp's
 LEDBAT is not less-than-best-effort, and every throughput number in this fork
-that favours it favours it for that reason.
+that favours it favours it for that reason. (Those were single runs by goodput
+share. Re-measured over seven, as the split while both send: about 69%
+against usually 21-33%, with queues of about 24 ms and 13 ms. The finding
+stands; the 2.5 ms does not reproduce. LEDBAT++ also has an open latecomer
+defect; see KNOWN-LIMITATIONS.md.)
 
 ## PR 14 — the send buffer retained the caller's slice
 
