@@ -338,3 +338,112 @@ func TestWindowCeilingIsNeverBelowTheFloor(t *testing.T) {
 		})
 	}
 }
+
+// ppStepClock is a clock that reads whatever time the test sets, so the
+// send times the controller records and the times the test passes in agree.
+type ppStepClock struct {
+	Clock
+	t time.Time
+}
+
+func (c *ppStepClock) Now() time.Time { return c.t }
+
+func newPPTestController(t0 time.Time) (*defaultController, *ppStepClock) {
+	clk := &ppStepClock{Clock: RealClock, t: t0}
+	config := defaultCtrlConfig()
+	config.Algorithm = AlgorithmLEDBATPP
+	config.Clock = clk
+	ctrl := newDefaultController(config)
+	ctrl.minRTT = 20 * time.Millisecond
+	return ctrl, clk
+}
+
+// A packet sent before a slowdown and declared lost during the ramp out of
+// it was sent from the window the slowdown saved. Its loss halves that
+// window, where the ramp is going, and leaves the ramp where it is. Charged
+// to the ramp's partial window instead, it ended the ramp at a fraction of
+// what the connection had been using, and two LEDBAT++ flows through a
+// shallow bottleneck split it as unevenly as 37/63 (KNOWN-LIMITATIONS.md).
+func TestLedbatPPLossFromBeforeASlowdownHalvesTheSavedWindow(t *testing.T) {
+	t0 := time.Now()
+	ctrl, clk := newPPTestController(t0)
+	packet := ctrl.minWindowSizeBytes / 2
+
+	if err := ctrl.OnTransmit(1, Initial, packet); err != nil {
+		t.Fatal(err)
+	}
+
+	ctrl.ppPhase = ppCongestionAvoidance
+	ctrl.maxWindowSizeBytes = 64 * packet
+	ctrl.ppNextSlowdownAt = t0.Add(time.Millisecond)
+	clk.t = t0.Add(2 * time.Millisecond)
+	ctrl.advanceLedbatPPPhase(clk.t, packet)
+	if ctrl.ppPhase != ppSlowdownFreeze {
+		t.Fatalf("setup: phase %v, want the freeze", ctrl.ppPhase)
+	}
+	clk.t = ctrl.ppFreezeUntil.Add(time.Millisecond)
+	ctrl.advanceLedbatPPPhase(clk.t, packet)
+	if ctrl.ppPhase != ppSlowdownRamp {
+		t.Fatalf("setup: phase %v, want the ramp", ctrl.ppPhase)
+	}
+	ctrl.maxWindowSizeBytes = 8 * packet
+
+	if err := ctrl.OnLostPacket(1, false, clk.t); err != nil {
+		t.Fatal(err)
+	}
+	if ctrl.ppPhase != ppSlowdownRamp {
+		t.Errorf("the ramp ended on the loss (phase %v); the loss was of the saved window", ctrl.ppPhase)
+	}
+	if got := ctrl.maxWindowSizeBytes; got != 8*packet {
+		t.Errorf("the ramp's window went from %d to %d; the loss belongs to the saved window", 8*packet, got)
+	}
+	if got, want := ctrl.ssthreshBytes, 32*packet; got != want {
+		t.Errorf("ssthresh %d after the loss, want the saved %d halved, %d", got, 64*packet, want)
+	}
+}
+
+// One congestion event is charged once. A packet sent before the window was
+// last cut belongs to the event that cut it, however much later its loss is
+// detected; a packet sent after the cut is a new event. The 100ms rate limit
+// alone charged one overflow twice when a slowdown fell between its losses.
+func TestLedbatPPLossIsChargedOncePerCongestionEvent(t *testing.T) {
+	t0 := time.Now()
+	ctrl, clk := newPPTestController(t0)
+	packet := ctrl.minWindowSizeBytes / 2
+	ctrl.ppPhase = ppCongestionAvoidance
+	ctrl.maxWindowSizeBytes = 64 * packet
+
+	for _, seq := range []uint16{1, 2} {
+		if err := ctrl.OnTransmit(seq, Initial, packet); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clk.t = t0.Add(10 * time.Millisecond)
+	if err := ctrl.OnLostPacket(1, false, clk.t); err != nil {
+		t.Fatal(err)
+	}
+	if got := ctrl.maxWindowSizeBytes; got != 32*packet {
+		t.Fatalf("setup: the first loss left %d, want %d", got, 32*packet)
+	}
+
+	clk.t = t0.Add(200 * time.Millisecond)
+	if err := ctrl.OnLostPacket(2, false, clk.t); err != nil {
+		t.Fatal(err)
+	}
+	if got := ctrl.maxWindowSizeBytes; got != 32*packet {
+		t.Errorf("a packet sent before the cut, lost 190ms after it, cut the window again: %d, want %d",
+			got, 32*packet)
+	}
+
+	if err := ctrl.OnTransmit(3, Initial, packet); err != nil {
+		t.Fatal(err)
+	}
+	clk.t = t0.Add(400 * time.Millisecond)
+	if err := ctrl.OnLostPacket(3, false, clk.t); err != nil {
+		t.Fatal(err)
+	}
+	if got := ctrl.maxWindowSizeBytes; got != 16*packet {
+		t.Errorf("a packet sent after the cut is a new event and should halve the window: %d, want %d",
+			got, 16*packet)
+	}
+}

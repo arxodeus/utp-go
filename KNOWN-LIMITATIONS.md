@@ -3640,12 +3640,23 @@ increase against new, all else equal:
 | Broadband, no loss | 5.55 Mbps | 5.55 Mbps |
 | Reordering | 2.38 Mbps | 2.41 Mbps |
 
-**Still open: the shallow queue.** On the 64KB queue, where every run drops
-packets, occasional runs still split about 37/63 with either increase, and
-more often with the new one. Suspected: the same defect as the freeze, one
-phase later -- a packet sent before a slowdown declared lost after the freeze
-has ended, halving the small ramp window rather than the window it was sent
-from. Being checked.
+**A loss was charged to the wrong window, or twice.** On the 64KB queue,
+where every run drops packets, occasional runs still split about 37/63 with
+either increase. Logged, the squeezed flow in each had a packet from before
+its slowdown declared lost during the ramp out of it: the loss halved the
+ramp's partial window (21.8KB, 23.2KB in two traces) and ended the ramp there,
+while the other flow ramped back to its whole window. In one trace the same
+overflow had already halved the window 110ms earlier; the 100ms rate limit
+let it be charged again. Two rules now, LEDBAT++ only
+(`defaultController.onLedbatPPLoss`): a packet sent before the window was
+last cut belongs to that congestion event and is not charged again (NewReno's
+"recover"), and a packet sent before a slowdown is charged to the window the
+slowdown saved, not the ramp's. Classic LEDBAT keeps libutp's 100ms rule
+exactly. Fifteen runs: worst split on the 64KB queue 45/55, where it was
+37/63, and none below 45% against six; on the 2MB queue, worst 47/53.
+`TestLedbatPPLossFromBeforeASlowdownHalvesTheSavedWindow` and
+`TestLedbatPPLossIsChargedOncePerCongestionEvent` each fail with their rule
+removed. Its effect on single-flow loss profiles is being measured.
 
 ## Things found but deliberately not fixed
 

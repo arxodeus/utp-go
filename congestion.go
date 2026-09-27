@@ -61,6 +61,9 @@ type packetRecord struct {
 	// again (utp_internal.cpp:877-881); acknowledging it does not subtract
 	// them a second time (:1390-1396).
 	NeedResend bool
+	// SentAt is when the packet was last transmitted. LEDBAT++ uses it to
+	// tell which window a loss belongs to; see OnLostPacket.
+	SentAt time.Time
 }
 
 type Ack struct {
@@ -437,6 +440,7 @@ func (c *defaultController) OnTransmit(seqNum uint16, transmission Transmit, dat
 			Acked:            false,
 		}
 		c.transmissions[seqNum] = packetInst
+		packetInst.SentAt = c.now()
 	} else {
 		var exists bool
 		packetInst, exists = c.transmissions[seqNum]
@@ -444,6 +448,7 @@ func (c *defaultController) OnTransmit(seqNum uint16, transmission Transmit, dat
 			return ErrUnknownSeqNum
 		}
 		packetInst.NumTransmissions++
+		packetInst.SentAt = c.now()
 		// A packet given up as lost counts in flight again once it is
 		// resent: `if (pkt->transmissions == 0 || pkt->need_resend)
 		// cur_window += pkt->payload` (utp_internal.cpp:877-881). Not
@@ -564,6 +569,55 @@ func (c *defaultController) decayOnLoss(now time.Time) {
 	}
 }
 
+// onLedbatPPLoss is LEDBAT++'s response to a lost packet. Called with the
+// lock held; decay is whether the 100ms rate limit classic LEDBAT applies
+// would allow a halving now.
+//
+// Two rules beyond the rate limit, both about which window a loss belongs
+// to, and both found by logging two LEDBAT++ flows that split a shallow
+// bottleneck unevenly (KNOWN-LIMITATIONS.md). On that bottleneck slowdowns
+// and queue overflows coincide, and a flow that was charged for one overflow
+// twice, or charged it against the wrong window, came out of the slowdown
+// with a fraction of the window the other flow did.
+//
+//   - A packet sent before the window was last cut belongs to the congestion
+//     event that cut it, and is not charged again. That is TCP NewReno's
+//     rule (RFC 6582's "recover"). The 100ms rate limit alone let one
+//     overflow halve the window twice when its losses were detected more
+//     than 100ms apart, as they are when a slowdown falls between them.
+//   - A packet sent before a slowdown was sent from the window the slowdown
+//     saved, not from the two packets of the freeze or the partial window of
+//     the ramp. Its loss halves the saved window, which is where the ramp is
+//     going; the window the ramp has reached is left alone. Halving the
+//     current window instead, and taking it as ssthresh, ended the ramp at a
+//     fraction of the window the connection had been using. RFC 5681 halves
+//     the data in flight, and the data in flight is from the saved window.
+//
+// The draft does not cover a loss during a slowdown.
+func (c *defaultController) onLedbatPPLoss(pkt *packetRecord, decay bool, now time.Time) {
+	if !c.lastWindowDecay.IsZero() && pkt.SentAt.Before(c.lastWindowDecay) {
+		return
+	}
+	if !decay {
+		return
+	}
+	inSlowdown := c.ppPhase == ppSlowdownFreeze || c.ppPhase == ppSlowdownRamp
+	if inSlowdown && (c.ppPhase == ppSlowdownFreeze || pkt.SentAt.Before(c.ppSlowdownStartedAt)) {
+		// During the freeze everything lost was sent from the saved window
+		// or from the two packets the freeze allows, and charging either to
+		// those two packets gives the same wrong answer.
+		c.ppSlowdownSsthresh = maxUint32(c.ppSlowdownSsthresh/2, c.minWindowSizeBytes)
+		c.ssthreshBytes = c.ppSlowdownSsthresh
+		c.lastWindowDecay = now
+		c.slowStart = false
+		if c.ppPhase == ppSlowdownRamp && c.maxWindowSizeBytes >= c.ssthreshBytes {
+			c.exitLedbatPPSlowStart(now)
+		}
+		return
+	}
+	c.decayOnLoss(now)
+}
+
 func (c *defaultController) OnLostPacket(seqNum uint16, retransmitting bool, now time.Time) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -579,26 +633,11 @@ func (c *defaultController) OnLostPacket(seqNum uint16, retransmitting bool, now
 	// single event, and with the window already at its floor the connection
 	// then crawled. libutp decays once per ack that resent anything, and not
 	// again for 100 ms however many acks arrive in between.
-	if c.lastWindowDecay.IsZero() || now.Sub(c.lastWindowDecay) >= maxWindowDecayInterval {
-		if c.algorithm == AlgorithmLEDBATPP && c.ppPhase == ppSlowdownFreeze {
-			// A loss during a LEDBAT++ slowdown is of a packet sent before
-			// it, from the window the slowdown saved; the window now is the
-			// two packets the freeze pinned it at. Halving that and taking it
-			// as ssthresh, as decayOnLoss does, overwrote the saved
-			// window with two packets: the ramp then "reached" ssthresh at
-			// once and the connection resumed from two packets, while a flow
-			// whose slowdown lost nothing ramped back to its whole window.
-			// On a shallow bottleneck, where slowdowns and overflows
-			// coincide, that split two flows 36/64. RFC 5681 halves the data
-			// in flight, and here that is the saved window. The draft does
-			// not cover a loss in a slowdown.
-			c.ppSlowdownSsthresh = maxUint32(c.ppSlowdownSsthresh/2, c.minWindowSizeBytes)
-			c.ssthreshBytes = c.ppSlowdownSsthresh
-			c.lastWindowDecay = now
-			c.slowStart = false
-		} else {
-			c.decayOnLoss(now)
-		}
+	decay := c.lastWindowDecay.IsZero() || now.Sub(c.lastWindowDecay) >= maxWindowDecayInterval
+	if c.algorithm == AlgorithmLEDBATPP {
+		c.onLedbatPPLoss(packetInst, decay, now)
+	} else if decay {
+		c.decayOnLoss(now)
 	}
 
 	if !retransmitting && !packetInst.NeedResend {
