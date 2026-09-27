@@ -81,6 +81,10 @@ type RenoResult struct {
 	// transfer, sampled once per acknowledgement.
 	CwndMaxBytes  uint32
 	CwndMeanBytes uint64
+	// Delivered is the receiver's in-order byte count over time, sampled at
+	// most every deliverySampleInterval, so a split against another flow can
+	// be taken over only the time both were running. See SplitWhileBothRan.
+	Delivered []DeliverySample
 }
 
 // RunRenoFlow sends payloadBytes from sender to receiver over the emulated
@@ -101,7 +105,8 @@ func RunRenoFlow(
 	recvDone := make(chan int, 1)
 	recvCtx, stopReceiver := context.WithCancel(ctx)
 	defer stopReceiver()
-	go renoReceiver(recvCtx, receiver, sender.Addr(), recvDone)
+	timeline := &deliveryTimeline{}
+	go renoReceiver(recvCtx, receiver, sender.Addr(), recvDone, timeline)
 
 	s := &renoSender{
 		ep:       sender,
@@ -113,7 +118,11 @@ func RunRenoFlow(
 		rto:      time.Second,
 		inflight: make(map[uint32]time.Time),
 	}
-	return s.run(ctx, recvDone)
+	res, err := s.run(ctx, recvDone)
+	if res != nil {
+		res.Delivered = timeline.snapshot()
+	}
+	return res, err
 }
 
 type renoSender struct {
@@ -348,7 +357,7 @@ func (s *renoSender) sampleRTT(sample time.Duration) {
 
 // renoReceiver acknowledges every packet with the highest contiguous byte
 // received, and reports the total when the sender says it is done.
-func renoReceiver(ctx context.Context, ep *Endpoint, sender utp.ConnectionPeer, done chan<- int) {
+func renoReceiver(ctx context.Context, ep *Endpoint, sender utp.ConnectionPeer, done chan<- int, timeline *deliveryTimeline) {
 	buf := make([]byte, 2048)
 	var expected uint32
 	outOfOrder := make(map[uint32]int)
@@ -391,6 +400,7 @@ func renoReceiver(ctx context.Context, ep *Endpoint, sender utp.ConnectionPeer, 
 			} else if seq > expected {
 				outOfOrder[seq] = body
 			}
+			timeline.record(time.Now(), uint64(expected))
 			ack := make([]byte, renoHeaderBytes)
 			binary.BigEndian.PutUint32(ack[:4], expected)
 			ack[4] = renoFlagAck

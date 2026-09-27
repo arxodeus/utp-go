@@ -401,40 +401,14 @@ func runTwoFlowBottleneck(t *testing.T, seed int64, profile twoFlowProfile, algo
 }
 
 // sharedPeriodSplit is the smaller of two flows' shares of the bytes their
-// receivers took in while both flows were running: from the later flow's
-// first sample to the earlier flow's last. It is 0 if the two never overlap.
+// receivers took in while both were running. It is 0 if the two never
+// overlap. See SplitWhileBothRan.
 func sharedPeriodSplit(a, b []utp.ConnectionMetrics) float64 {
-	if len(a) == 0 || len(b) == 0 {
+	share, ok := SplitWhileBothRan(ReceivedSeries(a), ReceivedSeries(b))
+	if !ok {
 		return 0
 	}
-	from := a[0].At
-	if b[0].At.After(from) {
-		from = b[0].At
-	}
-	until := a[len(a)-1].At
-	if b[len(b)-1].At.Before(until) {
-		until = b[len(b)-1].At
-	}
-	if !until.After(from) {
-		return 0
-	}
-	// Bytes received as of t: the last sample at or before it.
-	at := func(s []utp.ConnectionMetrics, t time.Time) uint64 {
-		var v uint64
-		for _, m := range s {
-			if m.At.After(t) {
-				break
-			}
-			v = m.BytesReceived
-		}
-		return v
-	}
-	da := float64(at(a, until) - at(a, from))
-	db := float64(at(b, until) - at(b, from))
-	if da+db == 0 {
-		return 0
-	}
-	return math.Min(da, db) / (da + db)
+	return math.Min(share, 1-share)
 }
 
 // benchmarkSeed is the profile's seed, or UTP_BENCHMARK_SEED when set.

@@ -41,13 +41,17 @@ func TestLatecomerShare(t *testing.T) {
 	} {
 		alg := alg
 		t.Run(alg.name, func(t *testing.T) {
-			incumbent, latecomer := runLatecomer(t, alg.algo)
+			incumbent, latecomer, latecomerShare := runLatecomer(t, alg.algo)
 
 			ratio := latecomer / incumbent
 			t.Logf("%s: incumbent %.2f Mbps, latecomer %.2f Mbps, latecomer/incumbent %.2f",
 				alg.name, incumbent, latecomer, ratio)
-			t.Logf("%s: Jain fairness over the shared period %.3f",
+			t.Logf("%s: Jain fairness over the two goodputs %.3f",
 				alg.name, FairnessIndex([]float64{incumbent, latecomer}))
+			// Goodputs cover each flow's whole transfer, including the
+			// incumbent's head start and the latecomer's finish alone. This
+			// is the split while both were sending.
+			t.Logf("%s: the latecomer's share while both ran %.1f%%", alg.name, 100*latecomerShare)
 
 			if incumbent <= 0 {
 				t.Errorf("the incumbent flow was starved to nothing by the latecomer")
@@ -64,7 +68,7 @@ func TestLatecomerShare(t *testing.T) {
 //
 // Both flows carry the same payload, so the comparison is of how long each
 // took, not of how much each was asked to move.
-func runLatecomer(t *testing.T, algo utp.CongestionAlgorithm) (incumbentMbps, latecomerMbps float64) {
+func runLatecomer(t *testing.T, algo utp.CongestionAlgorithm) (incumbentMbps, latecomerMbps, latecomerShare float64) {
 	t.Helper()
 
 	n := NewNetwork(210)
@@ -94,9 +98,10 @@ func runLatecomer(t *testing.T, algo utp.CongestionAlgorithm) (incumbentMbps, la
 	}
 
 	type outcome struct {
-		which string
-		mbps  float64
-		err   error
+		which     string
+		mbps      float64
+		delivered []DeliverySample
+		err       error
 	}
 	results := make(chan outcome, 2)
 
@@ -107,10 +112,10 @@ func runLatecomer(t *testing.T, algo utp.CongestionAlgorithm) (incumbentMbps, la
 			MetricsInterval: 10 * time.Millisecond,
 		})
 		if err != nil {
-			results <- outcome{"incumbent", 0, err}
+			results <- outcome{"incumbent", 0, nil, err}
 			return
 		}
-		results <- outcome{"incumbent", res.Goodput.Mbps(), nil}
+		results <- outcome{"incumbent", res.Goodput.Mbps(), ReceivedSeries(res.Receiver.Samples()), nil}
 	}()
 
 	// Long enough for the incumbent to fill the queue, so the latecomer's
@@ -125,24 +130,29 @@ func runLatecomer(t *testing.T, algo utp.CongestionAlgorithm) (incumbentMbps, la
 			MetricsInterval: 10 * time.Millisecond,
 		})
 		if err != nil {
-			results <- outcome{"latecomer", 0, err}
+			results <- outcome{"latecomer", 0, nil, err}
 			return
 		}
-		results <- outcome{"latecomer", res.Goodput.Mbps(), nil}
+		results <- outcome{"latecomer", res.Goodput.Mbps(), ReceivedSeries(res.Receiver.Samples()), nil}
 	}()
 
+	var incumbentDelivered, latecomerDelivered []DeliverySample
 	for i := 0; i < 2; i++ {
 		out := <-results
 		if out.err != nil {
 			t.Fatalf("%s flow: %v", out.which, out.err)
 		}
 		if out.which == "incumbent" {
-			incumbentMbps = out.mbps
+			incumbentMbps, incumbentDelivered = out.mbps, out.delivered
 		} else {
-			latecomerMbps = out.mbps
+			latecomerMbps, latecomerDelivered = out.mbps, out.delivered
 		}
 	}
-	return incumbentMbps, latecomerMbps
+	share, ok := SplitWhileBothRan(latecomerDelivered, incumbentDelivered)
+	if !ok {
+		t.Errorf("the two flows never overlapped; there is no split to report")
+	}
+	return incumbentMbps, latecomerMbps, share
 }
 
 // The base-delay estimate is the thing the latecomer problem corrupts, so

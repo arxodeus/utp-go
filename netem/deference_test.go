@@ -41,7 +41,7 @@ func TestDeferenceToLossBasedFlow(t *testing.T) {
 	} {
 		alg := alg
 		t.Run(alg.name, func(t *testing.T) {
-			utpMbps, renoMbps, queue := runDeference(t, alg.algo)
+			utpMbps, renoMbps, queue, utpShare := runDeference(t, alg.algo)
 
 			// The number that matters: how much of the competitor's
 			// bandwidth uTP took. A protocol that yields leaves the
@@ -51,6 +51,10 @@ func TestDeferenceToLossBasedFlow(t *testing.T) {
 			t.Logf("%s: the competitor kept %.0f%% of what it got alone (%.2f of %.2f Mbps)",
 				alg.name, retained*100, renoMbps, solo)
 			t.Logf("%s: uTP took %.0f%% of the shared link", alg.name, 100*utpMbps/(utpMbps+renoMbps))
+			// The share above is from each flow's whole-transfer goodput,
+			// which counts the competitor's head start and whichever flow
+			// finishes alone. This one is the split while both were sending.
+			t.Logf("%s: uTP's share while both ran %.1f%%", alg.name, 100*utpShare)
 			t.Logf("%s: standing queue at the bottleneck p50 %v, p95 %v, max %v",
 				alg.name, queue.p50, queue.p95, queue.max)
 
@@ -109,7 +113,7 @@ func runRenoSolo(t *testing.T) float64 {
 
 // runDeference runs a uTP flow and the competitor over one shared bottleneck
 // and returns what each achieved, plus the queue they left at the bottleneck.
-func runDeference(t *testing.T, algo utp.CongestionAlgorithm) (utpMbps, renoMbps float64, queue queueStats) {
+func runDeference(t *testing.T, algo utp.CongestionAlgorithm) (utpMbps, renoMbps float64, queue queueStats, utpShare float64) {
 	t.Helper()
 
 	n := NewNetwork(311)
@@ -138,9 +142,10 @@ func runDeference(t *testing.T, algo utp.CongestionAlgorithm) (utpMbps, renoMbps
 	}
 
 	type outcome struct {
-		which string
-		mbps  float64
-		err   error
+		which     string
+		mbps      float64
+		delivered []DeliverySample
+		err       error
 	}
 	results := make(chan outcome, 2)
 
@@ -150,10 +155,10 @@ func runDeference(t *testing.T, algo utp.CongestionAlgorithm) (utpMbps, renoMbps
 	go func() {
 		res, err := RunRenoFlow(ctx, renoSender, renoReceiver, deferencePayload, 1024)
 		if err != nil {
-			results <- outcome{"reno", 0, err}
+			results <- outcome{"reno", 0, nil, err}
 			return
 		}
-		results <- outcome{"reno", res.Goodput.Mbps(), nil}
+		results <- outcome{"reno", res.Goodput.Mbps(), res.Delivered, nil}
 	}()
 
 	time.Sleep(1500 * time.Millisecond)
@@ -167,22 +172,28 @@ func runDeference(t *testing.T, algo utp.CongestionAlgorithm) (utpMbps, renoMbps
 			MetricsInterval: 10 * time.Millisecond,
 		})
 		if err != nil {
-			results <- outcome{"utp", 0, err}
+			results <- outcome{"utp", 0, nil, err}
 			return
 		}
-		results <- outcome{"utp", res.Goodput.Mbps(), nil}
+		results <- outcome{"utp", res.Goodput.Mbps(), ReceivedSeries(res.Receiver.Samples()), nil}
 	}()
 
+	var utpDelivered, renoDelivered []DeliverySample
 	for i := 0; i < 2; i++ {
 		out := <-results
 		if out.err != nil {
 			t.Fatalf("%s flow: %v", out.which, out.err)
 		}
 		if out.which == "utp" {
-			utpMbps = out.mbps
+			utpMbps, utpDelivered = out.mbps, out.delivered
 		} else {
-			renoMbps = out.mbps
+			renoMbps, renoDelivered = out.mbps, out.delivered
 		}
+	}
+	if share, ok := SplitWhileBothRan(utpDelivered, renoDelivered); ok {
+		utpShare = share
+	} else {
+		t.Errorf("the two flows never overlapped; there is no split to report")
 	}
 
 	// The queue at the bottleneck itself, which is what a third party sharing
@@ -195,5 +206,5 @@ func runDeference(t *testing.T, algo utp.CongestionAlgorithm) (utpMbps, renoMbps
 		queue.p95 = link.QueueDelayPercentile(0.95)
 		_ = st
 	}
-	return utpMbps, renoMbps, queue
+	return utpMbps, renoMbps, queue, utpShare
 }
