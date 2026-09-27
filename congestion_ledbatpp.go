@@ -141,24 +141,26 @@ func ledbatPPGain(baseRTT time.Duration) float64 {
 }
 
 // ledbatPPWindowDeltaPerRTT is the per-round-trip change in the congestion
-// window, in packets, for a connection in congestion avoidance.
+// window, in packets, for a connection in congestion avoidance. draft §4.3,
+// which gives both branches:
 //
-// The draft gives one formula for the case it calls out explicitly (§4.3):
+//	delay below target:  W += GAIN
+//	delay above target:  W += max( (GAIN - Constant * W * (delay/target - 1)), -W/2) )
 //
-//	W += max( (GAIN - Constant * W * (delay/target - 1)), -W/2) )
+// Additive increase and multiplicative decrease. That pairing is the point
+// of the section: RFC 6817's increase, GAIN * (1 - delay/target), shrinks to
+// nothing as the delay nears the target, and so does the decrease, so near
+// the target neither acts and whatever split two flows arrived at persists --
+// the "persistent unfairness" of proportional feedback (§3.2). A constant
+// increase keeps pushing until the decrease, proportional to each flow's
+// window, takes more from the larger.
 //
-// introduced as what replaces LEDBAT's adjustment "when delay exceeds
-// target". Read literally and applied at delay < target it produces
-// `GAIN + W*(1 - delay/target)`, which for a hundred-packet window and no
-// queueing delay would be a hundred packets of growth in one round trip --
-// far more aggressive than the LEDBAT it is meant to be a gentler version
-// of, and flatly at odds with §4.2's whole purpose. So it is read as the
-// decrease branch only, and the increase stays RFC 6817's, scaled by the
-// §4.2 gain.
-//
-// That reading is stated here rather than buried because it is an
-// interpretation of an ambiguous specification, not a transcription of it.
-// It is also the reading that makes §4.2 mean anything.
+// This used to use RFC 6817's increase below the target, on the reading that
+// the draft gave only the decrease formula and left the increase ambiguous.
+// It does not: "In LEDBAT++, with multiplicative decrease, the per RTT window
+// when delay is less than target is: W += GAIN". With the proportional
+// increase, two LEDBAT++ flows that left slow start at different windows kept
+// most of the difference. See KNOWN-LIMITATIONS.md.
 //
 // A free function, so the shape of the response curve can be tested directly
 // at the interesting points rather than inferred from a transfer.
@@ -170,10 +172,7 @@ func ledbatPPWindowDeltaPerRTT(gain float64, windowPackets float64, queueingDela
 	delayRatio := float64(queueingDelay.Microseconds()) / targetMicros
 
 	if delayRatio <= 1 {
-		// RFC 6817's increase, scaled by the LEDBAT++ gain: at most GAIN
-		// packets per round trip, and proportionally less as the queueing
-		// delay approaches the target.
-		return gain * (1 - delayRatio)
+		return gain
 	}
 
 	// draft §4.3. The decrease is proportional to both the window and the

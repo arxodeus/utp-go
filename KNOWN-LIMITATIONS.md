@@ -3622,12 +3622,30 @@ After both, same benchmark: 45.6-49.9% on the 64KB queue (seven runs, 9-10
 drops) and 39.1-49.2% on the 2MB queue (fifteen runs, nothing dropped), with
 both flows ramping back to their whole window at every slowdown in the logs.
 
-**Still open: what is left of the split.** The flows now leave the initial
-slow start at different windows (63.1KB and 53.1KB in one trace) and the
-controller closes that gap slowly. Below the target this implementation
-grows by RFC 6817's GAIN * (1 - delay/target), where the draft's §4.3 is
-explicit that LEDBAT++ grows by GAIN, and DEVIATIONS.md's claim that the
-draft is ambiguous there is wrong. Being measured next.
+**The increase below the target was not the draft's.** The flows leave the
+initial slow start at different windows (63.1KB and 53.1KB in one trace).
+Below the target this implementation grew by RFC 6817's
+GAIN * (1 - delay/target), which fades to nothing near the target just as
+the multiplicative decrease does, so neither acts on a difference there. The
+draft's §4.3 is explicit that LEDBAT++ grows by GAIN, and DEVIATIONS.md's
+claim that it is ambiguous was wrong. Now GAIN. Fifteen runs each, old
+increase against new, all else equal:
+
+| | Old | Draft's `W += GAIN` |
+| --- | --- | --- |
+| Two flows, 2MB queue: split (worst) | 49/51 (45/55) | 49/51 (48/52) |
+| Two flows, 64KB queue: split (worst) | 49/51 (36/64) | 48/52 (37/63) |
+| 64KB queue: runs below 45% | 2 of 15 | 6 of 15 |
+| Broadband, 1% loss | 1.51 Mbps | 2.22 Mbps |
+| Broadband, no loss | 5.55 Mbps | 5.55 Mbps |
+| Reordering | 2.38 Mbps | 2.41 Mbps |
+
+**Still open: the shallow queue.** On the 64KB queue, where every run drops
+packets, occasional runs still split about 37/63 with either increase, and
+more often with the new one. Suspected: the same defect as the freeze, one
+phase later -- a packet sent before a slowdown declared lost after the freeze
+has ended, halving the small ramp window rather than the window it was sent
+from. Being checked.
 
 ## Things found but deliberately not fixed
 

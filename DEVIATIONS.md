@@ -837,14 +837,17 @@ Both are stated here because they are interpretations, not transcriptions,
 and a reader checking this implementation against the draft should know where
 it exercised judgement.
 
-**The §4.3 formula is applied only when the delay exceeds the target.** The
-draft introduces it as what replaces LEDBAT's adjustment "when delay exceeds
-target", but presents it as the whole rule. Read literally at *below* target
-it yields `GAIN + W*(1 - delay/target)` — for a hundred-packet window on an
-empty path, a hundred packets of growth in one round trip, which is far more
-aggressive than the LEDBAT it is meant to be a gentler version of and makes
-§4.2 meaningless. Below target this implementation uses RFC 6817's increase
-scaled by the §4.2 gain.
+**~~The §4.3 formula is applied only when the delay exceeds the target~~ —
+not a reading after all.** This section used to say the draft gave only the
+decrease and left the increase ambiguous, and used RFC 6817's
+`GAIN * (1 - delay/target)` below the target. The draft is explicit: "In
+LEDBAT++, with multiplicative decrease, the per RTT window when delay is less
+than target is: W += GAIN". It now does that. Measured against the old
+increase, fifteen runs each: the worst split of two flows on a 2MB queue from
+45/55 to 48/52, goodput at 1% loss from 1.51 to 2.22 Mbps, and no measurable
+change on the other profiles tried; on a 64KB queue, where losses decide the
+split, more runs fell below 45% (six of fifteen against two). See
+KNOWN-LIMITATIONS.md.
 
 **The ramp out of a slowdown is a full slow start, not a gain-scaled one.**
 §4.4 says only "ramp up the congestion window according to the slow start

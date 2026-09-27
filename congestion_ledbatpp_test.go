@@ -59,17 +59,24 @@ func TestLedbatPPWindowDeltaPerRTT(t *testing.T) {
 		}
 	})
 
-	t.Run("delay at target neither grows nor shrinks", func(t *testing.T) {
-		got := ledbatPPWindowDeltaPerRTT(gain, 100, target, target)
-		if math.Abs(got) > 1e-9 {
-			t.Errorf("delta = %v at exactly the target, want 0", got)
+	t.Run("below the target the increase is the full gain, whatever the delay", func(t *testing.T) {
+		// "the per RTT window when delay is less than target is: W += GAIN".
+		// Not RFC 6817's GAIN * (1 - delay/target), which fades to nothing
+		// near the target and with it the pressure that makes two flows
+		// converge.
+		for _, delay := range []time.Duration{target / 4, target / 2, target * 9 / 10, target} {
+			got := ledbatPPWindowDeltaPerRTT(gain, 100, delay, target)
+			if math.Abs(got-gain) > 1e-9 {
+				t.Errorf("delay %v: delta = %v, want the full gain %v", delay, got, gain)
+			}
 		}
 	})
 
-	t.Run("half the target grows by half the gain", func(t *testing.T) {
-		got := ledbatPPWindowDeltaPerRTT(gain, 100, target/2, target)
-		if math.Abs(got-gain/2) > 1e-9 {
-			t.Errorf("delta = %v, want %v", got, gain/2)
+	t.Run("the curve is continuous at the target", func(t *testing.T) {
+		below := ledbatPPWindowDeltaPerRTT(gain, 100, target, target)
+		above := ledbatPPWindowDeltaPerRTT(gain, 100, target+time.Microsecond, target)
+		if math.Abs(below-above) > 0.01 {
+			t.Errorf("delta jumps from %v to %v across the target", below, above)
 		}
 	})
 
