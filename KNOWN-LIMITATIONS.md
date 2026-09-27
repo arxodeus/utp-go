@@ -3656,7 +3656,14 @@ exactly. Fifteen runs: worst split on the 64KB queue 45/55, where it was
 37/63, and none below 45% against six; on the 2MB queue, worst 47/53.
 `TestLedbatPPLossFromBeforeASlowdownHalvesTheSavedWindow` and
 `TestLedbatPPLossIsChargedOncePerCongestionEvent` each fail with their rule
-removed. Its effect on single-flow loss profiles is being measured.
+removed.
+
+Single-flow LEDBAT++ on the lossy profiles, fifteen runs each, before and
+after: 1% loss 2.19 and 2.21 Mbps; 5% loss 0.47 and 0.50 Mbps (ranges
+overlapping); reordering 2.38 and 2.39 Mbps. The 16KB-queue profile is
+bimodal in both, runs landing near 1.4 or near 3.4 Mbps: 5 of 15 in the fast
+mode before, 10 of 15 after. That leans towards an improvement but fifteen
+runs do not settle it. Nothing measured got worse.
 
 ## Things found but deliberately not fixed
 
