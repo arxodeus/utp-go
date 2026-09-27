@@ -859,6 +859,17 @@ trips; measured, that turned a 1.3 s transfer into 2.8 s. The initial slow
 start is gain-scaled per §4.1; the slowdown ramp is not, and it stops at a
 window this connection was using a moment earlier.
 
+**A loss during a slowdown is charged to the window it was sent from.** The
+draft does not say what a loss during a slowdown does. Two rules here, both
+LEDBAT++ only: a packet sent before the window was last cut belongs to the
+congestion event that cut it and is not charged again (NewReno's "recover",
+RFC 6582), and a packet sent before a slowdown halves the window the slowdown
+saved rather than the freeze's two packets or the ramp's partial window
+(RFC 5681's halving of the data in flight). Without them two LEDBAT++ flows
+on a shallow bottleneck, where slowdowns and overflows coincide, split it as
+unevenly as 36/64. Classic LEDBAT keeps libutp's rule, one halving per
+100ms, exactly.
+
 ## The congestion controller: what still differs
 
 This section used to say that, apart from LEDBAT++, the controller matched

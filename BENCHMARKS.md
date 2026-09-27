@@ -413,7 +413,7 @@ share of the bytes delivered while both were running, and the link's
 queue-overflow drops, and a second row runs the same two flows on a queue deep
 enough that nothing is dropped.
 
-Seven runs each, on the same build:
+Seven runs each, on the build that introduced the measurement:
 
 | | Queue | Split while both ran | Worst | Queue drops | Jain |
 | --- | --- | --- | --- | --- | --- |
@@ -423,12 +423,22 @@ Seven runs each, on the same build:
 | LEDBAT++ | 2MB (2.1s) | 20/80 or 34/66 | 17.8/82.2 | 0 | 0.926-0.970 |
 
 Classic LEDBAT, the default, splits the link evenly on both queues and never
-fills the shallow one. LEDBAT++ does not: about 36/64 on the shallow queue,
+fills the shallow one. LEDBAT++ did not: about 36/64 on the shallow queue,
 and on the deep one, with nothing dropped, worse, in two modes -- four runs
 near 19/81 and three near 34/66. Its Jain figure in the table above, 0.999,
-was taken from goodputs and did not show it. Why it happens is not yet
-investigated; LEDBAT++ is opt-in, and this is recorded as a known defect of it
-rather than of the default.
+was taken from goodputs and did not show it.
+
+That was four defects in LEDBAT++, since fixed (KNOWN-LIMITATIONS.md, "LEDBAT++
+split a link unevenly between two of its own flows"): the ramp out of a
+slowdown left on delay, a loss during a slowdown overwrote the window it was
+returning to, the increase below the target was RFC 6817's rather than the
+draft's, and a loss from before a slowdown was charged to the ramp, or charged
+twice. After them, fifteen runs each:
+
+| | Queue | Split while both ran | Worst | Queue drops |
+| --- | --- | --- | --- | --- |
+| LEDBAT++ | 64KB (65ms) | 49/51 | 45/55 | 9 |
+| LEDBAT++ | 2MB (2.1s) | 49/51 | 47/53 | 0 |
 
 `go test ./netem -run 'TestBenchmarkSuite/.*/Two_flows' -v` with
 `UTP_BENCHMARK_REPEATS=7` reproduces it.
