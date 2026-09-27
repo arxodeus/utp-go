@@ -3586,29 +3586,48 @@ from a sweep that stopped early.
   in slow start and is the binding constraint in
   `min(max_window, opt_sndbuf, max_window_user)`.
 
-## LEDBAT++ splits a link unevenly between two of its own flows — open
+## LEDBAT++ split a link unevenly between two of its own flows — two causes fixed
 
 Two identical LEDBAT++ flows, started together through one 8Mb/s bottleneck,
-do not share it. Measured as each flow's share of the bytes delivered while
-both ran, seven runs each (BENCHMARKS.md, "Two flows: the split while both
-ran"):
+did not share it. Measured as each flow's share of the bytes delivered while
+both ran (BENCHMARKS.md, "Two flows: the split while both ran"): 34.2-38.8%
+for the smaller on a 64KB queue, with 8-10 queue drops a run, and on a 2MB
+queue with nothing dropped, 17.8-20.1% in four runs of seven and 33.4-33.9% in
+three. Classic LEDBAT on the same links: 47.5-48.4% and 49.0-49.9%. The
+benchmark had reported the row as Jain 0.999, from whole-transfer goodputs,
+which the squeezed flow recovers once the other finishes.
 
-- 64KB queue: 34.2-38.8% for the smaller, with 8-10 queue drops a run.
-- 2MB queue, nothing dropped: two modes, 17.8-20.1% in four runs and
-  33.4-33.9% in three.
+Found by logging each controller's phase changes, and each was a
+slowdown (§4.4) that one flow came out of and the other did not.
 
-Classic LEDBAT on the same links: 47.5-48.4% and 49.0-49.9%, no drops.
+**The ramp out of a slowdown left on delay.** The two flows' slowdowns
+synchronise, as the draft intends. The ramp back used the initial slow
+start's exit -- leave when the queueing delay passes 3/4 of the target -- and
+the queue had not finished draining from before the slowdown, or the other
+flow's ramp had refilled it: in the trace one flow read 73.5ms and left its
+ramp at two packets while the other ramped back to its whole 59.6KB. It then
+climbed at GAIN packets a round trip, and having measured a short slowdown,
+was slowed down again nine short durations later. The draft says this exit
+"SHOULD be applied only during the initial slow start"; it now is.
 
-The benchmark had reported this row as Jain 0.999, because it computed Jain
-over each flow's whole-transfer goodput, which the squeezed flow recovers
-once the other finishes. The split was measured only once the benchmark
-started recording it.
+**A loss during a slowdown overwrote the window it was returning to.** On the
+shallow queue slowdowns and overflows coincide. A packet sent before the
+slowdown was declared lost during the freeze, and the loss handler halved the
+frozen two-packet window and set ssthresh to it, replacing the saved 52.5KB
+with 2800 bytes; the ramp "reached" that at once. The draft does not cover a
+loss in a slowdown. RFC 5681 halves the data in flight, which here is the
+saved window, so that is what is halved now.
 
-Not yet investigated. Candidates, none checked: the periodic slowdown (§4.4)
-landing on one flow while the other takes the drained queue, and the two
-flows' slowdowns falling out of phase; LEDBAT++'s multiplicative decrease
-acting on a delay estimate one flow has inflated for the other. LEDBAT++ is
-opt-in, and classic LEDBAT, the default, is unaffected.
+After both, same benchmark: 45.6-49.9% on the 64KB queue (seven runs, 9-10
+drops) and 39.1-49.2% on the 2MB queue (fifteen runs, nothing dropped), with
+both flows ramping back to their whole window at every slowdown in the logs.
+
+**Still open: what is left of the split.** The flows now leave the initial
+slow start at different windows (63.1KB and 53.1KB in one trace) and the
+controller closes that gap slowly. Below the target this implementation
+grows by RFC 6817's GAIN * (1 - delay/target), where the draft's §4.3 is
+explicit that LEDBAT++ grows by GAIN, and DEVIATIONS.md's claim that the
+draft is ambiguous there is wrong. Being measured next.
 
 ## Things found but deliberately not fixed
 

@@ -238,8 +238,24 @@ func (c *defaultController) applyLedbatPP(
 		return
 
 	case ppSlowStart, ppSlowdownRamp:
-		if float64(queueingDelay) > ledbatPPSlowStartExitFraction*float64(target) {
-			// draft §4.1.
+		// draft §4.1: exit on a queueing delay over 3/4 of the target -- but
+		// "Exit slow start on excessive delay SHOULD be applied only during
+		// the initial slow start." The ramp out of a slowdown runs "until the
+		// congestion window reaches SSTHRESH" (§4.4) and nothing else.
+		//
+		// It used to exit the ramp on delay as well, and that is what split a
+		// link unevenly between two LEDBAT++ flows. Their slowdowns
+		// synchronise, as §4.4 intends; the one that ramps first refills the
+		// queue, or the queue has not finished draining from before the
+		// slowdown, and the other reads a delay over the threshold and leaves
+		// its ramp at two packets. It then climbs back at GAIN packets a
+		// round trip, and since the slowdown it measured was short, the next
+		// comes nine short durations later and knocks it back again.
+		// Measured on two flows through an 8Mb/s bottleneck with a 2MB
+		// queue: the squeezed flow took 17.8-33.9% of the link while both
+		// ran. See KNOWN-LIMITATIONS.md.
+		if c.ppPhase == ppSlowStart &&
+			float64(queueingDelay) > ledbatPPSlowStartExitFraction*float64(target) {
 			c.exitLedbatPPSlowStart(now)
 			return
 		}

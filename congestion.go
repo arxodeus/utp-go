@@ -547,6 +547,23 @@ func (c *defaultController) updateRTT(ertt int64) {
 // not once per packet resent (:1609-1610).
 const maxWindowDecayInterval = 100 * time.Millisecond
 
+// decayOnLoss halves the window for a loss, libutp's decay (utp_internal.cpp:
+// 606-617). Called with the lock held.
+func (c *defaultController) decayOnLoss(now time.Time) {
+	c.maxWindowSizeBytes = uint32(math.Max(float64(c.maxWindowSizeBytes/2), float64(c.minWindowSizeBytes)))
+	c.lastWindowDecay = now
+	// libutp leaves slow start on any decay and sets the threshold to
+	// where the window ended up (utp_internal.cpp:616-617). LEDBAT++
+	// leaves its own slow start on the same signal: a loss is congestion
+	// however the delay looked.
+	c.slowStart = false
+	c.ssthreshBytes = c.maxWindowSizeBytes
+	if c.algorithm == AlgorithmLEDBATPP &&
+		(c.ppPhase == ppSlowStart || c.ppPhase == ppSlowdownRamp) {
+		c.exitLedbatPPSlowStart(now)
+	}
+}
+
 func (c *defaultController) OnLostPacket(seqNum uint16, retransmitting bool, now time.Time) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -563,17 +580,24 @@ func (c *defaultController) OnLostPacket(seqNum uint16, retransmitting bool, now
 	// then crawled. libutp decays once per ack that resent anything, and not
 	// again for 100 ms however many acks arrive in between.
 	if c.lastWindowDecay.IsZero() || now.Sub(c.lastWindowDecay) >= maxWindowDecayInterval {
-		c.maxWindowSizeBytes = uint32(math.Max(float64(c.maxWindowSizeBytes/2), float64(c.minWindowSizeBytes)))
-		c.lastWindowDecay = now
-		// libutp leaves slow start on any decay and sets the threshold to
-		// where the window ended up (utp_internal.cpp:616-617). LEDBAT++
-		// leaves its own slow start on the same signal: a loss is congestion
-		// however the delay looked.
-		c.slowStart = false
-		c.ssthreshBytes = c.maxWindowSizeBytes
-		if c.algorithm == AlgorithmLEDBATPP &&
-			(c.ppPhase == ppSlowStart || c.ppPhase == ppSlowdownRamp) {
-			c.exitLedbatPPSlowStart(now)
+		if c.algorithm == AlgorithmLEDBATPP && c.ppPhase == ppSlowdownFreeze {
+			// A loss during a LEDBAT++ slowdown is of a packet sent before
+			// it, from the window the slowdown saved; the window now is the
+			// two packets the freeze pinned it at. Halving that and taking it
+			// as ssthresh, as decayOnLoss does, overwrote the saved
+			// window with two packets: the ramp then "reached" ssthresh at
+			// once and the connection resumed from two packets, while a flow
+			// whose slowdown lost nothing ramped back to its whole window.
+			// On a shallow bottleneck, where slowdowns and overflows
+			// coincide, that split two flows 36/64. RFC 5681 halves the data
+			// in flight, and here that is the saved window. The draft does
+			// not cover a loss in a slowdown.
+			c.ppSlowdownSsthresh = maxUint32(c.ppSlowdownSsthresh/2, c.minWindowSizeBytes)
+			c.ssthreshBytes = c.ppSlowdownSsthresh
+			c.lastWindowDecay = now
+			c.slowStart = false
+		} else {
+			c.decayOnLoss(now)
 		}
 	}
 
