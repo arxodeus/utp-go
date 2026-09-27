@@ -77,6 +77,11 @@ const (
 	// (draft §4.4).
 	ledbatPPFreezeRTTs = 2
 
+	// ledbatPPRTTFilter is how many recent round trips the current delay is
+	// the minimum of: "the minimum of the 4 most recent delay samples"
+	// (draft §4.5).
+	ledbatPPRTTFilter = 4
+
 	// ledbatPPSlowdownPeriodFactor is the 9 in "9 times this duration"
 	// (draft §4.4) -- the gap between the end of one slowdown and the start
 	// of the next, sized so a slowdown costs at most about 10% of the
@@ -182,11 +187,62 @@ func ledbatPPWindowDeltaPerRTT(gain float64, windowPackets float64, queueingDela
 	return math.Max(delta, -windowPackets/2)
 }
 
+// pushLedbatPPRTT records a round-trip sample for LEDBAT++'s delay
+// measurement. Called with the lock held, and only for a packet sent once,
+// whose acknowledgement can be matched to its transmission.
+func (c *defaultController) pushLedbatPPRTT(rtt time.Duration, now time.Time) {
+	if rtt <= 0 {
+		return
+	}
+	c.ppRTTRecent[c.ppRTTNext] = rtt
+	c.ppRTTNext = (c.ppRTTNext + 1) % ledbatPPRTTFilter
+	if c.ppRTTCount < ledbatPPRTTFilter {
+		c.ppRTTCount++
+	}
+	c.ppRTTBase.Push(rtt, now)
+	c.minRTT = c.ppRTTBase.BaseDelay()
+}
+
+// ledbatPPRTTDelay is LEDBAT++'s base and current round trip, whose
+// difference is its queueing delay. draft §4.5: "LEDBAT++ uses Round Trip
+// Time measurements instead of one way delay", filtered by "the minimum of
+// the 4 most recent delay samples"; the base is the lowest round trip within
+// the delay window, as the one-way base is for classic LEDBAT.
+//
+// This used to be the one-way delay classic LEDBAT uses. A round trip is
+// timed entirely on this end's clock, so it has no clock skew to correct and
+// no peer to trust, though it does include queueing on the return path and
+// any delay in acknowledging. Measured against the one-way delay, fifteen
+// runs each: deferring to a loss-based flow, LEDBAT++'s share while both
+// sent went from 27-30% in five runs and 50-73% in ten to 23-33% in fourteen
+// and 55% in one, and the bottleneck queue's median from 21 to 13 ms. It was
+// tried for the latecomer problem, and did not fix it (KNOWN-LIMITATIONS.md).
+//
+// Both are zero until the first sample.
+func (c *defaultController) ledbatPPRTTDelay() (base, current time.Duration) {
+	if c.ppRTTCount == 0 {
+		return 0, 0
+	}
+	current = c.ppRTTRecent[0]
+	for i := 1; i < c.ppRTTCount; i++ {
+		if c.ppRTTRecent[i] < current {
+			current = c.ppRTTRecent[i]
+		}
+	}
+	base = c.minRTT
+	if base <= 0 || base > current {
+		base = current
+	}
+	return base, current
+}
+
 // applyLedbatPP is the LEDBAT++ equivalent of applyCongestionControl, called
-// once per acked packet with the controller's lock held.
+// once per acked packet with the controller's lock held. baseMicros and
+// currentMicros are the base and current round trip (ledbatPPRTTDelay);
+// their difference is the queueing delay.
 func (c *defaultController) applyLedbatPP(
-	baseDelayMicros uint32,
-	packetDelayMicros uint32,
+	baseMicros uint32,
+	currentMicros uint32,
 	bytesAcked uint32,
 	rtt time.Duration,
 	now time.Time,
@@ -196,32 +252,23 @@ func (c *defaultController) applyLedbatPP(
 		packetSize = 1
 	}
 
-	// Track the base RTT, which the gain is computed from.
-	if rtt > 0 && (c.minRTT == 0 || rtt < c.minRTT) {
-		c.minRTT = rtt
-	}
-
-	queueingDelayMicros := int64(packetDelayMicros) - int64(baseDelayMicros)
+	queueingDelayMicros := int64(currentMicros) - int64(baseMicros)
 	if queueingDelayMicros < 0 {
 		queueingDelayMicros = 0
 	}
-	// The same clamp classic LEDBAT needs, and for the same reason: the
-	// queueing delay cannot exceed the round trip, and a peer that says
-	// otherwise is reporting a broken clock or lying.
+	// The queueing delay cannot exceed the round trip. With round-trip
+	// delay the filtered current value is at most this packet's own round
+	// trip, so this does not bind; it is kept so the rule holds whatever the
+	// inputs.
 	if rttMicros := rtt.Microseconds(); rttMicros > 0 && queueingDelayMicros > rttMicros {
 		queueingDelayMicros = rttMicros
 	}
-	// The clock-drift penalty, applied here as well as in classic LEDBAT.
-	//
-	// This one goes beyond libutp, which has no LEDBAT++ and so no opinion.
-	// The reason is that the penalty defends against a peer manipulating its
-	// clock to under-measure the queue, and that attack does not care which
-	// controller this end happens to be running. Leaving it out here would
-	// make the opt-in algorithm the weaker choice, which is not a trade
-	// anyone would be choosing knowingly. Recorded in DEVIATIONS.md.
-	if penalty := c.drift.penaltyMicros(); penalty > 0 {
-		queueingDelayMicros += penalty
-	}
+	// No clock-drift penalty. It used to be added here as well as in classic
+	// LEDBAT, to stop a peer manipulating its clock so that this end
+	// under-measured the queue. With the delay measured from round trips the
+	// peer's clock takes no part in it, so there is nothing to defend, and
+	// the penalty would only slow a flow whose peer's clock happens to
+	// drift. See DEVIATIONS.md.
 	queueingDelay := time.Duration(queueingDelayMicros) * time.Microsecond
 	target := time.Duration(c.targetDelayMicros) * time.Microsecond
 	gain := ledbatPPGain(c.minRTT)

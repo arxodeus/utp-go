@@ -237,23 +237,21 @@ differ only in the order of two extensions.
 step that proves the silence is the extension's doing and not a connection that
 had stopped answering for some other reason.
 
-## The clock-drift penalty is applied to LEDBAT++ as well
+## ~~The clock-drift penalty is applied to LEDBAT++ as well~~ — no longer
 
 **libutp has no opinion here, because it has no LEDBAT++.**
 
 libutp applies its clock-drift penalty inside `apply_ccontrol`
 (`utp_internal.cpp:1646-1650`), which is its only congestion controller. This
-library also offers LEDBAT++, opt-in, implemented from the draft. The penalty
-is applied in both.
+library applied it in LEDBAT++ too, on the reasoning that the penalty defends
+against a peer manipulating its clock so that this end under-measures the
+queue, and that attack does not care which controller is running.
 
-Reason: the penalty defends against a peer manipulating its clock so that this
-end under-measures the queue, and that attack does not care which controller
-this end happens to be running. Leaving LEDBAT++ unprotected would make the
-opt-in algorithm the weaker choice against a hostile peer, which is not a
-trade anyone would be making knowingly.
-
-The threshold, the formula and the estimator are libutp's unchanged; only the
-second call site is new.
+LEDBAT++ now measures its queueing delay from round trips, as the draft's §4.5
+says, and a round trip is timed entirely on this end's clock. The peer's clock
+takes no part, so there is no attack to defend against, and the penalty would
+only slow a flow whose peer's clock happens to drift. It is applied in classic
+LEDBAT only, as in libutp.
 
 ## Completing an incoming connection
 
@@ -823,6 +821,7 @@ brief asks for. It implements
 | Multiplicative decrease | §4.3 | `W += max(GAIN - W*(delay/target - 1), -W/2)` when the delay is over target |
 | Periodic slowdowns | §4.4 | Drop to two packets for two round trips, then ramp back, once per ten slowdown-durations |
 | A 60 ms delay target | §4.5 | Against RFC 6817's and libutp's 100 ms |
+| Delay from round trips | §4.5 | Queueing delay is the minimum of the last four round trips less the lowest within the delay window, not the one-way delay the peer reports |
 
 Reason: classic LEDBAT, as libutp implements it, is not less than best
 effort. Measured on a sustained transfer over a 40 ms path, it leaves **33 ms

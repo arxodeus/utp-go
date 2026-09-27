@@ -281,9 +281,19 @@ type defaultController struct {
 	// algorithm selects the congestion controller. Everything above is
 	// shared; the LEDBAT++ state below is used only when it is selected.
 	algorithm CongestionAlgorithm
-	// minRTT is the lowest round trip seen -- LEDBAT++'s `base`, which its
-	// gain is computed from (draft-irtf-iccrg-ledbat-plus-plus-01 §4.2).
+	// minRTT is LEDBAT++'s base round trip -- the lowest seen within the
+	// delay window -- which its gain is computed from
+	// (draft-irtf-iccrg-ledbat-plus-plus-01 §4.2) and its queueing delay
+	// measured against (§4.5).
 	minRTT time.Duration
+	// ppRTTBase holds the round-trip samples minRTT is the minimum of.
+	ppRTTBase *delayAccumulator
+	// ppRTTRecent is the last ledbatPPRTTFilter round-trip samples, and
+	// ppRTTCount how many of them are filled. §4.5: "filter the round trip
+	// measurements by using the minimum of the 4 most recent delay samples".
+	ppRTTRecent [ledbatPPRTTFilter]time.Duration
+	ppRTTCount  int
+	ppRTTNext   int
 	// ppPhase and the four fields after it drive the periodic slowdowns that
 	// keep the base-delay estimate honest (§4.4).
 	ppPhase             ledbatPPPhase
@@ -320,6 +330,7 @@ func newDefaultController(config *ctrlConfig) *defaultController {
 		transmissions:     make(map[uint16]*packetRecord),
 		clk:               clk,
 		delayAcc:          newDelayAccumulatorWithClock(config.DelayWindow, clk),
+		ppRTTBase:         newDelayAccumulatorWithClock(config.DelayWindow, clk),
 		peerDelayHist:     newPeerDelayHist(config.DelayWindow),
 		// libutp starts the first averaging slot five seconds after the
 		// socket is created, not after the first sample arrives
@@ -493,7 +504,14 @@ func (c *defaultController) OnAck(seqNum uint16, ack Ack) error {
 	baseDelayMicros := uint32(c.delayAcc.BaseDelay().Microseconds())
 	packetDelayMicros := uint32(ack.Delay.Microseconds())
 	if c.algorithm == AlgorithmLEDBATPP {
-		c.applyLedbatPP(baseDelayMicros, packetDelayMicros, packetInst.SizeBytes, ack.RTT, ack.ReceivedAt)
+		// §4.5: LEDBAT++ measures its queueing delay from round trips, not
+		// from the one-way delay the peer reports. See ledbatPPRTTDelay.
+		if packetInst.NumTransmissions == 1 {
+			c.pushLedbatPPRTT(ack.RTT, ack.ReceivedAt)
+		}
+		base, current := c.ledbatPPRTTDelay()
+		c.applyLedbatPP(uint32(base.Microseconds()), uint32(current.Microseconds()),
+			packetInst.SizeBytes, ack.RTT, ack.ReceivedAt)
 	} else {
 		c.applyCongestionControl(baseDelayMicros, packetDelayMicros, packetInst.SizeBytes, ack.RTT, ack.ReceivedAt)
 	}

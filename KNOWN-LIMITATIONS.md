@@ -3702,11 +3702,22 @@ freeze of two smoothed RTTs. It did not fix the latecomer (72% over 4 MB; one
 
 So the two readings of the ramp trade one unfairness for another: two flows
 starting together, fair only with the draft's ramp; a latecomer, fair only
-without it. Neither is the fix. What is left to look at is how the latecomer's
-base delay is meant to be corrected -- the draft's §4.5 measures RTT and takes
-the minimum of the last four samples, where this implementation uses one-way
-delay against a two-minute minimum -- and whether the slowdowns of competing
-flows should be made to overlap.
+without it. Neither is the fix.
+
+**Tried: the draft's round-trip delay (§4.5).** Queueing delay as the minimum
+of the last four round trips less the lowest within the delay window, in
+place of the one-way delay. It did not fix the latecomer: 59.0-71.3% over
+five 4 MB runs, 64.4-71.6% over three 16 MB runs. In hindsight it could not:
+a round trip passes through the incumbent's queue just as the one-way delay
+does, so the latecomer's base is inflated the same way. What it lacks is
+ever seeing the path empty, not a different clock. It was kept for what else
+it did -- deferring to a loss-based flow in fourteen runs of fifteen where
+the one-way delay deferred in five (BENCHMARKS.md) -- and is now how LEDBAT++
+measures delay.
+
+What is left to look at is whether the slowdowns of competing flows should be
+made to overlap, so that a latecomer's freeze coincides with the incumbent's
+and the queue can drain.
 
 ## Things found but deliberately not fixed
 

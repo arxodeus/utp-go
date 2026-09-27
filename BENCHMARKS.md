@@ -177,16 +177,19 @@ bytes delivered while both were sending, which is the split itself.
 | | uTP | Competitor | Competitor kept | uTP's share | While both ran | Bottleneck queue p50 |
 | --- | --- | --- | --- | --- | --- | --- |
 | LEDBAT | 5.72 Mbps | 3.79 Mbps | 65% (62-70) | 60% | **69%** (65-75) | 23.7 ms (16-27) |
-| LEDBAT++ | 3.71 Mbps | 4.60 Mbps | 79% (60-98) | 45% | **33%** (21-33; two runs 64, 84) | 13.2 ms (11-26) |
+| LEDBAT++ | 3.71 Mbps | 4.82 Mbps | 84% (62-99) | 44% | **31%** (23-33; one run 55) | 12.8 ms (11-27) |
 
 Classic LEDBAT does not yield. While both are sending it takes about 69% of a
 shared link from a loss-based flow -- more than an equal share, against the
 traffic it is supposed to defer to -- and costs that flow a third of its
 throughput, while leaving about 24 ms of queue for anything else on the path.
 
-LEDBAT++ usually defers: five runs of seven took 21-33% while both ran. Two did
-not, taking 64% and 84%. The build before the LEDBAT++ fixes did the same, one
-run in seven at 62%, so that is not new; it is not yet explained.
+LEDBAT++ defers: fourteen runs of fifteen took 23-33% while both ran, one
+55%. That row is fifteen runs, and it is with LEDBAT++ measuring its queueing
+delay from round trips, as the draft's §4.5 says. With the one-way delay it
+used before, fifteen runs deferred in only five (27-30%) and took 50-73% in
+the other ten, with a median queue of 21 ms; a seven-run measurement of that
+version had looked better than it was, five runs in seven deferring.
 
 The first measurement here, one run on an older build, gave 60% and 44% by
 goodput share and 24.6 ms and 2.5 ms of queue. The goodput shares still agree;
@@ -210,16 +213,21 @@ delivered while both were sending.
 | --- | --- | --- | --- | --- |
 | LEDBAT | 7.43 Mbps | 5.75 Mbps | 0.77 | **20.5%** (20.3-20.7) |
 | LEDBAT++ | 4.16 Mbps | 6.57 Mbps | 1.58 | **71%** (70.2-71.9) |
+| LEDBAT++, round-trip delay | | | | 69.7% (59.0-71.3, five runs) |
 | LEDBAT++, before its fixes | 4.04 Mbps | 4.25 Mbps | 1.05 | 46.8% (45.7-47.3) |
 
 Classic LEDBAT's incumbent keeps about 80% of the link while both run: here
-the flow already holding the queue wins, not the latecomer.
+the flow already holding the queue wins, not the latecomer. That is the first
+few seconds. Over 16 MB a flow (`TestLatecomerShareOverTime`, opt-in) classic
+LEDBAT's latecomer climbs steadily, 18% of the first two seconds to 59% of
+the last -- the latecomer advantage, arriving slowly.
 
 **LEDBAT++'s latecomer takes 71%, and that is a regression.** It was 46.8% on
 the build before the fixes to LEDBAT++'s slowdowns, and the change that moved
 it is letting the ramp out of a slowdown run to its target rather than stop on
 delay -- which is what the draft says, and what fixed two flows that start
-together. See KNOWN-LIMITATIONS.md, "LEDBAT++'s latecomer takes most of the
+together. Measuring the delay from round trips, as the draft does, did not
+change it. See KNOWN-LIMITATIONS.md, "LEDBAT++'s latecomer takes most of the
 link"; it is open. The first measurement here, one run on an older build, was
 a ratio of 1.03.
 
