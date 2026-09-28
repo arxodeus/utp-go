@@ -594,7 +594,11 @@ On a path narrower than 1400 past the local link, where the interface report
 
 The IPv6-like stall is the shared limitation in KNOWN-LIMITATIONS.md ("A path
 MTU below the size already adopted stalls the connection"); both starts hit
-it, the ceiling start sooner. Kept as the midpoint: the gain from matching
+it, the ceiling start sooner. The libutp column was measured through the
+driver, which reports a 1472-byte path MTU. libutp's own default would give
+an IPv6 peer 1232, which every IPv6 path carries, and so would not stall on
+one at all; this library now does the same for IPv6 peers (KNOWN-LIMITATIONS.md,
+"IPv6 peers stalled on a minimum-MTU path"). Kept as the midpoint: the gain from matching
 libutp is 1-2% on long transfers over healthy paths, and the cost lands on the
 paths that already fail.
 

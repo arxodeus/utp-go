@@ -287,3 +287,33 @@ func TestNarrowPathLowersTheConnectionCeiling(t *testing.T) {
 			highest, narrow)
 	}
 }
+
+// An IPv6 peer gets libutp's IPv6 ceiling, 1232 (UDP_TEREDO_MTU,
+// utp_utils.cpp:230-235); anything else keeps what was configured.
+func TestIPv6PeersGetTheIPv6SafeCeiling(t *testing.T) {
+	v6 := &net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 6881}
+	for _, tc := range []struct {
+		name       string
+		peer       ConnectionPeer
+		configured uint16
+		want       uint16
+	}{
+		{"IPv6 peer", NewUdpPeer(v6), 1400, 1232},
+		{"zoned link-local IPv6 peer", NewUdpPeer(&net.UDPAddr{IP: net.ParseIP("fe80::1"), Zone: "eth0", Port: 1}), 1400, 1232},
+		{"IPv6 peer, smaller ceiling configured", NewUdpPeer(v6), 1000, 1000},
+		{"IPv4 peer", NewUdpPeer(&net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 6881}), 1400, 1400},
+		{"IPv4-mapped IPv6 peer travels as IPv4", NewUdpPeer(&net.UDPAddr{IP: net.ParseIP("::ffff:192.0.2.1"), Port: 6881}), 1400, 1400},
+		{"peer without an address", fakePeerHash("somewhere"), 1400, 1400},
+	} {
+		if got := ipv6Ceiling(tc.peer, tc.configured); got != tc.want {
+			t.Errorf("%s: ceiling %d, want %d", tc.name, got, tc.want)
+		}
+	}
+	if ipv6SafeDatagram != 1232 {
+		t.Errorf("ipv6SafeDatagram is %d, want libutp's UDP_TEREDO_MTU, 1232", ipv6SafeDatagram)
+	}
+}
+
+type fakePeerHash string
+
+func (p fakePeerHash) Hash() string { return string(p) }

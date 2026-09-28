@@ -197,6 +197,39 @@ func datagramSizeForInterfaceMTU(mtu int, local net.IP) (int, bool) {
 // hard cap here because a ceiling that high is a probe schedule this library
 // has never been measured at, and raising it is a separate decision from
 // fixing the case where 1400 is too big. Recorded in DEVIATIONS.md.
+// ipv6SafeDatagram is the largest uTP datagram every IPv6 path carries: the
+// 1280-byte IPv6 minimum link MTU less 40 bytes of IPv6 header and 8 of UDP.
+// libutp's UDP_TEREDO_MTU, the path MTU its default callback reports for any
+// IPv6 peer (utp_utils.cpp:222, :230, :232-235).
+const ipv6SafeDatagram = 1280 - ipv6HeaderAndUDPOverhead
+
+// ipv6Ceiling caps the ceiling for a peer whose address is IPv6 at
+// ipv6SafeDatagram, as libutp does.
+//
+// libutp's comment calls it conservative -- "Since we don't know the local
+// address of the interface, be conservative and assume all IPv6 connections
+// are Teredo" -- and it is, but it is also what keeps it from stalling. IPv6
+// routers do not fragment, and with ICMPv6 filtered an oversized packet
+// simply vanishes: the "path MTU below the size already adopted" stall in
+// KNOWN-LIMITATIONS.md. Measured over a 1280-byte IPv6 link with no ICMP,
+// 1 MB, five runs each: this library at its 1400 ceiling stalled every time,
+// and at 1232 delivered 6.17-6.22 Mbps. Over a 1500-byte IPv6 link the cap
+// cost nothing measurable, 6.20-6.23 against 6.22-6.26 Mbps.
+//
+// An IPv4-mapped address travels as IPv4 and is left alone, as is any peer
+// that does not carry an address.
+func ipv6Ceiling(peer ConnectionPeer, configured uint16) uint16 {
+	addressed, ok := peer.(interface{ Addr() *net.UDPAddr })
+	if !ok || configured <= ipv6SafeDatagram {
+		return configured
+	}
+	addr := addressed.Addr()
+	if addr == nil || addr.IP.To4() != nil || addr.IP.To16() == nil {
+		return configured
+	}
+	return ipv6SafeDatagram
+}
+
 func pathMTUCeiling(socket Conn, peer ConnectionPeer, configured uint16) uint16 {
 	provider, ok := socket.(PathMTUProvider)
 	if !ok || peer == nil {

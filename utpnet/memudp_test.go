@@ -18,6 +18,10 @@ import (
 type memNet struct {
 	mu    sync.Mutex
 	conns map[string]*memUDP
+	// mtu, when non-zero, is the largest datagram the network carries.
+	// Anything larger vanishes without a word, as it does on an IPv6 path
+	// whose routers' ICMPv6 "packet too big" is filtered.
+	mtu int
 }
 
 func newMemNet() *memNet { return &memNet{conns: map[string]*memUDP{}} }
@@ -111,7 +115,11 @@ func (c *memUDP) WriteToUDP(b []byte, addr *net.UDPAddr) (int, error) {
 	}
 	c.net.mu.Lock()
 	dst := c.net.conns[addr.String()]
+	mtu := c.net.mtu
 	c.net.mu.Unlock()
+	if mtu > 0 && len(b) > mtu {
+		return len(b), nil
+	}
 	if dst != nil {
 		payload := append([]byte(nil), b...)
 		select {

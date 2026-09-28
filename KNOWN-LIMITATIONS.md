@@ -3770,6 +3770,43 @@ went the wrong way.
 unsolved problem does not justify leaving the draft and risking stability.
 `ledbatPPDecreaseConstant` is the one line to change to revisit it.
 
+## ~~IPv6 peers stalled on a minimum-MTU path~~ — fixed
+
+Found while looking for a way to test IPv6 at all on a host whose kernel has
+none. libutp's default path-MTU callback treats every IPv6 peer as a Teredo
+tunnel and reports 1232 -- the 1280-byte IPv6 minimum link MTU less 48 bytes
+of IPv6 and UDP header -- against 1402 for IPv4 (`utp_utils.cpp:228-236`,
+installed on every context, `utp_api.cpp:77-78`). This library used 1400 for
+both, lowered only if the local interface said less.
+
+On an IPv6 path that carries only its minimum, with ICMPv6 "packet too big"
+filtered, packets over 1232 vanish, and the search never recovers -- the
+stall in "A path MTU below the size already adopted stalls the connection".
+IPv6 is where it bites: routers there never fragment, and tunnels often
+carry little more than the minimum. Measured on the emulated network, 1 MB,
+five runs each, no ICMP:
+
+| | this library, 1400 | this library, 1232 | libutp, 1232 (its IPv6 default) |
+| --- | --- | --- | --- |
+| 1280-byte IPv6 link | **stalled, 5 of 5** | 6.17-6.22 Mbps | 4.17-4.19 Mbps |
+| 1500-byte IPv6 link | 6.22-6.26 Mbps | 6.20-6.23 Mbps | 4.17-4.19 Mbps |
+
+A peer whose address is IPv6 now gets a ceiling of at most 1232
+(`ipv6Ceiling`, path_mtu.go), as in libutp. An IPv4-mapped address travels
+as IPv4 and is left alone, as is a peer with no address and a smaller
+configured ceiling. On an ordinary IPv6 path it costs nothing measurable.
+`TestIPv6PeersGetTheIPv6SafeCeiling` pins the rule;
+`utpnet.TestIPv6TransferOverTheMinimumMTUPath` transfers 1 MB between IPv6
+peers over an in-memory path that drops anything over 1232, and stalls
+without the cap.
+
+Two corrections came with it. The libutp driver's comment said that with no
+MTU callback libutp's ceiling is 0; libutp installs its own defaults, and
+without the driver's callback it sends 1402-byte datagrams, measured. And the
+libutp column of DEVIATIONS.md's MTU-start table, which shows libutp stalling
+on IPv6-like paths, was measured through the driver's 1472: libutp's own
+default would not have stalled on an IPv6 path.
+
 ## Things found but deliberately not fixed
 
 These are real and unresolved. Each needs a measurement harness (M1) or a

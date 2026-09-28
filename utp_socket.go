@@ -1625,11 +1625,11 @@ func (s *UtpSocket) configForPeer(config *ConnectionConfig, peer ConnectionPeer)
 	if s.socket == nil {
 		return config
 	}
-	ceiling := pathMTUCeiling(s.socket, peer, config.MaxPacketSize)
+	ceiling := pathMTUCeiling(s.socket, peer, ipv6Ceiling(peer, config.MaxPacketSize))
 	if ceiling == config.MaxPacketSize {
 		return config
 	}
-	s.logger.Debug("lowering the path-MTU ceiling to what the local interface carries",
+	s.logger.Debug("lowering the path-MTU ceiling to what the path is known to carry",
 		"configured", config.MaxPacketSize, "discovered", ceiling, "peer", peer.Hash())
 	adjusted := *config
 	adjusted.MaxPacketSize = ceiling

@@ -188,17 +188,21 @@ static uint64 drv_get_read_buffer_size(utp_callback_arguments *a) {
 }
 
 // libutp asks its embedder for the path MTU and uses the answer as the ceiling
-// of its own MTU search (mtu_reset, utp_internal.cpp:1314-1322). With no
-// callback registered utp_call_get_udp_mtu returns 0 (utp_callbacks.cpp:122),
-// so the ceiling is 0, the floor stays 576, and mtu_search_update settles on
-// (576 + 0) / 2 = 288-byte packets -- the underflow in its
-// `mtu_ceiling - mtu_floor <= 16` test keeps the search from ever finishing.
-// That is not libutp's behaviour, it is the behaviour of libutp wired up
-// wrongly, and it made every throughput measurement taken against this driver
-// an understatement.
+// of its own MTU search (mtu_reset, utp_internal.cpp:1314-1322).
 //
-// 1472 is a standard 1500-byte Ethernet MTU less 20 bytes of IPv4 header and
-// 8 of UDP, which is what an embedder on an ordinary path reports.
+// This comment used to say that with no callback registered the answer is 0
+// and libutp settles on 288-byte packets. It is not so: every context is
+// created with libutp's own defaults installed (utp_api.cpp:77-78), and with
+// this driver's callback left out libutp sends 1402-byte datagrams --
+// measured. libutp's default reports 1402 for an IPv4 peer and 1232 for an
+// IPv6 one, which it assumes is a Teredo tunnel (utp_utils.cpp:228-236).
+//
+// The driver reports 1472 instead: a standard 1500-byte Ethernet MTU less 20
+// bytes of IPv4 header and 8 of UDP, which is what an embedder that knows its
+// path is ordinary Ethernet reports. Measurements made against it are of
+// libutp so configured, not of libutp's defaults -- and for an IPv6 peer
+// libutp's default would never send more than 1232 (KNOWN-LIMITATIONS.md).
+// SetUDPMTU sets any other figure.
 static uint64 drv_get_udp_mtu(utp_callback_arguments *a) {
 	libutp_driver *d = drv_of(a);
 	return d->udp_mtu ? d->udp_mtu : 1472;

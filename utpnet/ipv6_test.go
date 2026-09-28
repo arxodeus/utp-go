@@ -379,3 +379,67 @@ func TestIPv6PeersDifferingOnlyInAddressAreDistinct(t *testing.T) {
 		})
 	}
 }
+
+// A transfer to an IPv6 peer over a path at IPv6's minimum link MTU, 1280,
+// whose routers' "packet too big" messages never arrive.
+//
+// Every IPv6 path carries 1280, and tunnels often carry little more, so a
+// sender that tries anything larger and learns nothing when it vanishes can
+// stall on any of them. libutp never tries: its default path MTU for an IPv6
+// peer is 1232 (utp_utils.cpp:230-235), and so now is this library's
+// (ipv6Ceiling). Measured before it, over the emulated network: this library
+// stalled on such a path in five runs of five.
+func TestIPv6TransferOverTheMinimumMTUPath(t *testing.T) {
+	network := newMemNet()
+	network.mtu = 1280 - 48 // the UDP payload a 1280-byte IPv6 link carries
+	opts := &Options{Logger: quiet()}
+	open := func(addr string) *Socket {
+		conn, err := network.listen(addr)
+		if err != nil {
+			t.Fatalf("binding %s: %v", addr, err)
+		}
+		s, err := newSocket(context.Background(), conn, opts)
+		if err != nil {
+			t.Fatalf("socket on %s: %v", addr, err)
+		}
+		t.Cleanup(func() { s.Close() })
+		return s
+	}
+	server := open("[2001:db8::1]:6881")
+	client := open("[2001:db8::2]:51413")
+
+	payload := make([]byte, 1<<20)
+	if _, err := rand.Read(payload); err != nil {
+		t.Fatal(err)
+	}
+	received := make(chan []byte, 1)
+	go func() {
+		conn, err := server.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		got, _ := io.ReadAll(conn)
+		received <- got
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, err := client.DialContext(ctx, "udp6", server.Addr().String())
+	if err != nil {
+		t.Fatalf("dialling: %v", err)
+	}
+	go func() {
+		_, _ = conn.Write(payload)
+		conn.Close()
+	}()
+
+	select {
+	case got := <-received:
+		if !bytes.Equal(got, payload) {
+			t.Fatalf("delivered %d of %d bytes, or corrupted", len(got), len(payload))
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("stalled: a 1 MB transfer to an IPv6 peer did not complete over a 1280-byte path")
+	}
+}
