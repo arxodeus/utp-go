@@ -79,6 +79,18 @@ func FuzzDecodePacket(f *testing.F) {
 	f.Add(NewPacketBuilder(st_fin, 9, 0, 0, 1).Build().Encode())
 	f.Add(make([]byte, 22))
 	f.Add([]byte{1, 1, 0, 0})
+	// Extensions the decoder does not interpret, which it must still keep:
+	// extension 2 (eight bytes) leading a chain to an unknown type 99, and a
+	// selective ack followed by an unknown type.
+	withChain := func(first byte, chain ...byte) []byte {
+		p := NewPacketBuilder(st_data, 5, 1, 2, 3).WithPayload([]byte("body")).Build().Encode()
+		p[1] = first
+		out := append([]byte{}, p[:MINIMAL_HEADER_SIZE]...)
+		out = append(out, chain...)
+		return append(out, p[MINIMAL_HEADER_SIZE:]...)
+	}
+	f.Add(withChain(2, 99, 8, 1, 2, 3, 4, 5, 6, 7, 8, 0, 3, 0xaa, 0xbb, 0xcc))
+	f.Add(withChain(1, 99, 4, 0x05, 0, 0, 0, 0, 2, 0xde, 0xad))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		pkt, err := DecodePacket(data)
@@ -126,35 +138,21 @@ func FuzzDecodePacket(f *testing.F) {
 			t.Errorf("encoding is not idempotent:\n first %x\nsecond %x", reencoded, again.Encode())
 		}
 
-		// Byte-exact round trip, where it is owed.
+		// Byte-exact round trip, for every packet the decoder accepts.
 		//
-		// It is owed for a packet that carries nothing this implementation
-		// drops: no extensions at all, or exactly one selective ack with the
-		// chain terminating after it. Those are the only two shapes this
-		// library ever emits, and the only two it can reproduce.
-		//
-		// It is not owed otherwise. This decoder keeps the selective ack and
-		// discards everything else in an extension chain -- extension 2,
-		// unknown types further along, a zero-length selective ack -- because
-		// nothing here reads them. Re-encoding then legitimately produces a
-		// shorter packet, and demanding equality would be demanding that we
-		// reproduce data we never stored. What is still owed in that case is
-		// that the packet did not somehow grow.
+		// This used to be owed only for packets carrying nothing the decoder
+		// dropped -- no extensions, or exactly one selective ack -- because
+		// it kept the selective ack and discarded everything else in the
+		// chain: extension 2, unknown types further along, a zero-length
+		// selective ack. It now keeps the whole chain in order
+		// (packet.wireExtensions), so nothing is dropped and nothing is owed
+		// less than the original bytes.
 		//
 		// The selective-ack bitfield's own round trip, which is where a
-		// bit-order bug would hide, is covered directly by
-		// FuzzDecodeSelectiveAck rather than through this.
-		chainEndsAfterFirst := len(data) > MINIMAL_HEADER_SIZE && data[MINIMAL_HEADER_SIZE] == 0
-		reproducible := data[1] == 0 || (data[1] == 1 && chainEndsAfterFirst && pkt.Eack != nil)
-
-		if reproducible {
-			if !bytes.Equal(reencoded, data) {
-				t.Errorf("a packet carrying only what we retain did not round trip:\n in %x\nout %x",
-					data, reencoded)
-			}
-		} else if len(reencoded) > len(data) {
-			t.Errorf("re-encoding grew a packet whose extensions were dropped:\n in %x (%d)\nout %x (%d)",
-				data, len(data), reencoded, len(reencoded))
+		// bit-order bug would hide, is also covered directly by
+		// FuzzDecodeSelectiveAck.
+		if !bytes.Equal(reencoded, data) {
+			t.Errorf("an accepted packet did not round trip:\n in %x\nout %x", data, reencoded)
 		}
 	})
 }

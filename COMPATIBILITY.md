@@ -36,7 +36,7 @@ than "verified".
 | Selective-ack bitfield | Differential + fuzz | Bit order was reversed here; `FuzzDecodeSelectiveAck` round-trips it |
 | Selective-ack length validation | Differential | A deliberate divergence: we reject non-multiples of 4, libutp accepts |
 | Encoder self-consistency | Fuzz | `FuzzDecodePacket`: everything we encode, we can decode |
-| Unknown extensions preserved on re-encode | **None** | We discard them. Nothing forwards packets, so nothing depends on it |
+| Unknown extensions preserved on re-encode | Fuzz | A decoded packet keeps its whole extension chain in order -- unknown types further along, which both implementations step over, and extension 2 -- and writes it back byte for byte. `FuzzDecodePacket` now requires that of every packet the decoder accepts (6.7 million inputs, none failing); it used to be owed only for packets with no extensions or a lone selective ack. `TestDecodedPacketKeepsExtensionsThroughEdits` covers a caller replacing or clearing the selective ack. libutp never re-encodes a received packet, so there is nothing of its to compare; this is our encoder's fidelity |
 
 ## Connection setup
 
@@ -45,8 +45,8 @@ than "verified".
 | SYN contents | Differential | `TestDifferentialHandshakeIsEmitted` compares our SYN to libutp's field by field |
 | Connection-id derivation | Differential | Both roles; a SYN reaching an established connection was found here |
 | SYN retransmission schedule | **Measured** | 1x, 3x its 3000ms base, gives up at 7x. Ours matches |
-| Initial ack number (SYN-ACK seq minus one) | Cited | `utp_internal.cpp:1871-1874`, verified during M4 |
-| STATE carries the next sequence number | Cited | `:781` with `:1088-1089` |
+| Initial ack number (SYN-ACK seq minus one) | Differential | `utp_internal.cpp:1871-1874`. `TestInitiatorReordering` delivers the first data packet out of order, so both sides answer with an acknowledgement still at its initial value, 899 against a SYN-ACK of 900, compared field by field. Setting it to the SYN-ACK's own number fails the initiator corpus |
+| STATE carries the next sequence number | Differential | `:781` with `:1088-1089`. Every acknowledgement in both corpora is an ST_STATE whose sequence number is compared with libutp's. Sending the last number used instead of the next fails the corpus |
 | Completing an incoming connection | Differential | A deliberate divergence: libutp completes only on ST_DATA |
 | Duplicate/retransmitted SYN | Differential | Corpus + both fuzz roles |
 

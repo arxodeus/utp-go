@@ -261,18 +261,76 @@ type packet struct {
 	Header *PacketHeaderV1
 	Eack   *SelectiveAck
 	Body   []byte
+	// chain is the extension chain as it arrived, in order, for a decoded
+	// packet, and nil for one built here. See wireExtensions.
+	chain []ExtensionData
 }
 
 func (p *packet) EncodedLen() int {
 	length := MINIMAL_HEADER_SIZE
-
-	if p.Eack != nil {
-		length += p.Eack.EncodedLen() + EXTENSION_TYPE_LEN + EXTENSION_LEN_LEN
+	for _, e := range p.wireExtensions() {
+		length += EXTENSION_TYPE_LEN + EXTENSION_LEN_LEN + len(e.payload)
 	}
-
 	length += len(p.Body)
-
 	return length
+}
+
+// wireExtensions is the extension chain Encode writes, in order.
+//
+// A packet built here carries at most a selective ack. A decoded packet
+// carries every extension it arrived with, in the order it arrived, so that
+// decoding and encoding again gives back the same bytes: unknown types
+// further along the chain, which both this decoder and libutp step over
+// (utp_internal.cpp:1844-1866), and extension 2, whose contents nothing here
+// reads. These used to be dropped. Nothing on the live path re-encodes a
+// received packet, and libutp never does, but DecodePacket is exported, and
+// anything that forwarded packets through it would have stripped what it did
+// not understand.
+//
+// The selective ack keeps its place in the chain, and its bytes come from
+// Eack, so a caller that changes Eack changes what is written. Its place is
+// the last type-1 extension, because that is the one the decoder reads, as
+// libutp's loop does. If Eack is nil that entry is dropped -- unless it was
+// empty, in which case it never became an Eack and is kept as it came.
+//
+// An unknown type is never written first. A packet whose first extension is
+// unknown is rejected by this decoder and by libutp's version check
+// (utp_internal.cpp:2480), so leading with one would make the packet
+// unreadable. It can only happen if a caller cleared the selective ack that
+// used to come first, and then the unknown extensions ahead of the first
+// known one are dropped.
+func (p *packet) wireExtensions() []ExtensionData {
+	if len(p.chain) == 0 {
+		if p.Eack != nil {
+			return []ExtensionData{{extension: 1, payload: p.Eack.Encode()}}
+		}
+		return nil
+	}
+	slot := -1
+	for i, e := range p.chain {
+		if e.extension == 1 {
+			slot = i
+		}
+	}
+	out := make([]ExtensionData, 0, len(p.chain)+1)
+	if slot < 0 && p.Eack != nil {
+		out = append(out, ExtensionData{extension: 1, payload: p.Eack.Encode()})
+	}
+	for i, e := range p.chain {
+		if i == slot {
+			switch {
+			case p.Eack != nil:
+				e = ExtensionData{extension: 1, payload: p.Eack.Encode()}
+			case len(e.payload) != 0:
+				continue
+			}
+		}
+		out = append(out, e)
+	}
+	for len(out) > 0 && out[0].extension > MAX_KNOWN_EXTENSION {
+		out = out[1:]
+	}
+	return out
 }
 
 // Encode writes the packet to the wire.
@@ -296,15 +354,23 @@ func (p *packet) EncodedLen() int {
 func (p *packet) Encode() []byte {
 	bytes := make([]byte, 0, p.EncodedLen())
 
+	exts := p.wireExtensions()
 	header := *p.Header
-	header.Extension = p.extensionByte()
+	header.Extension = 0
+	if len(exts) > 0 {
+		header.Extension = exts[0].extension
+	}
 	bytes = append(bytes, header.EncodeToBytes()...)
 
-	// Encode selective ack if present
-	if p.Eack != nil {
-		ack := p.Eack.Encode()
-		bytes = append(bytes, byte(0), byte(len(ack)))
-		bytes = append(bytes, ack...)
+	// Each extension is introduced by the one before it: the header names
+	// the first, and each carries the type of the next.
+	for i, e := range exts {
+		var next byte
+		if i+1 < len(exts) {
+			next = exts[i+1].extension
+		}
+		bytes = append(bytes, next, byte(len(e.payload)))
+		bytes = append(bytes, e.payload...)
 	}
 
 	// Append payload
@@ -313,11 +379,11 @@ func (p *packet) Encode() []byte {
 	return bytes
 }
 
-// extensionByte is the extension this packet actually carries, as opposed to
-// the one its header claims.
+// extensionByte is the extension this packet actually carries first, as
+// opposed to the one its header claims.
 func (p *packet) extensionByte() byte {
-	if p.Eack != nil {
-		return 1
+	if exts := p.wireExtensions(); len(exts) > 0 {
+		return exts[0].extension
 	}
 	return 0
 }
@@ -367,20 +433,13 @@ func DecodePacket(b []byte) (*packet, error) {
 	// before the connection ever saw it, which meant it was never acked and
 	// the peer retransmitted it forever -- a silent stall against any peer
 	// that sends one.
-	// The header describes the packet as this implementation holds it, not
-	// as it arrived. An extension we did not retain -- a zero-length
-	// selective ack, or extension 2, whose contents nothing here reads -- is
-	// gone, so the header must not go on claiming it. Otherwise the struct
-	// lies about its own contents, which is what let Encode produce
-	// unparseable packets before it derived this byte itself.
-	header.Extension = 0
-	if ack != nil {
-		header.Extension = 1
-	}
-
+	// Every extension is kept, in order (see wireExtensions), so the header's
+	// extension byte stays as it arrived, and it agrees with what Encode will
+	// write.
 	p.Header = header
 	p.Eack = ack
 	p.Body = payload
+	p.chain = extensions
 	return &p, nil
 	//var body []byte
 	//if header.Extension == 0 {
