@@ -15,7 +15,7 @@ import (
 // Writes go straight out through the real socket, because there is nothing to
 // decide on the way out.
 type demuxConn struct {
-	udp *net.UDPConn
+	udp udpPacketConn
 
 	incoming chan inbound
 
@@ -36,7 +36,7 @@ type inbound struct {
 // with a retransmission, where a dropped DHT datagram costs one query.
 const demuxDepth = 4096
 
-func newDemuxConn(udp *net.UDPConn) *demuxConn {
+func newDemuxConn(udp udpPacketConn) *demuxConn {
 	return &demuxConn{
 		udp:      udp,
 		incoming: make(chan inbound, demuxDepth),

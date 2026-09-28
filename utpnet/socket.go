@@ -56,9 +56,25 @@ const maxDatagram = 65536
 // traffic behind a slow DHT reader on the same port.
 const passthroughDepth = 256
 
+// udpPacketConn is what a Socket uses of its UDP socket. *net.UDPConn is the
+// only implementation outside tests; the interface exists so that tests can
+// run a Socket over an in-memory network whose addresses are IPv6, on a host
+// whose kernel has no IPv6 at all (utpnet's IPv6 tests, ipv6_test.go).
+type udpPacketConn interface {
+	ReadFromUDP(b []byte) (int, *net.UDPAddr, error)
+	WriteToUDP(b []byte, addr *net.UDPAddr) (int, error)
+	LocalAddr() net.Addr
+	SetReadDeadline(t time.Time) error
+	SetReadBuffer(bytes int) error
+	SetWriteBuffer(bytes int) error
+	Close() error
+}
+
+var _ udpPacketConn = (*net.UDPConn)(nil)
+
 // Socket is a uTP endpoint on a UDP port, presented as net types.
 type Socket struct {
-	udp    *net.UDPConn
+	udp    udpPacketConn
 	sock   *utp.UtpSocket
 	inner  *demuxConn
 	logger log.Logger
@@ -140,6 +156,10 @@ func NewSocket(ctx context.Context, conn *net.UDPConn, opts *Options) (*Socket, 
 	if conn == nil {
 		return nil, errors.New("utpnet: nil UDP connection")
 	}
+	return newSocket(ctx, conn, opts)
+}
+
+func newSocket(ctx context.Context, conn udpPacketConn, opts *Options) (*Socket, error) {
 	if opts == nil {
 		opts = &Options{}
 	}
