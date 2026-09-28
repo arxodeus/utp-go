@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,7 +22,8 @@ import (
 // "LEDBAT++'s latecomer takes most of the link").
 //
 // Opt-in, because it takes about half a minute: set UTP_LONG_LATECOMER=1.
-// UTP_LONG_LATECOMER_ALGO=ledbat runs classic LEDBAT instead of LEDBAT++.
+// UTP_LONG_LATECOMER_ALGO=ledbat runs classic LEDBAT instead of LEDBAT++, and
+// UTP_LONG_LATECOMER_MB sets the size of each flow's transfer (default 16).
 func TestLatecomerShareOverTime(t *testing.T) {
 	if os.Getenv("UTP_LONG_LATECOMER") == "" {
 		t.Skip("set UTP_LONG_LATECOMER=1 to run")
@@ -39,10 +41,16 @@ func TestLatecomerShareOverTime(t *testing.T) {
 	cfg := Config{Delay: 20 * time.Millisecond, BandwidthBps: 10_000_000, QueueBytes: 256 * 1024}
 	n.ConnectAsymmetric(sender, receiver, cfg, cfg)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Second)
 	defer cancel()
 	pair := NewUtpPair(ctx, n, sender, receiver, quiet())
-	data := make([]byte, 16<<20)
+	megabytes := 16
+	if v := os.Getenv("UTP_LONG_LATECOMER_MB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			megabytes = n
+		}
+	}
+	data := make([]byte, megabytes<<20)
 
 	type outcome struct {
 		delivered []DeliverySample

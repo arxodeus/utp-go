@@ -3715,21 +3715,34 @@ it did -- deferring to a loss-based flow in fourteen runs of fifteen where
 the one-way delay deferred in five (BENCHMARKS.md) -- and is now how LEDBAT++
 measures delay.
 
-**Not what it looked like: the latecomer's base is corrected.** Logging each
-slowdown's base round trip and the lowest round trip seen during its freeze
-(16 MB run): the latecomer's first slowdown finds the real base -- 85.7 ms to
-41.5 ms -- and from there both flows measure the same base, about 41.5 ms. So
-making slowdowns overlap, the next idea, would repair something already
-repaired, and was not built.
+**The latecomer's base is only partly corrected -- and that is the cause.**
+Its first slowdown corrects the gross error (85.7 ms to 41.5 ms in one
+trace), and that was first read as the whole story. It is not. Logged over
+64 MB a flow, the latecomer's base settles 0.1-0.6 ms above the incumbent's
+(42.07 and later 41.61 ms, against 41.48), because it only sees the path
+near-empty when one of its freezes happens to coincide with the incumbent
+sending little. That residual decides the split. Near the target the delay
+excess is only a few percent of it, so a latecomer that subtracts a base 0.6
+ms too high reads a third to a half less excess, decreases less, and settles
+at a window 20-30% larger. The incumbent measured itself over target on 40%
+of acknowledgements, the latecomer on 31%, from the same queue. The split
+holds at about 60/40 for 40-60 seconds and moves in steps when the
+latecomer's base improves by a fraction of a millisecond; over 64 MB a flow
+it reached about 50% after a minute in two runs of three.
 
-What persists is a window imbalance set before any slowdown. During the
-latecomer's initial slow start, sized against its inflated base, the
-incumbent's multiplicative decrease takes it from 142 KB to 18 KB (another
-run: 141 KB to 16 KB). After that, with both measuring the same delay, the
-§4.3 decrease -- proportional to each window and to how far the delay is over
-target -- closes a 97 KB against 18 KB gap slowly, because the queue sits near
-the target where that decrease is small: the latecomer's share falls from
-about 85% to 60-64% over twenty seconds.
+Confirmed by an oracle: with every flow given the lowest round trip any flow
+had seen as its base, the latecomer took 20.5-23.4% instead of about 70% --
+starting at 6-8% and climbing. The advantage is base error, entirely.
+
+What remains once the base is right is convergence speed, and that is the
+draft's control law, not a defect. With a constant increase of GAIN packets
+a round trip and a decrease of C x W x (delay/target - 1), two flows sharing
+one queue see the same delay, and at equilibrium the excess is GAIN / (C x W),
+so the gap between their windows closes by a factor GAIN / W per round trip --
+the constant C cancels. Here, a third of a packet over about 45, a time
+constant of about 135 round trips, 13 seconds at this path's 100 ms round
+trip, and slower with slowdowns interrupting. That is also why a larger C
+helped only the start (below).
 
 **Tried: distrusting the saved window.** If a freeze lowered the base by more
 than a quarter of the target, the ramp stopped on delay, on the reasoning
@@ -3740,10 +3753,13 @@ incumbent is already small, and its ramp reaches the saved window before the
 delay -- a round trip behind a doubling ramp -- crosses 3/4 of the target.
 Not applied.
 
-So the open question is the one the logs point at: how LEDBAT++ is meant to
-undo an imbalance set in the latecomer's initial slow start. The draft's
-answer is multiplicative decrease with `Constant` = 1, which it says
-implementations "MAY experiment with".
+So there are two separate things. The latecomer's advantage is its base
+error, which only a freeze that finds the path empty can remove -- which
+means both flows' freezes coinciding, the overlap idea, now with a reason. And
+however the imbalance arises, the draft's control law closes it slowly, with
+a time constant of W / GAIN round trips. The draft's decrease constant,
+`Constant` = 1, is one it says implementations "MAY experiment with", and
+was tried next.
 
 **Tried: a larger decrease constant.** A first pass at 1, 2 and 4, five runs
 each, found no measurable change to deference, to two flows starting
