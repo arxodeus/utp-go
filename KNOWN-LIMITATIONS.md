@@ -3900,6 +3900,39 @@ share, or make the flows converge in a bounded number of slowdowns rather
 than W / GAIN round trips. The second is the one that holds whatever the
 arrival.
 
+**Tried: cutting the window at each slowdown to the flow's share of the
+path.** §4.4 ramps back to the window from before the slowdown, which keeps
+every flow's share exactly as it was. Ramping instead to the window that fills
+the path with no queue cuts every flow on a queue by the same fraction, the
+way a TCP halving does, so the difference between two flows shrinks at each
+slowdown. Three ways of computing it (share while both ran; throughput five
+runs each, interleaved with the unchanged build):
+
+| ssthresh after a slowdown | latecomer | cost |
+| --- | --- | --- |
+| W x base / RTT | 4 MB: 43.0-49.8% (eight runs); 16 MB, arrivals 0.9-5 s: 40.6-53.8% | Broadband 6.04 to 5.23 Mbps, long transfer 8.68 to 7.88, two flows on 64 KB 5.91 to 5.09 |
+| the same, removing half the queue | 4 MB: 70% in seven runs of eight; 16 MB: 31-66% | none measurable |
+| delivery rate x base | 4 MB: 44.4-52.0% (eight runs); 16 MB, arrivals 0.9-10 s: 41.6-58.2% (ten) | 1% loss 2.15 to 2.02, 5% loss 0.60 to 0.53, two flows on 64 KB 5.91 to 5.08; two flows starting together 47-50/53-50 to 37-47/63-53 |
+
+With the rate-based cut, deference improved (median about 21% while both ran,
+against about 29%, and a 4-10 ms queue against 13 ms).
+
+W x base / RTT is exact in steady state and wrong at the first slowdown:
+logged, 72 KB at a 92 ms round trip gives 32 KB where the path holds 51 KB,
+because the window has already been cut for a queue that has not yet
+drained. The delivery rate gets that right (51 KB at every slowdown) but
+counts lost packets as not sent, so lossy paths are cut too deep.
+
+And both fail two flows that start together, for the same reason: their
+slowdowns synchronise, as §4.4 intends, but 20-100 ms apart. The second
+flow measures while the first is frozen -- the queue gone, the whole link
+its own -- and keeps its window (logged: 35 KB at a 42 ms round trip,
+against 19 KB for the first), every period. A cut computed at the moment of
+the slowdown is biased by whichever flow went first. Not applied. What it
+would need is an estimate the other flow's freeze does not reach -- taken
+from before it, or from slowdowns that coincide -- and one that loss does
+not drag down.
+
 **Tried: a larger decrease constant.** A first pass at 1, 2 and 4, five runs
 each, found no measurable change to deference, to two flows starting
 together, or to the single-flow profiles, and a smaller latecomer share at 2
