@@ -3933,6 +3933,40 @@ would need is an estimate the other flow's freeze does not reach -- taken
 from before it, or from slowdowns that coincide -- and one that loss does
 not drag down.
 
+**Tried next: estimates the other flow's freeze cannot reach.** All three
+count lost bytes as sent, and none cuts a flow that is application-limited
+(two runs each of Broadband and both two-flow rows, logged, before any full
+measurement):
+
+| the share is measured over | Broadband | two flows, 64 KB queue | two flows, 2 MB queue |
+| --- | --- | --- | --- |
+| one round trip ending four minimum round trips before the slowdown | 5.94-5.98 Mbps | | 40/60, 41/59 |
+| the whole congestion-avoidance period since the flow's last ramp | 5.96-6.15 Mbps | 50/50, 42/58 | 46/54, 45/55 |
+| the same, with slowdowns on the shared grid above, at least nine durations apart | 5.61-5.87 Mbps | 48/52, 41/59, 37/63 | 46/54, 46/54, 44/56 |
+
+The lagged window gets a lone flow right -- 51-53 KB at the first slowdown,
+where the path holds 51 KB -- but two flows' slowdowns drift 50-590 ms
+apart, and no fixed lag clears the other's freeze and ramp.
+
+Averaging over the period is symmetric, and logged it cuts each flow in
+proportion. What it exposed is that §4.4's schedule is not: the next
+slowdown comes nine durations after this one, a larger flow's ramp takes
+longer, so it slows down less often (2.34 s against 2.0-2.1 s) and has
+longer to regrow -- and keeps its larger share.
+
+On the grid, the freezes coincide (within 15-40 ms) and the two flows'
+shares converge at each slowdown (a ratio of 0.74, 0.84, 0.90 in one run).
+But the first slowdown sets that ratio from estimates made in slow start
+(20 KB against 27 KB), a 4 MB transfer lasts one or two slowdowns more, and
+on the 64 KB queue loss adds its own noise. The unchanged build keeps two
+flows that start together at 49/51 precisely because each ramps back to its
+own window; every cut tried trades some of that for the latecomer.
+
+Five ways of computing the cut, and the same result: the latecomer fixed at
+every arrival time where measured, and two flows starting together 4-13
+points from even. Not applied. The patch is not kept; the table above and
+the one before it are enough to rebuild any of them.
+
 **Tried: a larger decrease constant.** A first pass at 1, 2 and 4, five runs
 each, found no measurable change to deference, to two flows starting
 together, or to the single-flow profiles, and a smaller latecomer share at 2
