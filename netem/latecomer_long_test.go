@@ -23,7 +23,12 @@ import (
 //
 // Opt-in, because it takes about half a minute: set UTP_LONG_LATECOMER=1.
 // UTP_LONG_LATECOMER_ALGO=ledbat runs classic LEDBAT instead of LEDBAT++, and
-// UTP_LONG_LATECOMER_MB sets the size of each flow's transfer (default 16).
+// UTP_LONG_LATECOMER_MB sets the size of each flow's transfer (default 16),
+// and UTP_LONG_LATECOMER_ARRIVAL how long after the incumbent the latecomer
+// starts, as a Go duration (default 1.5s, TestLatecomerShare's). The split
+// depends on it: a latecomer arriving before the incumbent has settled is
+// starved rather than favoured (KNOWN-LIMITATIONS.md, "LEDBAT++'s latecomer
+// takes most of the link").
 func TestLatecomerShareOverTime(t *testing.T) {
 	if os.Getenv("UTP_LONG_LATECOMER") == "" {
 		t.Skip("set UTP_LONG_LATECOMER=1 to run")
@@ -73,7 +78,15 @@ func TestLatecomerShareOverTime(t *testing.T) {
 		out <- outcome{ReceivedSeries(r.Receiver.Samples()), nil}
 	}
 	go run(700, incumbentCh)
-	time.Sleep(1500 * time.Millisecond)
+	arrival := 1500 * time.Millisecond
+	if v := os.Getenv("UTP_LONG_LATECOMER_ARRIVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			t.Fatalf("UTP_LONG_LATECOMER_ARRIVAL: %v", err)
+		}
+		arrival = d
+	}
+	time.Sleep(arrival)
 	go run(720, latecomerCh)
 	inc, late := <-incumbentCh, <-latecomerCh
 	if inc.err != nil {

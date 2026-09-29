@@ -3817,8 +3817,55 @@ The incumbent's shrinking window is the right signal, and slowing down
 then, with the saved window restored, evened the 4 MB split. But a loss
 halves a window too, and on a queue shallow enough to drop, two flows that
 start together tripped it on each other: 49/51 became 40/60. Not applied.
-Telling a delay-driven halving from a loss-driven one might rescue it; not
-tried.
+Telling a delay-driven halving from a loss-driven one might rescue it; tried
+next.
+
+**Tried: the window-collapse trigger counting only delay-driven decreases.**
+Each second the flow notes its window and counts the bytes its §4.3
+decrease takes off it; a loss halving adds nothing. Once that count reaches
+half the noted window, it slows down and ramps back to the noted window, at
+most once in two seconds. The 64 KB two-flow row came back to 49/51 (worst
+45/55, three runs), the 2 MB row stayed at 47/53, and against the loss-based
+competitor it never fired in fifteen runs (fourteen at 24-36%, one at 71%, the
+same shape as the unchanged build's one outlier). The 4 MB latecomer fell to
+49.9-62.2% (five runs), 16 MB to 53.1-65.9% (three).
+
+Logged, the runs that stayed unfair were the runs where it fired twice. The
+first is the incumbent, collapsing under the latecomer's slow-start overshoot
+half a second after it arrives. The second, a second later, is the latecomer:
+the incumbent's ramp back halves *its* window, and it restores the 117-125 KB
+it had ramped to -- the inflated window, which it had never held. Arming the
+trigger only once a window has been held through a full second of congestion
+avoidance removed the second firing: 4 MB, eight runs, 36.8-56.1%, median 49%.
+
+Then the arrival time, which every measurement above held at 1.5 s. Moving it
+(share while both ran; four 4 MB runs or two 16 MB runs each, without the
+trigger and with the held-window version):
+
+| latecomer arrives | 4 MB, without | 4 MB, with | 16 MB, without | 16 MB, with |
+| --- | --- | --- | --- | --- |
+| 0.5 s | 10.0-11.2% | 9.8-10.4% | | |
+| 0.9 s | 9.0-9.4% | 9.0-9.8% | 26.6%, 34.3% | 25.2%, 25.2% |
+| 1.5 s | 67.4-70.8% (fifteen runs, below) | 36.8-56.1% (eight) | 51.8-71.7% (fifteen, below) | not measured |
+| 2.5 s | 26.3-45.7% | 26.5-43.3% | 52.3%, 64.4% | 61.5%, 63.7% |
+| 5 s | | | 58.2%, 68.8% | 58.9%, 59.8% |
+| 10 s | | | 59.5%, 67.4% | 39.3%, 63.6% |
+
+(4 MB transfers are over before a latecomer at 4 s or later arrives.)
+
+The trigger fires on the incumbent only when the latecomer's overshoot
+halves it inside one second, and that happened reliably at 1.5 s and in one
+run of eight at 2.5-10 s, where the latecomer still takes 52-69% over 16 MB.
+It fixed the arrival time the test uses and not the problem. Not applied.
+
+What the sweep adds: the latecomer is not simply favoured. Arriving within
+the first second -- before the incumbent's initial slowdown has settled -- it
+is *starved*, to about 10% over 4 MB and 25-34% over 16 MB, climbing about
+four points every two seconds. Either way the split starts wherever the
+arrival leaves it and moves toward even at the W / GAIN pace above. The
+problem to solve is that convergence rate, not the arrival; any fix has to be
+measured across arrival times. `UTP_LONG_LATECOMER_ARRIVAL` sets it in
+`TestLatecomerShareOverTime`.
 
 **Tried: a larger decrease constant.** A first pass at 1, 2 and 4, five runs
 each, found no measurable change to deference, to two flows starting
