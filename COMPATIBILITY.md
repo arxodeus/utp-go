@@ -197,5 +197,6 @@ so it sent 288-byte packets. Both are written up in
   `utp_issue_deferred_acks` and this library when an event-loop pass ends, so
   the comparison would measure harness cadence rather than either
   implementation. This bullet previously claimed the clock was the blocker.
-- **IPv6.** Everything here runs on IPv4 loopback or an emulator with no
-  address family at all.
+- **IPv6 through a kernel socket.** Everything above the socket is covered in
+  memory (the IPv6 row above); the kernel's IPv6 socket layer -- socket
+  options, dual-stack mapping -- needs a host with IPv6, which this one lacks.

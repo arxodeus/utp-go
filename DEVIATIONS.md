@@ -81,8 +81,6 @@ copied. Not measured as an improvement.
 - *A selective ack riding on an unmatched acknowledgement is dropped:* a
   defence against a spoofed acknowledgement, at the cost of information the
   next acknowledgement repeats. The cost is not measured.
-- *The clock-drift penalty is applied to LEDBAT++ as well:* libutp has no
-  LEDBAT++ to compare.
 
 **Different, neither better nor worse.** An API choice, a structural
 consequence, or equivalent on the wire.
