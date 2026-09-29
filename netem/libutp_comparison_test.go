@@ -19,14 +19,19 @@ import (
 // control row there was *cited* — code read against utp_internal.cpp and
 // matched by hand — and every number in BENCHMARKS.md compared this library
 // against a previous version of itself, because libutp had never been run over
-// the emulated network. Three flows go over each link:
+// the emulated network. Four flows go over each link, every sender against
+// every receiver:
 //
-//	go->go        both ends this library, the BENCHMARKS.md configuration
-//	libutp->go    libutp's congestion controller, our receiver
-//	go->libutp    our congestion controller, libutp's receiver
+//	go->go          both ends this library, the BENCHMARKS.md configuration
+//	libutp->go      libutp's congestion controller, our receiver
+//	go->libutp      our congestion controller, libutp's receiver
+//	libutp->libutp  the reference against itself
 //
 // Comparing the first two is the point: same link, same payload, same clock,
-// different sender.
+// different sender. The other two are the controls: each sender against the
+// other receiver, so that a difference can be put on the end that makes it.
+// Every flow is timed from the moment before the SYN to the receiver holding
+// the last byte.
 //
 // What this is not: a claim that either implementation is better. The links
 // are emulated, the machine is one machine, and libutp is being driven by the
@@ -43,11 +48,11 @@ func TestLibutpOverEmulatedNetwork(t *testing.T) {
 		{"High BDP (100ms, 20Mbps)", Config{Delay: 100 * time.Millisecond, BandwidthBps: 20_000_000, QueueBytes: 256 * 1024}, 2 << 20},
 		{"Shallow queue (16KB)", Config{Delay: 20 * time.Millisecond, BandwidthBps: 10_000_000, QueueBytes: 16 * 1024}, 1 << 20},
 	}
-	modes := []string{"go->go", "libutp->go", "go->libutp"}
+	modes := []string{"go->go", "libutp->go", "go->libutp", "libutp->libutp"}
 
 	repeats := benchmarkRepeatCount()
 	var table strings.Builder
-	table.WriteString("| Profile | go->go | libutp->go | go->libutp |\n| --- | --- | --- | --- |\n")
+	table.WriteString("| Profile | go->go | libutp->go | go->libutp | libutp->libutp |\n| --- | --- | --- | --- | --- |\n")
 
 	for _, p := range profiles {
 		payload := make([]byte, p.bytes)
@@ -73,8 +78,8 @@ func TestLibutpOverEmulatedNetwork(t *testing.T) {
 			lo, hi := minMaxFloat(samples)
 			cells = append(cells, fmt.Sprintf("%.2f (%.2f-%.2f)", medianFloat(samples), lo, hi))
 		}
-		t.Logf("%-26s go->go %-22s libutp->go %-22s go->libutp %s", p.name, cells[0], cells[1], cells[2])
-		fmt.Fprintf(&table, "| %s | %s | %s | %s |\n", p.name, cells[0], cells[1], cells[2])
+		t.Logf("%-26s go->go %-22s libutp->go %-22s go->libutp %-22s libutp->libutp %s", p.name, cells[0], cells[1], cells[2], cells[3])
+		fmt.Fprintf(&table, "| %s | %s | %s | %s | %s |\n", p.name, cells[0], cells[1], cells[2], cells[3])
 	}
 
 	if dir := os.Getenv("UTP_BENCHMARK_OUT_DIR"); dir != "" {
@@ -120,6 +125,8 @@ func runComparisonFlow(t *testing.T, mode string, cfg Config, payload []byte) (f
 		elapsed, got, err = libutpToGo(ctx, n, a, b, payload, 7000)
 	case "go->libutp":
 		elapsed, got, err = goToLibutp(ctx, n, a, b, payload, 7000)
+	case "libutp->libutp":
+		elapsed, got, err = libutpToLibutp(ctx, n, a, b, payload, 7000)
 	default:
 		return 0, fmt.Errorf("unknown mode %q", mode)
 	}
@@ -142,8 +149,8 @@ func runComparisonFlow(t *testing.T, mode string, cfg Config, payload []byte) (f
 //
 // Its value is not the throughput number. It is that the harness driving
 // libutp — clock, packet delivery, read draining, MTU — is wired up correctly,
-// which is not something to take on trust: two defects in it were found by
-// measuring, and both made libutp look worse than it is. See
+// which is not something to take on trust: three defects in it were found by
+// measuring, and all three made libutp look worse than it is. See
 // KNOWN-LIMITATIONS.md.
 func TestLibutpTransfersOverEmulatedNetwork(t *testing.T) {
 	payload := make([]byte, 256*1024)
@@ -152,7 +159,7 @@ func TestLibutpTransfersOverEmulatedNetwork(t *testing.T) {
 	}
 	cfg := Config{Delay: 10 * time.Millisecond, BandwidthBps: 20_000_000, QueueBytes: 64 * 1024}
 
-	for _, mode := range []string{"libutp->go", "go->libutp"} {
+	for _, mode := range []string{"libutp->go", "go->libutp", "libutp->libutp"} {
 		t.Run(mode, func(t *testing.T) {
 			mbps, err := runComparisonFlow(t, mode, cfg, payload)
 			if err != nil {

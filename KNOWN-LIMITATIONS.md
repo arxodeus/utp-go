@@ -15,7 +15,7 @@ all.
 | **M2** — conformance harness against real libutp | **Partly done.** Corpus comparing emitted packets field by field, including malformed and hostile headers, plus retransmission-schedule and ack-count comparisons measured against libutp on each run; see [CONFORMANCE.md](CONFORMANCE.md). Both roles are covered: `conformance_initiator_corpus_test.go` adds nine curated cases in the dialling role, on the virtual clock, comparing the SYN itself. Ack *latency* is still not compared, for a reason that is not about clocks — see [COMPATIBILITY.md](COMPATIBILITY.md). |
 | **M3** — fix the failing transfer tests | **Done.** Root causes below; gates in "Verification". |
 | **M4** — audit transfer paths against libutp | **Done.** The ack path, the loss-recovery path, the retransmission timers and the send path are all audited against libutp — the timers by measurement rather than by reading, see [CONFORMANCE.md](CONFORMANCE.md). Three findings from the send path below; the packet-size one is deliberately left to M6. |
-| **M4b** — exhaustive libutp compatibility sweep | **Done, and the line-by-line sweep it deferred has since been done too** — see "The M4b sweep" below. It found the clock-drift penalty missing, now implemented and measured, and `utp_read_drained` missing, now implemented after two reverts that rested on a misattributed hang, and measured: a stalled reader's transfer finishes in 2.16s with it against 29.7s under libutp's own behaviour without it. Measuring it found two more defects: our sender overran the peer's window (fixed), and our keep-alive could leave 29 seconds late (also fixed). [COMPATIBILITY.md](COMPATIBILITY.md) records every protocol area, the *kind* of evidence behind it — differential, measured, interop, cited, or none — and what is unchecked. Writing it found one defect (an ack per data packet, below), and the largest gap it named — libutp had never been run over the emulated network — has since been closed: `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite, which found two more defects. Both were in the harness, and both made libutp look worse than it is. |
+| **M4b** — exhaustive libutp compatibility sweep | **Done, and the line-by-line sweep it deferred has since been done too** — see "The M4b sweep" below. It found the clock-drift penalty missing, now implemented and measured, and `utp_read_drained` missing, now implemented after two reverts that rested on a misattributed hang, and measured: a stalled reader's transfer finishes in 2.16s with it against 29.7s under libutp's own behaviour without it. Measuring it found two more defects: our sender overran the peer's window (fixed), and our keep-alive could leave 29 seconds late (also fixed). [COMPATIBILITY.md](COMPATIBILITY.md) records every protocol area, the *kind* of evidence behind it — differential, measured, interop, cited, or none — and what is unchecked. Writing it found one defect (an ack per data packet, below), and the largest gap it named — libutp had never been run over the emulated network — has since been closed: `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite, which found three more defects. All were in the harness, and all made libutp look worse than it is. |
 | **M5** — verify LEDBAT, add LEDBAT++ | **Done.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft, opt-in. Deference measured against a loss-based competitor over a shared bottleneck: while both send, classic LEDBAT takes about 69% of the link from it, LEDBAT++ usually 21-33% (re-measured; the first figures were 60% and 44% by goodput share). See [BENCHMARKS.md](BENCHMARKS.md). |
 | **M6** — MTU path discovery | **Done.** Binary search between a 576-byte floor and a 1400-byte ceiling, probing with ordinary data packets, as libutp does. The ceiling could be raised from 1024 only because discovery makes it safe: an untested path still gets 988 bytes. Probes now carry the don't-fragment bit through `utp.DontFragmentWriter`, implemented for a real UDP socket on Linux, Darwin, the BSDs and Windows without adding a dependency, and compiling everywhere else against a stub. Implementing the bit exposed a second gap, since closed: libutp's duplicate-acknowledgement route to lowering the ceiling (`:1927-1940`) was missing, so a probe dropped for size during a bulk transfer taught the search nothing. With both, the search comes down from 1384 to 996 on a 1000-byte path and fragmentation falls from 3809 datagrams to 32. |
 | **M7** — anacrolix/torrent integration | **Done, with one gap.** `utpnet` presents a uTP socket as `net.PacketConn`/`net.Conn` and satisfies torrent's uTP interface, checked against the real interface by reflection in `integration/anacrolix`. The gap: torrent selects its uTP implementation at build time, so wiring it in needs a `replace` or a patched file — recipes in that module's README. |
@@ -1224,18 +1224,20 @@ to 6.63 at Jain 1.000). That is the expected result: coalescing removes
 because it costs nothing and matches the reference, not because it was faster.
 The claim being made here is only that it did not regress.
 
-## libutp was wired up wrongly, twice, and both times it looked like a result
+## libutp was wired up wrongly, three times, and each time it looked like a result
 
 The largest gap COMPATIBILITY.md named was that libutp had never been run over
 the emulated network: every congestion-control row there was *cited*, and every
 number in BENCHMARKS.md compared this library against a previous version of
 itself. `libutp_flow_test.go` closes it by driving `libutp.Driver` — which has
 no socket, no clock and no threads by design — over a netem `Endpoint`, and
-`netem.TestLibutpOverEmulatedNetwork` runs three flows over each of the
-benchmark links: ours to ours, libutp to ours, ours to libutp.
+`netem.TestLibutpOverEmulatedNetwork` runs four flows over each of the
+benchmark links: ours to ours, libutp to ours, ours to libutp, and libutp to
+libutp.
 
-The first two attempts produced tables that looked publishable and were wrong.
-Both defects were in the harness, and both made libutp look worse than it is.
+Three versions of it produced tables that looked publishable and were wrong.
+All three defects were in the harness, and all three made libutp look worse
+than it is.
 
 ### The two clocks were in different epochs
 
@@ -1275,39 +1277,59 @@ It changed the interop numbers too, which is how much of an understatement it
 was: our initiator to libutp went from ~430 to ~600 Mbps, and libutp to us from
 ~374 to ~430.
 
+### A libutp sender was timed to its teardown
+
+Found when libutp was finally run against itself. A flow with libutp sending
+was timed to libutp tearing the connection down, and libutp does that only on
+one of its 500 ms timeout passes (`TIMEOUT_CHECK_INTERVAL`,
+`utp_internal.cpp:37`, `:3284-3285`) after its FIN is acknowledged: a 256 KB
+transfer whose receiver had every byte at 344 ms was timed at 502 ms. Every
+libutp-sender cell came out at a multiple of half a second -- 4.19 Mbps for
+1 MB is exactly 2.00 s -- and the LAN column, 4 MB at 100 Mb/s, came out
+"bimodal" at 505 ms or 2.003 s, which this file then explained as one
+retransmission timeout. It was the pass, not a timeout.
+
+Timing to the receiver's end of stream instead was not enough either: libutp's
+FIN can wait a round trip for window behind its last data packet, so our
+receiver saw the end of stream about 43 ms after the last byte, and libutp's
+sender looked 3-5% slower into our receiver than into its own. Every flow is
+now timed from the moment before the SYN to the receiver holding the last
+byte, and with that the two receivers are indistinguishable.
+
 ### What libutp does on these links
 
 Seven repeats per cell, median with the range, 4 MB on the LAN profile and
 1-2 MB elsewhere. Every transfer is byte-verified.
 
-| Profile | go->go | libutp->go | go->libutp |
-| --- | --- | --- | --- |
-| LAN (1ms, 100Mbps) | 86.78 (84.10-88.95) | 33.50 (16.65-66.69) | 83.43 (72.99-90.57) |
-| Broadband (20ms, 10Mbps) | 6.39 (6.28-6.40) | 4.19 (4.19-4.19) | 6.43 (6.21-6.45) |
-| Broadband, 1% loss | 3.94 (3.91-4.05) | 2.80 (2.79-3.35) | 3.87 (2.69-4.06) |
-| High BDP (100ms, 20Mbps) | 2.10 (2.08-2.10) | 1.86 (1.86-1.86) | 2.09 (2.07-2.10) |
-| Shallow queue (16KB) | 5.62 (3.29-5.66) | 4.19 (3.35-4.19) | 5.56 (3.30-5.66) |
+| Profile | go->go | libutp->go | go->libutp | libutp->libutp |
+| --- | --- | --- | --- | --- |
+| LAN (1ms, 100Mbps) | 85.06 (81.29-87.33) | 59.73 (19.28-77.42) | 75.89 (21.93-87.02) | 70.13 (16.54-86.18) |
+| Broadband (20ms, 10Mbps) | 6.24 (6.06-6.27) | 5.51 (5.44-5.51) | 6.25 (5.85-6.28) | 5.52 (5.51-6.24) |
+| Broadband, 1% loss | 4.01 (3.99-4.01) | 3.32 (3.31-3.33) | 3.99 (3.79-4.01) | 3.32 (3.32-3.33) |
+| High BDP (100ms, 20Mbps) | 2.04 (1.98-2.05) | 1.95 (1.95-2.03) | 2.04 (2.01-2.05) | 1.95 (1.94-2.04) |
+| Shallow queue (16KB) | 5.60 (3.32-5.63) | 5.51 (5.46-5.74) | 5.61 (3.17-5.71) | 5.51 (5.42-5.54) |
 
-Two things are worth saying about this table and not more.
+**The receiver makes no difference.** Into our receiver and into its own,
+libutp's sender runs at 5.51 and 5.52 Mbps on broadband, and identically on the
+lossy, high-BDP and shallow-queue paths; our sender likewise into either. That
+was the point of running libutp against itself: every difference that remains
+is the sending controller.
 
-**Our sender is faster than libutp's on every profile**, by 34% on broadband
-and 41% under 1% loss. That is a difference in how hard classic LEDBAT is
-driven, not evidence that either is correct; BENCHMARKS.md already records that
-our classic LEDBAT leaves 33 ms of standing queue on a 40 ms path, and a
-controller that yields less will finish sooner. Read alongside that number, the
-honest summary is that this fork's classic LEDBAT is *more aggressive* than the
-reference, which is a finding about us, not a win.
+**Our sender is faster than libutp's**, by 13% on broadband and 21% under 1%
+loss, 5% on the high-BDP path and 2% on the shallow queue. That is a
+difference in how hard classic LEDBAT is driven, not evidence that either is
+correct; BENCHMARKS.md records that our classic LEDBAT leaves 33 ms of
+standing queue on a 40 ms path, and a controller that yields less will finish
+sooner. The honest summary is that this fork's classic LEDBAT is *more
+aggressive* than the reference, which is a finding about us, not a win. (The
+first version of this table said 34% and 41%: the teardown timing above.)
 
-**The LAN column is bimodal for libutp and not for us.** Twelve consecutive
-runs came in at either ~505 ms or ~2.003 s, with queue drops in both — 6 to 20
-per run — so it is not the presence of loss that separates them. The 1.5 s gap
-is one retransmission timeout: libutp's RTO floor is 1000 ms, and
-`utp_check_timeouts` refuses to do anything more often than every 500 ms
-(`TIMEOUT_CHECK_INTERVAL`, `utp_internal.cpp:37`, `:3284-3285`), so a loss that
-fast retransmit cannot cover costs between 1.0 and 1.5 s on a 1 ms path. Our
-seven LAN runs showed no such mode. This fork has the same 1000 ms floor,
-measured and asserted in `TestConformanceDataRetransmitSchedule`, so the
-difference is in what reaches a timeout, not in the timeout.
+**On the LAN, flows with libutp at either end have occasional slow runs** --
+lows of 16-22 Mbps in the libutp-to-ours, ours-to-libutp and libutp-to-libutp
+cells, none in ours-to-ours. Since it happens whichever implementation sends,
+it is not a property of either sender, and nothing here establishes its
+cause; the loop driving libutp on a 200µs tick at 100 Mb/s is as likely as
+libutp itself.
 
 ### What this still is not
 
@@ -1315,8 +1337,8 @@ libutp is driven here by a Go loop, not by a production embedder: it is handed
 packets, its clock is set, and `utp_check_timeouts` and
 `utp_issue_deferred_acks` are called on a 200µs tick. That is a faithful
 embedding — it is what `utp.h` asks for — but it is this fork's embedding, and
-two defects in it have already been found by measuring rather than by reading.
-Treat a third as likely rather than impossible. The numbers above are one
+three defects in it have already been found by measuring rather than by
+reading. Treat a fourth as likely rather than impossible. The numbers above are one
 machine, emulated links, and no wide-area path.
 
 ## An extra retransmission, from a timer wheel that counts ticks and not time
@@ -4010,8 +4032,12 @@ five runs each, no ICMP:
 
 | | this library, 1400 | this library, 1232 | libutp, 1232 (its IPv6 default) |
 | --- | --- | --- | --- |
-| 1280-byte IPv6 link | **stalled, 5 of 5** | 6.17-6.22 Mbps | 4.17-4.19 Mbps |
-| 1500-byte IPv6 link | 6.22-6.26 Mbps | 6.20-6.23 Mbps | 4.17-4.19 Mbps |
+| 1280-byte IPv6 link | **stalled, 5 of 5** | 6.17-6.22 Mbps | 5.48-5.51 Mbps |
+| 1500-byte IPv6 link | 6.22-6.26 Mbps | 6.20-6.23 Mbps | 5.51 Mbps |
+
+(The libutp column first read 4.17-4.19 Mbps: it was timed to libutp's
+teardown, a harness defect described in "libutp was wired up wrongly". Re-
+measured timed to the last byte, five runs each.)
 
 A peer whose address is IPv6 now gets a ceiling of at most 1232
 (`ipv6Ceiling`, path_mtu.go), as in libutp. An IPv4-mapped address travels

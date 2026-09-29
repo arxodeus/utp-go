@@ -333,36 +333,48 @@ reason: fewer, larger packets are fewer opportunities to be reordered.
 
 Everything above compares this library to itself. This table compares it to
 real libutp, run over the same emulated links by
-`netem.TestLibutpOverEmulatedNetwork`. Seven repeats per cell, median with the
-range, every transfer byte-verified. Both ends run classic LEDBAT, which is
-libutp's controller and this library's default.
+`netem.TestLibutpOverEmulatedNetwork`: every sender against every receiver,
+libutp against itself included. Seven repeats per cell, median with the
+range, every transfer byte-verified, every flow timed from the moment before
+the SYN to the receiver holding the last byte. Both ends run classic LEDBAT,
+which is libutp's controller and this library's default.
 
-| Profile | go->go | libutp->go | go->libutp |
-| --- | --- | --- | --- |
-| LAN (1ms, 100Mbps) | 86.78 (84.10-88.95) | 33.50 (16.65-66.69) | 83.43 (72.99-90.57) |
-| Broadband (20ms, 10Mbps) | 6.39 (6.28-6.40) | 4.19 (4.19-4.19) | 6.43 (6.21-6.45) |
-| Broadband, 1% loss | 3.94 (3.91-4.05) | 2.80 (2.79-3.35) | 3.87 (2.69-4.06) |
-| High BDP (100ms, 20Mbps) | 2.10 (2.08-2.10) | 1.86 (1.86-1.86) | 2.09 (2.07-2.10) |
-| Shallow queue (16KB) | 5.62 (3.29-5.66) | 4.19 (3.35-4.19) | 5.56 (3.30-5.66) |
+| Profile | go->go | libutp->go | go->libutp | libutp->libutp |
+| --- | --- | --- | --- | --- |
+| LAN (1ms, 100Mbps) | 85.06 (81.29-87.33) | 59.73 (19.28-77.42) | 75.89 (21.93-87.02) | 70.13 (16.54-86.18) |
+| Broadband (20ms, 10Mbps) | 6.24 (6.06-6.27) | 5.51 (5.44-5.51) | 6.25 (5.85-6.28) | 5.52 (5.51-6.24) |
+| Broadband, 1% loss | 4.01 (3.99-4.01) | 3.32 (3.31-3.33) | 3.99 (3.79-4.01) | 3.32 (3.32-3.33) |
+| High BDP (100ms, 20Mbps) | 2.04 (1.98-2.05) | 1.95 (1.95-2.03) | 2.04 (2.01-2.05) | 1.95 (1.94-2.04) |
+| Shallow queue (16KB) | 5.60 (3.32-5.63) | 5.51 (5.46-5.74) | 5.61 (3.17-5.71) | 5.51 (5.42-5.54) |
 
-Our sender is faster than libutp's everywhere — 34% on broadband, 41% under 1%
-loss. That is not a win, and reading it as one would be the mistake this file
-exists to prevent. LEDBAT's whole purpose is to yield, and the LEDBAT++ section
-above already records that our classic LEDBAT leaves 33 ms of standing queue on
-a 40 ms path where LEDBAT++ leaves 1.55 ms. A controller that yields less
-finishes sooner. The defensible reading is that this fork's classic LEDBAT is
-more aggressive than the reference's, which is a finding about this library.
+**The receiver makes no difference.** libutp's sender moves the same data at
+the same rate into our receiver as into its own -- 5.51 against 5.52 Mbps on
+broadband, identical to the hundredth under loss, on the high-BDP path and on
+the shallow queue -- and ours does the same into libutp's as into ours. So
+every difference in the table is the sending controller.
 
-The `go->libutp` column is the useful control: our sender against libutp's
-receiver lands within noise of our sender against our own receiver on every
-profile, so the difference in the middle column is the sending controller and
-not the receiving end.
+**Our sender is faster than libutp's**: 13% on broadband, 21% under 1% loss,
+5% on the high-BDP path, 2% on the shallow queue. That is not a win, and
+reading it as one would be the mistake this file exists to prevent. LEDBAT's
+whole purpose is to yield, and the LEDBAT++ section above already records that
+our classic LEDBAT leaves 33 ms of standing queue on a 40 ms path where
+LEDBAT++ leaves 1.55 ms. A controller that yields less finishes sooner. The
+defensible reading is that this fork's classic LEDBAT is more aggressive than
+the reference's, which is a finding about this library.
 
-libutp's LAN figure is bimodal — twelve consecutive runs came in at either
-~505 ms or ~2.003 s — and the gap is one retransmission timeout against its
-1000 ms RTO floor and 500 ms check granularity. Our seven runs showed no such
-mode. Details in [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md), along with the
-two harness defects that had to be fixed before this table meant anything.
+An earlier version of this table said 34% and 41%, and that libutp's LAN runs
+were bimodal. Both were the harness: a libutp sender was timed to libutp's
+tearing the connection down, which it does only on one of its 500 ms timeout
+passes, and against our receiver to our end of stream, which waited a round
+trip for libutp's FIN. Timed to the last byte, both went away; the libutp
+column rose from 4.19 to 5.51 Mbps on broadband.
+
+On the LAN, every cell with libutp at *either* end has occasional slow runs
+(lows of 16-22 Mbps), whichever implementation sends, and ours to ours has
+none. What causes them is not established; the loop driving libutp on a 200µs
+tick at 100 Mb/s is as likely a suspect as libutp. Details in
+[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md), along with the three harness
+defects that had to be fixed before this table meant anything.
 
 ## Two mechanisms, compared directly
 

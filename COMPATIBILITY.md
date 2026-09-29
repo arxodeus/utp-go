@@ -111,7 +111,7 @@ than "verified".
 | Timeouts for acknowledged packets | **Measured** | `netem.TestQuietConnectionDoesNotTimeOut`: a quiet connection on a lossless link took 2 timeouts and 12 retransmissions of delivered data before the fix, 0 and 0 after |
 | Delay clamp to RTT | **Measured** | `TestDelayClampedToRTT`: 20 acknowledgements each claiming 30s of delay on a 20ms path leave the window at 86722 bytes; without the clamp the same acknowledgements take it to the 2800-byte floor. Measured at the controller, not on the wire -- see the note below |
 | Application-limited guard | **Measured** | `netem.TestApplicationLimitedWindowDoesNotGrow`: after slow start ends, five seconds of 1 KB writes every 20ms leave the window unchanged to the byte (15677 -> 15677). Removing the guard makes it fail on every run |
-| **Behaviour under load** | **Measured** | `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite. Ours is faster on every profile, which reads as ours being more aggressive rather than better; libutp's LAN result is bimodal on its 1000ms RTO floor |
+| **Behaviour under load** | **Measured** | `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite, every sender against every receiver, libutp against itself included. The receiver makes no difference: libutp's sender runs at the same rate into ours as into its own (5.51 against 5.52 Mbps on broadband, identical under loss), so every difference is the sending controller. Ours is faster -- 13% on broadband, 21% under 1% loss -- which reads as ours being more aggressive rather than better. An earlier 34% and 41%, and a "bimodal" libutp LAN result, were a libutp sender timed to its 500ms-pass teardown |
 
 Every row above now has a measurement behind it. That was not true when this
 file was written: each mechanism had been matched by hand against
@@ -172,9 +172,12 @@ so it sent 288-byte packets. Both are written up in
   `utp_socket_stats` does not report it, and reaching in means modifying the
   copy REFERENCE.md pins. Where it was needed it was inferred from libutp's
   first flight instead, which is what a peer can see.
-- **libutp against libutp on the emulated network.** Every flow measured joins
-  libutp to this library. A libutp-to-libutp flow over the same links would
-  separate the reference's behaviour from what our end contributes to it.
+- **~~libutp against libutp on the emulated network.~~** Covered:
+  `libutpToLibutp` runs the reference at both ends, and the comparison table
+  now has every sender against every receiver. It showed our receiver is
+  indistinguishable from libutp's to libutp's sender -- and, on the way, that
+  the libutp-sender column had been timing libutp's teardown rather than its
+  transfer.
 - **Interop under adverse conditions over *real sockets*.** The loopback gate
   still transfers on a clean path. Loss, reordering and jitter against libutp
   are now covered over the emulated network, which is where the close-handshake

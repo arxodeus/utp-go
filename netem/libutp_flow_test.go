@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -67,6 +68,13 @@ type libutpEndpoint struct {
 
 	received []byte
 	emitted  uint64
+
+	// linger keeps a receiver running after the last byte has arrived, until
+	// its context ends, so that it is still there to acknowledge the FIN of a
+	// libutp sender. This library's receiver keeps its socket open the same
+	// way; a libutp receiver that stopped would leave the sender waiting.
+	linger bool
+	doneAt time.Duration
 }
 
 // newLibutpEndpoint pins libutp's random source to connSeed, which fixes the
@@ -145,6 +153,9 @@ func (l *libutpEndpoint) run(ctx context.Context) (time.Duration, error) {
 	for {
 		select {
 		case <-ctx.Done():
+			if l.linger && l.doneAt > 0 {
+				return l.doneAt, nil
+			}
 			return 0, fmt.Errorf("libutp %s: %w (received %d bytes)",
 				l.role, ctx.Err(), len(l.received))
 
@@ -193,6 +204,12 @@ func (l *libutpEndpoint) finished() (bool, error) {
 	switch l.role {
 	case libutpReceiver:
 		if len(l.received) >= l.expect {
+			if l.linger {
+				if l.doneAt == 0 {
+					l.doneAt = time.Since(l.start)
+				}
+				break
+			}
 			return true, nil
 		}
 	case libutpSender:
@@ -238,6 +255,13 @@ func (r libutpRole) String() string {
 
 // libutpToGo runs a transfer with real libutp sending and this library
 // receiving. It returns the elapsed time and the bytes the receiver read.
+//
+// The elapsed time runs from the moment before libutp's SYN to the moment our
+// receiver holds the last byte, as for every other flow. It used to
+// run to libutp's tearing the connection down, and libutp only does that on
+// one of its 500ms timeout passes (utp_internal.cpp:37, :3284-3285) after the
+// FIN is acknowledged: a 256 KB transfer delivered in 344ms was timed at
+// 502ms. That rounding is libutp's teardown cadence, not its sending.
 func libutpToGo(ctx context.Context, n *Network, from, to *Endpoint, payload []byte, connSeed uint32) (time.Duration, []byte, error) {
 	sender, err := newLibutpEndpoint(from, to.Addr(), connSeed, libutpSender)
 	if err != nil {
@@ -260,6 +284,7 @@ func libutpToGo(ctx context.Context, n *Network, from, to *Endpoint, payload []b
 		wg       sync.WaitGroup
 		got      []byte
 		acceptEr error
+		recvDone time.Time
 	)
 	wg.Add(1)
 	go func() {
@@ -270,20 +295,31 @@ func libutpToGo(ctx context.Context, n *Network, from, to *Endpoint, payload []b
 			return
 		}
 		defer stream.Close()
+		// Read to the end of the stream, noting when the last byte arrived.
+		// That instant, not the end of stream, is what the flow is timed to:
+		// libutp's FIN can wait a round trip behind a full window, and a
+		// libutp receiver is timed to the last byte (libutpToLibutp).
 		buf := make([]byte, 0, len(payload))
-		nRead, err := stream.ReadToEOF(ctx, &buf)
-		lastReceiverReadErr.Store(fmt.Sprintf("read=%d err=%v", nRead, err))
-		if err != nil && !errors.Is(err, context.Canceled) {
-			acceptEr = fmt.Errorf("read from libutp: %w", err)
-			return
+		chunk := make([]byte, 64*1024)
+		for {
+			n, err := stream.Read(ctx, chunk)
+			buf = append(buf, chunk[:n]...)
+			if len(buf) >= len(payload) && recvDone.IsZero() {
+				recvDone = time.Now()
+			}
+			if err != nil {
+				lastReceiverReadErr.Store(fmt.Sprintf("read=%d err=%v", len(buf), err))
+				if !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
+					acceptEr = fmt.Errorf("read from libutp: %w", err)
+					return
+				}
+				break
+			}
 		}
-		if nRead > len(buf) {
-			nRead = len(buf)
-		}
-		got = buf[:nRead]
+		got = buf
 	}()
 
-	elapsed, runErr := sender.run(ctx)
+	_, runErr := sender.run(ctx)
 	wg.Wait()
 	if runErr != nil {
 		return 0, nil, runErr
@@ -291,7 +327,10 @@ func libutpToGo(ctx context.Context, n *Network, from, to *Endpoint, payload []b
 	if acceptEr != nil {
 		return 0, nil, acceptEr
 	}
-	return elapsed, got, nil
+	if recvDone.IsZero() {
+		return 0, got, fmt.Errorf("our receiver got %d of %d bytes", len(got), len(payload))
+	}
+	return recvDone.Sub(sender.start), got, nil
 }
 
 // goToLibutp runs a transfer with this library sending and real libutp
@@ -337,6 +376,59 @@ func goToLibutp(ctx context.Context, n *Network, from, to *Endpoint, payload []b
 		return 0, nil, sendErr
 	}
 	return elapsed, receiver.received, nil
+}
+
+// libutpToLibutp runs a transfer with real libutp at both ends, so that what
+// libutp does on a link can be told apart from what our end contributes when
+// it is joined to this library. The returned duration runs from the moment
+// before the SYN to the moment the receiver holds the last byte, as for every
+// other flow.
+func libutpToLibutp(ctx context.Context, n *Network, from, to *Endpoint, payload []byte, connSeed uint32) (time.Duration, []byte, error) {
+	sender, err := newLibutpEndpoint(from, to.Addr(), connSeed, libutpSender)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer sender.Close()
+	sender.payload = payload
+
+	// A listening libutp takes whatever ids the SYN carries; its own random
+	// draws (its sequence numbers) come from a different seed.
+	receiver, err := newLibutpEndpoint(to, from.Addr(), connSeed+1000, libutpReceiver)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer receiver.Close()
+	receiver.expect = len(payload)
+	receiver.linger = true
+
+	rctx, rcancel := context.WithCancel(ctx)
+	defer rcancel()
+	var (
+		wg     sync.WaitGroup
+		recvEr error
+	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, recvEr = receiver.run(rctx)
+	}()
+
+	_, runErr := sender.run(ctx)
+	// The sender is finished; give its last packets a moment to be answered
+	// before the receiver stops, as a socket would.
+	time.Sleep(50 * time.Millisecond)
+	rcancel()
+	wg.Wait()
+	if runErr != nil {
+		return 0, nil, runErr
+	}
+	if recvEr != nil {
+		return 0, nil, recvEr
+	}
+	if receiver.doneAt == 0 {
+		return 0, nil, fmt.Errorf("libutp receiver got %d of %d bytes", len(receiver.received), len(payload))
+	}
+	return receiver.start.Add(receiver.doneAt).Sub(sender.start), receiver.received, nil
 }
 
 // libutpErrName names libutp's error codes (utp.h:60-62).

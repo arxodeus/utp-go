@@ -560,8 +560,9 @@ failures:
   interop numbers from ~430/~374 Mbps to ~600/~430.
 
 The comparison itself says our classic LEDBAT is more aggressive than libutp's
-— 34% faster on broadband, 41% under 1% loss, with our sender against libutp's
-receiver as the control. That is a finding about this fork, not a win, and it
+— 13% faster on broadband, 21% under 1% loss, with every sender run against
+both receivers as the control. (It first said 34% and 41%; a libutp sender was
+being timed to its connection teardown, which libutp does on a 500 ms pass.) That is a finding about this fork, not a win, and it
 belongs in any conversation about upstreaming PR 12.
 
 ## PR 25 — the event loop blocked on the application
