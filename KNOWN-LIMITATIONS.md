@@ -3761,6 +3761,36 @@ a time constant of W / GAIN round trips. The draft's decrease constant,
 `Constant` = 1, is one it says implementations "MAY experiment with", and
 was tried next.
 
+**Tried: slowdowns on a shared grid.** Periodic slowdowns were scheduled on
+wall-clock instants shared by every connection -- the next multiple, from the
+Unix epoch, of the smallest 250 ms x 2^k period at least ten slowdown
+durations long, so that a longer period's instants are a subset of a shorter
+one's and the draft's tenth-of-the-time bound holds. Logged, it did what it
+was built to do: the two flows' freezes started within 25 ms of each other
+at every grid point both reached. It did not change the split: the
+latecomer took 68.5-71.0% over three 16 MB runs and 68.3-70.1% over five
+4 MB runs. With the freeze lengthened to two smoothed round trips as well,
+so that a flow's in-flight data drains inside the freeze -- at two minimum
+round trips it often did not, and one coinciding freeze saw no round trip
+under 101 ms -- 67.5-72.6% and 53.5-67.4%. Not applied.
+
+It could not have worked, and the oracle says why. The oracle fixed the
+latecomer's base from its first packet, so its *initial slow start* read the
+delay correctly and did not overshoot; that overshoot is what collapses the
+incumbent (142 KB to 18 KB in one trace), before either flow has had a
+slowdown for any schedule to align. Aligned slowdowns only act afterwards,
+when the imbalance is set and the draft's convergence time is what remains.
+The residual base difference they were meant to remove is by then 0.1-0.6
+ms, less than one packet's serialization at 10 Mb/s (1.1 ms): which flow
+catches a packet on an empty queue is sampling luck, and no schedule
+removes it.
+
+So the latecomer's advantage is decided in its first second, by a slow
+start that cannot know the queue it measures is someone else's. What would
+change it is a slow start that does not trust a base it has never seen
+confirmed by a freeze, or a control law that converges faster than W / GAIN
+round trips; both are further from the draft than anything above.
+
 **Tried: a larger decrease constant.** A first pass at 1, 2 and 4, five runs
 each, found no measurable change to deference, to two flows starting
 together, or to the single-flow profiles, and a smaller latecomer share at 2
