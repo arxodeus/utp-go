@@ -3791,6 +3791,35 @@ change it is a slow start that does not trust a base it has never seen
 confirmed by a freeze, or a control law that converges faster than W / GAIN
 round trips; both are further from the draft than anything above.
 
+**Tried: a cautious first slow start, and two incumbent-side triggers.**
+All three measured against the same latecomer runs (share while both ran;
+about 70% before):
+
+| | 4 MB | 16 MB | cost |
+| --- | --- | --- | --- |
+| the new flow freezes at 8 packets, before trusting its base | 65.3-67.6% | 67.4-68.9% | -- |
+| the incumbent slows down on a delay spike over 1.5 x target | 53.7-66.4% | 63.0-67.0% | -- |
+| the incumbent slows down when its window halves within a second | **48.6-49.2%** | 62.3%, 62.3% | two flows on a 64 KB queue 49/51 to **40/60** |
+
+The first cannot work, and the measurement agrees: the latecomer's base is
+inflated by the *incumbent's* queue, which a freeze of the latecomer's own
+does not empty. It confirms the wrong base.
+
+A delay spike is the wrong signal. While the latecomer is in slow start the
+incumbent's own decrease holds the combined queue near the target -- that
+decrease is the collapse -- so the delay passes 1.5 x target only once the
+damage is done (logged: 161 ms after the latecomer left slow start, with
+the incumbent already at 40 KB). At 1.2 x target it fired on the
+incumbent's own slow-start overshoot instead, and its rate limit then kept
+it silent through the latecomer's arrival.
+
+The incumbent's shrinking window is the right signal, and slowing down
+then, with the saved window restored, evened the 4 MB split. But a loss
+halves a window too, and on a queue shallow enough to drop, two flows that
+start together tripped it on each other: 49/51 became 40/60. Not applied.
+Telling a delay-driven halving from a loss-driven one might rescue it; not
+tried.
+
 **Tried: a larger decrease constant.** A first pass at 1, 2 and 4, five runs
 each, found no measurable change to deference, to two flows starting
 together, or to the single-flow profiles, and a smaller latecomer share at 2
