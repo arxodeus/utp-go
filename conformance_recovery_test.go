@@ -301,6 +301,10 @@ func oursRTO(t *testing.T, samples []time.Duration) time.Duration {
 // ours is measured to its wheel's 25ms tick. The tolerance is the sum, and
 // ours may not be earlier than libutp's by more than the 10ms.
 func TestConformanceRetransmissionTimeoutComputation(t *testing.T) {
+	// This pins libutp's retransmission-timeout schedule. The loss probe is
+	// not libutp's and would add one packet before the first timeout; it is
+	// measured on its own in loss_probe_test.go.
+	withoutLossProbe(t)
 	const step = 10 * time.Millisecond
 	cases := []struct {
 		name    string

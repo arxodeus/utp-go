@@ -20,7 +20,7 @@ table here is a median of seven with the range beside it.
 Each link profile has a fixed seed, and the emulator's loss, reordering,
 jitter and queueing all draw from it, so the *network* is identical between
 runs. Our side is not: it runs on the real clock with real goroutines. Each
-profile therefore runs three times and the **median** is reported, with the
+profile therefore runs seven times and the **median** is reported, with the
 full range beside it. Where the range is wide, no amount of averaging hides it, and the range is
 printed so it cannot be mistaken for precision.
 
@@ -54,10 +54,12 @@ for seed in $(seq 1 12); do
 done
 ```
 
-**The tables below predate that fix.** Measured across twelve seeds, it changes
-nothing outside the 5%-loss profile, and costs about 6% there under classic
-LEDBAT and about 17% under LEDBAT++. The 5%-loss rows have not been
-regenerated since.
+**The two tables below were regenerated in full** after classic LEDBAT gained
+its loss probe (DEVIATIONS.md, "A loss probe resends before the retransmission
+timeout"), which moved its lossy rows: 1% loss 4.98 to 5.73 Mbps and 5% loss
+2.00 to 2.64. They had also drifted from the code before that -- LEDBAT++'s
+broadband row still read 3.45 Mbps from before its fixes -- so no row is
+carried over.
 
 Two columns describe queueing, and they are not the same thing:
 
@@ -90,15 +92,16 @@ libutp.
 
 | Profile | Goodput (median) | Range | Elapsed | Retx | cwnd mean | cwnd max | at floor | qdelay p50 | qdelay p95 | standing queue p50 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| LAN (1ms, 100Mbps, no loss) | 89.21 Mbps | 85.56-91.21 | 376ms | 0.00% | 97283B | 153045B | 0.7% | 193µs | 740µs | 5.637ms |
-| Broadband (20ms, 10Mbps, no loss) | 6.40 Mbps | 6.37-6.41 | 1.312s | 0.00% | 51098B | 76359B | 0.3% | 253µs | 459µs | 2.433ms |
-| Broadband, 1% loss | 5.22 Mbps | 3.91-5.25 | 6.425s | 0.72% | 32602B | 62149B | 0.1% | 517µs | 1.009ms | 1.454ms |
-| Broadband, 5% loss | 1.24 Mbps | 0.98-1.59 | 13.498s | 6.44% | 14388B | 24910B | 1.1% | 462µs | 1.029ms | 1.448ms |
-| High BDP (100ms, 20Mbps, no loss) | 2.10 Mbps | 2.10-2.10 | 8.004s | 0.00% | 73141B | 110611B | 0.3% | 441µs | 977µs | 1.058ms |
-| Shallow queue (20ms, 10Mbps, 16KB queue) | 4.75 Mbps | 4.69-4.77 | 882ms | 0.00% | 36773B | 55483B | 0.6% | 177µs | 472µs | 1.65ms |
-| Long transfer (20ms, 10Mbps, 8MB) | 8.82 Mbps | 8.66-8.91 | 7.608s | 0.05% | 84619B | 114121B | 0.0% | 366µs | 796µs | 32.263ms |
-| Reordering (20ms, 10Mbps, 2% reordered) | 3.40 Mbps | 3.36-3.70 | 1.234s | 1.89% | 21385B | 32393B | 0.5% | 391µs | 1.339ms | 1.054ms |
-| Two flows, 8Mbps bottleneck | 6.63 Mbps total | 6.55-6.65 | | | | | | | | Jain 1.000 |
+| LAN (1ms, 100Mbps, no loss) | 87.16 Mbps | 82.54-90.46 | 385ms | 0.00% | 96170B | 153382B | 1.4% | 5.975ms | 10.008ms | 5.369ms |
+| Broadband (20ms, 10Mbps, no loss) | 6.25 Mbps | 6.19-6.26 | 1.341s | 0.00% | 51002B | 76789B | 0.3% | 3.07ms | 16.744ms | 2.338ms |
+| Broadband, 1% loss | 5.73 Mbps | 5.71-5.75 | 5.86s | 0.73% | 39732B | 74104B | 0.1% | 2.349ms | 13.369ms | 1.951ms |
+| Broadband, 5% loss | 2.64 Mbps | 2.50-2.68 | 6.36s | 4.68% | 16790B | 30173B | 0.1% | 1.581ms | 3.822ms | 1.706ms |
+| High BDP (100ms, 20Mbps, no loss) | 2.04 Mbps | 2.04-2.05 | 8.205s | 0.00% | 72796B | 110875B | 0.2% | 1.521ms | 3.083ms | 1.103ms |
+| Shallow queue (20ms, 10Mbps, 16KB queue) | 4.56 Mbps | 4.40-4.59 | 920ms | 0.00% | 36722B | 55643B | 0.5% | 1.532ms | 3.59ms | 1.806ms |
+| Long transfer (20ms, 10Mbps, 8MB) | 8.99 Mbps | 8.81-9.08 | 7.461s | 0.06% | 89006B | 116889B | 0.1% | 34.159ms | 50.279ms | 33.854ms |
+| Reordering (20ms, 10Mbps, 2% reordered) | 3.80 Mbps | 3.50-3.85 | 1.103s | 1.93% | 27391B | 43116B | 0.5% | 1.303ms | 3.879ms | 1.625ms |
+| Two flows, 8Mbps bottleneck | 6.49 Mbps total | 6.42-6.52 | | | | | | | | Jain 1.000; split while both ran 48/52 (worst 48/52); 0 queue drops |
+| Two flows, 8Mbps, 2MB queue | 7.68 Mbps total | 7.65-7.69 | | | | | | | | Jain 1.000; split while both ran 50/50 (worst 49/51); 0 queue drops |
 
 ## LEDBAT++
 
@@ -106,42 +109,51 @@ Opt in with `ConnectionConfig.CongestionAlgorithm = AlgorithmLEDBATPP`.
 
 | Profile | Goodput (median) | Range | Elapsed | Retx | cwnd mean | cwnd max | at floor | qdelay p50 | qdelay p95 | standing queue p50 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| LAN (1ms, 100Mbps, no loss) | 77.01 Mbps | 76.56-77.20 | 436ms | 0.00% | 108966B | 262201B | 0.6% | 256µs | 973µs | 4.949ms |
-| Broadband (20ms, 10Mbps, no loss) | 3.45 Mbps | 1.79-3.58 | 2.432s | 2.40% | 41878B | 140769B | 7.3% | 228µs | 525µs | 2.438ms |
-| Broadband, 1% loss | 1.51 Mbps | 1.37-1.54 | 22.241s | 0.78% | 9350B | 47660B | 5.8% | 563µs | 1.083ms | 883µs |
-| Broadband, 5% loss | 0.54 Mbps | 0.45-0.57 | 31.275s | 5.19% | 4145B | 9213B | 12.4% | 525µs | 1.066ms | 1.131ms |
-| High BDP (100ms, 20Mbps, no loss) | 4.38 Mbps | 4.37-4.38 | 3.834s | 0.00% | 294953B | 577090B | 23.4% | 327µs | 849µs | 24.554ms |
-| Shallow queue (20ms, 10Mbps, 16KB queue) | 2.33 Mbps | 1.23-2.39 | 1.799s | 3.47% | 27243B | 85219B | 7.9% | 246µs | 659µs | 2.356ms |
-| Long transfer (20ms, 10Mbps, 8MB) | 6.85 Mbps | 6.81-6.94 | 9.802s | 0.23% | 51102B | 141151B | 2.8% | 551µs | 1.108ms | 4.759ms |
-| Reordering (20ms, 10Mbps, 2% reordered) | 1.31 Mbps | 0.94-2.31 | 3.195s | 1.23% | 8200B | 28056B | 4.9% | 460µs | 1.098ms | 933µs |
-| Two flows, 8Mbps bottleneck | 4.02 Mbps total | 3.94-5.38 | | | | | | | | Jain 0.999 |
+| LAN (1ms, 100Mbps, no loss) | 73.51 Mbps | 72.23-75.91 | 456ms | 0.00% | 104371B | 262247B | 1.2% | 5.496ms | 16.733ms | 4.289ms |
+| Broadband (20ms, 10Mbps, no loss) | 6.02 Mbps | 2.13-6.09 | 1.393s | 2.88% | 69790B | 145633B | 5.7% | 17.921ms | 51.022ms | 17.853ms |
+| Broadband, 1% loss | 2.19 Mbps | 2.05-2.25 | 15.342s | 0.73% | 16273B | 63285B | 3.9% | 1.618ms | 3.752ms | 1.3ms |
+| Broadband, 5% loss | 0.60 Mbps | 0.59-0.61 | 27.892s | 4.78% | 5302B | 11563B | 10.0% | 1.128ms | 2.562ms | 1.152ms |
+| High BDP (100ms, 20Mbps, no loss) | 4.15 Mbps | 4.14-4.15 | 4.047s | 0.00% | 256428B | 501274B | 22.7% | 7.133ms | 78.046ms | 7.63ms |
+| Shallow queue (20ms, 10Mbps, 16KB queue) | 1.80 Mbps | 1.40-3.53 | 2.335s | 5.35% | 32416B | 84077B | 7.5% | 2.582ms | 11.692ms | 3.642ms |
+| Long transfer (20ms, 10Mbps, 8MB) | 8.69 Mbps | 8.68-8.71 | 7.721s | 0.35% | 87613B | 144281B | 3.1% | 32.347ms | 45.354ms | 32.441ms |
+| Reordering (20ms, 10Mbps, 2% reordered) | 2.31 Mbps | 2.29-2.56 | 1.818s | 1.27% | 16111B | 37069B | 4.0% | 922µs | 5.705ms | 1.674ms |
+| Two flows, 8Mbps bottleneck | 5.90 Mbps total | 5.83-6.09 | | | | | | | | Jain 1.000; split while both ran 49/51 (worst 47/53); 11 queue drops |
+| Two flows, 8Mbps, 2MB queue | 7.65 Mbps total | 7.42-7.90 | | | | | | | | Jain 1.000; split while both ran 48/52 (worst 46/54); 0 queue drops |
 
 ## What LEDBAT++ costs, and what it buys
 
-Read as a throughput table, LEDBAT++ looks like a regression: it is slower on
-six of eight profiles, by as much as a factor of three. That reading is
-incomplete, and the two rows that matter tell the real story.
+Read as a throughput table, LEDBAT++ is slower on six of eight profiles, and
+by far the most on the lossy ones: 2.19 against 5.73 Mbps at 1% loss, 0.60
+against 2.64 at 5%. Part of that gap is classic LEDBAT's loss probe, which
+LEDBAT++ does not use (below); most of it is that LEDBAT++ grows its window
+far more slowly after a loss.
 
 **It wins where the window has to get large.** High BDP (100 ms, 20 Mbps):
-2.10 -> 4.38 Mbps, mean congestion window 73 KB -> 295 KB. Classic LEDBAT
+2.04 -> 4.15 Mbps, mean congestion window 73 KB -> 256 KB. Classic LEDBAT
 grows at a flat 3000 bytes per round trip whatever the path, so on a long fat
 link it never reaches the bandwidth-delay product; LEDBAT++'s gain scales with
 the base RTT (§4.2) and its slow start is exponential, so it does.
 
-**It leaves the path alone.** On the sustained 8 MB transfer:
+**Alone on a link, it does not leave less queue.** This file used to say
+LEDBAT++ left a seventh of classic LEDBAT's standing queue on the 8 MB
+transfer (4.76 against 32.26 ms) and a thirty-fifth on a 256 KB queue (1.1
+against 38.1 ms). Those were measured when LEDBAT++ read its queueing delay
+from one-way timestamps. Since it measures round trips, as the draft's §4.5
+says, it aims for the draft's 60 ms target and gets there. Now, three runs each
+of `TestBaseDelayTracking`'s lone flow on a 256 KB queue:
 
-| | Goodput | Standing queue p50 |
-| --- | --- | --- |
-| LEDBAT | 8.82 Mbps | **32.26 ms** |
-| LEDBAT++ | 6.85 Mbps | **4.76 ms** |
+| | Standing queue p50 |
+| --- | --- |
+| LEDBAT | 37.0-37.4 ms |
+| LEDBAT++ | 44.5-46.9 ms |
 
-22% less throughput for 7x less queue. On the deeper-queue latecomer link
-(256 KB, ~200 ms of buffering) the gap is wider still: 38.1 ms against 1.1 ms.
+and on the 8 MB transfer above, 32.4 ms against classic LEDBAT's 33.9 -- a
+64 KB queue holds only 52 ms at 10 Mb/s, below either controller's target,
+so both fill it.
 
-That is the entire proposition of a "less than best effort" protocol, and it
-is the one thing uTP exists to provide. Classic LEDBAT as libutp implements it
-does not provide it: 33 ms of standing queue is not deference, it is
-bufferbloat with extra steps. It is fast *because* it is not yielding.
+**What it buys is deference.** Where the two differ is with loss-based
+traffic on the link, which is the case uTP exists for: classic LEDBAT takes
+about two thirds of it, LEDBAT++ about a third, below.
 
 **It is slower on short paths on purpose.** §4.2 sets
 `GAIN = 1 / min(16, ceil(2*TARGET/base))`, which on a 20 ms path is 1/6 -- six
@@ -234,14 +246,15 @@ a ratio of 1.03.
 ### Why the default is still classic LEDBAT
 
 On the evidence above, LEDBAT++ is the better congestion controller for what
-uTP is for. It defers to loss-based traffic where classic LEDBAT out-competes
-it, and it leaves a tenth of the queue.
+uTP is for: it defers to loss-based traffic where classic LEDBAT out-competes
+it. (It no longer leaves less queue than classic LEDBAT when alone on a link;
+see above.)
 
 The default is nevertheless unchanged, for one reason: this library's standing
 rule is to match libutp unless there is a concrete reason not to, and a
 default is not the place to spend that. Switching it would change the
-behaviour of every existing caller without their asking, and on an
-uncontended link it would cost some of them half their throughput. It is one
+behaviour of every existing caller without their asking, and on a lossy
+link it would cost them 60-75% of their throughput. It is one
 line for a caller who wants it:
 
 ```go
@@ -252,8 +265,8 @@ config.CongestionAlgorithm = utp.AlgorithmLEDBATPP
 **For a BitTorrent client -- the case in the brief -- that line should be
 there.** Yielding to the user's own interactive traffic is the entire reason
 uTP exists rather than plain TCP, and the numbers above say classic LEDBAT
-does not do it: 60% of a shared link taken from a loss-based flow, and 25 ms
-of self-inflicted queue. A client that ships classic LEDBAT is shipping
+does not do it: two thirds of a shared link taken from a loss-based flow, and
+about 25 ms of queue at the bottleneck while it does. A client that ships classic LEDBAT is shipping
 something that behaves like TCP with extra latency.
 
 ## Classic LEDBAT, before the M5 correction
@@ -341,11 +354,11 @@ which is libutp's controller and this library's default.
 
 | Profile | go->go | libutp->go | go->libutp | libutp->libutp |
 | --- | --- | --- | --- | --- |
-| LAN (1ms, 100Mbps) | 85.06 (81.29-87.33) | 59.73 (19.28-77.42) | 75.89 (21.93-87.02) | 70.13 (16.54-86.18) |
-| Broadband (20ms, 10Mbps) | 6.24 (6.06-6.27) | 5.51 (5.44-5.51) | 6.25 (5.85-6.28) | 5.52 (5.51-6.24) |
-| Broadband, 1% loss | 4.01 (3.99-4.01) | 3.32 (3.31-3.33) | 3.99 (3.79-4.01) | 3.32 (3.32-3.33) |
-| High BDP (100ms, 20Mbps) | 2.04 (1.98-2.05) | 1.95 (1.95-2.03) | 2.04 (2.01-2.05) | 1.95 (1.94-2.04) |
-| Shallow queue (16KB) | 5.60 (3.32-5.63) | 5.51 (5.46-5.74) | 5.61 (3.17-5.71) | 5.51 (5.42-5.54) |
+| LAN (1ms, 100Mbps) | 84.29 (81.44-87.93) | 80.05 (22.33-86.65) | 81.56 (76.71-89.48) | 76.92 (19.22-85.25) |
+| Broadband (20ms, 10Mbps) | 6.24 (6.09-6.25) | 5.51 (5.44-6.05) | 6.23 (5.98-6.26) | 5.51 (5.49-5.51) |
+| Broadband, 1% loss | 4.00 (3.99-4.01) | 3.32 (3.32-3.33) | 3.99 (3.76-4.01) | 3.33 (3.32-3.33) |
+| High BDP (100ms, 20Mbps) | 2.04 (2.03-2.05) | 1.95 (1.95-1.95) | 2.04 (2.02-2.05) | 1.95 (1.95-2.07) |
+| Shallow queue (16KB) | 5.62 (5.60-5.71) | 5.51 (5.50-5.71) | 5.62 (5.13-5.65) | 5.51 (4.14-5.51) |
 
 **The receiver makes no difference.** libutp's sender moves the same data at
 the same rate into our receiver as into its own -- 5.51 against 5.52 Mbps on
@@ -356,9 +369,9 @@ every difference in the table is the sending controller.
 **Our sender is faster than libutp's**: 13% on broadband, 21% under 1% loss,
 5% on the high-BDP path, 2% on the shallow queue. That is not a win, and
 reading it as one would be the mistake this file exists to prevent. LEDBAT's
-whole purpose is to yield, and the LEDBAT++ section above already records that
-our classic LEDBAT leaves 33 ms of standing queue on a 40 ms path where
-LEDBAT++ leaves 1.55 ms. A controller that yields less finishes sooner. The
+whole purpose is to yield, and the deference measurement above already
+records that our classic LEDBAT takes two thirds of a link from a loss-based
+flow. A controller that yields less finishes sooner. The
 defensible reading is that this fork's classic LEDBAT is more aggressive than
 the reference's, which is a finding about this library.
 
@@ -369,11 +382,13 @@ passes, and against our receiver to our end of stream, which waited a round
 trip for libutp's FIN. Timed to the last byte, both went away; the libutp
 column rose from 4.19 to 5.51 Mbps on broadband.
 
-The LAN column's low runs are shared protocol behaviour, not either
-implementation: every pairing has them, ours to ours included (two runs in
-fifteen). Each is a fast retransmission lost in the same full queue as the
-packet it replaced -- neither implementation retransmits a packet a second
-time before its timeout -- and a 1000 ms timeout floor on a 1 ms path. Details
+The LAN column's low runs (the lows of 19-22 Mbps with libutp sending) were
+shared protocol behaviour: before the loss probe every pairing had them, ours
+to ours included (two runs in fifteen). Each was a fast retransmission lost in
+the same full queue as the packet it replaced -- neither implementation
+retransmitted a packet a second time before its timeout -- and a 1000 ms
+timeout floor on a 1 ms path. Our classic-LEDBAT sender now has a loss probe,
+and its two columns have none. Details
 in [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md), along with the three harness
 defects that had to be fixed before this table meant anything.
 

@@ -306,6 +306,15 @@ type connection struct {
 	// armIdleRto schedules the wake-up that lets an idle connection's window
 	// decay. Set by the event loop, which owns the timer.
 	armIdleRto func(d time.Duration)
+	// armLossProbe schedules the loss probe; lossProbeBackoff is how many
+	// times it has fired since the last acknowledgement. See onLossProbe.
+	armLossProbe func(d time.Duration)
+	// lossProbeSent is set once the probe has fired, and cleared only when
+	// the cumulative acknowledgement moves past lossProbeAckNum: one probe
+	// per episode, as RFC 8985 allows.
+	lossProbeSent   bool
+	lossProbeAckNum uint16
+	lossProbes      uint64
 
 	// finAck is the acknowledgement sent for the peer's FIN, kept so the
 	// socket can send it again if the peer retransmits that FIN after this
@@ -534,6 +543,7 @@ func (c *connection) armRetransmit(pkt *packet, delay time.Duration) {
 		// guarded by `cur_window_packets == 0`
 		// (utp_internal.cpp:994-998).
 		c.rtoDeadline = c.now().Add(delay)
+		c.rearmLossProbe(c.lossProbeAckNum)
 	}
 	c.armed[seq] = struct{}{}
 	c.timers.arm(
@@ -761,6 +771,21 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		idleRtoTimer.Reset(d)
 	}
 
+	lossProbeTimer := c.timeSource().NewTimer(time.Hour)
+	if !lossProbeTimer.Stop() {
+		<-lossProbeTimer.C()
+	}
+	defer lossProbeTimer.Stop()
+	c.armLossProbe = func(d time.Duration) {
+		if !lossProbeTimer.Stop() {
+			select {
+			case <-lossProbeTimer.C():
+			default:
+			}
+		}
+		lossProbeTimer.Reset(d)
+	}
+
 	handleIncoming := func(event *streamEvent) {
 		if event.Type == streamIncoming {
 			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
@@ -908,6 +933,8 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			woke = wakeProbe
 		case <-idleRtoTimer.C():
 			woke = wakeIdleRto
+		case <-lossProbeTimer.C():
+			woke = wakeLossProbe
 		case <-idleTimer.C():
 			woke = wakeIdleTimeout
 		case <-c.ctx.Done():
@@ -952,6 +979,8 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			c.processWrites(c.now())
 		case wakeIdleRto:
 			c.onIdleRto(c.now())
+		case wakeLossProbe:
+			c.onLossProbe(c.now())
 		case wakeIdleTimeout:
 			handleIdleTimeout()
 		case wakeCtxDone:
@@ -1033,6 +1062,7 @@ const (
 	wakeKeepAlive
 	wakeProbe
 	wakeIdleRto
+	wakeLossProbe
 	wakeIdleTimeout
 	wakeCtxDone
 )
@@ -1669,6 +1699,7 @@ func (c *connection) sampleMetrics(now time.Time, force bool) {
 		BytesReceived:        c.bytesReceived,
 		Timeouts:             c.timeouts,
 		FastRetransmits:      c.fastRetransmits,
+		LossProbes:           c.lossProbes,
 		PendingWrites:        len(c.pendingWrites),
 		MtuCurrent:           c.mtu.current,
 		MtuFloor:             c.mtu.floor,
@@ -2020,8 +2051,9 @@ func (c *connection) retransmit(originPacket *packet, now time.Time) {
 // resendSentPacket sends a packet again from what was recorded when it was
 // first sent, with its acknowledgement fields brought up to date. It is the
 // resend for a packet a retransmission timeout gave up as lost, whether the
-// timeout itself, processWrites or onFastTimeout is sending it.
-func (c *connection) resendSentPacket(pkt *sentPacket, now time.Time) {
+// timeout itself, processWrites or onFastTimeout is sending it. It returns the
+// packet as sent.
+func (c *connection) resendSentPacket(pkt *sentPacket, now time.Time) *packet {
 	builder := NewPacketBuilder(pkt.packetType, c.cid.Send, c.nowMicros(),
 		uint32(c.state.RecvBuf.Window()), pkt.seqNum)
 	if pkt.data != nil {
@@ -2036,6 +2068,98 @@ func (c *connection) resendSentPacket(pkt *sentPacket, now time.Time) {
 	c.bytesRetransmitted += uint64(len(pkt.data))
 	// Not a first transmission, so never an MTU probe (utp_internal.cpp:911).
 	c.transmit(resend, now, false)
+	return resend
+}
+
+// lossProbeEnabled switches the loss probe. It is not libutp's: see
+// DEVIATIONS.md, "A loss probe resends before the retransmission timeout".
+var lossProbeEnabled = func() *atomic.Bool {
+	b := new(atomic.Bool)
+	b.Store(true)
+	return b
+}()
+
+// lossProbeActive reports whether this connection uses the loss probe:
+// classic LEDBAT only. Under LEDBAT++ the retransmission timeout it avoids is
+// part of how the flow yields -- after one, the window collapses to two
+// packets -- and with the probe LEDBAT++ took more than its share from a
+// loss-based flow in about one run in five (DEVIATIONS.md). Classic LEDBAT's
+// share was unchanged.
+func (c *connection) lossProbeActive() bool {
+	return lossProbeEnabled.Load() && c.config.CongestionAlgorithm != AlgorithmLEDBATPP
+}
+
+// minLossProbeTimeout is RFC 8985's floor on the probe timeout (§7.2).
+const minLossProbeTimeout = 10 * time.Millisecond
+
+// lossProbeTimeout is RFC 8985's PTO, max(2 x SRTT, 10 ms), or zero before
+// there is a round-trip estimate.
+func (c *connection) lossProbeTimeout() time.Duration {
+	rtt := c.state.SentPackets.ControllerStats().RTT
+	if rtt <= 0 {
+		return 0
+	}
+	return max(2*rtt, minLossProbeTimeout)
+}
+
+// rearmLossProbe restarts the loss probe's timeout. It runs on every
+// acknowledgement and when the first packet enters an empty window, so the
+// probe fires only after a probe timeout with nothing acknowledged. An
+// acknowledgement that moves the cumulative ack forward starts a new
+// episode, with a new probe to spend.
+func (c *connection) rearmLossProbe(ackNum uint16) {
+	if !c.lossProbeActive() || c.armLossProbe == nil || c.state.stateType != ConnConnected ||
+		c.state.SentPackets == nil {
+		return
+	}
+	if ackNum != c.lossProbeAckNum {
+		c.lossProbeAckNum = ackNum
+		c.lossProbeSent = false
+	}
+	if c.lossProbeSent || c.fastTimeout || !c.state.SentPackets.HasUnackedPackets() {
+		return
+	}
+	if pto := c.lossProbeTimeout(); pto > 0 {
+		c.armLossProbe(pto)
+	}
+}
+
+// onLossProbe resends the oldest outstanding packet when nothing has been
+// acknowledged for a probe timeout, and backs off for the next probe.
+//
+// libutp has nothing between fast retransmission and its retransmission
+// timeout, whose floor is a second. A packet whose fast retransmission is
+// lost as well -- common on a queue that has just overflowed, which is when
+// fast retransmission happens -- and the last packet of a transfer, which
+// has nothing after it to raise duplicate acknowledgements, both wait for
+// it. On a 1 ms LAN path that made a 0.4 s transfer take 1.4 s, in every
+// pairing of this library and libutp (KNOWN-LIMITATIONS.md). This is TCP's
+// answer, RFC 8985's tail loss probe, resending the oldest packet rather
+// than the newest because the oldest is the one known to be missing.
+//
+// One probe per episode, as in RFC 8985: after it, only an acknowledgement
+// that moves the cumulative ack forward allows another, and none is sent
+// once a retransmission timeout has fired (libutp's fast-timeout retry takes
+// over from there) or when the timeout is already due. It does not touch the
+// congestion window: the packet it resends is already counted in flight, and
+// the loss that led here has already been charged.
+func (c *connection) onLossProbe(now time.Time) {
+	if !c.lossProbeActive() || c.lossProbeSent || c.fastTimeout ||
+		c.state.stateType != ConnConnected || c.state.SentPackets == nil ||
+		c.rtoDeadline.IsZero() || !now.Before(c.rtoDeadline) {
+		return
+	}
+	oldest, ok := c.state.SentPackets.OldestOutstanding()
+	if !ok {
+		return
+	}
+	c.lossProbeSent = true
+	c.lossProbes++
+	resent := c.resendSentPacket(oldest, now)
+	// transmit armed the packet's timer a whole timeout from now; the
+	// timeout itself is due where it was, and the probe must not move it.
+	// (Re-arming for the same deadline can land a wheel tick later.)
+	c.armRetransmit(resent, c.rtoDeadline.Sub(now))
 }
 
 // onFastTimeout is libutp's fast-timeout retry, run on every acknowledgement
@@ -2394,6 +2518,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 		c.noteDuplicateAck(packet.Header.PacketType, packet.Header.AckNum)
 		err = c.processAck(packet.Header.AckNum, packet.Eack, delay, now)
 		c.onFastTimeout(now)
+		c.rearmLossProbe(packet.Header.AckNum)
 		if err != nil {
 			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 				c.logger.Trace("ack does not correspond to known seq_num",

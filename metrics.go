@@ -149,6 +149,10 @@ type ConnectionMetrics struct {
 	// FastRetransmits counts packets resent because they were declared lost
 	// by duplicate acks rather than by a timeout.
 	FastRetransmits uint64
+	// LossProbes counts packets resent by the loss probe: nothing had been
+	// acknowledged for a probe timeout, short of the retransmission timeout.
+	// Not a libutp mechanism; see DEVIATIONS.md.
+	LossProbes uint64
 
 	// --- buffers ---
 

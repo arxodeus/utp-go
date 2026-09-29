@@ -1349,6 +1349,20 @@ same fate. A one-second floor on a 1 ms path then turns 0.4 s into 1.4 s.
 This is the protocol both implementations share, not the harness, and not a
 difference between them.
 
+**Fixed for this library's classic-LEDBAT sender, by a deviation.** Declaring a
+retransmission lost by the same evidence as the original -- three packets sent
+after it acknowledged -- was tried first and changed nothing: in every stall
+the lost fast retransmission was the last packet sent before the silence,
+the window being full, so nothing sent after it could be acknowledged. What
+works is time: a loss probe resends the oldest outstanding packet when
+nothing has been acknowledged for max(2 x SRTT, 10 ms), once per episode,
+which is RFC 8985's tail loss probe. No slow runs in 120 LAN transfers against
+about 7% without it, and 15-30% more throughput at 1-5% loss. Not under
+LEDBAT++: there the timeout is part of how the flow yields, and with the probe
+it took more than its share from a loss-based flow in about one run in five.
+LEDBAT++ and libutp as senders still stall; see DEVIATIONS.md, "A loss probe
+resends before the retransmission timeout".
+
 ### What this still is not
 
 libutp is driven here by a Go loop, not by a production embedder: it is handed
@@ -4187,3 +4201,22 @@ risks making things worse.
 - `Accept`/`AcceptWithCid` can now return `ErrAcceptTimedOut`. Callers that
   previously blocked forever will now see an error.
 - `AWAITING_CONNECTION_TIMEOUT` is a fixed 20 s and is not configurable.
+
+## ~~A lone LEDBAT++ flow leaves a fraction of classic LEDBAT's queue~~ — no longer true
+
+Found while regenerating BENCHMARKS.md for the loss probe. The file said
+LEDBAT++ left a seventh of classic LEDBAT's standing queue on the 8 MB
+transfer (4.76 against 32.26 ms) and a thirty-fifth on a 256 KB queue (1.1
+against 38.1 ms), and DEVIATIONS.md and UPSTREAM.md repeated it. Re-measured,
+three runs each of `TestBaseDelayTracking`'s lone flow on the 256 KB queue:
+37.0-37.4 ms for classic LEDBAT, 44.5-46.9 ms for LEDBAT++; and 33.9 against
+32.4 ms on the 8 MB transfer.
+
+The earlier figures were measured when LEDBAT++ read its queueing delay from
+the peer's one-way timestamps. Since it measures round trips, as the draft's
+§4.5 says, it aims for the draft's 60 ms target and reaches it, settling
+around 45 ms between slowdowns. That is the draft working as written, not a
+defect. It moves LEDBAT++'s case onto deference, which is unchanged: against
+a loss-based flow it takes about a third of the link where classic LEDBAT
+takes two thirds, with about 12 ms of queue at the bottleneck against 25.
+The documents that made the queue claim now say this.

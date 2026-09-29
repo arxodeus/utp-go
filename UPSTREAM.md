@@ -312,7 +312,10 @@ decrease (§4.3), periodic slowdowns (§4.4) and a 60 ms target (§4.5).
 Worth sending because of what measuring it revealed about the existing
 controller: on a sustained transfer over a 40 ms path, classic LEDBAT leaves
 33 ms of standing queue and reports causing 500µs, because its base-delay
-estimate has drifted up to include its own queue. LEDBAT++ leaves 1.55 ms.
+estimate has drifted up to include its own queue. LEDBAT++ left 1.55 ms when
+this was written, reading one-way delay; measuring round trips as the draft
+says, a lone LEDBAT++ flow now leaves as much as classic LEDBAT, and what sets
+it apart is deference to loss-based traffic (BENCHMARKS.md).
 
 Comes with the standing-queue metric that shows it (see "Not for upstream"
 below on the harness), the latecomer experiment, and two documented readings

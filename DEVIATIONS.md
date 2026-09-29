@@ -66,6 +66,10 @@ worse.
   on that profile only, under classic LEDBAT.
 - *The zero-window probe fits a packet at any MTU.* At an Ethernet interface's
   MTU libutp's probe never fires; ours fires at 15s. Measured against libutp.
+- *A loss probe resends before the retransmission timeout* (classic LEDBAT).
+  A lost fast retransmission no longer waits a second: no LAN stalls in 120
+  runs against about 7% without, 15-30% more throughput at 1-5% loss, and no
+  change in deference. Not applied to LEDBAT++, whose deference it cost.
 
 **Better on reasoning.** libutp has a defect or a hazard here that was not
 copied. Not measured as an improvement.
@@ -100,8 +104,11 @@ consequence, or equivalent on the wire.
 
 **A trade-off.** Better on one measure, worse on another.
 
-- *LEDBAT++* (opt-in): about 7 times less standing queue, 22% less
-  throughput.
+- *LEDBAT++* (opt-in): takes about a third of a link from a loss-based flow
+  where classic LEDBAT takes two thirds; twice the throughput on a
+  high-BDP path, 60-75% less on lossy ones. (It used to be credited with 7
+  times less standing queue; that was the one-way-delay version, and a lone
+  LEDBAT++ flow now leaves as much as classic LEDBAT.)
 - *The MTU search starts at the midpoint.* libutp's start is 1-2% faster on
   healthy paths, winning every one of twelve seeds. Ours is better only on
   paths narrower than 1400, and on the IPv6-like ones both starts stall.
@@ -787,6 +794,61 @@ The likely reason, not separately measured: at 5% loss the holes that fast
 retransmit cannot fill are recovered only by the timeout, and a deadline that
 every selective ack pushes back fires later for them.
 
+## A loss probe resends before the retransmission timeout
+
+**Classic LEDBAT only.** libutp has nothing between fast retransmission and
+its retransmission timeout, whose floor is a second (`rto = max(rtt +
+rtt_var*4, 1000)`, `utp_internal.cpp:1380`). It fast-retransmits a packet
+once (`fast_resend_seq_nr`, `:1537`, `:1603`), so a packet whose fast
+retransmission is lost as well waits for the timeout, and so does the last
+packet of a transfer, which has nothing after it to raise duplicate
+acknowledgements.
+
+Under classic LEDBAT, the default, this library adds a loss probe: RFC
+8985's tail loss probe, with one change. When nothing has been acknowledged
+for a probe timeout, max(2 x SRTT, 10 ms), it resends the *oldest*
+outstanding packet, the one known to be missing, rather than the newest. One
+probe per episode, as RFC 8985 allows: another only after the cumulative
+acknowledgement moves, none once a retransmission timeout has fired, and none
+when the timeout is already due. It does not move the timeout's deadline or
+touch the congestion window. `onLossProbe` in `conn.go`;
+`ConnectionMetrics.LossProbes` counts them.
+
+**Why.** On a 1 ms LAN path with a 64 KB queue, about 7% of 4 MB transfers
+took 1.4 s instead of 0.4 s, in every pairing of this library and libutp.
+Traced at the link, each was a fast retransmission lost in the same full
+queue as the packet it replaced, or a lost final packet, followed by the
+one-second timeout (KNOWN-LIMITATIONS.md). Measured with and without, in
+alternating runs, classic LEDBAT:
+
+| | without | with |
+| --- | --- | --- |
+| LAN, runs under 40 Mbps (ours to ours and ours to libutp) | 2 of 40 | 0 of 120 |
+| 1% loss | 4.98 Mbps | 5.73 Mbps |
+| 5% loss | 2.00 Mbps | 2.60 Mbps |
+| share taken from a loss-based flow (15 runs) | 66.7% (63.9-86.3) | 67.4% (60.3-72.0) |
+
+Five runs each unless stated. No other profile moved beyond its own spread,
+the retransmission rate did not rise on any, and the two-flow splits were
+unchanged. Reordering and the 16 KB queue, which looked worse over five runs,
+were the same over fifteen.
+
+**Why not LEDBAT++.** It helped LEDBAT++'s throughput too -- 0.56 to 0.70
+Mbps at 5% loss, 2.60 to 3.14 Mbps (mean of 15) on the 16 KB queue -- but it
+cost the thing LEDBAT++ is for. Against the loss-based flow, fifteen
+alternating runs each: without the probe, fourteen took 24.8-34.4% of the link
+and one 5.4%; with it, eleven took 28.0-35.9% and four took 40.6, 57.2, 59.7
+and 68.1% (and three of fifteen in a second measurement). The timeout the
+probe avoids is part of how LEDBAT++ yields: after one, its window collapses
+to two packets. So LEDBAT++ keeps libutp's behaviour
+(`TestLossProbeIsNotUsedByLedbatPP`).
+
+**Cost.** One packet per episode into a path that may be dead: on a
+blackholed connection, one extra retransmission before the first timeout
+(`TestLossProbeSendsOnePacketBeforeTheTimeout`). The conformance tests that
+pin libutp's timeout schedule switch it off, since that schedule is what they
+measure.
+
 ## Inherited notes that claim consistency with the reference
 
 Two comments in `conn.go` describe behaviour as matching the reference
@@ -828,9 +890,12 @@ brief asks for. It implements
 Reason: classic LEDBAT, as libutp implements it, is not less than best
 effort. Measured on a sustained transfer over a 40 ms path, it leaves **33 ms
 of standing queue** — its own base-delay estimate has drifted up to include
-that queue, so it reports causing 500µs and cannot see the rest. LEDBAT++
-leaves 1.55 ms on the same link. Full numbers in
-[BENCHMARKS.md](BENCHMARKS.md).
+that queue, so it reports causing 500µs and cannot see the rest. LEDBAT++'s
+case now rests on deference, not on that queue: a lone LEDBAT++ flow aims for
+§4.5's 60 ms and leaves as much queue as classic LEDBAT, or more (1.55 ms was
+measured when it read one-way delay), but against a loss-based flow it takes
+about a third of the link where classic LEDBAT takes two thirds. Full numbers
+in [BENCHMARKS.md](BENCHMARKS.md).
 
 ### Two readings of an ambiguous specification
 

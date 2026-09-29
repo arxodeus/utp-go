@@ -167,6 +167,10 @@ func TestConformanceSynRetransmitSchedule(t *testing.T) {
 // transfer: libutp doubles its RTO from a 1000ms floor
 // (rto = max(rtt + rtt_var*4, 1000), utp_internal.cpp:1380).
 func TestConformanceDataRetransmitSchedule(t *testing.T) {
+	// This pins libutp's retransmission-timeout schedule. The loss probe is
+	// not libutp's and would add one packet before the first timeout; it is
+	// measured on its own in loss_probe_test.go.
+	withoutLossProbe(t)
 	resends, _ := libutpRetransmitSchedule(t, true)
 	const libutpBase = 1000
 
