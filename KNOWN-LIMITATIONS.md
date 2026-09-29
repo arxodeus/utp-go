@@ -3867,6 +3867,39 @@ problem to solve is that convergence rate, not the arrival; any fix has to be
 measured across arrival times. `UTP_LONG_LATECOMER_ARRIVAL` sets it in
 `TestLatecomerShareOverTime`.
 
+**Measured: what sets the split, and what does not.** Over 64 MB (about 90 s
+of overlap) the split does not drift steadily to even; it sits on plateaus.
+Arriving at 0.9 s the latecomer climbed to about 36% in ten seconds and held
+32-40% for seventy; at 1.5 s it held about 60% for twenty seconds before
+stepping to about 50%; at 5 s, 60-66% for forty seconds, then about 50%.
+
+The draft's control law does predict a sensitive equilibrium. A flow settles
+where GAIN = C x W x (delay / target - 1), so two flows reading the delay Δ
+apart split in the ratio (d - T) / (d - Δ - T), and here d - T is only about
+2 x GAIN x T / (C x total W), about 0.4 ms. By that, a 0.3 ms disagreement
+would give the flow reading more delay about 35%. Measured, by adding a fixed
+offset to one of two flows started together (16 MB, two runs each): 0.3 ms,
+47% and 41%; 1 ms, 41% and 38%; 3 ms, 28% and 37%. The slowdowns keep the
+flows away from that equilibrium, and a residual base error of the 0.1-0.6 ms
+measured above moves the split a few points, not twenty.
+
+What does set it is where the latecomer's first slow start ends. Logged at
+0.9 s: the latecomer's base starts 9 ms high and is within 0.5-0.9 ms of the
+truth after its slowdowns, the incumbent's within 0.2 ms, and both read
+58-60 ms of queue -- but the latecomer left slow start at 8 KB, stopped by
+the queue the incumbent's ramp out of its own first slowdown was rebuilding,
+and then climbed at GAIN a round trip, 8 KB to 59 KB over seventeen seconds
+while the incumbent came down from 98 KB to 68 KB. At 1.5 s it is the mirror:
+the slow start ends far too high. The draft's law then evens the two out at
+a time constant of W / GAIN round trips, and W grows with the path's
+bandwidth-delay product, so on a faster link the same start takes
+proportionally longer to correct.
+
+So a fix has to do one of two things: end the first slow start near a fair
+share, or make the flows converge in a bounded number of slowdowns rather
+than W / GAIN round trips. The second is the one that holds whatever the
+arrival.
+
 **Tried: a larger decrease constant.** A first pass at 1, 2 and 4, five runs
 each, found no measurable change to deference, to two flows starting
 together, or to the single-flow profiles, and a smaller latecomer share at 2
