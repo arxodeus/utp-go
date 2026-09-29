@@ -1324,12 +1324,30 @@ sooner. The honest summary is that this fork's classic LEDBAT is *more
 aggressive* than the reference, which is a finding about us, not a win. (The
 first version of this table said 34% and 41%: the teardown timing above.)
 
-**On the LAN, flows with libutp at either end have occasional slow runs** --
-lows of 16-22 Mbps in the libutp-to-ours, ours-to-libutp and libutp-to-libutp
-cells, none in ours-to-ours. Since it happens whichever implementation sends,
-it is not a property of either sender, and nothing here establishes its
-cause; the loop driving libutp on a 200µs tick at 100 Mb/s is as likely as
-libutp itself.
+**On the LAN, every pairing has occasional slow runs**, lows of 16-24 Mbps
+against a usual 65-89. The seven-run table happened to show none for ours to
+ours; fifteen runs of each pairing, every packet traced at the link, gave two
+for ours to ours, two for libutp to ours, two for ours to libutp and five for
+libutp to itself.
+
+Each is one retransmission timeout. The sender goes silent mid-transfer for
+1.011 s (ours: the 1000 ms floor plus a 25 ms wheel tick) or 1.05-1.5 s
+(libutp: the same floor, plus up to one of its 500 ms passes), then resends
+the lowest unacknowledged packet. In ten of the eleven, that packet had been
+sent twice before the silence -- the original, then its fast retransmission
+7-30 ms later -- and the receiver's acknowledgement never moved past it, so
+both copies were lost. Neither implementation fast-retransmits a packet a
+second time (`fast_resend_seq_nr`, `utp_internal.cpp:1480-1610`, which this
+library matches), so a lost fast retransmission waits for the timeout. The
+eleventh was the transfer's last packet, lost with nothing after it to raise
+duplicate acknowledgements.
+
+Why here: the LAN profile's 64 KB queue is 5 ms at 100 Mb/s, far below
+LEDBAT's 100 ms target, so both controllers fill it until it overflows, and
+a retransmission sent into the queue that just overflowed often meets the
+same fate. A one-second floor on a 1 ms path then turns 0.4 s into 1.4 s.
+This is the protocol both implementations share, not the harness, and not a
+difference between them.
 
 ### What this still is not
 

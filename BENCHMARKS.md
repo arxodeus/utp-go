@@ -369,11 +369,12 @@ passes, and against our receiver to our end of stream, which waited a round
 trip for libutp's FIN. Timed to the last byte, both went away; the libutp
 column rose from 4.19 to 5.51 Mbps on broadband.
 
-On the LAN, every cell with libutp at *either* end has occasional slow runs
-(lows of 16-22 Mbps), whichever implementation sends, and ours to ours has
-none. What causes them is not established; the loop driving libutp on a 200µs
-tick at 100 Mb/s is as likely a suspect as libutp. Details in
-[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md), along with the three harness
+The LAN column's low runs are shared protocol behaviour, not either
+implementation: every pairing has them, ours to ours included (two runs in
+fifteen). Each is a fast retransmission lost in the same full queue as the
+packet it replaced -- neither implementation retransmits a packet a second
+time before its timeout -- and a 1000 ms timeout floor on a 1 ms path. Details
+in [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md), along with the three harness
 defects that had to be fixed before this table meant anything.
 
 ## Two mechanisms, compared directly
