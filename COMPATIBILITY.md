@@ -150,6 +150,7 @@ so it sent 288-byte packets. Both are written up in
 | Transfer, our initiator to libutp | **Interop** | 512 KB verified over real sockets |
 | Transfer, libutp initiator to ours | **Interop** | 512 KB verified over real sockets |
 | Transfer under loss against libutp | **Measured** | `netem.TestLibutpInteropUnderAdverseConditions`: loss, reordering, jitter and all three, both directions. Found a close-handshake defect that loopback could not -- 4 of 20 transfers ended in `UTP_ECONNRESET` on data that had all arrived |
+| Transfer under loss against libutp, over real sockets | **Interop** | `native/libutp.TestInteropUnderAdverseConditions`: real libutp on its own kernel socket, thread and clock, ours on a real `utpnet` socket, and a relay between them that loses, reorders, delays and rate-limits datagrams (`relay_test.go`). 5% loss, 5% reordering, jitter of half the delay, and all of them on a 16 KB queue, both directions, 256 KB verified each time; ten runs of all eight passed, and under `-race`. It is the gate that catches an interop defect only loss reveals: with the selective-ack bits reversed -- the defect this file's cited rows once missed -- all four lossy cases fail in both directions, while the clean-loopback interop tests still pass at ~400 Mbps. The impairment is in userspace because this host's kernel has no netem (`CONFIG_NET_SCH_NETEM` is not set); the sockets at both ends are real |
 | Many concurrent connections against libutp | **Interop** | `TestInteropConcurrentLibutpInitiators` and `TestInteropConcurrentGoInitiators`: 16 libutp peers and one socket of ours, both directions, 256 KB each verified byte for byte with per-peer stamps so a byte on the wrong stream names its origin |
 | The `net.PacketConn` contract | **Measured** | `utpnet`: goroutine accounting across 500 datagrams each way, past and moved deadlines, and Close under a blocked read. Found a goroutine leaked per datagram on the port a DHT shares |
 | The `net.Conn` contract | **Differential** | `integration/nettest`: the standard library's own `golang.org/x/net/nettest` suite, eleven subtests under `-race`, with kernel TCP run as a control in the same process. Found a `Write` that retained the caller's buffer past a deadline, and a `Close` that held the caller for up to 60s |
@@ -179,10 +180,12 @@ so it sent 288-byte packets. Both are written up in
   indistinguishable from libutp's to libutp's sender -- and, on the way, that
   the libutp-sender column had been timing libutp's teardown rather than its
   transfer.
-- **Interop under adverse conditions over *real sockets*.** The loopback gate
-  still transfers on a clean path. Loss, reordering and jitter against libutp
-  are now covered over the emulated network, which is where the close-handshake
-  defect was found, but nothing damages packets between two real UDP sockets.
+- **~~Interop under adverse conditions over *real sockets*.~~** Covered:
+  `native/libutp.TestInteropUnderAdverseConditions` puts a damaging relay
+  between real libutp and a real socket of ours (the whole-stack table above).
+  What it cannot do is damage packets inside the kernel: this host has no
+  netem, so loss and reordering happen in the relay, between two real sockets,
+  rather than on the wire.
 - **~~The initiator role in the hand-written corpus.~~** Covered:
   `conformance_initiator_corpus_test.go` drives both implementations as the
   dialling side through nine curated cases — the handshake and the SYN itself,

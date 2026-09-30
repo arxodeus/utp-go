@@ -4220,3 +4220,25 @@ defect. It moves LEDBAT++'s case onto deference, which is unchanged: against
 a loss-based flow it takes about a third of the link where classic LEDBAT
 takes two thirds, with about 12 ms of queue at the bottleneck against 25.
 The documents that made the queue claim now say this.
+
+## Interop under loss over real sockets: covered, with one observation
+
+`native/libutp.TestInteropUnderAdverseConditions` runs real libutp and this
+library on real kernel sockets with a relay between them that loses,
+reorders, delays and rate-limits datagrams (`relay_test.go`). The damage is
+done in userspace because this host's kernel is built without netem and has
+no `tc`; the sockets at both ends, libutp's thread and clock, and our
+socket's read and write paths are all real. Eight cases -- 5% loss, 5%
+reordering, jitter of half the delay, and all of them on a 16 KB queue, in
+both directions -- passed ten runs of ten and under `-race`. With the
+selective-ack bits reversed, every lossy case failed in both directions
+(libutp reset the connection after 100-124 KB of 256 KB) while the clean
+loopback interop tests passed, so it is the gate that loss-only interop
+defects have to get past.
+
+The observation, not investigated: on the lossy profiles libutp as the sender
+took 3.2-5.5 s to deliver 256 KB, in two clusters near 3.2 and 5.4 s, where
+this library as the sender took 1.0-2.2 s. That is the shape of whole
+one-second timeouts, which this library's classic-LEDBAT sender now avoids
+with its loss probe and libutp does not have; but nothing here traced it,
+and it is recorded as a timing, not a cause.

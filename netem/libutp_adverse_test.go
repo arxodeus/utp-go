@@ -11,9 +11,12 @@ import (
 
 // Transfers against real libutp on paths that damage them.
 //
-// The interop gate in native/libutp runs over loopback, which loses nothing,
-// reorders nothing and delays nothing: it proves the two implementations can
-// complete a transfer, not that they can recover one. Everything that makes
+// The plain interop gate in native/libutp runs over loopback, which loses
+// nothing, reorders nothing and delays nothing: it proves the two
+// implementations can complete a transfer, not that they can recover one.
+// native/libutp.TestInteropUnderAdverseConditions damages the path between
+// real sockets; this one runs libutp inside the emulated network, where the
+// link can also be measured. Everything that makes
 // loss recovery interesting -- selective acks, fast retransmit, the
 // retransmission timeout, and the window collapsing and reopening -- is
 // exactly what a clean path never exercises.
