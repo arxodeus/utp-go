@@ -127,3 +127,87 @@ func TestKeepAliveLeavesOneIntervalAfterTheLastPacket(t *testing.T) {
 		}
 	}
 }
+
+// A keep-alive sent while a gap is open names the packets that really arrived.
+//
+// libutp's keep-alive is an acknowledgement one behind the real one, built by
+// decrementing ack_nr before send_ack (utp_internal.cpp:834-844), so its
+// selective ack is computed from the decremented ack_nr as well (:804-808)
+// and the peer, reading bit i as ack_nr + 2 + i against the header (:1441-),
+// finds the right packets. This library built the state packet first, with
+// its selective ack computed from the real ack number, and then decremented
+// the header: every bit was read one packet early, so the peer would have
+// taken a packet it still owed as delivered, freed it, and never sent it
+// again -- and this end would have waited for it forever. Found reading
+// send_keep_alive line by line (the audit in LIBUTP-AUDIT.md).
+func TestKeepAliveSelectiveAckMatchesItsAckNumber(t *testing.T) {
+	const (
+		ourSeq   = 0x4321
+		peerID   = 6100
+		peerSeq  = 900
+		interval = defaultKeepAliveInterval
+	)
+	clk := newVirtualClock(time.Unix(0, 0).Add(time.Hour))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer pinRandom(ourSeq)()
+
+	conn := newScriptedConn()
+	sock := WithSocket(ctx, conn, conformanceLogger(), WithClock(clk))
+	defer sock.Close()
+	cfg := NewConnectionConfig()
+	cfg.Clock = clk
+	cfg.NowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
+
+	cid := NewConnectionId(conn.peer, peerID+1, peerID)
+	accepted := make(chan error, 1)
+	go func() {
+		_, err := sock.AcceptWithCid(ctx, cid, cfg)
+		accepted <- err
+	}()
+	clk.AwaitParticipants(4)
+	clk.AwaitQuiet()
+	clk.AwaitReactionTo(func() {
+		conn.inject(NewPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+	})
+	if err := <-accepted; err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	clk.AwaitParticipants(5)
+	clk.AwaitQuiet()
+	conn.takeEmitted()
+
+	// peerSeq+1 never arrives; peerSeq+2 does. The acknowledgement stays at
+	// peerSeq, with peerSeq+2 selectively acknowledged.
+	clk.AwaitReactionTo(func() {
+		conn.inject(NewPacketBuilder(st_data, peerID+1, 190000, 1<<20, peerSeq+2).
+			WithAckNum(ourSeq - 1).WithPayload([]byte("after the gap")).Build().Encode())
+	})
+	conn.takeEmitted()
+
+	clk.Advance(interval)
+	emitted := conn.takeEmitted()
+	if len(emitted) != 1 {
+		t.Fatalf("expected one keep-alive after %v of silence, got %s", interval, describePackets(emitted))
+	}
+	pkt, err := DecodePacket(emitted[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pkt.Header.PacketType != st_state || pkt.Header.AckNum != peerSeq-1 {
+		t.Fatalf("keep-alive: %s, expected a STATE acknowledging %d", describePackets(emitted), peerSeq-1)
+	}
+	if pkt.Eack == nil {
+		t.Fatal("the keep-alive carried no selective ack with a gap open; libutp's does")
+	}
+	var named []uint16
+	for i, set := range pkt.Eack.Acked() {
+		if set {
+			named = append(named, pkt.Header.AckNum+2+uint16(i))
+		}
+	}
+	if len(named) != 1 || named[0] != peerSeq+2 {
+		t.Fatalf("the keep-alive's selective ack, read against its own ack number %d, names %v "+
+			"as received; only %d arrived", pkt.Header.AckNum, named, peerSeq+2)
+	}
+}

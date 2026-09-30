@@ -49,42 +49,66 @@ func TestAckTurnaround(t *testing.T) {
 	}
 	for _, p := range paths {
 		payload := makePayload(p.size)
-		results := map[string]turnaroundStats{}
-		for _, pair := range []string{"libutp->libutp", "libutp->go", "go->libutp", "go->go"} {
-			t.Run(p.name+" "+pair, func(t *testing.T) {
-				var data, acks []relayEvent
-				onNewRelay = func(r *relay) {
-					data, acks = nil, nil
-					// Data runs sideA -> sideB (toGo) when the sender faces
-					// sideA, which it does in every pairing but go->libutp.
-					if pair == "go->libutp" {
-						r.toLib.delivered, r.toGo.trace = &data, &acks
-					} else {
-						r.toGo.delivered, r.toLib.trace = &data, &acks
+		// Each pairing runs ackTurnaroundRounds times, the pairings
+		// interleaved, and the gate compares the median of each one's p90s.
+		// Run once each and in sequence, a burst of load from elsewhere on
+		// the machine landed on one receiver and not the other: under the
+		// full suite, with netem running alongside, our p90 read 1.9 ms
+		// against libutp's 0.55 ms on a run that read 0.28 ms against 0.12 ms
+		// alone.
+		results := map[string][]turnaroundStats{}
+		for round := 0; round < ackTurnaroundRounds; round++ {
+			for _, pair := range []string{"libutp->libutp", "libutp->go", "go->libutp", "go->go"} {
+				t.Run(fmt.Sprintf("%s %s #%d", p.name, pair, round), func(t *testing.T) {
+					var data, acks []relayEvent
+					onNewRelay = func(r *relay) {
+						data, acks = nil, nil
+						// Data runs sideA -> sideB (toGo) when the sender faces
+						// sideA, which it does in every pairing but go->libutp.
+						if pair == "go->libutp" {
+							r.toLib.delivered, r.toGo.trace = &data, &acks
+						} else {
+							r.toGo.delivered, r.toLib.trace = &data, &acks
+						}
 					}
-				}
-				defer func() { onNewRelay = nil }()
-				runPair(t, pair, p.cfg, payload)
-				s := turnaround(data, acks)
-				results[pair] = s
-				if s.unacked > 0 {
-					t.Errorf("%d data packets were never acknowledged", s.unacked)
-				}
-				t.Logf("%-15s %-15s ack turnaround p50 %v p90 %v p99 %v max %v; %d data packets, %.2f acks each; %d never acked",
-					p.name, pair, s.p50, s.p90, s.p99, s.max, s.packets, s.acksPerPacket, s.unacked)
-			})
+					defer func() { onNewRelay = nil }()
+					runPair(t, pair, p.cfg, payload)
+					s := turnaround(data, acks)
+					if s.unacked > 0 {
+						t.Errorf("%d data packets were never acknowledged", s.unacked)
+					}
+					if s.packets > 0 {
+						results[pair] = append(results[pair], s)
+					}
+					t.Logf("%-15s %-15s ack turnaround p50 %v p90 %v p99 %v max %v; %d data packets, %.2f acks each; %d never acked",
+						p.name, pair, s.p50, s.p90, s.p99, s.max, s.packets, s.acksPerPacket, s.unacked)
+				})
+			}
 		}
 		for _, sender := range []string{"libutp", "go"} {
 			ours, ref := results[sender+"->go"], results[sender+"->libutp"]
-			if ours.packets == 0 || ref.packets == 0 {
+			if len(ours) == 0 || len(ref) == 0 {
 				continue // a subtest failed and said why
 			}
-			if ours.p90 > ref.p90+ackTurnaroundSlack {
-				t.Errorf("%s, %s sending: our receiver acknowledges in %v at the 90th percentile, libutp's in %v",
-					p.name, sender, ours.p90, ref.p90)
+			if o, r := medianP90(ours), medianP90(ref); o > r+ackTurnaroundSlack {
+				t.Errorf("%s, %s sending: our receiver acknowledges in %v at the 90th percentile, libutp's in %v (medians of %d and %d runs)",
+					p.name, sender, o, r, len(ours), len(ref))
 			}
 		}
 	}
+}
+
+// ackTurnaroundRounds is how many times each pairing runs.
+const ackTurnaroundRounds = 3
+
+// medianP90 is the median of the runs' 90th percentiles.
+func medianP90(runs []turnaroundStats) time.Duration {
+	p := make([]time.Duration, len(runs))
+	for i, r := range runs {
+		p[i] = r.p90
+	}
+	sort.Slice(p, func(i, j int) bool { return p[i] < p[j] })
+	return p[len(p)/2]
 }
 
 // ackTurnaroundSlack is how much slower than libutp's our receiver's p90 may

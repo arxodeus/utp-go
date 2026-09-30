@@ -249,6 +249,36 @@ func TestSubsequentRTTSamplesFollowLibutp(t *testing.T) {
 	require.Equal(t, 1090*time.Millisecond, st.Timeout)
 }
 
+// libutp's estimator works in whole milliseconds: the sample is truncated
+// (`ertt = (now - time_sent) / 1000`, utp_internal.cpp:1364) and rtt and
+// rtt_var are integer millisecond counts. Fractions of a millisecond are
+// dropped, not carried, and the RTO is libutp's to the millisecond.
+func TestRTTSamplesAreWholeMilliseconds(t *testing.T) {
+	ctrl := newDefaultController(defaultCtrlConfig())
+
+	require.NoError(t, ctrl.OnTransmit(1, Initial, 500))
+	require.NoError(t, ctrl.OnAck(1, ackAfter(1, 400*time.Millisecond+900*time.Microsecond)))
+	require.NoError(t, ctrl.OnTransmit(2, Initial, 500))
+	require.NoError(t, ctrl.OnAck(2, ackAfter(2, 480*time.Millisecond+700*time.Microsecond)))
+
+	// As TestSubsequentRTTSamplesFollowLibutp: ertt 400 then 480 give
+	// rtt 410, rtt_var 170, rto 1090. Carried in microseconds they give
+	// 410.875, 170.288 and 1092.
+	st := ctrl.Stats()
+	require.Equal(t, 410*time.Millisecond, st.RTT)
+	require.Equal(t, int64(170000), st.RTTVarianceMicros)
+	require.Equal(t, 1090*time.Millisecond, st.Timeout)
+
+	// On a path faster than a millisecond libutp's estimate stays 0, and
+	// every sample is taken as the first (:1365). The loss probe, which is
+	// not libutp's, needs the round trip anyway, and has its own.
+	fast := newDefaultController(defaultCtrlConfig())
+	require.NoError(t, fast.OnTransmit(1, Initial, 500))
+	require.NoError(t, fast.OnAck(1, ackAfter(1, 300*time.Microsecond)))
+	require.Equal(t, time.Duration(0), fast.Stats().RTT)
+	require.Equal(t, 300*time.Microsecond, fast.Stats().FineRTT)
+}
+
 // A retransmitted packet's ack cannot be attributed to a particular
 // transmission, so it must not move the estimate. libutp guards on
 // `pkt->transmissions == 1` (utp_internal.cpp:1362); this is Karn's algorithm.

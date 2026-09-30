@@ -128,6 +128,19 @@ type Controller interface {
 	// clock drift between the two ends is detected. See
 	// defaultController.OnPeerDelay.
 	OnPeerDelay(sample uint32, now time.Time)
+	// OnAckDelay reports the delay the peer measured on our packets, as
+	// carried by one incoming acknowledgement, once per acknowledgement and
+	// before OnAck for the packets it covers. libutp adds it to our_hist
+	// once per incoming packet (utp_internal.cpp:2017-2024), not once per
+	// packet acknowledged.
+	OnAckDelay(delay time.Duration, now time.Time)
+	// ApplyAck ends one incoming acknowledgement: after OnAck for every
+	// packet it covers, and before any loss it reveals is reported. Classic
+	// LEDBAT updates the window here, once, for all the bytes the
+	// acknowledgement covered -- libutp's single apply_ccontrol call per
+	// incoming packet (utp_internal.cpp:2139-2140), which comes before
+	// selective_ack can decay the window (:2289).
+	ApplyAck()
 	Timeout() time.Duration
 	BytesAvailableInWindow() uint32
 	// BytesInFlight is libutp's cur_window: payload bytes sent and neither
@@ -162,8 +175,13 @@ type ControllerStats struct {
 	MaxWindowSizeBytes uint32
 	// MinWindowSizeBytes is the floor the window will not drop below.
 	MinWindowSizeBytes uint32
-	// RTT is the smoothed round-trip time estimate.
+	// RTT is the smoothed round-trip time estimate: libutp's, in whole
+	// milliseconds, and so zero on a path faster than one.
 	RTT time.Duration
+	// FineRTT is the same estimator run in microseconds, for what libutp does
+	// not have and needs a round trip below a millisecond to be nonzero: the
+	// loss probe's timeout.
+	FineRTT time.Duration
 	// RTTVarianceMicros is the RTT variance estimate, in microseconds.
 	RTTVarianceMicros int64
 	// Timeout is the current retransmission timeout.
@@ -231,7 +249,17 @@ type defaultController struct {
 	rtt                   time.Duration
 	rttVarianceMicros     int64
 	transmissions         map[uint16]*packetRecord
+	fineRTT               time.Duration // see ControllerStats.FineRTT
 	delayAcc              *delayAccumulator
+	// curDelayHist is libutp's cur_delay_hist: the last curDelaySize
+	// queueing-delay samples, each taken against the base as it stood when
+	// it arrived, zero until filled (DelayHist, utp_internal.cpp:247-248,
+	// :269-271, :364-365). Classic LEDBAT's delay is their minimum.
+	curDelayHist [curDelaySize]uint32
+	curDelayIdx  int
+	// ackBatch is what the acknowledgement being processed has covered so
+	// far, for ApplyAck. Classic LEDBAT only.
+	ackBatch ackBatch
 	// lastWindowDecay is when the congestion window was last halved for
 	// loss. libutp's `last_rwin_decay` (utp_internal.cpp:461).
 	lastWindowDecay time.Time
@@ -385,6 +413,7 @@ func (c *defaultController) Stats() ControllerStats {
 		MaxWindowSizeBytes:  c.maxWindowSizeBytes,
 		MinWindowSizeBytes:  c.minWindowSizeBytes,
 		RTT:                 c.rtt,
+		FineRTT:             c.fineRTT,
 		RTTVarianceMicros:   c.rttVarianceMicros,
 		Timeout:             c.timeout,
 		BaseDelay:           c.delayAcc.BaseDelay(),
@@ -480,6 +509,91 @@ func (c *defaultController) OnTransmit(seqNum uint16, transmission Transmit, dat
 	return nil
 }
 
+// ackBatch is libutp's acked_bytes and min_rtt for one incoming packet
+// (utp_internal.cpp:1956-1987, :1403-1436).
+type ackBatch struct {
+	packets int
+	bytes   uint32
+	minRTT  time.Duration
+	delay   time.Duration
+	at      time.Time
+}
+
+// ackBatchRTTFallback is what libutp takes as a packet's round trip when the
+// clock has not moved since it was sent: `min_rtt = min<int64>(min_rtt,
+// 50000)` (utp_internal.cpp:1982-1985, :1428-1431).
+const ackBatchRTTFallback = 50 * time.Millisecond
+
+// curDelaySize is libutp's CUR_DELAY_SIZE (utp_internal.cpp:44).
+const curDelaySize = 3
+
+// OnAckDelay is one incoming acknowledgement's delay sample. See the
+// Controller interface.
+//
+// A zero is no measurement -- the peer has not timed one of our packets yet,
+// or reported the MaxInt32 sentinel -- and libutp neither records it nor
+// runs its congestion control on that acknowledgement (`if (actual_delay !=
+// 0)`, utp_internal.cpp:2023, :2139).
+func (c *defaultController) OnAckDelay(delay time.Duration, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if delay <= 0 {
+		return
+	}
+	c.delayAcc.Push(delay, now)
+	// The same sample drives the clock-drift estimate (utp_internal.cpp:
+	// 2025-2107), on the same condition.
+	c.drift.push(uint32(delay.Microseconds()), now)
+	queueing := delay - c.delayAcc.BaseDelay()
+	if queueing < 0 {
+		queueing = 0
+	}
+	c.curDelayHist[c.curDelayIdx] = uint32(queueing.Microseconds())
+	c.curDelayIdx = (c.curDelayIdx + 1) % curDelaySize
+}
+
+// filteredDelayMicros is libutp's our_hist.get_value(): the least of the last
+// curDelaySize queueing-delay samples (utp_internal.cpp:383-391), which is
+// what apply_ccontrol works from (:1621). One late packet does not move it;
+// three do.
+func (c *defaultController) filteredDelayMicros() uint32 {
+	v := c.curDelayHist[0]
+	for _, d := range c.curDelayHist[1:] {
+		if d < v {
+			v = d
+		}
+	}
+	return v
+}
+
+// ApplyAck is the once-per-acknowledgement end of classic LEDBAT. See the
+// Controller interface.
+func (c *defaultController) ApplyAck() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	b := c.ackBatch
+	c.ackBatch = ackBatch{}
+	if b.packets == 0 {
+		// libutp's min_rtt stays INT64_MAX, so neither step below runs.
+		return
+	}
+	filtered := c.filteredDelayMicros()
+	// "if the delay estimate exceeds the RTT, adjust the base_delay to
+	// compensate" (utp_internal.cpp:2127-2133). A one-way delay longer than
+	// the round trip is a clock that has moved, and raising the base takes
+	// it back out of the samples that follow. The value the window update
+	// below sees is not affected: libutp's shift moves delay_base, not
+	// cur_delay_hist (:277-289).
+	if minRTT := b.minRTT.Microseconds(); int64(filtered) > minRTT {
+		c.delayAcc.shift(time.Duration(int64(filtered)-minRTT) * time.Microsecond)
+	}
+	// "if we don't have a delay measurement, there's no point in invoking
+	// the congestion control" (:2136-2140).
+	if b.delay > 0 && b.bytes >= 1 {
+		c.applyCongestionControl(0, filtered, b.bytes, b.minRTT, b.at)
+	}
+}
+
 func (c *defaultController) OnAck(seqNum uint16, ack Ack) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -494,15 +608,10 @@ func (c *defaultController) OnAck(seqNum uint16, ack Ack) error {
 	packetInst.Acked = true
 	c.transmissions[seqNum] = packetInst
 
-	c.delayAcc.Push(ack.Delay, ack.ReceivedAt)
-	// The same sample libutp feeds to our_hist also drives its clock-drift
-	// estimate (utp_internal.cpp:2025-2107), on the same condition: a zero
-	// means the peer has no measurement yet, and driftEstimator.push drops it.
-	c.drift.push(uint32(ack.Delay.Microseconds()), ack.ReceivedAt)
+	// The delay sample itself was recorded once for the whole
+	// acknowledgement, by OnAckDelay.
 	c.currentDelay = ack.Delay
 
-	baseDelayMicros := uint32(c.delayAcc.BaseDelay().Microseconds())
-	packetDelayMicros := uint32(ack.Delay.Microseconds())
 	if c.algorithm == AlgorithmLEDBATPP {
 		// §4.5: LEDBAT++ measures its queueing delay from round trips, not
 		// from the one-way delay the peer reports. See ledbatPPRTTDelay.
@@ -513,7 +622,18 @@ func (c *defaultController) OnAck(seqNum uint16, ack Ack) error {
 		c.applyLedbatPP(uint32(base.Microseconds()), uint32(current.Microseconds()),
 			packetInst.SizeBytes, ack.RTT, ack.ReceivedAt)
 	} else {
-		c.applyCongestionControl(baseDelayMicros, packetDelayMicros, packetInst.SizeBytes, ack.RTT, ack.ReceivedAt)
+		// Counted towards the acknowledgement's single update, in ApplyAck.
+		rtt := ack.RTT
+		if rtt <= 0 {
+			rtt = ackBatchRTTFallback
+		}
+		b := &c.ackBatch
+		if b.packets == 0 || rtt < b.minRTT {
+			b.minRTT = rtt
+		}
+		b.packets++
+		b.bytes += packetInst.SizeBytes
+		b.delay, b.at = ack.Delay, ack.ReceivedAt
 	}
 
 	// "if need_resend is set, this packet has already been considered
@@ -542,22 +662,44 @@ func (c *defaultController) OnRTTSample(rtt time.Duration) {
 
 // updateRTT is libutp's RTT estimator and timeout (utp_internal.cpp:1362-1380),
 // for one sample in microseconds. Called with the lock held.
-func (c *defaultController) updateRTT(ertt int64) {
+//
+// The arithmetic is libutp's, in whole milliseconds: the sample is truncated
+// to them (`ertt = (now - time_sent) / 1000`, :1364), rtt and rtt_var are
+// unsigned millisecond counts, and each division truncates. Kept in
+// microseconds, as it used to be, the estimate differed from libutp's by the
+// fractions it drops -- a few milliseconds of RTO once the round trip is
+// large enough to lift it off its 1000ms floor.
+func (c *defaultController) updateRTT(erttMicros int64) {
+	// The microsecond estimate, for the loss probe; see FineRTT.
+	if c.fineRTT == 0 {
+		c.fineRTT = time.Duration(erttMicros) * time.Microsecond
+	} else {
+		fine := c.fineRTT.Microseconds()
+		c.fineRTT = time.Duration(maxInt64(fine-fine/8+erttMicros/8, 0)) * time.Microsecond
+	}
+
+	ertt := erttMicros / 1000
+	if ertt < 0 {
+		ertt = 0
+	}
+	var rtt, rttVar int64
 	if c.rtt == 0 {
 		// First sample: adopt it outright rather than easing an average
 		// up from zero, which would take about twenty samples to
 		// converge and leave the RTO wrong for all of them
-		// (utp_internal.cpp:1364-1367).
-		c.rtt = time.Duration(ertt) * time.Microsecond
-		c.rttVarianceMicros = ertt / 2
+		// (utp_internal.cpp:1364-1367). A sub-millisecond sample is 0,
+		// so the next one counts as the first again, as in libutp.
+		rtt, rttVar = ertt, ertt/2
 	} else {
-		// utp_internal.cpp:1370-1372.
-		rttMicros := c.rtt.Microseconds()
-		delta := rttMicros - ertt
-		c.rttVarianceMicros = maxInt64(0, c.rttVarianceMicros+(absInt64(delta)-c.rttVarianceMicros)/4)
-		rttMicros = rttMicros - rttMicros/8 + ertt/8
-		c.rtt = time.Duration(maxInt64(rttMicros, 0)) * time.Microsecond
+		// utp_internal.cpp:1370-1372. The variance step is signed and
+		// truncates toward zero, as Go's division does.
+		rtt, rttVar = c.rtt.Milliseconds(), c.rttVarianceMicros/1000
+		delta := rtt - ertt
+		rttVar += (absInt64(delta) - rttVar) / 4
+		rtt = rtt - rtt/8 + ertt/8
 	}
+	c.rtt = time.Duration(rtt) * time.Millisecond
+	c.rttVarianceMicros = rttVar * 1000
 
 	c.applyTimeoutAdjustment()
 }
@@ -727,11 +869,10 @@ func (c *defaultController) applyCongestionControl(
 
 	// "the delay can never be greater than the rtt" (utp_internal.cpp:1617-1621):
 	// libutp clamps our_delay to the minimum RTT of the packets this ack
-	// covers. Without the clamp a peer that reports a wild timestamp -- by
-	// malice, by a clock step, or by a timestamp wrap -- drives off_target
-	// arbitrarily negative and collapses the window in one ack. We clamp to
-	// this packet's own RTT, which is the closest thing available where the
-	// controller sees one packet at a time.
+	// covers, and so does ApplyAck. Without the clamp a peer that reports a
+	// wild timestamp -- by malice, by a clock step, or by a timestamp wrap --
+	// drives off_target arbitrarily negative and collapses the window in one
+	// ack.
 	if rttMicros := rtt.Microseconds(); rttMicros > 0 && ourDelayMicros > rttMicros {
 		ourDelayMicros = rttMicros
 	}

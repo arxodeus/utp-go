@@ -1294,6 +1294,21 @@ func (c *connection) keepAlivePacket() *packet {
 		return nil
 	}
 	pkt.Header.AckNum-- // wrapping
+	// The selective ack must be read against the decremented number too.
+	// libutp decrements ack_nr before send_ack builds the mask
+	// (utp_internal.cpp:836-843, :804-808), so its bit i is ack_nr + 1 + i
+	// of the real acknowledgement; ours was built against the real one, bit i
+	// being ack_nr + 2 + i. Shift it up one: the new bit 0 is ack_nr + 1, the
+	// packet a selective ack exists because we lack, and the top bit falls
+	// out of the window as it does in libutp. Left unshifted, the peer read
+	// every bit one packet early and could free a packet we never received.
+	// TestKeepAliveSelectiveAckMatchesItsAckNumber.
+	if pkt.Eack != nil {
+		old := pkt.Eack.Acked()[:SELECTIVE_ACK_WINDOW]
+		shifted := make([]bool, len(old))
+		copy(shifted[1:], old[:len(old)-1])
+		pkt.Eack = NewSelectiveAck(shifted)
+	}
 	return pkt
 }
 
@@ -1937,6 +1952,17 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 		probeTimedOut := c.mtu.probeOutstanding(originPacket.Header.SeqNum) &&
 			c.state.SentPackets.UnackedCount() == 1
 		if probeTimedOut && !now.Before(c.rtoDeadline) {
+			// Everything else in libutp's timeout still happens: the give-up
+			// check comes first (:1191), and the timeout counts towards it
+			// and starts the fast-timeout retry (:1240, :1247). Only the
+			// doubling and the window collapse are skipped (:1179, :1206).
+			if c.retransmitCount >= maxConsecutiveTimeouts {
+				c.state.stateType = ConnClosed
+				c.state.Err = ErrTimedOut
+				return
+			}
+			c.retransmitCount++
+			c.fastTimeout = true
 			c.mtu.onProbeLost(now)
 			c.logger.Debug("MTU probe timed out",
 				"floor", c.mtu.floor, "ceiling", c.mtu.ceiling, "current", c.mtu.current)
@@ -2095,7 +2121,9 @@ const minLossProbeTimeout = 10 * time.Millisecond
 // lossProbeTimeout is RFC 8985's PTO, max(2 x SRTT, 10 ms), or zero before
 // there is a round-trip estimate.
 func (c *connection) lossProbeTimeout() time.Duration {
-	rtt := c.state.SentPackets.ControllerStats().RTT
+	// The microsecond estimate: libutp's own is in whole milliseconds, and
+	// on a path faster than one it is zero.
+	rtt := c.state.SentPackets.ControllerStats().FineRTT
 	if rtt <= 0 {
 		return 0
 	}
@@ -2517,6 +2545,9 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 		// (utp_internal.cpp:1921, with ack_packet not reached until :2194).
 		c.noteDuplicateAck(packet.Header.PacketType, packet.Header.AckNum)
 		err = c.processAck(packet.Header.AckNum, packet.Eack, delay, now)
+		if err == nil && packet.Eack != nil {
+			c.noteSelectiveAckCount(packet.Header.AckNum, packet.Eack)
+		}
 		c.onFastTimeout(now)
 		c.rearmLossProbe(packet.Header.AckNum)
 		if err != nil {
@@ -2778,6 +2809,43 @@ func (c *connection) noteDuplicateAck(packetType PacketType, ackNum uint16) {
 	c.mtu.clearProbe()
 }
 
+// noteSelectiveAckCount is the last thing libutp's selective_ack does:
+//
+//	duplicate_ack = count;          (utp_internal.cpp:1612)
+//
+// where count is the number of bits the selective ack sets for packets inside
+// the send window other than its oldest (:1454-1461) -- counted whether or not
+// those packets were already acknowledged, and not at all when the
+// acknowledgement has emptied the window (:1440). The next duplicate
+// acknowledgement then counts on from there, so on a path where each
+// acknowledgement's selective ack names more packets than the last, the third
+// "duplicate" that judges an MTU probe too big (noteDuplicateAck) comes
+// sooner than three repeats would -- or, once the count has passed three, not
+// at all until an acknowledgement that moves resets it.
+//
+// It runs for every packet type that carries the extension, as libutp's
+// does, and after the acknowledgement has been applied, which is where
+// libutp's window stands when it counts (:2289, after :2194).
+func (c *connection) noteSelectiveAckCount(ackNum uint16, sack *SelectiveAck) {
+	sp := c.state.SentPackets
+	if c.state.stateType != ConnConnected || sp == nil {
+		return
+	}
+	window := sp.UnackedCount() // libutp's cur_window_packets
+	if window == 0 {
+		return
+	}
+	next := sp.NextSeqNum() // libutp's seq_nr
+	count := uint32(0)
+	for i, set := range sack.Acked() {
+		v := ackNum + 2 + uint16(i)
+		if set && next-v-1 < window-1 {
+			count++
+		}
+	}
+	c.duplicateAcks = count
+}
+
 func (c *connection) processAck(
 	ackNum uint16,
 	selectiveAck *SelectiveAck,
@@ -2872,7 +2940,7 @@ func (c *connection) processAck(
 	// A converged search stands for a while and is then redone, because paths
 	// change. libutp: 30 minutes (utp_internal.cpp:1310).
 	if c.mtu.dueForSearch(now) {
-		c.mtu.reset(uint32(c.config.MaxPacketSize), now)
+		c.mtu.research(uint32(c.config.MaxPacketSize), now)
 	}
 
 	retired := c.disarmAcked(fullAcked)
@@ -3470,6 +3538,21 @@ func (c *connection) transmit(packet *packet, now time.Time, firstTransmission b
 
 	c.state.SentPackets.OnTransmit(packet.Header.SeqNum, packet.Header.PacketType, payload, length, now)
 	c.armRetransmit(packet, c.state.SentPackets.Timeout())
+
+	// A packet carrying the current acknowledgement -- and the current
+	// selective ack, which every packet this connection builds carries --
+	// says everything a deferred ST_STATE would have, so that one is no
+	// longer owed. libutp takes the socket off its ack list whenever it sends
+	// anything (send_data, utp_internal.cpp:768).
+	//
+	// It rarely applies here: data received and data sent mostly fall in
+	// different event-loop passes. Measured in a two-way transfer against
+	// libutp, pure acknowledgements per data packet were 0.90 before and after
+	// (libutp's 0.55-0.58 is where its batches end; DEVIATIONS.md, "Acks are
+	// deferred, but not batched the way libutp's are").
+	if c.state.RecvBuf != nil && packet.Header.AckNum == c.state.RecvBuf.AckNum() {
+		c.ackPending = false
+	}
 
 	c.emitPacket(packet, isProbe)
 }

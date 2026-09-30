@@ -36,7 +36,7 @@ func TestDriftPenaltyReachesTheWindow(t *testing.T) {
 				t.Fatalf("transmit %d: %v", i, err)
 			}
 			now = now.Add(time.Millisecond)
-			if err := ctrl.OnAck(seq, Ack{
+			if err := ackOne(ctrl, seq, Ack{
 				Delay:      20 * time.Millisecond,
 				RTT:        50 * time.Millisecond,
 				ReceivedAt: now,
@@ -88,7 +88,7 @@ func TestDriftPenaltyIgnoresTheHarmlessDirection(t *testing.T) {
 				t.Fatalf("transmit %d: %v", i, err)
 			}
 			now = now.Add(time.Millisecond)
-			if err := ctrl.OnAck(seq, Ack{
+			if err := ackOne(ctrl, seq, Ack{
 				Delay:      20 * time.Millisecond,
 				RTT:        50 * time.Millisecond,
 				ReceivedAt: now,

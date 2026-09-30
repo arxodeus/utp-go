@@ -555,6 +555,7 @@ func TestConformanceFastRetransmitDecisions(t *testing.T) {
 // (utp_internal.cpp:1713-1730).
 type ccEntry struct {
 	raw        string
+	actualUs   int64 // the delay the acknowledgement reported, unfiltered
 	ourDelayMs int64
 	targetMs   int64
 	acked      uint32
@@ -589,7 +590,7 @@ func parseCCLog(t *testing.T, lines []string) []ccEntry {
 			t.Fatalf("libutp cc log: scaled_gain in %q: %v", l, err)
 		}
 		out = append(out, ccEntry{
-			raw: l, ourDelayMs: num("our_delay"), targetMs: num("target_delay"),
+			raw: l, actualUs: num("actual_delay"), ourDelayMs: num("our_delay"), targetMs: num("target_delay"),
 			acked: uint32(num("acked_bytes")), maxWindow: uint32(num("max_window")),
 			packetSize: uint32(num("packet_size")), lastMaxed: num("last_maxed_out_window"),
 			nowMs: num("current_ms"), sndbuf: uint32(num("opt_sndbuf")),

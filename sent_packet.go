@@ -304,6 +304,15 @@ func (s *sentPackets) onAck(
 	delay time.Duration,
 	now time.Time,
 ) (*circularRangeInclusive, []uint16, error) {
+	// Once per acknowledgement, whatever it acknowledges: libutp records the
+	// sample even from one whose ack number it discards (utp_internal.cpp:
+	// 1907, :2023-2024).
+	s.congestionCtrl.OnAckDelay(delay, now)
+	// Whatever path the acknowledgement takes below, its window update
+	// happens once. detectAndRecordLosses applies it earlier, before a loss
+	// can decay the window, as libutp's order has it.
+	defer s.congestionCtrl.ApplyAck()
+
 	// Check if ack number is in valid range
 	seqRange := s.SeqNumRange()
 	if !seqRange.Contains(ackNum) {
@@ -409,6 +418,9 @@ func (s *sentPackets) OnAckNum(
 // controller about each one. A packet is declared lost once: see
 // fastResendSeqNum.
 func (s *sentPackets) detectAndRecordLosses(now time.Time) error {
+	// libutp's apply_ccontrol (utp_internal.cpp:2139) precedes the decay a
+	// selective ack can cause (:2289).
+	s.congestionCtrl.ApplyAck()
 	firstUnacked, err := s.FirstUnackedSeqNum()
 	if err != nil {
 		// Nothing outstanding, so nothing can be lost.

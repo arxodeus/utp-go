@@ -128,7 +128,7 @@ func TestOnAck(t *testing.T) {
 		ReceivedAt: ackReceivedAt,
 	}
 
-	err = ctrl.OnAck(seqNum, ack)
+	err = ackOne(ctrl, seqNum, ack)
 	require.NoError(t, err, "ack registration failed")
 
 	// Check base delay
@@ -139,6 +139,15 @@ func TestOnAck(t *testing.T) {
 
 	// Check timeout
 	require.True(t, ctrl.minTimeout >= ctrl.Timeout(), "expected timeout %v, got %v", ctrl.minTimeout, ctrl.Timeout())
+}
+
+// ackOne delivers one acknowledgement covering one packet the way
+// sentPackets.onAck does: its delay sample, the packet, then the window
+// update.
+func ackOne(ctrl *defaultController, seq uint16, ack Ack) error {
+	ctrl.OnAckDelay(ack.Delay, ack.ReceivedAt)
+	defer ctrl.ApplyAck()
+	return ctrl.OnAck(seq, ack)
 }
 
 func TestOnAckUnknownSeqNum(t *testing.T) {
@@ -401,7 +410,7 @@ func TestDelayClampedToRTT(t *testing.T) {
 		if err := ctrl.OnTransmit(seq, Initial, packetSize); err != nil {
 			t.Fatalf("transmit %d: %v", seq, err)
 		}
-		if err := ctrl.OnAck(seq, Ack{Delay: delay, RTT: rtt, ReceivedAt: at}); err != nil {
+		if err := ackOne(ctrl, seq, Ack{Delay: delay, RTT: rtt, ReceivedAt: at}); err != nil {
 			t.Fatalf("ack %d: %v", seq, err)
 		}
 	}
@@ -418,16 +427,10 @@ func TestDelayClampedToRTT(t *testing.T) {
 	}
 	before := ctrl.maxWindowSizeBytes
 
-	// A peer that lies once costs 17% of the window and no more -- the gain is
-	// scaled by this packet's share of it, so a single acknowledgement can
-	// only move it so far. A peer that lies does not lie once. Twenty
-	// acknowledgements is what a second of a hostile or broken peer looks
-	// like, and is what separates the two behaviours: clamped, the delay reads
-	// as 20ms against a 100ms target and the window is fine; unclamped, each
-	// one takes about 14.6 KB and the window reaches its floor.
-	//
-	// The first version of this test injected exactly one and passed without
-	// the clamp.
+	// A peer that lies does not lie once. Twenty acknowledgements is what a
+	// second of a hostile or broken peer looks like. (The first version of
+	// this test injected exactly one, and before the delay filter and the
+	// base shift were in, twenty unclamped took the window to its floor.)
 	for i := 0; i < 20; i++ {
 		seq++
 		grow(ctrl, seq, absurd, now.Add(time.Duration(41+i)*rtt))
@@ -439,9 +442,17 @@ func TestDelayClampedToRTT(t *testing.T) {
 			"room for a collapse to be visible", before, ctrl.minWindowSizeBytes)
 	}
 	// Clamped, the delay reads as 20ms against a 100ms target, which is under
-	// target, so the window holds or grows. Unclamped it reaches the floor.
-	// Half is far from both.
-	if after < before/2 {
+	// target, so the window holds or grows.
+	//
+	// Unclamped it no longer reaches the floor, and a threshold at half the
+	// window stopped telling the two apart once libutp's other defence was
+	// in: a delay beyond the round trip raises the base by the excess
+	// (utp_internal.cpp:2127-2133), so after the three acknowledgements it
+	// takes to fill the delay filter the lie reads as 20ms anyway. What is
+	// left for the clamp is the acknowledgement that filled it, which
+	// unclamped takes about 17% (measured: 84000 -> 69052 bytes). So the
+	// test is that the window does not shrink at all.
+	if after < before {
 		t.Errorf("20 acknowledgements reporting %v of delay on a %v path took the window from "+
 			"%d bytes to %d (floor %d). libutp clamps the reported delay to the round trip "+
 			"(utp_internal.cpp:1615-1621) precisely so that a peer cannot do this",
@@ -449,4 +460,90 @@ func TestDelayClampedToRTT(t *testing.T) {
 	}
 	t.Logf("window %d -> %d bytes across 20 acknowledgements each claiming %v of delay on a "+
 		"%v path", before, after, absurd, rtt)
+}
+
+// An acknowledgement that covers several packets updates the window once, for
+// all their bytes: libutp sums acked_bytes over the packets an incoming
+// packet acknowledges and calls apply_ccontrol once with the total
+// (utp_internal.cpp:1956-1987, :2139-2140). Updating once per packet instead
+// compounds -- each later packet sees the window the earlier ones grew -- and
+// lands somewhere else.
+func TestOneWindowUpdatePerAcknowledgement(t *testing.T) {
+	const (
+		packets    = 4
+		size       = 1000
+		rtt        = 50 * time.Millisecond
+		baseDelay  = 20 * time.Millisecond
+		queueDelay = 30 * time.Millisecond
+	)
+	fresh := func() *defaultController {
+		c := newDefaultController(defaultCtrlConfig())
+		c.maxWindowSizeBytes = 8 * size
+		c.lastMaxedOutWindow = time.Now() // not application-limited
+		// Establish the base delay the samples below are measured against.
+		c.OnAckDelay(baseDelay, time.Now())
+		c.OnAckDelay(baseDelay, time.Now())
+		c.OnAckDelay(baseDelay, time.Now())
+		return c
+	}
+	for _, slowStart := range []bool{true, false} {
+		c := fresh()
+		c.slowStart = slowStart
+		now := time.Now()
+		for s := uint16(1); s <= packets; s++ {
+			require.NoError(t, c.OnTransmit(s, Initial, size))
+		}
+		for i := 0; i < 3; i++ {
+			c.OnAckDelay(baseDelay+queueDelay, now)
+		}
+		for s := uint16(1); s <= packets; s++ {
+			require.NoError(t, c.OnAck(s, Ack{Delay: baseDelay + queueDelay, RTT: rtt, ReceivedAt: now}))
+		}
+		c.ApplyAck()
+
+		want := fresh()
+		want.slowStart = slowStart
+		want.applyCongestionControl(0, uint32(queueDelay.Microseconds()), packets*size, rtt, now)
+		require.Equal(t, want.maxWindowSizeBytes, c.maxWindowSizeBytes,
+			"slow start %v: one acknowledgement of %d packets should be one update of %d bytes",
+			slowStart, packets, packets*size)
+		require.NotEqual(t, uint32(8*size), c.maxWindowSizeBytes, "slow start %v: the window did not move", slowStart)
+
+		// And a second ApplyAck, with nothing acknowledged since, is not a
+		// second update.
+		before := c.maxWindowSizeBytes
+		c.ApplyAck()
+		require.Equal(t, before, c.maxWindowSizeBytes)
+	}
+}
+
+// A one-way delay longer than the round trip cannot be queueing; it is the
+// clocks. libutp raises its base by the excess (utp_internal.cpp:2127-2133),
+// so the samples that follow read the path as it is.
+func TestDelayOverTheRoundTripRaisesTheBase(t *testing.T) {
+	const (
+		rtt  = 20 * time.Millisecond
+		base = 10 * time.Millisecond
+	)
+	c := newDefaultController(defaultCtrlConfig())
+	now := time.Now()
+	c.OnAckDelay(base, now)
+	var seq uint16
+	ack := func(reported time.Duration) {
+		seq++
+		require.NoError(t, c.OnTransmit(seq, Initial, 1000))
+		require.NoError(t, ackOne(c, seq, Ack{Delay: reported, RTT: rtt, ReceivedAt: now}))
+	}
+	// Three acknowledgements 100ms over the base: the filter reads 100ms,
+	// 80ms more than the round trip allows.
+	for i := 0; i < 3; i++ {
+		ack(base + 100*time.Millisecond)
+	}
+	require.Equal(t, base+80*time.Millisecond, c.delayAcc.BaseDelay(),
+		"the base should have risen by the 80ms the delay exceeded the round trip by")
+	// The same reports now read as 20ms of queue.
+	for i := 0; i < 3; i++ {
+		ack(base + 100*time.Millisecond)
+	}
+	require.Equal(t, uint32(20000), c.filteredDelayMicros())
 }

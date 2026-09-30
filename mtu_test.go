@@ -151,13 +151,22 @@ func TestMtuSearchIsRedoneAfterTheInterval(t *testing.T) {
 		t.Errorf("search never came due again; a path that changed would never be rediscovered")
 	}
 
-	m.reset(1500, now.Add(mtuSearchInterval))
+	m.research(1500, now.Add(mtuSearchInterval))
 	if m.done() {
-		t.Error("reset left the search already finished")
+		t.Error("the re-search left the search already finished")
 	}
-	if m.current >= settled && settled > mtuAbsoluteFloor {
-		t.Logf("note: reset restarts from the midpoint %d, below the previously settled %d",
-			m.current, settled)
+	// The size stays where it settled, as libutp's does -- mtu_reset does not
+	// touch mtu_last -- and the next packet at that size is the first probe.
+	if m.current != settled {
+		t.Errorf("the re-search moved packets from the settled %d to %d", settled, m.current)
+	}
+	if !m.eligibleProbe(settled, true) {
+		t.Errorf("a packet at the settled size %d is not a probe; the search cannot move", settled)
+	}
+	m.beginProbe(100, settled)
+	m.onAck(100, now.Add(mtuSearchInterval))
+	if m.floor != settled {
+		t.Errorf("acknowledging the settled size left the floor at %d", m.floor)
 	}
 }
 

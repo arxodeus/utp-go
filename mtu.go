@@ -126,6 +126,23 @@ func (m *mtuSearch) reset(ceiling uint32, now time.Time) {
 	m.searchUpdate(now)
 }
 
+// research restarts a converged search after mtuSearchInterval without
+// giving up the size it settled on.
+//
+// libutp's re-search is mtu_reset alone (utp_internal.cpp:892-896, :1314-
+// 1322): it restores the floor and ceiling but does not recompute mtu_last,
+// so packets stay at the size known to get through, and the first of them is
+// the next probe. reset, which a new connection uses and which starts from
+// the midpoint (DEVIATIONS.md), would instead drop a connection settled at
+// 1400 bytes to about 988 every half hour and climb back.
+func (m *mtuSearch) research(ceiling uint32, now time.Time) {
+	known := m.current
+	m.reset(ceiling, now)
+	if known > m.floor && known <= m.ceiling {
+		m.current = known
+	}
+}
+
 // searchUpdate takes one binary-search step. Called whenever the floor or
 // ceiling moves. libutp's mtu_search_update (utp_internal.cpp:1289-1312).
 func (m *mtuSearch) searchUpdate(now time.Time) {

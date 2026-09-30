@@ -177,3 +177,62 @@ func TestDuplicateAckIgnoredWithNothingOutstanding(t *testing.T) {
 			"is neither counted nor a reset", conn.duplicateAcks)
 	}
 }
+
+// A selective ack sets the duplicate count to the number of packets it names
+// inside the window (libutp: `duplicate_ack = count`, utp_internal.cpp:1612),
+// and the next duplicate counts on from there. With the two packets after the
+// probe named, the second duplicate is libutp's third.
+func TestSelectiveAckSetsTheDuplicateCount(t *testing.T) {
+	conn, dup := dupAckConn(t)
+	ceilingBefore := conn.mtu.ceiling
+	// Bits 0 and 1 are dup+2 and dup+3: the two packets after the probe.
+	sack := NewSelectiveAck([]bool{true, true})
+
+	conn.noteDuplicateAck(st_state, dup)
+	conn.noteSelectiveAckCount(dup, sack)
+	if conn.duplicateAcks != 2 {
+		t.Fatalf("a selective ack naming two packets in the window set the count to %d", conn.duplicateAcks)
+	}
+	if conn.mtu.ceiling != ceilingBefore {
+		t.Fatalf("the ceiling moved before the count reached three")
+	}
+	conn.noteDuplicateAck(st_state, dup)
+	if conn.mtu.ceiling != 1200-1 {
+		t.Errorf("after a selective ack naming two packets and one more duplicate the ceiling is "+
+			"%d; libutp's count is three there and it sets the ceiling to 1199", conn.mtu.ceiling)
+	}
+
+	// Bits outside the window, and the oldest packet's, are not counted.
+	conn2, dup2 := dupAckConn(t)
+	far := make([]bool, 32)
+	far[5] = true // dup2+7: never sent
+	conn2.noteSelectiveAckCount(dup2, NewSelectiveAck(far))
+	if conn2.duplicateAcks != 0 {
+		t.Errorf("a bit for a packet never sent was counted: %d", conn2.duplicateAcks)
+	}
+}
+
+// The same, through the packet path: the count is taken from a selective ack
+// on an arriving packet, after its acknowledgement is applied.
+func TestSelectiveAckSetsTheDuplicateCountOnArrival(t *testing.T) {
+	conn, dup := dupAckConn(t)
+	const syn = uint16(100)
+	now := time.Now()
+	bits := make([]bool, 32)
+	bits[0], bits[1] = true, true // dup+2 and dup+3, the packets after the probe
+
+	withSack := NewPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()),
+		DefaultWindowSize, syn+1).WithAckNum(dup).WithSelectiveAck(NewSelectiveAck(bits)).Build()
+	conn.onPacket(withSack, now)
+	if conn.duplicateAcks != 2 {
+		t.Fatalf("after a duplicate carrying a selective ack for two packets the count is %d; "+
+			"libutp's is 2 (utp_internal.cpp:1612)", conn.duplicateAcks)
+	}
+	bare := NewPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()),
+		DefaultWindowSize, syn+1).WithAckNum(dup).Build()
+	conn.onPacket(bare, now.Add(time.Millisecond))
+	if conn.mtu.ceiling != 1200-1 {
+		t.Errorf("two duplicates, the first naming two packets, left the ceiling at %d; "+
+			"libutp's count reaches three on the second and sets it to 1199", conn.mtu.ceiling)
+	}
+}

@@ -49,6 +49,17 @@ accident, and the list is worth trusting for what it contains. It is still not
 a proof that nothing else differs — the sweep read the paths that carry
 packets, not every line of a 3,500-line file.
 
+That proof is now being built. [LIBUTP-AUDIT.md](LIBUTP-AUDIT.md) reads
+`utp_internal.cpp` line by line and gives every function a verdict: matched,
+fixed, or recorded here. Lines 1-1766 are done. They turned up fifteen
+differences no earlier pass had found: ten fixed, one recorded below
+("The retransmission timeout is capped at `MaxTimeout`"), and four still
+open.
+One further difference had been measured and documented elsewhere but never
+entered here ("The base delay is the lowest over two minutes"). Until the rest
+of the file and its support files are read, this list is still only as
+complete as the paths the sweep covered.
+
 ## What kind of deviation each one is
 
 "Intentional" means chosen, not better. Only some of these are improvements on
@@ -98,6 +109,9 @@ consequence, or equivalent on the wire.
   *`MaxConnAttempts` counts transmissions*, *the selective-ack window* (always
   30 entries), *read-side half-close discards what is buffered* (libutp has no
   buffer to discard), *ICMP: no CS_IDLE state*, *`WriteV` blocks*.
+- *The retransmission timeout is capped at `MaxTimeout`:* 60 seconds by
+  default. It binds only once the timeout itself is past 3.75 seconds, and
+  then only on the last backed-off wait before the connection gives up.
 - *Timeouts act when due, not on a 500ms pass:* retransmissions, keep-alives
   and the zero-window probe fire within our 25ms timer tick of their
   deadline; libutp's fire on the first of its 500ms passes after it.
@@ -113,6 +127,10 @@ consequence, or equivalent on the wire.
   high-BDP path, 60-75% less on lossy ones. (It used to be credited with 7
   times less standing queue; that was the one-way-delay version, and a lone
   LEDBAT++ flow now leaves as much as classic LEDBAT.)
+- *The base delay is the lowest over two minutes, not about thirteen.* A
+  clock drift's phantom queue grows with the window, measured linear, so
+  libutp's is 6.5 times ours. What the shorter memory costs -- a queue that
+  stands for two minutes is taken for the empty path -- is not measured.
 - *The MTU search starts at the midpoint.* libutp's start is 1-2% faster on
   healthy paths, winning every one of twelve seeds. Ours is better only on
   paths narrower than 1400, and on the IPv6-like ones both starts stall.
@@ -129,8 +147,6 @@ consequence, or equivalent on the wire.
   measurement), and jumbo frames are never used.
 - *Close waits:* a caller is held for up to one flush or two seconds of peer
   silence; libutp's `utp_close` returns at once.
-- *The delay clamp uses one packet's RTT:* never tighter than libutp's, and
-  possibly looser. Not measured.
 
 ## Intentional deviations
 
@@ -468,34 +484,26 @@ It was unbounded before, which was a defect rather than a deviation, and cost
 31 to 60 seconds per close on a connection whose peer had gone. See
 [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
 
-## The delay clamp uses one packet's RTT, not the batch minimum
+## ~~The delay clamp uses one packet's RTT, not the batch minimum~~ — no longer
 
-libutp feeds its congestion controller a delay clamped to the minimum
-round-trip time of the packets the acknowledgement covers:
+libutp runs `apply_ccontrol` once per incoming acknowledgement, with the bytes
+of every packet it covers and the smallest round trip among them
+(`utp_internal.cpp:1956-1987`, `:1403-1436`, called at `:2139`). This library
+used to run its update once per acknowledged packet, clamping to that packet's
+own round trip, and this entry said the two were equivalent for the gain.
+They were not quite: per packet, each later packet sees the window the earlier
+ones grew, so the updates compound. `TestOneWindowUpdatePerAcknowledgement`
+measures the difference and fails if the update is applied per packet.
 
-```cpp
-// the delay can never be greater than the rtt. The min_rtt
-// variable is the RTT in microseconds
-int32 our_delay = min<uint32>(our_hist.get_value(), uint32(min_rtt));
-                                        (utp_internal.cpp:1615-1621)
-```
-
-`apply_ccontrol` there runs once per acknowledgement, over a batch of packets,
-so `min_rtt` is the smallest round trip among them. This library's controller
-runs once per *acknowledged packet* -- the two are equivalent for the gain,
-which scales by each packet's share of the window -- so the batch does not
-exist at the point the clamp is applied, and it clamps to that packet's own
-round trip instead.
-
-The difference is a bound: a per-packet RTT is never smaller than the minimum
-across the batch it belongs to, so our clamp is at most as tight as libutp's
-and never tighter. The gap is whatever the round trip varied by within one
-acknowledgement's coverage, and it only matters at all for a peer reporting a
-delay that falls between the two -- larger than the batch minimum, smaller than
-this packet's own RTT.
-
-What the clamp is for is unaffected, and is measured:
-`TestDelayClampedToRTT`.
+The controller now gathers an acknowledgement's packets and updates once
+(`ApplyAck`), clamping to their minimum round trip as libutp does, and taking
+libutp's 50 ms when the clock has not moved since a packet was sent. The
+line-by-line audit (LIBUTP-AUDIT.md) found three more differences in the same
+path, all closed with it: the delay the rule works from is the least of the
+last three samples, not the latest (`DelayHist::get_value`, `:383-391`;
+`TestConformanceDelayFilter` compares it with libutp's own log); an
+acknowledgement reporting no delay does not run the rule (`:2139`); and a
+delay longer than the round trip raises the base by the excess (`:2127-2133`).
 
 ## A selective ack riding on an unmatched acknowledgement is dropped
 
@@ -658,6 +666,49 @@ after 15 seconds, libutp at 15.01s on its first timeout pass after the
 deadline; at 1472 libutp sends nothing in 40 seconds and ours probes at 15s.
 The test asserts libutp's failure as well as our success, so a change in the
 vendored libutp shows.
+
+## The base delay is the lowest over two minutes, not about thirteen
+
+libutp's base delay is the minimum over thirteen one-minute buckets
+(`DELAY_BASE_HISTORY`, `utp_internal.cpp:50`; rotated at `:367-380`), so it
+remembers between twelve and thirteen minutes. This library's is a sliding
+minimum over `ConnectionConfig.DelayWindow`, two minutes by default. This was
+recorded in COMPATIBILITY.md ("Delay base history") and KNOWN-LIMITATIONS.md
+but not here, which this file's own rule makes a defect in the file; the
+line-by-line audit found it.
+
+The reason is clock drift. Two clocks running at different rates make every
+sample drift, and the base lags the drift by up to the window's length, so the
+phantom queue a drifting pair sees is the drift rate times the window --
+measured linear in the product (KNOWN-LIMITATIONS.md, "`their_hist` is a missing mechanism -- implemented"). At
+1000 ppm, which an oversubscribed virtual machine reaches, two minutes is
+120 ms of phantom queue, above the 100 ms target; thirteen would be about
+780 ms. libutp leans on its `their_hist` correction for this; so does this
+library (`OnPeerDelay`), with the shorter window as well.
+
+The cost is the other side of the same memory. A queue that stands for longer
+than the window becomes the base, after which the controller reads it as an
+empty path and adds its own queue on top: LEDBAT's latecomer problem, which a
+longer memory postpones. That is not measured. Setting `DelayWindow` to 13
+minutes recovers libutp's length, though not its bucket granularity.
+
+## The retransmission timeout is capped at `MaxTimeout`
+
+libutp's timeout is `max(rtt + rtt_var * 4, 1000)` milliseconds with no upper
+bound (`utp_internal.cpp:1380`), and it doubles on each timeout with none
+either (`:1179`). This library caps both at `ConnectionConfig.MaxTimeout`, 60
+seconds by default.
+
+The reason is that it is a configuration knob callers already have, and at
+its default it binds only on paths libutp itself serves badly. Both give up at
+the fifth consecutive timeout (`:1191`), so the waits are 1, 2, 4, 8 and 16
+times the timeout, and the cap touches only the last of them, and only once
+the timeout is past 3.75 seconds (16 times it exceeds 60). That takes a
+smoothed round trip of 1.25 seconds with the variance at its first-sample
+value of half the round trip (`rtt + 4 * rtt_var`), or less on a path whose
+round trip swings widely. There, this
+library gives up a little sooner than libutp would. Setting `MaxTimeout` very
+high recovers libutp's behaviour exactly.
 
 ## Timeouts act when due, not on a 500ms pass
 
@@ -982,8 +1033,6 @@ What differs in classic LEDBAT, each with its own entry above:
   Slow start grows by a maximum-size packet here and by libutp's current
   `get_packet_size()` there. ("The congestion window starts at, and never
   falls below, two packets.")
-- The delay clamp uses one packet's round trip, not the minimum across the
-  acknowledgement's batch. ("The delay clamp uses one packet's RTT.")
 - A selective ack does not restart the retransmission timeout. ("A selective
   ack does not restart the retransmission timeout.")
 
