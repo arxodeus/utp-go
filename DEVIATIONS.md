@@ -76,6 +76,10 @@ copied. Not measured as an improvement.
 
 - *Completing an incoming connection:* libutp never completes a zero-length
   transfer.
+- *An initiator can fast-retransmit from its first packet:* a libutp initiator
+  whose random first sequence number lands in the wrong half never can.
+  Measured against libutp: its sender took twice as long at 3-5% loss on
+  those connections.
 - *`WriteV` has no 1024-buffer limit:* libutp silently drops buffers past 1024.
 - *ICMP: the next-hop MTU is converted to a payload size:* libutp's ceiling
   ends up 28 bytes too large. The tests measure what an ICMP report saves, not
@@ -848,6 +852,28 @@ blackholed connection, one extra retransmission before the first timeout
 (`TestLossProbeSendsOnePacketBeforeTheTimeout`). The conformance tests that
 pin libutp's timeout schedule switch it off, since that schedule is what they
 measure.
+
+## An initiator can fast-retransmit from its first packet
+
+**libutp's initiator often cannot.** `utp_create_socket` sets `seq_nr = 1` and
+`fast_resend_seq_nr = seq_nr` (`utp_internal.cpp:2611-2615`), and
+`utp_connect` then replaces `seq_nr` with a random number (`:2768`) without
+touching `fast_resend_seq_nr`. It advances only through a wrapping less-than
+on each acknowledgement (`:2186-2188`), so when the random start lies more
+than half the sequence space past 1, it never advances, and every fast
+retransmission is refused (`:1537`, `:1560`) until the sequence numbers wrap.
+The accepting side sets it after choosing `seq_nr` (`:2988-2989`).
+
+This library starts it at the first sequence number in both roles, as
+libutp's accepting side does.
+
+**Why.** It is a defect, measured: over the real-socket relay, forty
+libutp-sender transfers at 3-5% loss split by the SYN's sequence number, a
+median of 4.31 s and no refused fast retransmissions below 32768, against
+8.46 s and 61 refused ones above (KNOWN-LIMITATIONS.md). Copying it would
+make half of this library's outgoing connections recover every loss by
+timeout. `TestFastRetransmitFromAnyInitialSequenceNumber` fails with
+libutp's initiator behaviour substituted.
 
 ## Inherited notes that claim consistency with the reference
 

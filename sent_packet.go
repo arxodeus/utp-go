@@ -88,8 +88,12 @@ func newSentPackets(initSeqNum uint16, congestionCtrl Controller, logger log.Log
 		packets:     make([]*sentPacket, 0),
 		initSeqNum:  initSeqNum,
 		lostPackets: btree.NewOrderedG[uint16](2),
-		// libutp initialises fast_resend_seq_nr to seq_nr, the number the
-		// next packet will take (utp_internal.cpp:2615, :2990).
+		// The number the next packet will take, in both roles. libutp's
+		// accepting side does the same (utp_internal.cpp:2988-2989); its
+		// initiator does not -- fast_resend_seq_nr stays at 1 when
+		// utp_connect randomises seq_nr (:2615, :2768), and for half of all
+		// starting numbers never catches up. Not copied; see
+		// TestFastRetransmitFromAnyInitialSequenceNumber.
 		fastResendSeqNum: initSeqNum + 1,
 		congestionCtrl:   congestionCtrl,
 	}

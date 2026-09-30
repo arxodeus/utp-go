@@ -85,14 +85,54 @@ type relayPath struct {
 	queued   int       // bytes waiting in the bottleneck queue
 	stats    pathStats
 	wake     chan struct{}
+
+	// trace, when non-nil, records every datagram offered and whether it
+	// was dropped, for diagnosing a transfer after the fact.
+	trace *[]relayEvent
+}
+
+// relayEvent is one offered datagram, as the relay saw it.
+type relayEvent struct {
+	At   time.Time
+	Type byte // uTP packet type, the high nibble of the first byte
+	Seq  uint16
+	Ack  uint16
+	Wnd  uint32 // advertised receive window
+	Len  int
+	// Sack is the selective-ack bitmask, if the packet carries one: bit i of
+	// the whole mask, least significant first, is ack_nr + 2 + i (BEP 29).
+	Sack    []byte
+	Dropped bool
 }
 
 func (p *relayPath) offer(b []byte, now time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.stats.Offered++
+	var ev *relayEvent
+	if p.trace != nil && len(b) >= 20 {
+		*p.trace = append(*p.trace, relayEvent{At: now, Type: b[0] >> 4,
+			Seq: uint16(b[16])<<8 | uint16(b[17]), Ack: uint16(b[18])<<8 | uint16(b[19]), Len: len(b),
+			Wnd: uint32(b[12])<<24 | uint32(b[13])<<16 | uint32(b[14])<<8 | uint32(b[15])})
+		ev = &(*p.trace)[len(*p.trace)-1]
+		// Walk the extension chain for a selective ack (type 1).
+		for next, off := b[1], 20; next != 0 && off+2 <= len(b); {
+			typ, n := next, int(b[off+1])
+			next = b[off]
+			if off+2+n > len(b) {
+				break
+			}
+			if typ == 1 {
+				ev.Sack = append([]byte(nil), b[off+2:off+2+n]...)
+			}
+			off += 2 + n
+		}
+	}
 	if p.cfg.LossRate > 0 && p.rng.Float64() < p.cfg.LossRate {
 		p.stats.DroppedByLoss++
+		if ev != nil {
+			ev.Dropped = true
+		}
 		return
 	}
 	depart := now
@@ -105,6 +145,9 @@ func (p *relayPath) offer(b []byte, now time.Time) {
 		}
 		if p.cfg.QueueBytes > 0 && p.queued+len(b) > p.cfg.QueueBytes {
 			p.stats.DroppedByQueue++
+			if ev != nil {
+				ev.Dropped = true
+			}
 			return
 		}
 		p.nextFree = p.nextFree.Add(time.Duration(float64(len(b)*8) / float64(p.cfg.BandwidthBps) * float64(time.Second)))
@@ -200,6 +243,9 @@ func newRelay(t *testing.T, libPort, goPort uint16, toGo, toLib pathConfig, seed
 	r.toLib = &relayPath{cfg: toLib, out: r.sideA, dst: loopback(libPort),
 		rng: rand.New(rand.NewSource(seed + 1)), wake: make(chan struct{}, 1)}
 
+	if onNewRelay != nil {
+		onNewRelay(r)
+	}
 	pump := func(in *net.UDPConn, p *relayPath) {
 		defer r.wg.Done()
 		buf := make([]byte, 65536)
@@ -218,6 +264,10 @@ func newRelay(t *testing.T, libPort, goPort uint16, toGo, toLib pathConfig, seed
 	go func() { defer r.wg.Done(); r.toLib.deliver(r.done) }()
 	return r
 }
+
+// onNewRelay, when set, sees every relay before it starts forwarding: a
+// diagnostic can switch tracing on (relayPath.trace) and keep the relay.
+var onNewRelay func(*relay)
 
 // LibutpFacingPort is where libutp should send: the relay's side facing it.
 func (r *relay) LibutpFacingPort() uint16 { return uint16(r.sideA.LocalAddr().(*net.UDPAddr).Port) }

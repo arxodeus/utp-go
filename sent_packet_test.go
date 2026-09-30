@@ -370,6 +370,43 @@ func TestFastRetransmitHappensOncePerPacket(t *testing.T) {
 	}
 }
 
+// Fast retransmission works whatever the first sequence number is.
+//
+// A libutp initiator gets this wrong. utp_create_socket sets seq_nr = 1 and
+// fast_resend_seq_nr = seq_nr (utp_internal.cpp:2611-2615); utp_connect then
+// replaces seq_nr with a random number (:2768) and leaves fast_resend_seq_nr
+// at 1. Acknowledgements advance it only through a wrapping less-than
+// (:2186-2188), and when the random start is more than half the sequence
+// space past 1, 1 counts as ahead and it never moves -- so the connection
+// cannot fast-retransmit (:1537, :1560) until the numbers wrap round. The
+// accepting side sets it after choosing seq_nr (:2988-2989) and is correct.
+// Measured through the real-socket relay: every one of 61 stalls in which
+// libutp had the selective-ack evidence and did not resend came from such a
+// connection, and none from the other half (KNOWN-LIMITATIONS.md).
+//
+// This library starts fast_resend at the first sequence number in both roles,
+// which is what the accepting side of libutp does.
+func TestFastRetransmitFromAnyInitialSequenceNumber(t *testing.T) {
+	for _, initSeqNum := range []uint16{100, 32768, 40000, 65000, 65534} {
+		ctrl := newDefaultController(fromConnConfig(NewConnectionConfig()))
+		sent := newSentPacketsWithoutLogger(initSeqNum, ctrl)
+		data := []byte{0}
+		for i := 0; i < 8; i++ {
+			sent.OnTransmit(sent.NextSeqNum(), st_data, data, uint32(len(data)), time.Now())
+		}
+		// The first packet is missing; the next four arrive.
+		sack := NewSelectiveAck([]bool{true, true, true, true})
+		if _, _, err := sent.onAck(initSeqNum, sack, 10*time.Millisecond, time.Now()); err != nil {
+			t.Fatalf("init %d: %v", initSeqNum, err)
+		}
+		lost := sent.TakeLostPackets()
+		if len(lost) != 1 || lost[0].SeqNum != initSeqNum+1 {
+			t.Errorf("first sequence number %d: the hole at %d should be fast retransmitted, got %v",
+				initSeqNum, initSeqNum+1, describeLost(lost))
+		}
+	}
+}
+
 // One ack fast retransmits at most four packets, however many it reveals as
 // lost. libutp: "Re-send max 4 packets" (utp_internal.cpp:1605-1606).
 func TestFastRetransmitIsCappedPerAck(t *testing.T) {

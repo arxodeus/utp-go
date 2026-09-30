@@ -4236,9 +4236,53 @@ selective-ack bits reversed, every lossy case failed in both directions
 loopback interop tests passed, so it is the gate that loss-only interop
 defects have to get past.
 
-The observation, not investigated: on the lossy profiles libutp as the sender
-took 3.2-5.5 s to deliver 256 KB, in two clusters near 3.2 and 5.4 s, where
-this library as the sender took 1.0-2.2 s. That is the shape of whole
-one-second timeouts, which this library's classic-LEDBAT sender now avoids
-with its loss probe and libutp does not have; but nothing here traced it,
-and it is recorded as a timing, not a cause.
+**Traced: why libutp is the slower sender on these paths.** The first runs
+showed libutp taking 3.2-5.5 s to send 256 KB where this library took
+1.0-2.2 s. The relay now logs every datagram it is offered, with its type,
+sequence and acknowledgement numbers, advertised window, selective-ack
+bitmask, and whether it was dropped. Over twenty seeds per profile (each seed
+a different loss pattern, since the relay's losses follow the order packets
+arrive in):
+
+| sender | 5% loss, median | runs with a stall over 500 ms | bad path, median | runs with a stall |
+| --- | --- | --- | --- | --- |
+| libutp | 5.95 s | 20 of 20 | 4.85 s | 15 of 20 |
+| ours | 1.29 s | 2 of 20 | 2.50 s | 0 of 20 |
+| ours, loss probe off | 2.20-3.07 s | 11 of 20 | 2.27-2.59 s | 7-8 of 20 |
+
+None of it is the receiver. libutp sending to libutp through the same relay
+stalls on the same packets, and libutp sends into our receiver as it does
+into its own. It is three things libutp's sender does:
+
+1. **A lost fast retransmission waits for the timeout** -- a second, plus up
+   to one of libutp's 500 ms passes -- as on the LAN profile. Ten to
+   twenty-one such stalls per twenty runs. This library's classic-LEDBAT
+   sender recovers them with its loss probe, which is most of the gap at 5%
+   loss.
+2. **A libutp initiator often cannot fast-retransmit at all.** Selective
+   acks had shown three or more packets past the hole, which is libutp's own
+   rule for resending, and it did not resend: 23-24 stalls per twenty runs,
+   and zero for this library. libutp's debug log showed `fast_resend_seq_nr`
+   at 1 while sequence numbers were near 55243. `utp_create_socket` sets
+   `seq_nr = 1` and `fast_resend_seq_nr = seq_nr` (`utp_internal.cpp:
+   2611-2615`); `utp_connect` then randomises `seq_nr` (`:2768`) and leaves
+   `fast_resend_seq_nr` behind. Acknowledgements advance it through a wrapping
+   less-than (`:2186-2188`), so when the random start is more than half the
+   sequence space past 1 it never moves, and the resend tests (`:1537`,
+   `:1560`) always fail. The accepting side sets it after choosing `seq_nr`
+   (`:2988-2989`). Split by the SYN's sequence number, forty libutp-sender
+   runs: below 32768, a median of 4.31 s and no such stalls; above, 8.46 s
+   and 61 of them. So about half of all connections libutp initiates recover
+   every loss by timeout. This library starts it at the first sequence number
+   in both roles (`TestFastRetransmitFromAnyInitialSequenceNumber`, which
+   fails with libutp's initiator behaviour substituted). The conformance
+   harness never saw it: it scripts libutp's random numbers, and its seed,
+   7000, is in the half that works.
+3. **At close, the last packet waits for a timeout pass.** When the final
+   partial packet is still held by Nagle and the FIN is queued behind it,
+   libutp's ack path -- which flushes a held packet only when it is the one
+   packet outstanding (`:2247-2252`) -- sends neither, and both go on the
+   next 500 ms pass: 346-364 ms of silence, logged with libutp's own
+   receiver as with ours. (A first trace blamed our receiver for this; its
+   libutp-to-libutp control had not closed the stream, so it never queued a
+   FIN.)
