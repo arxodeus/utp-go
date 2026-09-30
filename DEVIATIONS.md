@@ -370,6 +370,14 @@ Measured, on a 512 KB transfer over the emulated network: 0.82 acks per data
 packet at 20 Mbps, 0.37 at 100 Mbps, 0.17 at 1 Gbps, against exactly 1.000
 before deferring was implemented.
 
+Over real sockets, against libutp as embedded by its bridge
+(`native/libutp.TestAckTurnaround`): at 10 Mb/s both ack about every packet
+(libutp 0.94-0.99, ours 1.00); at 100 Mb/s libutp 0.22-0.33 and ours
+0.51-0.70. The batching costs nothing in latency either way: the time from a
+data packet reaching the receiver's socket to the ack covering it leaving is
+a median of 50-180µs for both, and our p90 is within about 0.2 ms of libutp's
+with the same sender.
+
 Reason for not closing it: matching libutp's count means the socket
 accumulating datagrams and handing the connection a batch, which trades read
 latency for return-path packets, or a delayed-ack timer, which libutp does not

@@ -89,6 +89,30 @@ type relayPath struct {
 	// trace, when non-nil, records every datagram offered and whether it
 	// was dropped, for diagnosing a transfer after the fact.
 	trace *[]relayEvent
+	// delivered, when non-nil, records every datagram as it is written to
+	// its destination.
+	delivered *[]relayEvent
+}
+
+// parseRelayEvent reads the uTP header fields, and the selective ack if there
+// is one, out of a datagram.
+func parseRelayEvent(b []byte, at time.Time) relayEvent {
+	ev := relayEvent{At: at, Type: b[0] >> 4,
+		Seq: uint16(b[16])<<8 | uint16(b[17]), Ack: uint16(b[18])<<8 | uint16(b[19]), Len: len(b),
+		Wnd: uint32(b[12])<<24 | uint32(b[13])<<16 | uint32(b[14])<<8 | uint32(b[15])}
+	// Walk the extension chain for a selective ack (type 1).
+	for next, off := b[1], 20; next != 0 && off+2 <= len(b); {
+		typ, n := next, int(b[off+1])
+		next = b[off]
+		if off+2+n > len(b) {
+			break
+		}
+		if typ == 1 {
+			ev.Sack = append([]byte(nil), b[off+2:off+2+n]...)
+		}
+		off += 2 + n
+	}
+	return ev
 }
 
 // relayEvent is one offered datagram, as the relay saw it.
@@ -111,22 +135,8 @@ func (p *relayPath) offer(b []byte, now time.Time) {
 	p.stats.Offered++
 	var ev *relayEvent
 	if p.trace != nil && len(b) >= 20 {
-		*p.trace = append(*p.trace, relayEvent{At: now, Type: b[0] >> 4,
-			Seq: uint16(b[16])<<8 | uint16(b[17]), Ack: uint16(b[18])<<8 | uint16(b[19]), Len: len(b),
-			Wnd: uint32(b[12])<<24 | uint32(b[13])<<16 | uint32(b[14])<<8 | uint32(b[15])})
+		*p.trace = append(*p.trace, parseRelayEvent(b, now))
 		ev = &(*p.trace)[len(*p.trace)-1]
-		// Walk the extension chain for a selective ack (type 1).
-		for next, off := b[1], 20; next != 0 && off+2 <= len(b); {
-			typ, n := next, int(b[off+1])
-			next = b[off]
-			if off+2+n > len(b) {
-				break
-			}
-			if typ == 1 {
-				ev.Sack = append([]byte(nil), b[off+2:off+2+n]...)
-			}
-			off += 2 + n
-		}
 	}
 	if p.cfg.LossRate > 0 && p.rng.Float64() < p.cfg.LossRate {
 		p.stats.DroppedByLoss++
@@ -193,6 +203,11 @@ func (p *relayPath) deliver(done <-chan struct{}) {
 
 		for _, b := range due {
 			_, _ = p.out.WriteToUDP(b, p.dst)
+			if p.delivered != nil && len(b) >= 20 {
+				p.mu.Lock()
+				*p.delivered = append(*p.delivered, parseRelayEvent(b, time.Now()))
+				p.mu.Unlock()
+			}
 		}
 		timer.Reset(wait)
 		select {

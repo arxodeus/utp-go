@@ -70,6 +70,7 @@ than "verified".
 | RESET handling | Differential | Corpus, plus the rate limiting under flood |
 | Zero peer window | Differential | Corpus |
 | **Ack coalescing** | **Differential + measured** | libutp emits one ack per batch; we emitted one per packet. Now deferred, with the residual measured under load and recorded as a deviation |
+| Ack turnaround | **Interop, measured** | `native/libutp.TestAckTurnaround`: from the relay writing a data packet to the receiver's real socket to the relay reading the first ack that covers it, cumulatively or selectively, every sender against every receiver. Clean paths, three runs: at 10 Mb/s both receivers ack about every packet with a median of 60-140µs and a p99 of 0.2-0.45 ms; at 100 Mb/s, medians 50-180µs, and libutp batches harder (0.22-0.33 acks per data packet against our 0.51-0.70). The gate: with the sender fixed, our receiver's p90 within 1 ms of libutp's; delaying our flush by 1 ms fails it in all four comparisons (p90 2.7-3.2 ms against 0.12-0.56) and leaves libutp's rows unchanged |
 
 ## Sending
 
@@ -196,14 +197,13 @@ so it sent 288-byte packets. Both are written up in
   barrier participants, so the whole chain from wire to connection and back is
   synchronised and reply timing is measurable. `TestReplyInstantMatchesLibutp`
   finds both implementations answering at the instant the packet arrived.
-- **Ack latency, for a reason that is not about clocks.** Ack *count* is
-  compared, as a bound, because our batching is load-dependent where libutp's
-  is embedder-driven. Latency is not, and an injectable clock -- which now
-  exists -- does not unlock it: both implementations flush deferred acks when
-  something external says so, libutp when its embedder calls
-  `utp_issue_deferred_acks` and this library when an event-loop pass ends, so
-  the comparison would measure harness cadence rather than either
-  implementation. This bullet previously claimed the clock was the blocker.
+- **~~Ack latency.~~** Covered, over real sockets (the "Ack turnaround" row).
+  The objection here was that both implementations flush deferred acks when
+  something outside says so, so a test would time the harness. That holds on
+  a virtual clock, where the harness *is* the trigger; it does not over real
+  sockets, where each runs with its production trigger -- libutp's embedder
+  draining its socket and calling `utp_issue_deferred_acks`, as `utp.h` asks,
+  and this library's own event loop -- and both are timed on one clock.
 - **IPv6 through a kernel socket.** Everything above the socket is covered in
   memory (the IPv6 row above); the kernel's IPv6 socket layer -- socket
   options, dual-stack mapping -- needs a host with IPv6, which this one lacks.
