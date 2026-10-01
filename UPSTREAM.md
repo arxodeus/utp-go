@@ -1613,8 +1613,8 @@ this side by two unit tests, each of which fails with its half disabled.
 
 The controller gains `BytesInFlight` and `CongestionWindow`, the two halves of
 the old `BytesAvailableInWindow` that the rule needs separately. Libutp's
-Nagle check in the same loop is not ported; that is an existing, measured
-deviation.
+Nagle check in the same loop was not ported then; it is now (DEVIATIONS.md,
+"Nagle: libutp's rule, with an opt-out").
 
 ## PR 55 — the keep-alive leaves one interval after the last packet
 

@@ -68,17 +68,21 @@ func TestRead(t *testing.T) {
 		t.Errorf("First read failed, expected %d bytes, got %d", READ_LEN, read)
 	}
 
-	// Read remaining chunk of first write.
+	// The rest of the first write, and the second continues it: a read
+	// fills its buffer across writes, as libutp fills the last unsent packet
+	// (TestSendBufferReadSpansWrites). This test used to expect the read to
+	// stop at the end of the first write, which was the defect.
 	readBuf = make([]byte, READ_LEN)
 	read = buf.Read(readBuf)
-	if read != WRITE_LEN-READ_LEN || !bytes.Equal(readBuf[:WRITE_LEN-READ_LEN], writeOne[READ_LEN:]) {
-		t.Errorf("Second read failed, expected %d bytes, got %d", WRITE_LEN-READ_LEN, read)
+	want := append(append([]byte(nil), writeOne[READ_LEN:]...), writeTwo[:2*READ_LEN-WRITE_LEN]...)
+	if read != READ_LEN || !bytes.Equal(readBuf[:read], want) {
+		t.Errorf("Second read failed, expected %d bytes spanning both writes, got %d", READ_LEN, read)
 	}
 
-	// Read first chunk of second write.
+	// What is left of the second write.
 	read = buf.Read(readBuf)
-	if read != READ_LEN || !bytes.Equal(readBuf[:READ_LEN], writeTwo[:READ_LEN]) {
-		t.Errorf("Third read failed, expected %d bytes, got %d", READ_LEN, read)
+	if rest := 2*WRITE_LEN - 2*READ_LEN; read != rest || !bytes.Equal(readBuf[:read], writeTwo[2*READ_LEN-WRITE_LEN:]) {
+		t.Errorf("Third read failed, expected %d bytes, got %d", rest, read)
 	}
 
 	// Read with empty buffer returns zero.
@@ -153,5 +157,24 @@ func TestSendBufferDoesNotRetainOnPartialWrite(t *testing.T) {
 	got := sb.Read(out)
 	if string(out[:got]) != "01234567" {
 		t.Errorf("read back %q, want %q", out[:got], "01234567")
+	}
+}
+
+// A read fills its buffer across writes, as libutp fills the last unsent
+// packet before starting another (utp_internal.cpp:1013-1023).
+func TestSendBufferReadSpansWrites(t *testing.T) {
+	sb := newSendBuffer(1024)
+	for _, w := range []string{"abc", "defg", "hi"} {
+		sb.Write([]byte(w))
+	}
+	out := make([]byte, 6)
+	if n := sb.Read(out); string(out[:n]) != "abcdef" {
+		t.Errorf("first read %q, want %q", out[:n], "abcdef")
+	}
+	if n := sb.Read(out); string(out[:n]) != "ghi" {
+		t.Errorf("second read %q, want %q", out[:n], "ghi")
+	}
+	if n := sb.Read(out); n != 0 || !sb.IsEmpty() || sb.Pending() != 0 {
+		t.Errorf("third read %d bytes, empty %v, pending %d", n, sb.IsEmpty(), sb.Pending())
 	}
 }

@@ -85,8 +85,13 @@ func TestNothingIsSentIntoLessThanAPacketOfRoom(t *testing.T) {
 }
 
 // The control for both: a window with room for everything sends everything.
+//
+// With NoDelay: the send buffer holds 2048 bytes, so the third packet is a
+// 110-byte tail, which the Nagle rule holds behind the two before it, as
+// libutp's would (TestNagle*).
 func TestAWidePeerWindowSendsEveryPacket(t *testing.T) {
 	conn := drainTestConn(t, 0, TEST_BUFFER_SIZE)
+	conn.config.NoDelay = true
 	conn.mtu = newMtuSearch(uint32(conn.config.MaxPacketSize), time.Now())
 	p := conn.mtu.payloadSize()
 	conn.testWidenCongestionWindow(100 * p)

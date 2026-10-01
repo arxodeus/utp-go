@@ -177,9 +177,6 @@ consequence, or equivalent on the wire.
   receiver's socket to its acknowledgement leaving is 110-120 us here and
   60-70 us in libutp. The packet crosses three goroutines on the way in; libutp
   handles it on the thread that read it. No throughput cost has been measured.
-- *No Nagle:* many small writes become many small packets. Implementing it
-  showed no benefit on the workloads tried; the likely BitTorrent case, small
-  messages written faster than a round trip, was not among them.
 - *A discovered path MTU only lowers the ceiling:* capped at 1402, libutp's
   own default for IPv4, so about 6% of the packet is given up on a 1500-byte
   path (arithmetic, not a throughput
@@ -578,10 +575,10 @@ each delivery (`relaySpin`), and the figures above are on that relay.
 A FIN is acked immediately rather than deferred, matching libutp's direct
 `send_ack()` at `:2369-2370`.
 
-## No Nagle
+## Nagle: libutp's rule, with an opt-out
 
-libutp holds back a partial packet while anything else is in flight, and
-releases it when the next packet arrives:
+libutp holds back a partial packet while anything else is in its window, and
+later writes join it:
 
 	if (i != ((seq_nr - 1) & ACK_NR_MASK) ||
 	    cur_window_packets == 1 ||
@@ -589,47 +586,52 @@ releases it when the next packet arrives:
 	    send_packet(pkt);
 	}
 
-(`utp_internal.cpp:976-983`, with "flush Nagle" at `:2246-2252`.) This library
-sends whatever is in the send buffer when it composes packets.
+(`flush_packets`, `utp_internal.cpp:974-982`; the join is
+`write_outgoing_packet`, `:1013-1023`; the release when the window empties is
+"flush Nagle", `:2246-2252`.) `connection.processWrites` now applies the same
+rule: a packet short of a full one is not composed while anything is
+unacknowledged or composed ahead of it, and every acknowledgement brings the
+loop round again. Closing the write side releases it, as libutp's FIN does by
+queueing behind it.
 
-It was implemented, measured and reverted. The reasoning is worth keeping,
-because the case for it looked strong and was not.
+Two defects stood in the way, and the second is why this library's earlier
+attempt at the rule, measured and reverted, changed nothing:
 
-**What made it look necessary.** Counting datagrams for the same bytes on a
-50 Mbps path: 4000 writes of 20 bytes produced 4020 datagrams averaging 40
-bytes, where libutp moved the same payload in 58. That is a seventy-fold
-difference, and it is not a real comparison -- libutp's test driver takes a
-single `Write` and cannot express many small ones, so it was never asked to do
-the same thing. Comparing our own sender given one large write puts it at 881
-datagrams of 1210 bytes, so the packetisation is fine; what differs is the
-write pattern.
+- No rule at all: a short write behind an unacknowledged packet went out at
+  once.
+- The send buffer handed out at most one write per packet
+  (`sendBuffer.Read`). A run of small writes queued together still became one
+  packet each, and a bulk writer whose writes were not a multiple of the
+  packet size left a short packet at the end of every write. libutp fills the
+  last unsent packet before starting another.
 
-**Why the implementation changed nothing.** With libutp's rule in place the
-hold fired 623 times out of 4000 writes, and the packet count did not move.
-The other 3377 writes had *nothing else outstanding*, which is exactly the case
-Nagle is defined to send immediately (`cur_window_packets == 1`). An
-application that waits for each write to be accepted before issuing the next is
-never writing fast enough for Nagle to have anything to coalesce, and that is
-what this library's `Write` does.
+Measured against libutp over real sockets (`native/libutp.TestSmallWritesAgainstLibutp`):
+2,000 messages of 100 bytes written every 0.5 ms over a 20 ms round trip, to
+this library's receiver.
 
-Making it bite would mean holding the bytes until an acknowledgement arrives
-rather than releasing them on the next pass of the write path. That was tried.
-It still did not coalesce, and it introduces a way for buffered data to sit
-unsent if no acknowledgement comes -- a stall of exactly the kind this
-repository has been bitten by before.
+| Sender | Data packets | Message latency, median | 99th percentile |
+| --- | --- | --- | --- |
+| libutp | 139 | 15.3 ms | 44.6 ms |
+| this library | 149 | 14.7 ms | 20.4 ms |
+| this library, `NoDelay` | 1,921-1,925 | 11.0 ms | 19.0-19.5 ms |
+| this library before | 2,000 | 10.9 ms | 19.9 ms |
 
-**What it cost.** The benchmark suite at five repeats came back consistently
-lower: broadband 6.19 against 6.40 Mbps, shallow queue 4.54 against 4.77, long
-transfer 8.73 against 8.85, two flows 6.42 against 6.63. Several of those sit
-outside the previous run-to-run ranges. A run of `FuzzDifferentialResponder`
-also failed during that suite and did not reproduce afterwards; unattributed,
-but not dismissed either.
+The remaining difference in packets is packet size: libutp's payloads are
+about 1,400 bytes from the start, ours about 1,300 while the MTU search runs
+("The MTU search starts at the midpoint"). libutp's latency includes its
+bridge's loop, which can wait up to 20 ms for its socket before it hands a
+write to libutp, so the latency columns are not a comparison of the two
+libraries.
 
-So: a change with no measured benefit, a measured cost, and an unexplained
-differential failure alongside it. Reverted. If a workload ever appears where
-this library writes faster than a round trip -- which a BitTorrent peer sending
-many small protocol messages plausibly does -- this is worth revisiting, with
-that workload as the gate.
+`ConnectionConfig.NoDelay` turns the rule off, as `TCP_NODELAY` does, for an
+application that would rather have each message sooner than fewer packets.
+
+A FIN is not held by the rule here. libutp's is a packet with no payload, so
+its Nagle check holds it until everything before it is acknowledged; ours goes
+out as soon as the data before it has been sent, and the peer learns of the
+end of the stream up to a round trip sooner. Not measured against libutp: its
+driver's window of one packet holds the data before the FIN in the corpus,
+which hides the difference.
 
 ## Close waits; libutp's does not
 

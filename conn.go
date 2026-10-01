@@ -179,6 +179,19 @@ type ConnectionConfig struct {
 	// from the reference implementation -- see DEVIATIONS.md and
 	// BENCHMARKS.md for what it changes and what it measures.
 	CongestionAlgorithm CongestionAlgorithm
+	// NoDelay sends a partial packet as soon as the window allows, as
+	// TCP_NODELAY does. By default a connection follows libutp's Nagle rule
+	// (flush_packets, utp_internal.cpp:974-982): a packet smaller than a
+	// full one waits while anything else is unacknowledged, and later writes
+	// join it, until it fills, everything before it is acknowledged, or the
+	// write side closes.
+	//
+	// Measured against libutp, 2,000 messages of 100 bytes written every
+	// 0.5 ms over a 20 ms round trip: with the rule, both send them in about
+	// 140 packets; with NoDelay, 2,000 packets, and each message arrives
+	// sooner -- a median of 10.9 ms against 15.3 ms, a 99th percentile of
+	// 19.9 ms against 44.8 ms.
+	NoDelay bool
 }
 
 func NewConnectionConfig() *ConnectionConfig {
@@ -292,6 +305,11 @@ type connection struct {
 	// Without it a half-close would end the moment its FIN came back, which is
 	// the opposite of the point.
 	closeRequested bool
+	// writeShut records that the application has closed the write side, so
+	// nothing more will join a packet the Nagle rule is holding back. libutp
+	// queues its FIN behind the held packet, which is then no longer the last
+	// and goes out (utp_close, utp_internal.cpp:3232-3247; flush_packets).
+	writeShut bool
 
 	// readShutdown records that the application has finished reading, while
 	// the connection carries on.
@@ -1079,6 +1097,10 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		}
 		if (stream.shutdown.Load() || stream.writeClosed.Load()) &&
 			c.state.stateType != ConnClosed {
+			if !c.writeShut {
+				c.writeShut = true
+				c.processWrites(c.now())
+			}
 			c.shutdown()
 			// And re-check: shutdown may have just sent the FIN that finishes
 			// this connection, and no packet need ever arrive to notice.
@@ -1538,6 +1560,15 @@ func (c *connection) processWrites(now time.Time) {
 			break
 		}
 		n := minUint32(uint32(c.state.SendBuf.Pending()), packetSize)
+		// libutp's Nagle rule (flush_packets, utp_internal.cpp:974-982): the
+		// last packet waits while it is short of a full one and anything is
+		// ahead of it in the window -- sent and unacknowledged, or composed in
+		// this pass -- and what is written next joins it. The acknowledgement
+		// that empties the window releases it, as libutp's "flush Nagle" does
+		// (:2246-2252): every acknowledgement brings this loop round again.
+		if n < packetSize && !c.config.NoDelay && !c.writeShut && outstanding+len(payloads) > 0 {
+			break
+		}
 		data := make([]byte, n)
 		n = uint32(c.state.SendBuf.Read(data))
 		payloads = append(payloads, data[:n])

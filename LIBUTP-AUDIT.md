@@ -132,6 +132,7 @@ libutp it was, and the tests named are what stands behind each verdict.
 | libutp | Ours | Verdict |
 | --- | --- | --- |
 | `is_full` | window checks in `processWrites`, `finFits` | Matched; the packet cap was N1 |
+| `flush_packets`: the Nagle check (`:974-982`) | the hold in `processWrites` | Was absent (recorded as "No Nagle"); now matched for data, with `NoDelay` to turn it off. Our FIN is not held by it (DEVIATIONS.md, "Nagle: libutp's rule, with an opt-out") |
 | `check_timeouts`: MTU probe branch | `onTimeout` | Fixed (N4) |
 | `check_timeouts`: `CS_SYN_RECV` destroyed at the first timeout | acceptor ignores it | Open (N5) |
 | `check_timeouts`: give up at the fifth timeout, two for a SYN | `maxConsecutiveTimeouts`, `MaxConnAttempts` | Matched; the SYN count is a deviation ("`MaxConnAttempts` counts transmissions") |
@@ -209,7 +210,7 @@ libutp it was, and the tests named are what stands behind each verdict.
 | FIN acknowledged in full: `fin_sent_acked`, destroy if close was requested | `updateClosingState` | Matched (close corpus, netem close tests) |
 | `fast_resend_seq_nr` advanced with the cumulative acknowledgement | `OnAckNum` | Matched |
 | `ack_packet` loop; window shrunk past selectively acknowledged packets | `onAck` | Matched |
-| Nagle flush of a lone unsent packet (`:2237-2245`) | none | Deviation: "No Nagle" |
+| Nagle flush of a lone unsent packet (`:2237-2245`) | every acknowledgement runs `processWrites`, which composes a held packet once nothing is ahead of it | Matched (DEVIATIONS.md, "Nagle: libutp's rule, with an opt-out") |
 | fast timeout-retry (`:2247-2276`), before the selective ack | `onFastTimeout`, before `retransmitLostPackets` | Matched in effect: the same packet goes once, in the same order |
 | selective ack (`:2289`) | `onAck`, `TakeLostPackets` | Matched, and N10 |
 | writable again when the window drops below full, for any packet type (`:2302-2308`) | `writable` channel | Fixed (N25): ours woke only for ST_STATE. A first reading of this row said "matched in effect"; the two-way measurement for N13 is what showed otherwise |
@@ -250,7 +251,7 @@ libutp it was, and the tests named are what stands behind each verdict.
 
 | libutp | Ours | Verdict |
 | --- | --- | --- |
-| `utp_writev`: refused outside `CS_CONNECTED` or after the FIN; queued while `!is_full(size)`; small writes join the last unsent packet; `CS_CONNECTED_FULL` when full | `Write`, `WriteV`, send buffer, `processWrites` | Matched in effect: what goes on the wire follows `flush_packets`, which needs a whole packet of room (`TestNothingIsSentIntoLessThanAPacketOfRoom`). `WriteV`'s blocking and the 1024-buffer limit are recorded deviations |
+| `utp_writev`: refused outside `CS_CONNECTED` or after the FIN; queued while `!is_full(size)`; small writes join the last unsent packet; `CS_CONNECTED_FULL` when full | `Write`, `WriteV`, send buffer, `processWrites` | Matched in effect: what goes on the wire follows `flush_packets`, which needs a whole packet of room (`TestNothingIsSentIntoLessThanAPacketOfRoom`). Small writes did not join: the send buffer gave each packet one write at most, found when the Nagle rule changed nothing; fixed (`TestSendBufferReadSpansWrites`, `TestInitiatorNagle`). `WriteV`'s blocking and the 1024-buffer limit are recorded deviations |
 | `utp_read_drained` | `onReadDrained` | Matched, measured (KNOWN-LIMITATIONS.md, "The M4b sweep") |
 | `utp_issue_deferred_acks` | `flushAck` once the socket read that brought the data has been handed out (`UdpConn.readBatch` reads until the socket would block, as libutp's embedder does) | Matched; letting an acknowledgement wait for more packets is a recorded deviation |
 | `utp_check_timeouts`: 500 ms pass, `RST_INFO_TIMEOUT` expiry, sockets destroyed | timers, `utp_socket.go` | Deviation: "Timeouts act when due"; reset bookkeeping matched (flood corpus) |

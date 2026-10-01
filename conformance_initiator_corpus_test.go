@@ -379,3 +379,49 @@ func TestInitiatorWriteFlowsWithoutZeroWindow(t *testing.T) {
 		},
 	})
 }
+
+// initiatorAckOf builds a bare ST_STATE from the peer acknowledging our
+// packets up to seq.
+func initiatorAckOf(tsMicros uint32, seq uint16) []byte {
+	return NewPacketBuilder(st_state, initiatorConnSeed, tsMicros, corpusWindow, initiatorFirstInOrder).
+		WithAckNum(seq).Build().Encode()
+}
+
+// Short writes behind an unacknowledged packet, against libutp: the second
+// waits, the third joins it, and the acknowledgement of the first sends both
+// as one packet. Every step is compared packet for packet, bodies included.
+//
+// libutp holds the second because its window starts at one packet
+// (utp_internal.cpp:2567) and is_full charges a whole packet (:933-936); it
+// would hold it with an open window too, by its Nagle rule (flush_packets,
+// :974-982). Either way the third write joins the unsent packet
+// (write_outgoing_packet, :1013-1023). This library's window starts at two
+// packets, so here it is the Nagle rule that holds the second
+// (TestNagleHoldsAShortPacketBehindAnother isolates it).
+//
+// Before this library had the rule, the second and third writes went out at
+// once; without the send buffer reading across writes, the packet released
+// at the end carried "second" alone.
+func TestInitiatorNagle(t *testing.T) {
+	runInitiatorCorpus(t, []step{
+		{name: "peer answers the SYN", injectRaw: initiatorSynAck(), wantNoEmission: true},
+		{name: "a short write with nothing in flight leaves at once", write: []byte("first")},
+		{name: "the next waits behind it", write: []byte("second"), wantNoEmission: true},
+		{name: "and the one after joins it", write: []byte("third"), wantNoEmission: true},
+		{
+			name:      "the acknowledgement of the first sends both as one packet",
+			injectRaw: initiatorAckOf(300000, initiatorConnSeed+1),
+		},
+	})
+}
+
+// The control for TestInitiatorNagle: with the first packet acknowledged
+// before the next write, nothing is in flight and the write leaves at once.
+func TestInitiatorNagleNothingInFlight(t *testing.T) {
+	runInitiatorCorpus(t, []step{
+		{name: "peer answers the SYN", injectRaw: initiatorSynAck(), wantNoEmission: true},
+		{name: "first write", write: []byte("first")},
+		{name: "acknowledged", injectRaw: initiatorAckOf(300000, initiatorConnSeed+1), wantNoEmission: true},
+		{name: "the next write leaves at once", write: []byte("second")},
+	})
+}

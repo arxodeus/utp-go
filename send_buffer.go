@@ -66,25 +66,27 @@ func (sb *sendBuffer) Write(data []byte) int {
 	return n
 }
 
+// Read fills buf from the front of the buffer, across as many writes as it
+// takes, and reports how much it copied.
+//
+// It used to stop at the end of the write it started in, so a packet never
+// held bytes from two writes. libutp fills the last unsent packet before it
+// starts another (write_outgoing_packet, utp_internal.cpp:1013-1023): a run of
+// small writes queued together becomes full packets, and a bulk writer whose
+// writes are not a multiple of the packet size does not leave a short packet
+// at the end of every one.
 func (sb *sendBuffer) Read(buf []byte) int {
-	if len(buf) == 0 {
-		return 0
+	n := 0
+	for n < len(buf) && len(sb.pending) > 0 {
+		data := sb.pending[0]
+		k := copy(buf[n:], data[sb.offset:])
+		n += k
+		if sb.offset+k == len(data) {
+			sb.offset = 0
+			sb.pending = sb.pending[1:]
+		} else {
+			sb.offset += k
+		}
 	}
-
-	if len(sb.pending) == 0 {
-		return 0
-	}
-
-	data := sb.pending[0]
-	n := minInt(len(data)-sb.offset, len(buf))
-	copy(buf, data[sb.offset:sb.offset+n])
-
-	if sb.offset+n == len(data) {
-		sb.offset = 0
-		sb.pending = sb.pending[1:]
-	} else {
-		sb.offset += n
-	}
-
 	return n
 }
