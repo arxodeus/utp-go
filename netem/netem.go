@@ -66,6 +66,12 @@ type Config struct {
 	// overflow, which is loss caused by congestion.
 	LossRate float64
 
+	// DuplicateRate is the probability that a packet is delivered twice, in
+	// [0,1]. The copy is made past the bottleneck, as a link-layer
+	// retransmission or a misbehaving switch would make it: it takes no
+	// queue space and arrives just after the original.
+	DuplicateRate float64
+
 	// ReorderRate is the probability that a packet is displaced backwards in
 	// the delivery order by ReorderDelay, in [0,1].
 	ReorderRate float64

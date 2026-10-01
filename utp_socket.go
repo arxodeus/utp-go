@@ -504,6 +504,7 @@ func (s *UtpSocket) readLoop() {
 	// its own batch, which holds nothing back.
 	br, _ := s.socket.(batchReader)
 	var batch uint64
+	var failures int
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -531,13 +532,7 @@ func (s *UtpSocket) readLoop() {
 							batch: batch, batchEnd: i == len(dgs)-1}
 					}
 				}
-				if netutil.IsTemporaryError(err) {
-					s.logger.Error("Temporary UDP read error", "err", err)
-					continue
-				} else if err != nil {
-					if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
-						s.logger.Error("UDP read error", "err", err)
-					}
+				if s.readFailed(err, &failures) {
 					return
 				}
 				continue
@@ -549,17 +544,13 @@ func (s *UtpSocket) readLoop() {
 			if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
 				s.logger.Debug("read data from base socket", "n", n, "from", from)
 			}
-			if netutil.IsTemporaryError(err) {
-				// Ignore temporary read errors.
-				s.logger.Error("Temporary UDP read error", "err", err)
-				continue
-			} else if err != nil {
-				// Shut down the loop for permanent errors.
-				if !errors.Is(err, io.EOF) {
-					s.logger.Error("UDP read error", "err", err)
+			if err != nil {
+				if s.readFailed(err, &failures) {
+					return
 				}
-				return
+				continue
 			}
+			failures = 0
 			dstBuf := make([]byte, n)
 			copy(dstBuf, buf[:n])
 			if barrier != nil {
@@ -570,6 +561,46 @@ func (s *UtpSocket) readLoop() {
 		}
 
 	}
+}
+
+// maxConsecutiveReadErrors is how many read errors in a row the socket
+// tolerates before it gives up and closes. go-libutp, go-utp's pure Go port
+// and rust-utp all use 100, for the same reason: some platforms report errors
+// on a UDP socket that do not mean it is finished.
+const maxConsecutiveReadErrors = 100
+
+// readFailed handles a read error, and reports whether the read loop should
+// stop. failures counts the errors since the last successful read.
+//
+// The loop used to stop at the first error that did not say it was temporary,
+// and leave the socket open. Nothing read from it again: every connection on
+// it retransmitted into silence until it timed out, new dials and accepts
+// waited out their contexts, and nothing told the application why. Now a run
+// of errors is tolerated, and a socket that cannot read closes, so everything
+// waiting on it fails at once with ErrClosed-shaped errors instead.
+func (s *UtpSocket) readFailed(err error, failures *int) bool {
+	if err == nil {
+		*failures = 0
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) || s.ctx.Err() != nil {
+		return true
+	}
+	*failures++
+	if netutil.IsTemporaryError(err) {
+		s.logger.Debug("temporary UDP read error", "err", err, "consecutive", *failures)
+	} else {
+		s.logger.Warn("UDP read error", "err", err, "consecutive", *failures)
+	}
+	if *failures < maxConsecutiveReadErrors {
+		return false
+	}
+	s.logger.Error("too many consecutive read errors, closing the socket",
+		"err", err, "consecutive", *failures)
+	// In the background: Close waits for this loop's peers to settle, and
+	// this loop is one of the things it tears down.
+	go s.Close()
+	return true
 }
 
 func (s *UtpSocket) writeLoop() {
@@ -784,7 +815,11 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) chan *stre
 	// Handle incoming packets
 	packetPtr, err := DecodePacket(incomingRaw.payload)
 	if err != nil {
-		s.logger.Warn("Unable to decode uTP packet", "peer", incomingRaw.peer, "err", err)
+		// Not uTP, or not well formed. Ordinary on a port shared with
+		// another protocol -- go-libutp, go-utp and rust-utp all hand such
+		// datagrams on rather than complain -- and anyone can send them, so
+		// a warning per datagram is a way to flood the log.
+		s.logger.Debug("Unable to decode uTP packet", "peer", incomingRaw.peer, "err", err)
 		return nil
 	}
 

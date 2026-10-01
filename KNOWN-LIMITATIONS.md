@@ -4396,3 +4396,46 @@ at 1% loss, each verified, and fails with any one of the three undone (the
 first two as a timeout or a panic, the third as a stall). libutp sent 101 MB,
 70,000 packets, to this library's receiver over real sockets without error.
 
+## Three defects found by reading anacrolix's uTP implementations
+
+go-libutp (the cgo wrapper this repository's interop tests drive), go-utp
+(a pure Go port of libutp), old-go-utp and rust-utp (a pure Rust port) were
+read for anything they handle that this library does not.
+
+- **A dial answered with a reset waited out its context.** `reset` closed
+  the connection but did not tell the waiting `Connect`, which the timeout
+  and ICMP paths both did; measured, 5 s, the test's own limit, for a
+  failure libutp reports at once. It also now reports the failure as
+  refused, which libutp intends and cannot reach (DEVIATIONS.md).
+- **One read error stopped the socket reading, silently.** The read loop
+  returned at the first error that did not say it was temporary, and left
+  the socket open: every connection on it retransmitted into silence and a
+  dial took 21 s to time out. The references all tolerate a run of 100 and
+  then close the socket; so does this one now (`readFailed`,
+  `netem.TestSocketReadsOnAfterAReadError`, `TestSocketThatCannotReadCloses`).
+- **Every datagram that did not decode was logged as a warning.** Ordinary
+  on a port shared with another protocol, which all four hand on, and a way
+  for anyone to flood the log. Now debug.
+
+Checked and found not to apply:
+
+- go-libutp v1.5.1 bounds the delay sample a peer can send in `reply_micro`,
+  because at half the 32-bit space libutp's average reaches -2^31 and an
+  assertion aborts the process. This library has no assertion there, and
+  the one int32 negation that can wrap does so to both averages alike, so
+  the slope is unaffected. A peer can still steer the drift estimate, which
+  slows only what this library sends to that peer -- as advertising a small
+  window would.
+- go-libutp v1.5.0 fixed writes on a freshly accepted connection hanging
+  until the dialer sent data. An acceptor here that writes first delivered
+  65,000 bytes in 170 ms.
+- The out-of-bounds selective-ack read rust-utp and go-utp mention is
+  guarded in the libutp vendored here (`bits >= 0`), and the packet it
+  covers, the one after the acknowledgement number, is in this library's
+  loss detection too.
+- Packet duplication, which go-utp's interop suite applies: netem now has
+  `Config.DuplicateRate`. At 10% both ways this library sent 2 MB at
+  7.62-7.68 Mbps with no retransmission
+  (`TestDuplicatedPacketsCauseNoRetransmission`), against libutp's
+  6.65-7.48.
+

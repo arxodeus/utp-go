@@ -3531,10 +3531,26 @@ func (c *connection) onFin(seqNum uint16, data []byte) error {
 func (c *connection) onReset() {
 	c.logger.Warn("RESET from remote")
 
-	// If the connection is not already closed or reset, then reset the connection
-	if c.state.stateType != ConnClosed {
-		c.reset(ErrReset)
+	if c.state.stateType == ConnClosed {
+		return
 	}
+	// A reset answering our SYN is a refusal: nothing on the other end will
+	// take the connection. libutp means to say so --
+	//
+	//	if (conn->close_requested) conn->state = CS_DESTROY;
+	//	else conn->state = CS_RESET;
+	//	const int err = (conn->state == CS_SYN_SENT) ? UTP_ECONNREFUSED : UTP_ECONNRESET;
+	//	                                        (utp_internal.cpp:2865-2870)
+	//
+	// -- but it overwrites the state before testing it, so the refusal is
+	// unreachable and every reset reads as one. go-utp's pure Go port
+	// corrects the same line. Its ICMP path, which tests the state first
+	// (onICMPUnreachable), already distinguished the two here.
+	err := ErrReset
+	if c.state.stateType == ConnConnecting && c.endpoint.Type == Initiator {
+		err = ErrConnRefused
+	}
+	c.reset(err)
 }
 
 // onCloseRead applies libutp's read_shutdown: from here on, what arrives is
@@ -3693,6 +3709,20 @@ func (c *connection) reset(err error) {
 		}
 	}
 
+	// A Connect still waiting for the handshake learns why it failed. This
+	// did not: a SYN answered with a reset closed the connection and left
+	// the dial to wait out its own context, where libutp reports the error
+	// at once (utp_call_on_error, utp_internal.cpp:2870). The timeout and
+	// ICMP paths already signalled it; see onICMPUnreachable. Only during the
+	// handshake: afterwards nobody waits on the channel, and its one slot may
+	// still hold the success already sent.
+	if c.state.stateType == ConnConnecting && c.state.connectedCh != nil {
+		select {
+		case c.state.connectedCh <- err:
+		default:
+		}
+		c.state.connectedCh = nil
+	}
 	c.state.stateType = ConnClosed
 	c.state.Err = err
 }

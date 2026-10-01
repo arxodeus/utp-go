@@ -337,11 +337,17 @@ func TestOnResetNonClosed(t *testing.T) {
 	}
 	conn := CreateTestConnection(endpoint)
 
-	// Test reset
+	// A reset answering our SYN: the dial was refused.
+	require.Equal(t, ConnConnecting, conn.state.stateType)
 	conn.onReset()
-
-	// Verify state
 	require.Equal(t, ConnClosed, conn.state.stateType, "expected state to be closed")
+	require.ErrorIs(t, conn.state.Err, ErrConnRefused,
+		"a reset answering our SYN is a refusal; libutp means to say so and cannot (utp_internal.cpp:2865-2870)")
+
+	// Once connected, a reset is a reset.
+	conn = CreateTestConnection(endpoint)
+	conn.state.stateType = ConnConnected
+	conn.onReset()
 	require.ErrorIs(t, conn.state.Err, ErrReset, "expected error %v, got %v", ErrReset, conn.state.Err)
 }
 

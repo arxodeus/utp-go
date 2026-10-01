@@ -268,6 +268,15 @@ accepted:
 		dst:        dst,
 	}
 	heap.Push(&l.pending, item)
+	if cfg.DuplicateRate > 0 && l.rng.Float64() < cfg.DuplicateRate {
+		l.seq++
+		dup := *item
+		dup.seq = l.seq
+		dup.arriveAt = arriveAt.Add(time.Microsecond)
+		dup.payload = append([]byte(nil), payload...)
+		heap.Push(&l.pending, &dup)
+		l.stats.PacketsDuplicated++
+	}
 
 	l.stats.QueueDelaySum += queueDelay
 	l.stats.QueueDelayCount++

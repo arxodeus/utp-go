@@ -36,6 +36,8 @@ type Stats struct {
 	PacketsFragmented uint64
 
 	PacketsReordered uint64
+	// PacketsDuplicated counts the extra copies Config.DuplicateRate made.
+	PacketsDuplicated uint64
 
 	QueueDelaySum   time.Duration
 	QueueDelayCount uint64

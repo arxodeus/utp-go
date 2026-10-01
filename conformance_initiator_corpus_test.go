@@ -4,6 +4,7 @@ package utp_go
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -39,12 +40,14 @@ type initiatorRun struct {
 	// ConnectWithCid and read by the test, and a plain field would be a data
 	// race the race detector finds on the first run.
 	streamCh <-chan *UtpStream
-	stream   *UtpStream
-	conn     *scriptedConn
-	sock     *UtpSocket
-	cancel   context.CancelFunc
-	unpin    func()
-	start    time.Time
+	// dialErr carries ConnectWithCid's error, if it failed.
+	dialErr <-chan error
+	stream  *UtpStream
+	conn    *scriptedConn
+	sock    *UtpSocket
+	cancel  context.CancelFunc
+	unpin   func()
+	start   time.Time
 }
 
 func (r *initiatorRun) close() {
@@ -99,10 +102,11 @@ func newInitiatorRunMTU(t *testing.T, udpMTU uint16) (*initiatorRun, [][]byte, [
 
 	cid := NewConnectionId(conn.peer, initiatorConnSeed, initiatorConnSeed+1)
 	streamCh := make(chan *UtpStream, 1)
+	dialErr := make(chan error, 1)
 	go func() {
 		s, err := sock.ConnectWithCid(ctx, cid, cfg)
 		if err != nil {
-			t.Logf("our ConnectWithCid: %v", err)
+			dialErr <- err
 		}
 		streamCh <- s
 	}()
@@ -126,6 +130,7 @@ func newInitiatorRunMTU(t *testing.T, udpMTU uint16) (*initiatorRun, [][]byte, [
 	drv.ClearEmitted()
 
 	r.streamCh = streamCh
+	r.dialErr = dialErr
 	return r, ourSyn, libutpSyn
 }
 
@@ -291,16 +296,29 @@ func TestInitiatorDuplicateData(t *testing.T) {
 
 // A peer that answers our SYN with a reset rather than an acknowledgement --
 // what a closed port or a refusing client does.
+//
+// The dial fails as refused. libutp intends that and cannot reach it: it sets
+// CS_RESET before testing for CS_SYN_SENT (utp_internal.cpp:2865-2870), so
+// every reset reads as ECONNRESET.
 func TestInitiatorResetInsteadOfSynAck(t *testing.T) {
-	runInitiatorCorpus(t, []step{
-		{
-			name: "peer resets instead of answering",
-			injectRaw: NewPacketBuilder(st_reset, initiatorConnSeed, 150000, corpusWindow, 900).
-				WithAckNum(initiatorConnSeed).Build().Encode(),
-			// A reset is never answered with a reset; both sides go quiet.
-			wantNoEmission: true,
-		},
+	r, ourSyn, libutpSyn := newInitiatorRun(t)
+	defer r.close()
+	compareStep(t, -1, step{name: "our SYN"}, ourSyn, libutpSyn)
+	r.step(0, step{
+		name: "peer resets instead of answering",
+		injectRaw: NewPacketBuilder(st_reset, initiatorConnSeed, 150000, corpusWindow, 900).
+			WithAckNum(initiatorConnSeed).Build().Encode(),
+		// A reset is never answered with a reset; both sides go quiet.
+		wantNoEmission: true,
 	})
+	select {
+	case err := <-r.dialErr:
+		if !errors.Is(err, ErrConnRefused) {
+			t.Errorf("the dial failed with %v, want %v", err, ErrConnRefused)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the dial did not fail after its SYN was answered with a reset")
+	}
 }
 
 // The peer closes a connection we opened.

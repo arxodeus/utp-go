@@ -93,6 +93,14 @@ worse.
 **Better on reasoning.** libutp has a defect or a hazard here that was not
 copied. Not measured as an improvement.
 
+- *A reset answering our SYN fails the dial as refused:* libutp means to
+  report `UTP_ECONNREFUSED` there and cannot, because it sets `CS_RESET`
+  before testing for `CS_SYN_SENT` (`utp_internal.cpp:2865-2870`); every
+  reset reads as `ECONNRESET`. go-utp's pure Go port corrects the same line.
+  `TestInitiatorResetInsteadOfSynAck`.
+- *A socket that cannot read closes:* after 100 consecutive read errors, as
+  go-libutp, go-utp and rust-utp do, so everything waiting on it fails at
+  once. libutp leaves reading to its embedder.
 - *Closing the socket delivers what closed streams still hold:* libutp's
   embedder must keep its context pumping or lose the tail; `UtpSocket.Close`
   waits for it while the peer answers. Closing a stream returns at once in
