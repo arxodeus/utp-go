@@ -66,9 +66,14 @@ differs rather than silently skipping it:
 
 ## What it found
 
-### Retransmission deadlines drift later with each backoff
+### Retransmission deadlines drifted later with each backoff
 
-**Recorded, not fixed.** The first exact comparison of *when* this
+**Fixed.** The wheel now places a timer by its deadline against its own tick
+schedule (`timeWheel.put`), and the same comparison reads 3.0s and 9.0s;
+`TestSynRetransmissionInstantsMatchLibutp` allows one tick, not one per
+retransmission. What follows is the finding as it was recorded.
+
+The first exact comparison of *when* this
 implementation sends, against libutp read the same way, on an unanswered SYN:
 
 | | first | second |

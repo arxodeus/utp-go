@@ -908,11 +908,12 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	// Declared outside the loop so the fast-path `goto afterSelect` above does
 	// not jump over them. Reset on every pass by the select that assigns them.
 	var (
-		woke      wakeKind
-		wokeEvent *streamEvent
-		wokeWrite *queuedWrite
-		wokeOK    bool
-		wokeTimer *packet
+		woke       wakeKind
+		markedIdle bool
+		wokeEvent  *streamEvent
+		wokeWrite  *queuedWrite
+		wokeOK     bool
+		wokeTimer  *packet
 	)
 	for {
 		maxStreamEventLen = max(maxStreamEventLen, len(stream.streamEvents))
@@ -948,8 +949,21 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		// Tell a virtual clock this loop is about to block, so it knows the
 		// reaction to the last instant is complete and time may move. A real
 		// clock has no barrier and this is nil. See IdleBarrier.
-		if barrier != nil {
+		//
+		// Not while a wake this loop queued for itself is still waiting: an
+		// incoming packet that reopens the peer's window signals writable, and
+		// the data goes out on the next pass. Marked idle with that signal
+		// buffered, the select returned at once, but in between the clock saw
+		// every participant parked and nothing in flight, called the system
+		// quiet, and the packet went out after the step that should have
+		// seen it -- TestInitiatorZeroWindow, about once in 160 runs. Only
+		// this goroutine queues those wakes before reaching here, so their
+		// length is exact; a wake from another goroutine is that goroutine's
+		// to account for.
+		markedIdle = false
+		if barrier != nil && len(c.writable) == 0 && len(c.readable) == 0 {
 			barrier.MarkIdle()
+			markedIdle = true
 		}
 		// The select below only *receives*; every case body runs after it,
 		// through the switch. That shape is what lets a virtual clock be told
@@ -983,7 +997,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		case <-c.ctx.Done():
 			woke = wakeCtxDone
 		}
-		if barrier != nil {
+		if markedIdle {
 			barrier.MarkBusy()
 		}
 		switch woke {
@@ -2385,7 +2399,7 @@ func (c *connection) onLossProbe(now time.Time) {
 	resent := c.resendSentPacket(oldest, now)
 	// transmit armed the packet's timer a whole timeout from now; the
 	// timeout itself is due where it was, and the probe must not move it.
-	// (Re-arming for the same deadline can land a wheel tick later.)
+	// The wheel places a timer by its deadline, so this keeps its tick.
 	c.armRetransmit(resent, c.rtoDeadline.Sub(now))
 }
 

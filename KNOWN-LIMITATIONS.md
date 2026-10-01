@@ -1745,6 +1745,16 @@ fixed: making deadlines absolute is a change to the most defect-prone code in
 this library for an error of tens of milliseconds against multi-second
 timeouts, and the wheel's lateness is already a stated design choice.
 
+**Later: fixed.** It stopped being tens of milliseconds against multi-second
+timeouts in the tests that scale the timeout down: at a 200 ms base the drift
+was 25 ms a step, and `TestConformanceDataRetransmitSchedule`, then on the real
+clock, failed under CPU load with its first retransmission at 245-249 ms. The
+change turned out small and local to the wheel: it records when its next tick
+is due and places a timer on the first tick at or after the deadline, to
+libutp's millisecond (`timeWheel.put`). An unanswered SYN now retransmits at
+3.0s and 9.0s; the schedule tests run on the virtual clock and allow less than
+one tick, and fail the old wheel.
+
 ### The inbound path, closed
 
 The socket's read and event loops are barrier participants too, so the whole

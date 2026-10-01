@@ -165,24 +165,19 @@ func TestSynRetransmissionInstantsMatchLibutp(t *testing.T) {
 
 	n := min(len(ours), len(theirs))
 	for i := 0; i < n; i++ {
-		// The tolerance grows by one wheel tick per retransmission, and that
-		// is a property this measurement exposed rather than a fudge.
+		// Within one wheel tick, however many retransmissions in. The wheel
+		// fires a timer on the first tick at or after its deadline, never
+		// early, because firing early resends a packet the peer was still
+		// going to acknowledge; libutp compares the clock against an absolute
+		// rto_timeout (utp_internal.cpp:1147-1148).
 		//
-		// The retransmission wheel rounds a delay up to a whole tick and so
-		// fires up to one tick late -- deliberately, because firing early
-		// resends a packet the peer was still going to acknowledge. Each
-		// backoff then re-arms *relative to the moment the last one fired*,
-		// so the lateness carries forward and the next deadline inherits it.
-		// libutp cannot accumulate this: it compares the clock against an
-		// absolute rto_timeout (utp_internal.cpp:1147-1148) rather than
-		// trusting a timer, so each deadline is independent of the last.
-		//
-		// Measured here as 3.025s and 9.05s against libutp's 3.0s and 9.0s:
-		// one tick, then two. The drift is bounded by the number of
-		// retransmissions times the 25ms tick, one-directional, and in the
-		// safe direction. It is recorded in KNOWN-LIMITATIONS.md rather than
-		// hidden in a round number.
-		tolerance := time.Duration(i+1) * defaultRetransmitTickInterval
+		// This tolerance used to grow by a tick per retransmission. The wheel
+		// counted ticks from the moment of arming and added one, and each
+		// backoff re-arms just after the tick that fired it, so the lateness
+		// carried forward: 3.025s and 9.05s against libutp's 3.0s and 9.0s.
+		// It now places a timer by its deadline (timeWheel.put), and measures
+		// 3.0s and 9.0s.
+		tolerance := defaultRetransmitTickInterval
 		// libutp's own instants carry its driver's stepping granularity.
 		tolerance += 10 * time.Millisecond
 		diff := ours[i] - theirs[i]

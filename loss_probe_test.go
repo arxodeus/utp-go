@@ -18,9 +18,8 @@ func withoutLossProbe(t *testing.T) {
 // that has gone silent after the handshake: exactly one retransmission before
 // the first retransmission timeout, a probe timeout after the data went out,
 // and then libutp's timeout schedule -- the probe does not replace the
-// timeout, and does not move its deadline. (Re-arming the packet's timer for
-// the same deadline can land it one 25 ms wheel tick later, which the
-// schedule's tolerance absorbs; libutp's own check runs every 500 ms.)
+// timeout, and does not move its deadline: re-arming the packet's timer for
+// the same deadline lands it on the same wheel tick (timeWheel.put).
 func TestLossProbeSendsOnePacketBeforeTheTimeout(t *testing.T) {
 	const base = 200 * time.Millisecond
 	cfg := NewConnectionConfig()

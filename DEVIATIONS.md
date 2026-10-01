@@ -923,6 +923,18 @@ those fires on the first pass after its deadline: up to 500ms late. Ours are
 timers aimed at the deadline, fired by a wheel with a 25ms tick, so they fire
 within 25ms of it.
 
+Within 25ms of the deadline itself, not of the last firing. The wheel used to
+count ticks from the moment a timer was armed and add one, so as never to fire
+early, and a retransmission re-arms right after the tick that fired it: every
+backoff landed nearly a tick later than the last, 208, 633, 1458 and 3084 ms
+for deadlines at 200, 600, 1400 and 3000. It now places a timer by its
+deadline against its own tick schedule, to libutp's millisecond (`timeWheel.put`),
+and the same schedule measures 215, 615, 1415, 3015 on the virtual clock: one
+fixed offset to the tick, no growth (`TestConformanceDataRetransmitSchedule`,
+which allows less than one tick late and fails the old wheel on every
+retransmission after the first). Each libutp backoff, in a real embedder, starts
+from the pass that fired it, so its lateness grows by up to 500ms a step.
+
 Nothing is gained by reproducing the delay, and it is not a protocol rule: it
 is how often libutp's sockets are walked. The measurements that compare the
 two account for it (`libutpRTO` in `conformance_recovery_test.go` recovers

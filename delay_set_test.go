@@ -40,7 +40,8 @@ func (f *firing) count() int {
 }
 
 // An item must never fire before its delay. Firing early is what declared
-// packets lost before their ack could arrive.
+// packets lost before their ack could arrive. "Before" is to the millisecond,
+// libutp's resolution (wheelResolution).
 func TestTimeWheelNeverFiresEarly(t *testing.T) {
 	const interval = 20 * time.Millisecond
 	f := newFiring()
@@ -68,7 +69,7 @@ func TestTimeWheelNeverFiresEarly(t *testing.T) {
 			t.Errorf("%v (delay %v) never fired", k, want)
 			continue
 		}
-		if got < want {
+		if got < want-wheelResolution {
 			t.Errorf("%v fired at %v, before its %v delay", k, got, want)
 		}
 		// The wheel's resolution is one interval, plus scheduler slack.
@@ -122,7 +123,7 @@ func TestTimeWheelHandlesDelaysBeyondOneRevolution(t *testing.T) {
 	if !ok {
 		t.Fatalf("a %v delay never fired", long)
 	}
-	if got < long {
+	if got < long-wheelResolution {
 		t.Errorf("fired at %v, before the requested %v", got, long)
 	}
 	if got > long+revolution {
@@ -278,7 +279,7 @@ func TestTimeWheelNeverFiresEarlyWhenArmedMidCycle(t *testing.T) {
 				// f.at records the time since the recorder was created; the
 				// delay is owed from when the item was armed.
 				sinceArmed := got - armedAt
-				if sinceArmed < want {
+				if sinceArmed < want-wheelResolution {
 					t.Errorf("%v fired %v after arming, before its %v delay "+
 						"(armed %v into the tick cycle)", k, sinceArmed, want, offset)
 				}

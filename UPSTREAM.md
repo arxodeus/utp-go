@@ -1227,7 +1227,9 @@ With all three: bit-identical instants across five runs and five `-race` runs.
 — 3.025s and 9.05s against libutp's 3.0s and 9.0s — because the wheel rounds
 up to a whole tick and each backoff re-arms relative to the last firing, while
 libutp compares against an absolute `rto_timeout`. Bounded, one-directional,
-in the safe direction, and recorded rather than fixed.
+in the safe direction, and recorded rather than fixed -- until a test that
+measured on the real clock kept failing under load because of it. The wheel now
+places a timer by its deadline (`timeWheel.put`): 3.0s and 9.0s.
 
 **What it does not cover.** The socket's inbound event loop is not a
 participant, so the timing of a reply to an injected packet is not yet

@@ -28,26 +28,21 @@ import (
 // two different time scales.
 //
 // So: libutp's schedule is measured on its virtual clock, at its real 3000ms
-// and 1000ms defaults, on every run. Ours is measured on the real clock with
-// the base timeout scaled down to keep the test fast. The multiples must
+// and 1000ms defaults, on every run. Ours is measured on a virtual clock too,
+// with the base timeout scaled down. The multiples must
 // match, and the bases must be equal -- which together mean the absolute
 // schedules coincide. Both halves are asserted; neither is assumed.
 
-// scheduleTolerance is how far a measured retransmission may fall from its
-// expected multiple.
+// scheduleLateness is how late one of our retransmissions may be: less than
+// one tick of the retransmission wheel (defaultRetransmitTickInterval), which
+// is its resolution. On the virtual clock that is all the lateness there is.
 //
-// Ours is generous because our side runs on real timers under a test runner,
-// and because the retransmission wheel has a resolution of its own
-// (defaultRetransmitTickInterval, 25ms) which rounds every arming up to a
-// tick. That makes each retransmission systematically a little late -- at the
-// real 1000ms RTO it is under 2.5%, and at the scaled-down base used here it
-// is larger, which is why the base is chosen well above the tick interval.
-//
-// A 20% window absorbs that without admitting a schedule that backs off by a
-// different factor, which is what this is looking for: the gaps between
-// consecutive retransmissions double, so an off-by-one in the backoff is a
-// 100% error, not a 20% one.
-const scheduleTolerance = 0.20
+// This was a 20% tolerance while our side ran on real timers, and it hid two
+// things. Under CPU load the scheduler alone used it up (first retransmissions
+// at 245-249 ms against 200). And the wheel rounded every re-arm up by nearly
+// a tick, so each backoff landed 25 ms later than the last -- 208, 633, 1458,
+// 3084 ms -- which a percentage of a growing deadline never caught.
+const scheduleLateness = defaultRetransmitTickInterval
 
 // libutpRetransmitSchedule drives libutp until it stops retransmitting, and
 // returns the times (in milliseconds from the first transmission) at which it
@@ -207,7 +202,7 @@ func TestConformanceDataRetransmitSchedule(t *testing.T) {
 }
 
 // assertScheduleMatches checks that measured times land on the expected
-// multiples of a base, within tolerance.
+// multiples of a base: never early, and less than scheduleLateness late.
 func assertScheduleMatches(t *testing.T, what string, wantMultiples []int64, got []int64, baseMillis int64) {
 	t.Helper()
 	if len(got) < len(wantMultiples) {
@@ -221,22 +216,17 @@ func assertScheduleMatches(t *testing.T, what string, wantMultiples []int64, got
 		// Never early. A retransmission before the timeout has elapsed
 		// resends a packet the peer was still going to acknowledge, and
 		// libutp cannot do it: it compares the clock against rto_timeout
-		// before declaring a timeout (utp_internal.cpp:1147-1148). Asserted
-		// separately from the tolerance, which is two-sided.
-		if actual < expected*0.95 {
+		// before declaring a timeout (utp_internal.cpp:1147-1148). To its
+		// millisecond, which is also the resolution of these times.
+		if actual < expected-1 {
 			t.Errorf("%s retransmission %d was at %vms, before its %dx base = %vms. "+
 				"Retransmitting early resends packets the peer was still going to ack.",
 				what, i, actual, mult, expected)
 		}
-		delta := actual - expected
-		if delta < 0 {
-			delta = -delta
-		}
-		if delta/expected > scheduleTolerance {
-			t.Errorf("%s retransmission %d was at %vms; libutp's is at %dx the base = %vms "+
-				"(%.0f%% off, tolerance %.0f%%). Full schedule: ours %v, libutp's multiples %v",
-				what, i, actual, mult, expected, 100*delta/expected, 100*scheduleTolerance,
-				got, wantMultiples)
+		if late := actual - expected; late >= float64(scheduleLateness.Milliseconds()) {
+			t.Errorf("%s retransmission %d was at %vms; libutp's is at %dx the base = %vms, "+
+				"%vms late against a resolution of %v. Full schedule: ours %v, libutp's multiples %v",
+				what, i, actual, mult, expected, late, scheduleLateness, got, wantMultiples)
 		}
 	}
 }
@@ -246,6 +236,15 @@ func assertScheduleMatches(t *testing.T, what string, wantMultiples []int64, got
 //
 // The peer never acknowledges anything, so every emission after the first is a
 // retransmission.
+//
+// On a virtual clock (virtual_clock_test.go), as the corpus runs. This used to
+// run on the real clock, and the schedule it measured was the machine's as
+// much as the connection's: the retransmission wheel ticks every 25 ms, which
+// against the 200 ms base the callers scale libutp's down to is already 12.5%,
+// and the 20% tolerance left 15 ms for the scheduler. Under CPU load the first
+// retransmission came at 245-249 ms, failing 4 runs in 12 before any change
+// and once in each of two full runs of the package. The times come from each
+// packet's header, which the connection stamps from the same clock.
 func ourRetransmitSchedule(t *testing.T, cfg *ConnectionConfig, afterHandshake bool) (resends []int64, gaveUp time.Duration) {
 	t.Helper()
 
@@ -255,9 +254,13 @@ func ourRetransmitSchedule(t *testing.T, cfg *ConnectionConfig, afterHandshake b
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	clk := newVirtualClock(time.Unix(1, 0))
+	cfg.Clock = clk
+	cfg.NowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
+
 	conn := newScriptedConn()
 	defer conn.Close()
-	sock := WithSocket(ctx, conn, conformanceLogger())
+	sock := WithSocket(ctx, conn, conformanceLogger(), WithClock(clk))
 	defer sock.Close()
 
 	cid := NewConnectionId(conn.peer, initiatorConnSeed, initiatorConnSeed+1)
@@ -272,76 +275,60 @@ func ourRetransmitSchedule(t *testing.T, cfg *ConnectionConfig, afterHandshake b
 		connected <- stream
 	}()
 
-	// Wait for the SYN.
-	waitFor(t, 2*time.Second, func() bool { return conn.emittedCount() > 0 })
+	// The socket's wheel and its read, write and event loops, and the
+	// connection: the SYN has gone out once all five are parked.
+	clk.AwaitParticipants(5)
+	clk.AwaitQuiet()
+	start := clk.Now()
+
+	// Times since the first packet that matches, from the header stamps.
+	var startMicros uint32
+	var haveFirst bool
+	collect := func(match func(*packet) bool) {
+		for _, raw := range conn.takeEmitted() {
+			pkt, err := DecodePacket(raw)
+			if err != nil || !match(pkt) {
+				continue
+			}
+			if !haveFirst {
+				startMicros, haveFirst = uint32(pkt.Header.Timestamp), true
+				continue
+			}
+			since := time.Duration(wrappingSubUint32(uint32(pkt.Header.Timestamp), startMicros)) * time.Microsecond
+			resends = append(resends, since.Milliseconds())
+		}
+	}
+	const step = 5 * time.Millisecond
 
 	if !afterHandshake {
-		// Times come from each packet's own header, not from when this loop
-		// noticed it -- the same correction the data branch below already
-		// carries, and for the same reason.
-		//
-		// This branch kept the older measurement: it took its zero from
-		// time.Now() *after* waitFor had observed the SYN, and timed every
-		// retransmission from there. Both ends of that are the observer
-		// rather than the sender. waitFor polls, this loop sleeps 2ms a pass,
-		// and either can be descheduled, so the zero lands somewhere after
-		// the SYN actually went out and every measured gap is short by that
-		// much.
-		//
-		// Against the 200ms base this test scales libutp's 3000ms down to,
-		// a 19ms late start reads as a retransmission at 181ms -- early,
-		// which the schedule check rejects outright because a real
-		// implementation resending before its timeout would be resending
-		// packets the peer was still going to acknowledge. Measured on the
-		// unfixed test under CPU load: 3 failures in 25 runs, all of them
-		// the observer being late rather than the connection being early.
-		//
-		// Every transmission stamps time.Now().UnixMicro() as it goes out,
-		// so the header carries the send time exactly and the poll interval
-		// stops mattering.
-		wallStart := time.Now()
-		var startMicros int64
-		var haveFirst bool
-
-		collect := func() {
-			for _, raw := range conn.takeEmitted() {
-				pkt, err := DecodePacket(raw)
-				if err != nil {
-					continue
+		// Giving up ends the connection's event loop, which leaves the
+		// clock within the step that did it. ConnectWithCid reports it later,
+		// from a goroutine the clock does not wait for.
+		participants := clk.Participants()
+		any := func(*packet) bool { return true }
+		for clk.Now().Sub(start) < cfg.InitialTimeout*10 {
+			clk.Advance(step)
+			collect(any)
+			if clk.Participants() < participants {
+				gaveUp = clk.Now().Sub(start)
+				select {
+				case <-connectErr:
+				case <-connected:
+					t.Fatal("the connection ended, and connected")
+				case <-time.After(5 * time.Second):
+					t.Fatal("the connection ended, and ConnectWithCid did not return")
 				}
-				if !haveFirst {
-					startMicros = pkt.Header.Timestamp
-					haveFirst = true
-					continue
-				}
-				since := time.Duration(wrappingSubUint32(
-					uint32(pkt.Header.Timestamp), uint32(startMicros))) * time.Microsecond
-				resends = append(resends, since.Milliseconds())
-			}
-		}
-
-		deadline := wallStart.Add(cfg.InitialTimeout * 10)
-		for time.Now().Before(deadline) {
-			time.Sleep(2 * time.Millisecond)
-			collect()
-			select {
-			case err := <-connectErr:
-				// Anything emitted in the same window as the failure still
-				// counts; without this the last retransmission is lost
-				// whenever it lands alongside the give-up.
-				collect()
-				gaveUp = time.Since(wallStart)
-				_ = err
 				return resends, gaveUp
-			default:
 			}
 		}
-		collect()
 		return resends, 0
 	}
 
-	// Complete the handshake, then write data nobody will acknowledge.
-	conn.inject(initiatorSynAck())
+	// Complete the handshake, then write data nobody will acknowledge. The
+	// SYN-ACK comes back 10 ms later: a round-trip estimate of zero would
+	// leave the loss probe, which needs one, never armed.
+	clk.Advance(10 * time.Millisecond)
+	clk.AwaitReactionTo(func() { conn.inject(initiatorSynAck()) })
 	var stream *UtpStream
 	select {
 	case stream = <-connected:
@@ -350,79 +337,28 @@ func ourRetransmitSchedule(t *testing.T, cfg *ConnectionConfig, afterHandshake b
 	case <-time.After(5 * time.Second):
 		t.Fatal("connect never completed")
 	}
-
 	conn.takeEmitted()
 	writeCtx, writeCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer writeCancel()
-	go func() { _, _ = stream.Write(writeCtx, []byte("payload")) }()
+	clk.AwaitReactionTo(func() { _, _ = stream.Write(writeCtx, []byte("payload")) })
 
-	// Record retransmissions of the data packet specifically.
-	//
-	// Counting emissions would be wrong: the acknowledgement of the SYN-ACK
-	// can land in the same window and would be counted as the first
-	// retransmission, putting every subsequent time one step out. Matching on
-	// the data packet's own sequence number is exact.
-	// Times come from each packet's own header, not from when this loop
-	// noticed it.
-	//
-	// Every transmission stamps time.Now().UnixMicro() as it goes out (see
-	// connection.retransmit), so the header carries the send time exactly.
-	// Polling for emissions and timestamping the observation instead measures
-	// the observer: this loop sleeps 2ms between passes and is descheduled
-	// like anything else, so on a loaded machine the first data packet could
-	// be seen tens of milliseconds after it was sent. Against a 200ms base
-	// that is a 27% error, and it failed the 20% tolerance -- reporting a
-	// retransmission at 254ms that the sender had made on time.
-	type timed struct {
-		at  time.Duration
-		pkt *packet
-	}
-	type dataEmission struct {
-		seq  uint16
-		ts   int64
-		body int
-	}
-	var allData []dataEmission
-	var seen []timed
+	// Retransmissions of the data packet specifically: the acknowledgement of
+	// the SYN-ACK can go out alongside, and counting it would put every time
+	// one step out.
 	var firstDataSeq uint16
-	var haveFirst bool
-	var startMicros int64
-
-	deadline := time.Now().Add(cfg.MinTimeout * 20)
-	for time.Now().Before(deadline) {
-		time.Sleep(2 * time.Millisecond)
-		for _, raw := range conn.takeEmitted() {
-			pkt, err := DecodePacket(raw)
-			if err != nil {
-				continue
-			}
-			if pkt.Header.PacketType != st_data {
-				continue
-			}
-			allData = append(allData, dataEmission{seq: pkt.Header.SeqNum, ts: pkt.Header.Timestamp, body: len(pkt.Body)})
-			if !haveFirst {
-				firstDataSeq = pkt.Header.SeqNum
-				haveFirst = true
-				startMicros = pkt.Header.Timestamp
-				continue
-			}
-			if pkt.Header.SeqNum == firstDataSeq {
-				at := time.Duration(pkt.Header.Timestamp-startMicros) * time.Microsecond
-				seen = append(seen, timed{at: at, pkt: pkt})
-			}
+	var haveSeq bool
+	isFirstData := func(p *packet) bool {
+		if p.Header.PacketType != st_data {
+			return false
 		}
-	}
-
-	for _, s := range seen {
-		resends = append(resends, s.at.Milliseconds())
-	}
-	if len(allData) > 0 {
-		var b []string
-		base := allData[0].ts
-		for _, d := range allData {
-			b = append(b, fmt.Sprintf("seq=%d +%dms body=%d", d.seq, (d.ts-base)/1000, d.body))
+		if !haveSeq {
+			firstDataSeq, haveSeq = p.Header.SeqNum, true
 		}
-		t.Logf("all ST_DATA emissions: %v", b)
+		return p.Header.SeqNum == firstDataSeq
+	}
+	for clk.Now().Sub(start) < cfg.MinTimeout*20 {
+		clk.Advance(step)
+		collect(isFirstData)
 	}
 	return resends, 0
 }

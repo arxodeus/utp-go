@@ -25,8 +25,9 @@ type timeWheelItem[P any] struct {
 //     being processed next, so it fired somewhere in [0, interval) rather
 //     than at the requested time. With a one-second interval and a 500 ms
 //     RTO, that declared packets lost long before their ack could arrive --
-//     about 6% of them on a lossless path. A delay is now rounded up to a
-//     whole number of ticks and never fires early.
+//     about 6% of them on a lossless path. An item now fires on the first
+//     tick at or after its deadline: never early, and less than one interval
+//     late.
 //   - Range. Delays beyond slotNum*interval used to be clamped to that
 //     ceiling, so exponential RTO backoff stopped growing. The rounds
 //     counter removes the ceiling.
@@ -35,11 +36,17 @@ type timeWheelItem[P any] struct {
 // every slot was acceptable for a per-connection wheel but not for one shared
 // across a whole socket.
 type timeWheel[P any] struct {
-	stopped          chan struct{}
-	interval         time.Duration
-	slots            []map[any]*timeWheelItem[P]
-	index            map[any]int
-	ticker           Ticker
+	stopped  chan struct{}
+	interval time.Duration
+	slots    []map[any]*timeWheelItem[P]
+	index    map[any]int
+	ticker   Ticker
+	clk      Clock
+	// nextTick is when the tick that processes slots[current] is due: the
+	// last tick's scheduled time plus one interval. A ticker keeps its phase,
+	// so the next tick is never sooner than this, and later only if one was
+	// dropped. See put.
+	nextTick         time.Time
 	current          int
 	slotNum          int
 	handleExpireFunc expireFunc[P]
@@ -74,6 +81,10 @@ func newTimeWheelWithClock[P any](interval time.Duration, slotNum int, clk Clock
 	if clk == nil {
 		clk = RealClock
 	}
+	tw.clk = clk
+	// Read before the ticker exists, so that the first tick is no sooner than
+	// this says.
+	tw.nextTick = clk.Now().Add(interval)
 	tw.ticker = clk.NewTicker(interval)
 	// A virtual clock may not move while this goroutine is processing a tick.
 	// Most ticks expire nothing and so never reach a connection, which is
@@ -90,9 +101,30 @@ func newTimeWheelWithClock[P any](interval time.Duration, slotNum int, clk Clock
 // put schedules value to expire after delay. Re-putting an existing key
 // reschedules it.
 //
-// The delay is rounded up to a whole number of ticks, so an item never fires
-// early. It may fire up to one interval late, which is the wheel's
-// resolution.
+// The item goes in the slot whose tick is the first due at or after the
+// deadline, to the millisecond, so it never fires early and fires less than
+// one interval late. To the millisecond is libutp's resolution: its clock is
+// current_ms, a deadline is current_ms plus the timeout, and it fires once
+// (int)(current_ms - rto_timeout) >= 0 (utp_internal.cpp:997, :1147, :1389),
+// which can be up to a millisecond before the microsecond the deadline was
+// set for.
+//
+// It used to count whole intervals from now, rounded up, and add one more,
+// because the wheel ticks on its own schedule and "n ticks from now" could be
+// as little as n-1 intervals away. Placing it n intervals past the slot about
+// to be processed made it never early -- measured against libutp before that:
+// a SYN with a 200 ms timeout retransmitted at 186 ms -- but nearly a whole
+// interval late whenever the put came just after a tick. A retransmission
+// re-arms its timer from the tick that fired it, so every backoff landed one
+// 25 ms tick later than the last: a 200 ms timeout's retransmissions at 208,
+// 633, 1458 and 3084 ms against 200, 600, 1400 and 3000. Placing by deadline
+// to the microsecond did no better, because the re-arm runs a fraction of a
+// millisecond after the tick and its deadline lands just past the matching
+// one.
+// wheelResolution is how precisely a deadline is honoured: libutp's
+// millisecond. See put.
+const wheelResolution = time.Millisecond
+
 func (tw *timeWheel[P]) put(key any, value P, delay time.Duration) {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
@@ -102,32 +134,15 @@ func (tw *timeWheel[P]) put(key any, value P, delay time.Duration) {
 		delete(tw.index, key)
 	}
 
-	ticks := int(delay / tw.interval)
-	if delay%tw.interval != 0 {
-		ticks++
+	// Slot current+n is processed by a tick due at nextTick + n*interval or
+	// later, so the least n that reaches the deadline is safe.
+	ticks := 0
+	if wait := tw.clk.Now().Add(delay).Sub(tw.nextTick) - wheelResolution; wait > 0 {
+		ticks = int(wait / tw.interval)
+		if wait%tw.interval != 0 {
+			ticks++
+		}
 	}
-	if ticks < 1 {
-		// Never schedule into the slot about to be processed: that would fire
-		// immediately rather than after the requested delay.
-		ticks = 1
-	}
-
-	// The next tick processes slots[current], and it may be about to happen:
-	// the wheel ticks on its own schedule, not on ours, so the gap between
-	// now and the next tick is anywhere from nothing to a full interval.
-	//
-	// An item placed at current+n-1 is therefore fired on the n'th tick from
-	// now, which is between (n-1) and n intervals away -- up to a full
-	// interval *early*, contradicting the promise above. Placing it at
-	// current+n fires it on the (n+1)'th tick, between n and n+1 intervals
-	// away: never early, at most one interval late.
-	//
-	// Measured against libutp before the fix: a SYN with a 200ms timeout was
-	// retransmitted at 186ms. At the real 3000ms timeout the error is under
-	// 1%, but early is the wrong direction -- it resends a packet the peer
-	// was still going to acknowledge, and libutp cannot do it, because it
-	// compares the clock against rto_timeout rather than trusting a timer
-	// (utp_internal.cpp:1147-1148).
 	idx := (tw.current + ticks) % tw.slotNum
 	tw.slots[idx][key] = &timeWheelItem[P]{
 		key:    key,
@@ -161,7 +176,7 @@ func (tw *timeWheel[P]) run() {
 			tw.barrier.MarkIdle()
 		}
 		select {
-		case <-tw.ticker.C():
+		case at := <-tw.ticker.C():
 			if tw.barrier != nil {
 				tw.barrier.MarkBusy()
 			}
@@ -184,6 +199,7 @@ func (tw *timeWheel[P]) run() {
 				expired = append(expired, item)
 			}
 			tw.current = (tw.current + 1) % tw.slotNum
+			tw.nextTick = at.Add(tw.interval)
 			tw.mu.Unlock()
 
 			for _, item := range expired {

@@ -151,6 +151,15 @@ func (c *virtualClock) Unregister() {
 	c.mu.Unlock()
 }
 
+// Participants is how many participants are registered now. A connection's
+// event loop unregisters as it ends, inside the step that ended it, which
+// makes this the exact moment a connection gave up.
+func (c *virtualClock) Participants() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.registered
+}
+
 // MarkIdle implements IdleBarrier: the caller is about to block.
 func (c *virtualClock) MarkIdle() {
 	c.mu.Lock()
