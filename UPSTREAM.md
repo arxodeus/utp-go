@@ -497,7 +497,8 @@ ceiling is no longer what gets sent: the search starts at the midpoint, 988
 bytes -- *below* the old 1024 -- and grows only once a probe of that size has
 been acknowledged. An untested path gets a smaller packet than before. A path
 that drops every probe settles on 576. That argument is asserted as a test,
-not left as prose.
+not left as prose. (Later the start moved to the ceiling, libutp's: it was
+faster on healthy paths and no worse on any measured; DEVIATIONS.md.)
 
 Measured against the fixed 1024: +2.1% long transfer, +11% reordering, +2.6%
 two flows, flat elsewhere.

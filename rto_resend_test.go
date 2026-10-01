@@ -39,11 +39,20 @@ func rtoResendCase(t *testing.T, ackWindow uint32, belowOnePacket bool) {
 	clk, conn, stream, ctx := vc.clk, vc.conn, vc.stream, vc.ctx
 	_ = step
 
-	// Write more than the opening window holds, so there are packets in
-	// flight and more waiting behind them.
+	// Room for four packets. The opening window is two, and a packet is a
+	// full one from the start (the MTU search starts at its ceiling, as
+	// libutp's does), so on its own the window would hold two -- not enough
+	// for the resend loop below. Set while the connection is parked; the
+	// clock's barrier orders it before the loop next runs.
+	clk.AwaitQuiet()
+	stream.conn.testWidenCongestionWindow(4 * 4000)
+	clk.AwaitQuiet()
+
+	// Write more than the window holds, so there are packets in flight and
+	// more waiting behind them.
 	// The writer is not a participant in the virtual clock, so wait for its
 	// packets in real time rather than by advancing the clock.
-	go func() { _, _ = stream.Write(ctx, bytes.Repeat([]byte("x"), 8000)) }()
+	go func() { _, _ = stream.Write(ctx, bytes.Repeat([]byte("x"), 20000)) }()
 	waitFor(t, 5*time.Second, func() bool { return conn.emittedCount() > 0 })
 	clk.AwaitQuiet()
 	first := dataPackets(t, conn.takeEmitted())
@@ -106,12 +115,19 @@ func rtoResendCase(t *testing.T, ackWindow uint32, belowOnePacket bool) {
 		}
 	}
 	if !belowOnePacket {
-		// Everything given up at the timeout goes out before any new data:
-		// libutp's flush_packets walks its buffer oldest first.
-		if len(after) < len(first)-1 || seqOf(t, after[len(first)-2]) != oldest+uint16(len(first)-1) {
-			t.Fatalf("after the acknowledgement, sent %s; the %d packets still "+
-				"owed (%d..%d) go first", describePackets(after), len(first)-1,
-				oldest+1, oldest+uint16(len(first)-1))
+		// What the window lets out is what was given up at the timeout,
+		// oldest first, before any new data: libutp's flush_packets walks its
+		// buffer from the oldest. The timeout cut the window to two packets,
+		// so not all of it need fit.
+		if len(after) < 2 {
+			t.Fatalf("after the acknowledgement, sent %s; a window of two packets "+
+				"has room for more than the fast-timeout retry", describePackets(after))
+		}
+		for i := 0; i < len(after) && i < len(first)-1; i++ {
+			if got, want := seqOf(t, after[i]), oldest+1+uint16(i); got != want {
+				t.Fatalf("after the acknowledgement, sent %s; the packets still owed "+
+					"(%d..%d) go first", describePackets(after), oldest+1, oldest+uint16(len(first)-1))
+			}
 		}
 	}
 }

@@ -316,8 +316,9 @@ What each change was, and the libutp line it came from, is in
 The packet size is no longer a fixed 1024. It is discovered per connection by
 binary search, between a 576-byte floor and a 1400-byte ceiling, and the
 ceiling could only be raised because discovery makes it safe: an untested path
-starts at 988 bytes, *below* the old fixed size, and grows only once a probe
-of a given size has been acknowledged. See
+started at 988 bytes, *below* the old fixed size, and grew only once a probe
+of a given size had been acknowledged. (It now starts at the ceiling, as
+libutp's does; DEVIATIONS.md.) See
 [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
 
 Against the fixed 1024 it replaces, on the profiles that resolve cleanly:

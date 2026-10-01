@@ -138,7 +138,7 @@ libutp it was, and the tests named are what stands behind each verdict.
 | `check_timeouts`: give up at the fifth timeout, two for a SYN | `maxConsecutiveTimeouts`, `MaxConnAttempts` | Matched; the SYN count is a deviation ("`MaxConnAttempts` counts transmissions") |
 | `check_timeouts`: timeout doubling, `fast_timeout`, `need_resend` | `onTimeout` | Matched, measured (`TestConformanceRetransmissionTimeoutComputation`); the cap is N11 |
 | `check_timeouts`: keep-alive only before our FIN | `keepAlive` | Matched |
-| `mtu_search_update`, `mtu_reset` | `mtuSearch` | Matched, measured, except the start (deviation: "The MTU search starts at the midpoint") and N6 (fixed) |
+| `mtu_search_update`, `mtu_reset` | `mtuSearch` | Matched, measured; the start, at the midpoint until it was moved to libutp's ceiling (DEVIATIONS.md, "The MTU search starts at the ceiling"), and N6 (fixed) |
 
 ### 1329-1400: `ack_packet`
 

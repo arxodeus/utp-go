@@ -31,12 +31,9 @@ const (
 	// recorded. IPv6 peers get libutp's 1232 (path_mtu.go).
 	//
 	// This was a flat 1024 before path-MTU discovery existed, because without
-	// discovery the only safe fixed size is a small one. It is safe to raise
-	// now precisely because it is no longer what gets sent: the search starts
-	// at the midpoint between 576 and this, and grows only once a probe of a
-	// given size has been acknowledged. An untested path therefore still gets
-	// a 989-byte packet, close to the old 1024, and reaches 1402 only after
-	// proving it can. See mtu.go.
+	// discovery the only safe fixed size is a small one. With discovery the
+	// search starts here, as libutp's does, and comes down when a probe of
+	// this size is lost. See mtu.go.
 	defaultMaxPacketSizeBytes = 1402
 	// defaultMaxWindowSizeIncBytes is the cap on how far the congestion
 	// window may grow in one RTT. libutp:

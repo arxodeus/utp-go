@@ -137,6 +137,15 @@ consequence, or equivalent on the wire.
 - *The retransmission timeout is capped at `MaxTimeout`:* 60 seconds by
   default. It binds only once the timeout itself is past 3.75 seconds, and
   then only on the last backed-off wait before the connection gives up.
+- *A path MTU report lowers the ceiling but does not raise it past
+  `MaxPacketSize`:* the default ceiling is libutp's default, 1402 (1232 for
+  IPv6), which libutp's own `get_udp_mtu` returns without asking the
+  interface. libutp with an embedder callback that reports a 1500-byte
+  interface would send 1472-byte datagrams; this library does that when
+  `MaxPacketSize` is raised, the report still bounding it. The default's cost
+  on a plain 1500-byte path is 5% more packets and 0.16 points more header
+  overhead per byte (48 bytes against 1402, and against 1472); its gain is a
+  PPPoE or GRE hop beyond the local interface carried without a probe.
 - *Timeouts act when due, not on a 500ms pass:* retransmissions, keep-alives
   and the zero-window probe fire within our 25ms timer tick of their
   deadline; libutp's fire on the first of its 500ms passes after it.
@@ -166,9 +175,6 @@ consequence, or equivalent on the wire.
   clock drift's phantom queue grows with the window, measured linear, so
   libutp's is 6.5 times ours. What the shorter memory costs -- a queue that
   stands for two minutes is taken for the empty path -- is not measured.
-- *The MTU search starts at the midpoint.* libutp's start is 1-2% faster on
-  healthy paths, winning every one of twelve seeds. Ours is better only on
-  paths narrower than 1400, and on the IPv6-like ones both starts stall.
 
 **Worse than libutp, accepted.** Each has a stated reason for being carried.
 
@@ -177,10 +183,6 @@ consequence, or equivalent on the wire.
   receiver's socket to its acknowledgement leaving is 110-120 us here and
   60-70 us in libutp. The packet crosses three goroutines on the way in; libutp
   handles it on the thread that read it. No throughput cost has been measured.
-- *A discovered path MTU only lowers the ceiling:* capped at 1402, libutp's
-  own default for IPv4, so about 6% of the packet is given up on a 1500-byte
-  path (arithmetic, not a throughput
-  measurement), and jumbo frames are never used.
 - *Close waits:* a caller is held for up to one flush or two seconds of peer
   silence; libutp's `utp_close` returns at once.
 
@@ -612,16 +614,15 @@ this library's receiver.
 | Sender | Data packets | Message latency, median | 99th percentile |
 | --- | --- | --- | --- |
 | libutp | 139 | 15.3 ms | 44.6 ms |
-| this library | 149 | 14.7 ms | 20.4 ms |
+| this library | 139 | 14.8 ms | 22.9 ms |
 | this library, `NoDelay` | 1,921-1,925 | 11.0 ms | 19.0-19.5 ms |
 | this library before | 2,000 | 10.9 ms | 19.9 ms |
 
-The remaining difference in packets is packet size: libutp's payloads are
-about 1,400 bytes from the start, ours about 1,300 while the MTU search runs
-("The MTU search starts at the midpoint"). libutp's latency includes its
-bridge's loop, which can wait up to 20 ms for its socket before it hands a
-write to libutp, so the latency columns are not a comparison of the two
-libraries.
+Both at the 1472-byte datagram the bridge reports to libutp; at this
+library's default 1402 it sends 146, the difference being packet size alone.
+libutp's latency includes its bridge's loop, which can wait up to 20 ms for
+its socket before it hands a write to libutp, so the latency columns are not a
+comparison of the two libraries.
 
 `ConnectionConfig.NoDelay` turns the rule off, as `TCP_NODELAY` does, for an
 application that would rather have each message sooner than fewer packets.
@@ -767,41 +768,43 @@ probe costs 3.8 seconds per 1MB transfer against 0.7: the first packet is a
 full-size probe, the one-packet window lets nothing else out, and the
 connection waits out the 3-second initial timeout.
 
-## The MTU search starts at the midpoint, not at the ceiling
+## The MTU search starts at the ceiling — closed; it started at the midpoint
 
 libutp sends its first packets at the ceiling: `mtu_last = mtu_ceiling` when a
-socket is created (`utp_internal.cpp:2562`), and the first of them is the
-probe. The search here starts at the midpoint between 576 and the ceiling --
-989 bytes against a 1402 ceiling -- and moves up only as probes are
-acknowledged. (The measurements in this section were taken when the ceiling
-was 1400; it became libutp's default IPv4 figure, 1402, in the line-by-line
-audit. Two bytes do not change which paths fit.) The reasoning is in KNOWN-LIMITATIONS.md, M6: an untested path
-gets a smaller packet.
+socket is created (`utp_internal.cpp:2561-2562`), and the first of them is the
+probe. This library started at the midpoint between 576 and the ceiling, 989
+bytes against 1402, and moved up as probes were acknowledged, on the argument
+that an untested path should get a small packet (KNOWN-LIMITATIONS.md, M6).
+It now starts at the ceiling, as libutp does (`newMtuSearch`,
+`TestConnectionStartsAtTheCeiling`).
 
-**Why, measured.** libutp's start was implemented behind a switch. On healthy
-paths it is slightly faster, consistently: twelve seeds, classic LEDBAT,
-geometric mean of the per-seed ratio 1.006 on broadband (12/12 seeds), 1.021
-on high BDP (12/12), 1.016 at 1% loss (11/12), 1.091 at 5% loss (8/12), within
-1-2% elsewhere. These transfers are 1-8MB; a shorter one would gain more.
+**Why.** The midpoint was kept as a trade-off: libutp's start was 1-2% faster
+on healthy paths (twelve seeds), and the midpoint was better only on paths
+narrower than the ceiling. Measured again against the midpoint, on the
+benchmark profiles, twenty runs each, classic LEDBAT, medians:
 
-On a path narrower than 1400 past the local link, where the interface report
-(`utp.PathMTUProvider`) cannot help, it is never better. 1MB, report withheld:
-
-| path | midpoint (ours) | ceiling (libutp) |
+| profile | midpoint | ceiling |
 | --- | --- | --- |
-| IPv6-like, 1000-1350 bytes: oversized packets dropped | stalls, 1.9-19.6KB delivered | stalls, **0 bytes** delivered |
-| IPv4-like, 1000-1350 bytes: ordinary packets fragmented | 0.72-0.77s | 0.77-0.78s |
-| wider than 1400 | 0.69s | 0.68s |
+| Broadband, 20 ms, 10 Mbps | 6.21 | 6.25 |
+| High BDP, 100 ms, 20 Mbps | 2.04 | 2.08 |
+| Long transfer, 8 MB | 8.96 | 8.99 |
+| Reordering, 2% | 3.50 | 3.96 |
+| Broadband, 1% loss | 5.85 | 5.90 |
+| Broadband, 5% loss | 2.47 | 2.49 |
 
-The IPv6-like stall is the shared limitation in KNOWN-LIMITATIONS.md ("A path
-MTU below the size already adopted stalls the connection"); both starts hit
-it, the ceiling start sooner. The libutp column was measured through the
-driver, which reports a 1472-byte path MTU. libutp's own default would give
-an IPv6 peer 1232, which every IPv6 path carries, and so would not stall on
-one at all; this library now does the same for IPv6 peers (KNOWN-LIMITATIONS.md,
-"IPv6 peers stalled on a minimum-MTU path"). Kept as the midpoint: the gain from matching
-libutp is 1-2% on long transfers over healthy paths, and the cost lands on the
-paths that already fail.
+LEDBAT++ gains 5.6% on high BDP and is level on the rest. (Five runs had put
+the 5%-loss profile 13% lower; twenty did not.)
+
+On the narrow paths the midpoint was better on, it no longer matters much:
+
+- *Narrower than the ceiling, dropping what does not fit (IPv6-like), no
+  report:* both stall, the shared limitation in KNOWN-LIMITATIONS.md ("A path
+  MTU below the size already adopted stalls the connection"); the midpoint
+  delivered 1,938 bytes of a megabyte before stalling, the ceiling none.
+  IPv6 peers get 1232, which every IPv6 path carries, and a narrower local
+  interface lowers the ceiling before the first packet (`PathMTUProvider`).
+- *Narrower, fragmenting (IPv4-like):* the midpoint was 0.72-0.77 s against
+  0.77-0.78 s for 1 MB when this was first measured.
 
 ## ~~No cap on incoming connections~~ — closed
 
@@ -968,11 +971,20 @@ repository runs over. Raising the ceiling is a separate decision from fixing
 the case where 1400 is too big, and only the second one has evidence behind
 it.
 
-So the fixed ceiling remains as a cap -- 1402 now, libutp's default for IPv4,
-and 1232 for IPv6 -- and the deviation that recorded it
-stands. What has changed is that it is no longer also a *floor* on the
-ceiling: a tunnel that carries 1392 is now discovered before the first packet
-rather than after a stall.
+So the fixed ceiling remains as a cap -- 1402, libutp's default for IPv4, and
+1232 for IPv6 -- and it is no longer also a *floor* on the ceiling: a tunnel
+that carries 1392 is discovered before the first packet rather than after a
+stall.
+
+Against libutp's defaults this is not a deviation at all: its default
+`get_udp_mtu` returns those same two figures and never looks at the interface
+(`utp_utils.cpp:211-235`). It differs only from libutp configured by an
+embedder whose callback reports the interface, and an embedder of this
+library gets that by raising `MaxPacketSize`: the interface report then sets
+the ceiling, as libutp's callback would. It used to be listed as worse than
+libutp with "about 6% of the packet given up"; that was payload arithmetic.
+Per byte sent, a 1472-byte datagram carries 3.26% header (20 of uTP and 28 of
+IPv4 and UDP) and a 1402-byte one 3.42%.
 
 ## ICMP: the next-hop MTU is converted from a link MTU to a payload size
 

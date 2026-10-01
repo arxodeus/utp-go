@@ -87,6 +87,16 @@ func TestPathMTUCeilingOnlyLowers(t *testing.T) {
 	}
 }
 
+// With MaxPacketSize raised, the report sets the ceiling, as libutp's
+// get_udp_mtu does (mtu_reset, utp_internal.cpp:1316): how an embedder gets
+// libutp's behaviour with a callback that reports the interface.
+func TestPathMTUSetsTheCeilingUnderARaisedMaximum(t *testing.T) {
+	peer := pathMTUTestPeer(t)
+	if got := pathMTUCeiling(&fakePathMTU{ok: true, mtu: 1472}, peer, 65535); got != 1472 {
+		t.Errorf("ceiling %d under a 65535 maximum and a 1472 report, want 1472", got)
+	}
+}
+
 // The header arithmetic, stated once rather than inferred from behaviour.
 func TestDatagramSizeForInterfaceMTU(t *testing.T) {
 	v4 := net.ParseIP("192.0.2.1")

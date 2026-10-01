@@ -213,31 +213,31 @@ func sizeName(n uint32) string {
 	}
 }
 
-// The connection actually uses what the search discovers, and grows only
-// after a probe comes back acknowledged.
+// A fresh connection sends at the ceiling, as libutp does (`mtu_last =
+// mtu_ceiling`, utp_internal.cpp:2561-2562), and a lost first probe brings it
+// down to the midpoint.
 //
-// This is the safety argument for raising the ceiling to 1400 stated as a
-// test: an untested path gets a conservative packet, and a larger one goes
-// out only once a packet of that size has been proven to arrive.
-func TestConnectionStartsConservativeAndGrows(t *testing.T) {
+// This test used to assert the opposite: a start at the midpoint, growing
+// only on evidence. libutp's start was faster on every healthy path measured
+// (DEVIATIONS.md, "The MTU search starts at the ceiling").
+func TestConnectionStartsAtTheCeiling(t *testing.T) {
 	cfg := NewConnectionConfig()
 
-	// The size a fresh connection would send, before any probe is answered.
 	initial := newMtuSearch(uint32(cfg.MaxPacketSize), time.Now())
-	if initial.current >= uint32(cfg.MaxPacketSize) {
-		t.Errorf("a fresh connection starts at %d, the full ceiling of %d -- it should start at "+
-			"the midpoint and grow only on evidence", initial.current, cfg.MaxPacketSize)
+	if initial.current != uint32(cfg.MaxPacketSize) {
+		t.Errorf("a fresh connection starts at %d; libutp starts at the ceiling, %d",
+			initial.current, cfg.MaxPacketSize)
 	}
-	if initial.current > 1024 {
-		t.Errorf("a fresh connection starts at %d, above the 1024 this library used before "+
-			"discovery existed; raising the ceiling must not raise what an untested path gets",
-			initial.current)
+	if !initial.eligibleProbe(initial.current, true) {
+		t.Errorf("the first full packet, %d bytes, is not a probe; libutp's is", initial.current)
 	}
-	if initial.current < mtuAbsoluteFloor {
-		t.Errorf("a fresh connection starts at %d, below the %d floor", initial.current, mtuAbsoluteFloor)
+	initial.beginProbe(1, initial.current)
+	initial.onProbeLost(time.Now())
+	if want := (mtuAbsoluteFloor + uint32(cfg.MaxPacketSize) - 1) / 2; initial.current != want {
+		t.Errorf("after the first probe was lost the size is %d, want the midpoint %d", initial.current, want)
 	}
 	t.Logf("ceiling %d: a fresh connection sends %d-byte datagrams (%d bytes of payload)",
-		cfg.MaxPacketSize, initial.current, initial.payloadSize())
+		cfg.MaxPacketSize, uint32(cfg.MaxPacketSize), uint32(cfg.MaxPacketSize)-mtuHeaderOverhead)
 
 	// A path that answers nothing never grows.
 	stuck := newMtuSearch(uint32(cfg.MaxPacketSize), time.Now())

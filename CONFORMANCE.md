@@ -225,9 +225,9 @@ don't-fragment bit where the `Conn` supports it (`utp.DontFragmentWriter`),
 and the ceiling is taken from the interface where the `Conn` can report it
 (`utp.PathMTUProvider`). What is still not matched: the ceiling is capped at
 1400, where libutp takes the interface MTU outright (a recorded deviation, see
-[DEVIATIONS.md](DEVIATIONS.md)); and the search starts at the midpoint, where
-libutp starts at the ceiling (`utp_internal.cpp:2562`), which is a recorded
-deviation, measured, in [DEVIATIONS.md](DEVIATIONS.md).
+[DEVIATIONS.md](DEVIATIONS.md)). The search used to start at the midpoint,
+where libutp starts at the ceiling (`utp_internal.cpp:2562`); it now starts at
+the ceiling too.
 
 The other half of libutp's MTU handling is the ICMP path, and it is now here
 too: `UtpSocket.ProcessICMPFragmentation` and `UtpSocket.ProcessICMPError`.

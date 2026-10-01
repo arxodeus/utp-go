@@ -98,7 +98,12 @@ func smallWrites(t *testing.T, libutpSends bool, path pathConfig, count, size in
 		write = func(b []byte) { _, _ = peer.Write(b) }
 	} else {
 		cid := utp.NewConnectionId(utp.NewUdpPeer(loopback(r.LibutpFacingPort())), 5100, 5101)
-		stream, err := sock.ConnectWithCid(ctx, cid, utp.NewConnectionConfig())
+		// The bridge tells libutp its path carries 1472-byte datagrams
+		// (bridge.cpp, cb_get_udp_mtu); the same ceiling here, so that the
+		// packets compared are the same size.
+		cfg := utp.NewConnectionConfig()
+		cfg.MaxPacketSize = 1472
+		stream, err := sock.ConnectWithCid(ctx, cid, cfg)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -145,10 +150,9 @@ func smallWrites(t *testing.T, libutpSends bool, path pathConfig, count, size in
 //
 // libutp coalesces them: a short packet waits while anything is
 // unacknowledged and later writes join it (flush_packets,
-// utp_internal.cpp:974-982; write_outgoing_packet, :1013-1023). Measured: 139
-// packets from libutp and 149 from this library, the difference being packet
-// size (about 1,400 bytes of payload against our MTU search's 1,300). The
-// gate is our count within smallWritesSlack of libutp's.
+// utp_internal.cpp:974-982; write_outgoing_packet, :1013-1023). Measured, with
+// both at the 1472-byte datagram the bridge reports to libutp: 139 packets
+// from each. The gate is our count within smallWritesSlack of libutp's.
 //
 // With NoDelay, or without the Nagle rule, this library sent 1,920-2,000
 // packets, one per message, and fails it.
@@ -180,5 +184,6 @@ func TestSmallWritesAgainstLibutp(t *testing.T) {
 }
 
 // smallWritesSlack is how many more packets than libutp's this library may
-// send: its packets are smaller while its MTU search runs.
-const smallWritesSlack = 0.15
+// send. Measured equal; the slack is for where the 0.5 ms writes fall against
+// the round trip on a loaded machine.
+const smallWritesSlack = 0.05

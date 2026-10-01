@@ -962,6 +962,8 @@ The search starts at the midpoint between 576 and the ceiling — 988 bytes,
 below the 1024 this library used before — and grows only once a probe of a
 given size has been acknowledged. An untested path gets a smaller packet than
 it did before this change. A path that drops every probe settles on 576.
+(Later: the search starts at the ceiling, as libutp's does. DEVIATIONS.md,
+"The MTU search starts at the ceiling".)
 
 Two things libutp did that this did not, when this was written. The first is
 now closed and the second partly; what remains of it is recorded as a

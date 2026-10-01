@@ -156,6 +156,9 @@ func TestAcknowledgementOnADataPacketWakesTheWriter(t *testing.T) {
 func TestOutstandingPacketsAreCappedAt1023(t *testing.T) {
 	for _, already := range []int{1021, 1022} {
 		conn := drainTestConn(t, 0, TEST_BUFFER_SIZE)
+		// Room for three whole packets, so that none is a short tail the
+		// Nagle rule would hold back.
+		conn.state.SendBuf = newSendBuffer(64 * 1024)
 		conn.mtu = newMtuSearch(uint32(conn.config.MaxPacketSize), time.Now())
 		p := conn.mtu.payloadSize()
 		conn.testWidenCongestionWindow(1 << 30)

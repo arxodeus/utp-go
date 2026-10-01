@@ -566,11 +566,9 @@ func newConnection(
 		pendingWrites:  make([]*queuedWrite, 0),
 		writable:       make(chan struct{}, 3),
 		latestTimeout:  nil,
-		// The ceiling is the largest packet this library will ever try; the
-		// search starts at the midpoint between it and 576 and only grows
-		// once a probe of that size has been acknowledged. That ordering is
-		// why raising the ceiling is safe: nothing large is sent until
-		// something large is known to arrive.
+		// The ceiling is the largest packet this library will ever try, and
+		// the first it sends, as libutp does; a lost probe brings it down.
+		// See newMtuSearch.
 		mtu: newMtuSearch(uint32(config.MaxPacketSize), clk.Now()),
 	}
 }

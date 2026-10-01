@@ -98,15 +98,22 @@ type mtuSearch struct {
 	nextSearch time.Time
 }
 
-// newMtuSearch starts a search bounded above by ceiling.
+// newMtuSearch starts a search bounded above by ceiling, sending at the
+// ceiling, as libutp does: `mtu_last = mtu_ceiling` when a socket is created
+// (utp_internal.cpp:2561-2562). The first packet larger than the floor is
+// the probe; if it is lost the ceiling comes down and the search proceeds
+// from the midpoint.
 //
-// The initial size is the midpoint, not the ceiling: an untested path gets a
-// conservative packet that grows only once a probe has come back
-// acknowledged. That ordering is the whole safety argument for discovery --
-// nothing large is sent until something large is known to arrive.
+// This used to start at the midpoint, 989 bytes against a 1402 ceiling, so
+// that an untested path got a small packet. libutp's start was faster on
+// every healthy path measured (DEVIATIONS.md, "The MTU search starts at the
+// ceiling"), which is nearly every path, and the ceiling itself is libutp's
+// conservative 1402 (or the local interface's, or 1232 for IPv6), which
+// leaves room for a tunnel.
 func newMtuSearch(ceiling uint32, now time.Time) *mtuSearch {
 	m := &mtuSearch{}
 	m.reset(ceiling, now)
+	m.current = m.ceiling
 	return m
 }
 
@@ -131,9 +138,8 @@ func (m *mtuSearch) reset(ceiling uint32, now time.Time) {
 // libutp's re-search is mtu_reset alone (utp_internal.cpp:892-896, :1314-
 // 1322): it restores the floor and ceiling but does not recompute mtu_last,
 // so packets stay at the size known to get through, and the first of them is
-// the next probe. reset, which a new connection uses and which starts from
-// the midpoint (DEVIATIONS.md), would instead drop a connection settled at
-// 1400 bytes to about 988 every half hour and climb back.
+// the next probe. reset alone would put the size at the midpoint, dropping a
+// connection settled at 1400 bytes to about 988 every half hour.
 func (m *mtuSearch) research(ceiling uint32, now time.Time) {
 	known := m.current
 	m.reset(ceiling, now)
