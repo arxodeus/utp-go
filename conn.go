@@ -365,9 +365,16 @@ type connection struct {
 	// inferring it from timing, which many other things also move.
 	readDrainedAcks uint64
 	// ackPending records that a received packet is owed an acknowledgement,
-	// which is sent once at the end of the event-loop pass that received it.
+	// which flushAck sends once the socket read that brought it has been
+	// handed out, or later if ackEvery lets it wait for more packets.
 	// libutp's schedule_ack / utp_issue_deferred_acks.
 	ackPending bool
+	// lastBatch is the socket read the last packet processed arrived in, and
+	// batchesDone the socket's count of reads handed out in full. While the
+	// first is ahead of the second, more of that read is on its way and the
+	// acknowledgement waits for it. See flushAck.
+	lastBatch   uint64
+	batchesDone *atomic.Uint64
 	// dropUnacked is set while a packet is being handled when libutp would
 	// discard it without scheduling an acknowledgement -- its early `return
 	// 0`s in utp_process_incoming (utp_internal.cpp:2381-2386, :2425-2431).
@@ -393,6 +400,18 @@ type connection struct {
 	// libutp's `last_sent_packet`, which its keep-alive compares against
 	// (utp_internal.cpp:1272).
 	lastSentPacket time.Time
+	// ackHeldSince is when the acknowledgement now pending was first held
+	// back, and armAckHold wakes the loop when it is due. dataSinceAck counts
+	// the data packets it would cover. See flushAck.
+	ackHeldSince time.Time
+	armAckHold   func(time.Duration)
+	dataSinceAck int
+	// lastDataAt, lastDataGap and dataGap time the data packets arriving:
+	// when the last came, the gap before it, and a smoothed gap. See
+	// ackEvery.
+	lastDataAt  time.Time
+	lastDataGap time.Duration
+	dataGap     time.Duration
 	// armProbeTimer wakes the event loop when a closed window has gone
 	// unprobed for long enough. Installed by the event loop, which owns the
 	// timer.
@@ -732,6 +751,20 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		<-probeTimer.C()
 	}
 	defer probeTimer.Stop()
+	ackHoldTimer := c.timeSource().NewTimer(time.Hour)
+	if !ackHoldTimer.Stop() {
+		<-ackHoldTimer.C()
+	}
+	defer ackHoldTimer.Stop()
+	c.armAckHold = func(d time.Duration) {
+		if !ackHoldTimer.Stop() {
+			select {
+			case <-ackHoldTimer.C():
+			default:
+			}
+		}
+		ackHoldTimer.Reset(d)
+	}
 	c.armProbeTimer = func(d time.Duration) {
 		if !probeTimer.Stop() {
 			select {
@@ -792,6 +825,9 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	}
 
 	handleIncoming := func(event *streamEvent) {
+		if event.Type == streamIncoming && event.BatchesDone != nil {
+			c.lastBatch, c.batchesDone = event.Batch, event.BatchesDone
+		}
 		if event.Type == streamIncoming {
 			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 				c.logger.Trace("incoming packet",
@@ -891,9 +927,9 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		case event := <-stream.streamEvents:
 			handleIncoming(event)
 			// Take whatever else has already arrived before answering, so one
-			// acknowledgement covers the batch rather than one per packet.
-			// This is what libutp's embedder does by calling
-			// utp_issue_deferred_acks once per event-loop pass.
+			// acknowledgement covers it rather than one per packet. flushAck
+			// also waits for the rest of the socket read the packets came in
+			// (see there).
 			//
 			// Bounded so that a peer sending continuously cannot keep this
 			// inner loop fed and starve writes and timers; the outer loop
@@ -936,6 +972,8 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			woke = wakeKeepAlive
 		case <-probeTimer.C():
 			woke = wakeProbe
+		case <-ackHoldTimer.C():
+			woke = wakeAckHold
 		case <-idleRtoTimer.C():
 			woke = wakeIdleRto
 		case <-lossProbeTimer.C():
@@ -953,7 +991,8 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			// The handoff the socket noted when it queued an inbound packet.
 			// Only streamIncoming is noted -- see handleIncomingBuf -- so
 			// only streamIncoming is taken.
-			if barrier != nil && wokeEvent != nil && wokeEvent.Type == streamIncoming {
+			if barrier != nil && wokeEvent != nil &&
+				(wokeEvent.Type == streamIncoming || wokeEvent.Type == streamBatchEnd) {
 				barrier.TakeHandoff()
 			}
 			handleIncoming(wokeEvent)
@@ -978,6 +1017,9 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			handleTimeout(wokeTimer)
 		case wakeKeepAlive:
 			onKeepAliveTimer()
+		case wakeAckHold:
+			// Nothing to do but wake: a held acknowledgement goes out from
+			// flushAck in afterSelect.
 		case wakeProbe:
 			// The peer's window has been closed for a whole interval. Let one
 			// packet through, so its acknowledgement carries a fresh window.
@@ -1068,6 +1110,7 @@ const (
 	wakeProbe
 	wakeIdleRto
 	wakeLossProbe
+	wakeAckHold
 	wakeIdleTimeout
 	wakeCtxDone
 )
@@ -2088,12 +2131,120 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 // sending continuously starve them.
 const maxAckCoalesce = 64
 
-// flushAck sends the acknowledgement owed for whatever was received in this
-// pass of the event loop, if any.
+// Acknowledgement coalescing. See ackEvery.
+const (
+	// ackQueueStep is how much queueing delay on the way back adds one packet
+	// to the run an acknowledgement waits for.
+	ackQueueStep = 500 * time.Microsecond
+	// ackRatePeriod is the shortest spacing this receiver keeps between its
+	// acknowledgements when data packets arrive closer together than that,
+	// up to maxAckRateRun packets apiece.
+	ackRatePeriod  = time.Millisecond
+	maxAckRateRun  = 4
+	maxAckQueueRun = 16
+	// maxAckWait is the longest an acknowledgement waits for the rest of its
+	// run. It waits no longer than two of the latest gap between packets per
+	// packet it is waiting for, so the end of a burst is acknowledged once
+	// the packets stop coming. Waiting by a smoothed gap, or with a 1 ms
+	// floor, held each slow-start burst's acknowledgement for packets that
+	// could not come until it was sent.
+	maxAckWait = 5 * time.Millisecond
+)
+
+// ackEvery is how many data packets an acknowledgement may wait to cover.
+//
+// libutp acknowledges once per pass of its embedder's loop: whatever arrived
+// while it was busy shares one acknowledgement, and a packet that arrives
+// alone gets its own. On a link, where packets arrive spaced, that is one per
+// packet -- measured over real sockets with the relay pacing each datagram to
+// its time, 0.99 per data packet at 10 Mb/s and 0.98 at 20 Mb/s -- and only
+// at 100 Mb/s, where packets come 110 us apart, does its loop gather a few
+// (0.58-0.62). So libutp sends a 20 Mb/s flow's acknowledgements at 1,750 a
+// second whatever the return path can carry: over a 160 kb/s return path,
+// which carries 1,000 a second, it took 2.97 s to receive 4 MB where 2.0 s
+// was the data path's limit, and over 64 kb/s 7.3 s.
+//
+// This receiver lets an acknowledgement wait for more packets, by two terms,
+// the larger winning:
+//
+//   - The rate: while packets arrive closer together than ackRatePeriod,
+//     round(1 ms / gap) of them share one, at most maxAckRateRun. The gap is
+//     the smaller of the latest and a smoothed one, so a burst after a pause
+//     is coalesced from its second packet.
+//   - The return path: the peer reports on every packet how long ours take to
+//     reach it, and for a connection that only receives, ours are its
+//     acknowledgements. Each ackQueueStep of filtered queueing delay on that
+//     path (libutp's our_hist.get_value()) adds one packet to the run.
+//
+// Measured against libutp receiving from libutp, a libutp sender, over real
+// sockets (native/libutp TestAsymmetricAckPath): 2.00-2.01 s against
+// 2.96-2.99 s over 160 kb/s, 2.45-2.49 s against 7.28-7.33 s over 64 kb/s,
+// level over 320 kb/s and 20 Mb/s with about half libutp's acknowledgements,
+// and at 100 Mb/s and 1 ms 1.43-1.44 s against libutp's best of 1.51 s. The
+// cost is the wait itself: at 100 Mb/s the median acknowledgement leaves
+// 310-320 us after its packet arrives against libutp's 170-210 us
+// (TestAckTurnaround). The return path alone, without the rate, waits only
+// once a queue has formed, and that queue is the delay: 2.13 s over 160 kb/s
+// and 1.55-1.66 s at 100 Mb/s. DEVIATIONS.md, "Acknowledgements: one per read,
+// fewer when they would crowd the way back".
+//
+// Never while a gap is open: the selective ack is how the peer learns of a
+// loss, and holding it back would delay recovery.
+func (c *connection) ackEvery() int {
+	if c.state == nil || c.state.SentPackets == nil || c.state.RecvBuf == nil {
+		return 1
+	}
+	if c.state.RecvBuf.SelectiveAck() != nil {
+		return 1
+	}
+	q := c.state.SentPackets.ControllerStats().FilteredQueueingDelay
+	k := min(1+int(q/ackQueueStep), maxAckQueueRun)
+	gap := c.dataGap
+	if c.lastDataGap > 0 {
+		gap = min(gap, c.lastDataGap)
+	}
+	if gap > 0 {
+		k = max(k, min(max(int((ackRatePeriod+gap/2)/gap), 1), maxAckRateRun))
+	}
+	return k
+}
+
+// flushAck sends the acknowledgement owed for whatever was received, if any,
+// unless ackEvery says it should wait for more.
 func (c *connection) flushAck() {
 	if !c.ackPending {
 		return
 	}
+	// One acknowledgement per socket read, as libutp's embedder sends it: the
+	// datagrams already waiting in the kernel are all processed, and then
+	// utp_issue_deferred_acks runs once (utp.h:512-517). A read that is still
+	// being handed out holds the acknowledgement; the socket wakes this
+	// connection when it has finished (UtpSocket.eventLoop), and the
+	// acknowledgement then covers everything the read brought.
+	//
+	// This used to flush at the end of every pass of this loop, and the batch
+	// boundary was wherever the goroutine hand-offs between the socket and
+	// here happened to fall. With batches alone, and ackEvery at one, a
+	// libutp sender at 100 Mb/s got 0.57-0.68 acknowledgements per data
+	// packet from this receiver and 0.58-0.62 from libutp's.
+	if c.batchesDone != nil && c.batchesDone.Load() < c.lastBatch {
+		return
+	}
+	if k := c.ackEvery(); k > 1 && c.dataSinceAck > 0 && c.dataSinceAck < k {
+		now := c.now()
+		if c.ackHeldSince.IsZero() {
+			c.ackHeldSince = now
+		}
+		hold := min(maxAckWait, 2*time.Duration(k)*c.lastDataGap)
+		if due := c.ackHeldSince.Add(hold); now.Before(due) {
+			if c.armAckHold != nil {
+				c.armAckHold(due.Sub(now))
+			}
+			return
+		}
+	}
+	c.ackHeldSince = time.Time{}
+	c.dataSinceAck = 0
 	c.ackPending = false
 	if statePacket := c.statePacket(); statePacket != nil {
 		c.emit(statePacket)
@@ -2720,6 +2871,19 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 		// the forward data.
 		if !c.dropUnacked {
 			c.ackPending = true
+			c.dataSinceAck++
+			if now := c.now(); !c.lastDataAt.IsZero() {
+				gap := now.Sub(c.lastDataAt)
+				c.lastDataGap = gap
+				if c.dataGap == 0 {
+					c.dataGap = gap
+				} else {
+					c.dataGap += (gap - c.dataGap) / 8
+				}
+				c.lastDataAt = now
+			} else {
+				c.lastDataAt = now
+			}
 		}
 	}
 
@@ -3690,11 +3854,13 @@ func (c *connection) transmit(packet *packet, now time.Time, firstTransmission b
 	//
 	// It rarely applies here: data received and data sent mostly fall in
 	// different event-loop passes. Measured in a two-way transfer against
-	// libutp, pure acknowledgements per data packet were 0.90 before and after
-	// (libutp's 0.55-0.58 is where its batches end; DEVIATIONS.md, "Acks are
-	// deferred, but not batched the way libutp's are").
+	// libutp, before socket reads were batched, pure acknowledgements per data
+	// packet were 0.90 before and after it (DEVIATIONS.md, "Acknowledgements:
+	// one per read, fewer when they would crowd the way back").
 	if c.state.RecvBuf != nil && packet.Header.AckNum == c.state.RecvBuf.AckNum() {
 		c.ackPending = false
+		c.ackHeldSince = time.Time{}
+		c.dataSinceAck = 0
 	}
 
 	c.emitPacket(packet, isProbe)

@@ -218,6 +218,11 @@ type ControllerStats struct {
 	// from the *other* direction's measurement, which is not a queue in
 	// either direction. See the note there.
 	CurrentDelay time.Duration
+	// FilteredQueueingDelay is the queue our packets are meeting on the way
+	// to the peer: the least of the last three samples, each over the base
+	// as it stood (libutp's our_hist.get_value(), utp_internal.cpp:383-391).
+	// For a connection that only receives, these are its acknowledgements.
+	FilteredQueueingDelay time.Duration
 	// TargetDelayMicros is the standing queue the controller aims for.
 	TargetDelayMicros uint32
 	// SlowStart reports whether the controller is still in slow start.
@@ -412,21 +417,22 @@ func (c *defaultController) Stats() ControllerStats {
 		appLimitedSince = c.now().Sub(c.lastMaxedOutWindow)
 	}
 	return ControllerStats{
-		WindowSizeBytes:     c.windowSizeBytes,
-		MaxWindowSizeBytes:  c.maxWindowSizeBytes,
-		MinWindowSizeBytes:  c.minWindowSizeBytes,
-		RTT:                 c.rtt,
-		FineRTT:             c.fineRTT,
-		RTTVarianceMicros:   c.rttVarianceMicros,
-		Timeout:             c.timeout,
-		BaseDelay:           c.delayAcc.BaseDelay(),
-		CurrentDelay:        c.currentDelay,
-		ClockSkewCorrection: c.delayAcc.skew,
-		ClockDrift:          c.drift.drift,
-		ClockDriftPenalty:   time.Duration(c.drift.penaltyMicros()) * time.Microsecond,
-		TargetDelayMicros:   c.targetDelayMicros,
-		SlowStart:           c.slowStart,
-		AppLimitedSince:     appLimitedSince,
+		WindowSizeBytes:       c.windowSizeBytes,
+		MaxWindowSizeBytes:    c.maxWindowSizeBytes,
+		MinWindowSizeBytes:    c.minWindowSizeBytes,
+		RTT:                   c.rtt,
+		FineRTT:               c.fineRTT,
+		RTTVarianceMicros:     c.rttVarianceMicros,
+		Timeout:               c.timeout,
+		BaseDelay:             c.delayAcc.BaseDelay(),
+		CurrentDelay:          c.currentDelay,
+		FilteredQueueingDelay: time.Duration(c.filteredDelayMicros()) * time.Microsecond,
+		ClockSkewCorrection:   c.delayAcc.skew,
+		ClockDrift:            c.drift.drift,
+		ClockDriftPenalty:     time.Duration(c.drift.penaltyMicros()) * time.Microsecond,
+		TargetDelayMicros:     c.targetDelayMicros,
+		SlowStart:             c.slowStart,
+		AppLimitedSince:       appLimitedSince,
 	}
 }
 

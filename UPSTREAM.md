@@ -519,27 +519,31 @@ sends one per batch: `schedule_ack()` sets a flag
 (`utp_internal.cpp:2377`) and the embedder flushes it once after draining a
 batch of datagrams (`utp.h:512-517`, `utp_internal.cpp:3796-3808`).
 
-`connection.ackPending` and `flushAck()` do the same, driven from the end of
-the event-loop pass rather than from an embedder call, with the priority drain
-extended to pull up to 64 further queued events into the same pass.
+`connection.ackPending` and `flushAck()` do the same. The socket reads the way
+libutp's embedder does, every datagram the kernel holds (`UdpConn.readBatch`),
+and each connection that received data acknowledges once the whole read has
+been handed out.
 
-The count cannot match libutp's exactly, and the reason is worth stating
-because it is structural: libutp's embedder hands it a whole batch of datagrams
-before the flush, where our packets cross three goroutines, so a pass covers
-however many happen to have arrived. The saving is therefore load-dependent.
-Measured on a 512 KB transfer over the emulated network, acks per data packet:
-upstream 1.000 at every rate; this 0.82 at 20 Mbps, 0.37 at 100 Mbps, 0.17 at
-1 Gbps. Two tests pin it — one against real libutp for the structural bound,
-one under load for the ratio.
+On a link that is one acknowledgement per packet, for libutp too, whatever the
+return path can carry, so `connection.ackEvery` goes further than libutp: an
+acknowledgement may cover up to four packets arriving under 1 ms apart, and
+more while ours queue on the way back. Measured on a 512 KB transfer over the
+emulated network, acks per data packet: upstream 1.000 at every rate; this
+0.63-0.70 at 20 Mbps, 0.22 at 100 Mbps, 0.10-0.12 at 1 Gbps. Against libutp
+over real sockets, 4 MB over a 160 kb/s return path took 2.0 s against libutp's
+3.0 s (DEVIATIONS.md, "Acknowledgements: one per read, fewer when they would
+crowd the way back"). Three tests pin it: one against real libutp for the
+structural bound, one under load for the ratio, one against libutp on
+asymmetric paths for the effect.
 
 A FIN is excluded and acked immediately — libutp acks it directly at
 `:2369-2370`, and deferring it emits nothing at all, because the connection is
 torn down in the same pass and `statePacket()` then returns nil.
 
-No throughput claim attaches to this. Re-running the benchmark suite put every
-profile inside its own run-to-run range; the change removes return-path
-packets, and none of those profiles is ack-limited. It is worth upstreaming
-because it matches the reference and costs nothing, not because it is faster.
+On the benchmark suite's profiles, none of them ack-limited, deferring alone
+put every profile inside its own run-to-run range. Where the return path is
+the limit it is faster, as above. The cost is latency: at 100 Mb/s the median
+acknowledgement leaves about 0.13 ms later than libutp's.
 
 ## PR 24 — libutp over the emulated network, and two harness defects
 

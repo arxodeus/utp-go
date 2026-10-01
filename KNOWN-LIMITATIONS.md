@@ -1227,6 +1227,30 @@ to 6.63 at Jain 1.000). That is the expected result: coalescing removes
 because it costs nothing and matches the reference, not because it was faster.
 The claim being made here is only that it did not regress.
 
+### Later: one per read, and fewer than libutp when they crowd the way back
+
+The pass boundary left the count to the scheduler. The socket now reads the
+way libutp's embedder does -- every datagram the kernel holds, then the
+acknowledgements (`UdpConn.readBatch`, `streamBatchEnd`) -- and
+`connection.ackEvery` lets an acknowledgement cover up to four packets arriving
+under 1 ms apart, more while ours queue on the way back. Over the emulated
+network the ratios became 0.63-0.70 at 20 Mbps, 0.22 at 100 Mbps and 0.10-0.12
+at 1 Gbps (`netem.TestAckCoalescingUnderLoad`).
+
+Measuring it against libutp over real sockets turned up a harness defect of the
+same kind as the ones below. The relay slept between deliveries on Go timers,
+which wake about 1.1 ms late when the runtime is idle (epoll waits in whole
+milliseconds), so it delivered a 100 Mb/s path's packets in clumps of about
+ten and a 20 Mb/s path's in pairs. libutp's loop drained each clump at once,
+which made it look like it acknowledged 0.22-0.33 packets at 100 Mb/s and 0.57
+at 20 Mb/s. With the relay spinning for the last 1.5 ms before each delivery,
+libutp acknowledges 0.98 per packet at 20 Mb/s and 0.60 at 100 Mb/s. And the
+throughput claim above no longer holds in either direction: on an asymmetric
+line the acknowledgements are the bottleneck, and over a 160 kb/s return path
+libutp's receiver took 3.0 s for 4 MB where ours takes 2.0 s. DEVIATIONS.md,
+"Acknowledgements: one per read, fewer when they would crowd the way back",
+has the measurements and the cost.
+
 ## libutp was wired up wrongly, three times, and each time it looked like a result
 
 The largest gap COMPATIBILITY.md named was that libutp had never been run over

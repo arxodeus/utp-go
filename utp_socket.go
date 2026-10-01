@@ -78,6 +78,9 @@ type Accept struct {
 
 type UdpConn struct {
 	base *net.UDPConn
+	// readScratch is readBatch's receive buffer. Only the socket's read loop
+	// reads, so one is enough.
+	readScratch []byte
 	// dfUnsupported records that this platform has no per-packet
 	// don't-fragment option, so the MTU search stops asking. See
 	// WriteToDontFragment.
@@ -167,7 +170,25 @@ func (c *UdpConn) LocalAddr() net.Addr {
 type IncomingPacketRaw struct {
 	peer    ConnectionPeer
 	payload []byte
+	// batch numbers the read this datagram arrived in, and batchEnd marks the
+	// last datagram of it. See readLoop.
+	batch    uint64
+	batchEnd bool
 }
+
+// datagram is one datagram from a batched read.
+type datagram struct {
+	payload []byte
+	peer    ConnectionPeer
+}
+
+// batchReader is a Conn that can hand over everything already queued in one
+// call. UdpConn on Unix is one; anything else reads a datagram at a time.
+type batchReader interface {
+	readBatch() ([]datagram, error)
+}
+
+var errBatchReadUnsupported = errors.New("utp: batched reads are not supported on this platform")
 
 type IncomingPacket struct {
 	pkt *packet
@@ -175,9 +196,12 @@ type IncomingPacket struct {
 }
 
 type UtpSocket struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	logger log.Logger
+	// batchesDone is the last read batch handed out in full. See readLoop and
+	// connection.flushAck.
+	batchesDone atomic.Uint64
+	ctx         context.Context
+	cancel      context.CancelFunc
+	logger      log.Logger
 	// clk is this socket's clock, handed to every connection it creates.
 	// Nil means the real one.
 	clk                      Clock
@@ -468,6 +492,15 @@ func (s *UtpSocket) readLoop() {
 		}()
 	}
 
+	// Each read is a batch, numbered, its last datagram marked. A connection
+	// holds an acknowledgement owed for a packet until that packet's batch has
+	// been handed out, so a run of datagrams that were already waiting in the
+	// kernel draws one acknowledgement, not one each -- libutp's embedder loop
+	// of recvfrom until EWOULDBLOCK, then utp_issue_deferred_acks
+	// (utp.h:512-517). A Conn that cannot read in batches makes every datagram
+	// its own batch, which holds nothing back.
+	br, _ := s.socket.(batchReader)
+	var batch uint64
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -475,6 +508,36 @@ func (s *UtpSocket) readLoop() {
 		default:
 			if barrier != nil {
 				barrier.MarkIdle()
+			}
+			if br != nil {
+				dgs, err := br.readBatch()
+				if barrier != nil {
+					barrier.MarkBusy()
+				}
+				if errors.Is(err, errBatchReadUnsupported) {
+					br = nil
+					continue
+				}
+				if len(dgs) > 0 {
+					batch++
+					for i, d := range dgs {
+						if barrier != nil {
+							barrier.NoteHandoff()
+						}
+						s.incomingBuf <- &IncomingPacketRaw{peer: d.peer, payload: d.payload,
+							batch: batch, batchEnd: i == len(dgs)-1}
+					}
+				}
+				if netutil.IsTemporaryError(err) {
+					s.logger.Error("Temporary UDP read error", "err", err)
+					continue
+				} else if err != nil {
+					if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+						s.logger.Error("UDP read error", "err", err)
+					}
+					return
+				}
+				continue
 			}
 			n, from, err := s.socket.ReadFrom(buf)
 			if barrier != nil {
@@ -499,7 +562,8 @@ func (s *UtpSocket) readLoop() {
 			if barrier != nil {
 				barrier.NoteHandoff()
 			}
-			s.incomingBuf <- &IncomingPacketRaw{peer: from, payload: dstBuf}
+			batch++
+			s.incomingBuf <- &IncomingPacketRaw{peer: from, payload: dstBuf, batch: batch, batchEnd: true}
 		}
 
 	}
@@ -607,6 +671,9 @@ func (s *UtpSocket) writeDatagram(b []byte, peer ConnectionPeer, dontFragment bo
 }
 
 func (s *UtpSocket) eventLoop() {
+	// batchTouched is the connections handed a datagram of the current read
+	// batch before its last one.
+	var batchTouched []chan *streamEvent
 	barrier, _ := s.clock().(IdleBarrier)
 	if barrier != nil {
 		barrier.Register()
@@ -675,19 +742,47 @@ func (s *UtpSocket) eventLoop() {
 			if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 				s.logger.Trace("will handle a packet from remote", "s.incomingBuf.len", len(s.incomingBuf))
 			}
-			s.handleIncomingBuf(gotIncoming)
+			// The batch is complete once its last datagram is handed out, so
+			// say so first: a connection that receives that datagram must not
+			// wait for a wake that its own packet already is.
+			if gotIncoming.batchEnd {
+				s.batchesDone.Store(gotIncoming.batch)
+			}
+			if to := s.handleIncomingBuf(gotIncoming); to != nil && !gotIncoming.batchEnd {
+				batchTouched = append(batchTouched, to)
+			}
+			if gotIncoming.batchEnd {
+				// Wake every connection given an earlier datagram of this
+				// batch. A wake that does not fit is not needed: a full queue
+				// is a connection that is busy and will look again.
+				for _, to := range batchTouched {
+					if barrier != nil {
+						barrier.NoteHandoff()
+					}
+					select {
+					case to <- &streamEvent{Type: streamBatchEnd}:
+					default:
+						if barrier != nil {
+							barrier.TakeHandoff()
+						}
+					}
+				}
+				batchTouched = batchTouched[:0]
+			}
 		case done:
 			return
 		}
 	}
 }
 
-func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
+// handleIncomingBuf routes one datagram, and returns the connection queue it
+// handed it to, or nil.
+func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) chan *streamEvent {
 	// Handle incoming packets
 	packetPtr, err := DecodePacket(incomingRaw.payload)
 	if err != nil {
 		s.logger.Warn("Unable to decode uTP packet", "peer", incomingRaw.peer, "err", err)
-		return
+		return nil
 	}
 
 	if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
@@ -750,8 +845,10 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
 			}
 			select {
 			case connStream <- &streamEvent{
-				Type:   streamIncoming,
-				Packet: packetPtr,
+				Type:        streamIncoming,
+				Packet:      packetPtr,
+				Batch:       incomingRaw.batch,
+				BatchesDone: &s.batchesDone,
 			}:
 			default:
 				if barrier != nil {
@@ -762,12 +859,12 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
 				s.droppedFullConnQueue.Add(1)
 				s.logger.Warn("connection stream channel is full, dropping packet",
 					"connStream.len", len(connStream), "cid.send", cid.Send, "cid.recv", cid.Recv, "cid.peer", cid.Peer.Hash())
-				return
+				return nil
 			}
 			if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 				s.logger.Trace("recieve a packet for a exist conn stream", "connStream.len", len(connStream))
 			}
-			return
+			return connStream
 		}
 	}
 
@@ -792,11 +889,11 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
 			// lookup above has missed, so a connection that still exists
 			// always wins.
 			if s.reAckLingering(packetPtr, incomingRaw.peer) {
-				return
+				return nil
 			}
 			s.maybeSendReset(packetPtr, incomingRaw.peer)
 		}
-		return
+		return nil
 	}
 
 	cid := cids[2]
@@ -814,7 +911,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
 				s.logger.Debug("refusing an incoming connection: at capacity",
 					"src.peer", incomingRaw.peer, "cap", s.maxConns)
 			}
-			return
+			return nil
 		}
 	}
 
@@ -830,7 +927,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
 		if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
 			s.logger.Debug("refusing an incoming connection: firewall", "src.peer", incomingRaw.peer)
 		}
-		return
+		return nil
 	}
 
 	s.logger.Debug("receive a syn packet from a new conn stream",
@@ -863,6 +960,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) {
 		s.logger.Debug("put a new syn packet to incomingConns...")
 		s.putIncomingConn(cidHash, &IncomingPacket{pkt: packetPtr, cid: cid})
 	}
+	return nil
 }
 
 // maybeSendReset answers a packet addressed to a connection this socket does

@@ -6,6 +6,7 @@ import (
 	"container/heap"
 	"math/rand"
 	"net"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -183,6 +184,10 @@ func (p *relayPath) offer(b []byte, now time.Time) {
 	}
 }
 
+// relaySpin is how long before a datagram is due deliver stops sleeping and
+// spins, so that it is written within microseconds of its time.
+const relaySpin = 1500 * time.Microsecond
+
 // deliver writes out each datagram when it is due, until done closes.
 func (p *relayPath) deliver(done <-chan struct{}) {
 	timer := time.NewTimer(time.Hour)
@@ -209,7 +214,22 @@ func (p *relayPath) deliver(done <-chan struct{}) {
 				p.mu.Unlock()
 			}
 		}
-		timer.Reset(wait)
+		// A Go timer under a millisecond fires after about 1.1 ms when the
+		// runtime is otherwise idle (epoll waits in whole milliseconds), which
+		// would deliver a 20 Mb/s path's packets in pairs and a 100 Mb/s
+		// path's in clumps of ten. Packets on a link arrive spaced, so the
+		// last stretch before a datagram is due is spun instead.
+		if wait < relaySpin {
+			select {
+			case <-p.wake:
+			case <-done:
+				return
+			default:
+				runtime.Gosched()
+			}
+			continue
+		}
+		timer.Reset(wait - relaySpin)
 		select {
 		case <-timer.C:
 		case <-p.wake:

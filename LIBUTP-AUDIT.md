@@ -112,7 +112,7 @@ libutp it was, and the tests named are what stands behind each verdict.
 | `get_udp_mtu`, `get_udp_overhead`, `get_overhead` | `PathMTUProvider`; statistics | Matched (MTU rows in COMPATIBILITY.md); overhead is statistics only, N/A |
 | `extensions[8]` from a SYN (`:1857`) | not kept | N/A: libutp stores and logs it and never reads it |
 | `average_delay`, `clock_drift` | `driftEstimator` | Matched, measured |
-| the ack list (`schedule_ack`, `removeSocketFromAckList`) | `ackPending` | Matched in effect; batching is a deviation ("Acks are deferred, but not batched") |
+| the ack list (`schedule_ack`, `removeSocketFromAckList`) | `ackPending` | Matched in effect; an acknowledgement may cover several packets, a deviation ("Acknowledgements: one per read, fewer when they would crowd the way back") |
 | `utp_register_sent_packet` | none | N/A (statistics) |
 
 ### 707-930: the send path
@@ -252,7 +252,7 @@ libutp it was, and the tests named are what stands behind each verdict.
 | --- | --- | --- |
 | `utp_writev`: refused outside `CS_CONNECTED` or after the FIN; queued while `!is_full(size)`; small writes join the last unsent packet; `CS_CONNECTED_FULL` when full | `Write`, `WriteV`, send buffer, `processWrites` | Matched in effect: what goes on the wire follows `flush_packets`, which needs a whole packet of room (`TestNothingIsSentIntoLessThanAPacketOfRoom`). `WriteV`'s blocking and the 1024-buffer limit are recorded deviations |
 | `utp_read_drained` | `onReadDrained` | Matched, measured (KNOWN-LIMITATIONS.md, "The M4b sweep") |
-| `utp_issue_deferred_acks` | `flushAck` once per event-loop pass | Matched in effect; batching is a recorded deviation |
+| `utp_issue_deferred_acks` | `flushAck` once the socket read that brought the data has been handed out (`UdpConn.readBatch` reads until the socket would block, as libutp's embedder does) | Matched; letting an acknowledgement wait for more packets is a recorded deviation |
 | `utp_check_timeouts`: 500 ms pass, `RST_INFO_TIMEOUT` expiry, sockets destroyed | timers, `utp_socket.go` | Deviation: "Timeouts act when due"; reset bookkeeping matched (flood corpus) |
 | `utp_getpeername`, `utp_get_context`, user data | `Cid().Peer`, Go values | N/A (API shape) |
 | `utp_get_delays`: our filtered delay, the peer's, and an age | `ControllerStats` | N/A: a diagnostic. Ours reports the base and the latest raw sample, not the filtered value |

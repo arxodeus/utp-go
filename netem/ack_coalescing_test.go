@@ -10,24 +10,22 @@ import (
 // puts on the return path per data packet it receives, on a real transfer.
 //
 // The connection defers acks — connection.ackPending is set when data arrives
-// and flushAck sends at most one at the end of the event-loop pass, matching
-// libutp's schedule_ack / utp_issue_deferred_acks (utp_internal.cpp:2377,
-// :3796-3808). How much that saves is load-dependent, not structural: when
-// packets arrive faster than the connection drains them, several are
-// acknowledged together; when they arrive one at a time there is nothing to
-// coalesce, and acknowledging each is both correct and what libutp does when
-// its embedder reads one datagram per batch.
+// and flushAck sends one once the read that brought the data has been handed
+// out, matching libutp's schedule_ack / utp_issue_deferred_acks
+// (utp_internal.cpp:2377, :3796-3808) -- and, when packets arrive closely
+// spaced or its acknowledgements queue on the way back, lets one wait to
+// cover a few packets (connection.ackEvery). How much that saves is
+// load-dependent, not structural, so this measures the ratio across a range
+// of packet rates rather than asserting a fixed count. Before deferring was
+// implemented the ratio was exactly 1.000 at every rate — every data packet
+// drew its own ack.
 //
-// So this measures the ratio across a range of packet rates rather than
-// asserting a fixed count. Before deferring was implemented the ratio was
-// exactly 1.000 at every rate — every data packet drew its own ack.
+// Measured on the reference machine, twice each:
 //
-// Measured on the reference machine, once each:
-//
-//	              plain    -race
-//	20Mbps/10ms   0.823    0.844-0.919
-//	100Mbps/1ms   0.368    0.670-0.721
-//	1Gbps/1ms     0.167    0.390-0.486
+//	              plain          -race
+//	20Mbps/10ms   0.630-0.695    0.628-0.633
+//	100Mbps/1ms   0.220-0.222    0.245-0.274
+//	1Gbps/1ms     0.101-0.124    0.168-0.214
 //
 // Only the highest rate is asserted, and loosely. At the lowest rate
 // coalescing barely engages by design, so a slower machine could legitimately

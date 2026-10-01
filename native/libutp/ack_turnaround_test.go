@@ -35,8 +35,13 @@ import (
 // between two rows with the same sender belongs to the receiver. The gate is
 // that, for each sender and path, our receiver's median turnaround stays
 // within ackTurnaroundSlack of libutp's. Delaying our flush by 1 ms fails it
-// on every path (medians 1.39-3.03 ms against 0.05-0.18 ms), and leaves
+// on every path (medians 0.76-1.17 ms against 0.06-0.18 ms), and leaves
 // libutp's rows unchanged.
+//
+// The relay paces each datagram to its time (relaySpin). Before it did, it
+// delivered a 100 Mb/s path's packets in clumps of about ten, and libutp's
+// loop, draining each clump at once, appeared to send 0.22-0.33
+// acknowledgements per data packet; paced, it sends 0.58-0.62.
 func TestAckTurnaround(t *testing.T) {
 	if testing.Short() {
 		t.Skip("not a -short test")
@@ -125,7 +130,10 @@ func bestP50(runs []turnaroundStats) time.Duration {
 }
 
 // ackTurnaroundSlack is how much slower than libutp's our receiver's median
-// may be. Measured alone, the two medians are within about 0.1 ms.
+// may be. Measured alone, ours is 40-60 us slower at 10 Mb/s, where both
+// acknowledge every packet, and 100-150 us slower at 100 Mb/s, where ours lets
+// an acknowledgement wait for up to four packets (connection.ackEvery) and
+// sends 0.25 per data packet to libutp's 0.60.
 const ackTurnaroundSlack = 500 * time.Microsecond
 
 type turnaroundStats struct {
