@@ -2461,6 +2461,13 @@ Written against real sockets first, both passed while measuring nothing:
 "vanished" peer that had in fact sent a FIN on its way out. That is the third
 time in this repository a test has passed by staging the wrong situation.
 
+**Later: the stream's Close no longer waits at all.** The wait moved to
+`UtpSocket.Close`, which waits for the streams already closed, by the same
+silence rule; `UtpStream.Close` returns at once, as libutp's `utp_close` does.
+The two tests above now hold the socket's Close to the same ends, and the
+stream's to returning at once (DEVIATIONS.md, "Closing a stream returns at
+once; closing the socket delivers what is left").
+
 The clean before-and-after is the conformance suite itself, same tests and same
 machine: **139.91s to 9.58s**, with `RacyRead` alone going from 31.15s to
 0.03s. This repository's own `integrated` and `netem` packages also came down

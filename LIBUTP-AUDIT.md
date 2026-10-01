@@ -257,7 +257,7 @@ libutp it was, and the tests named are what stands behind each verdict.
 | `utp_check_timeouts`: 500 ms pass, `RST_INFO_TIMEOUT` expiry, sockets destroyed | timers, `utp_socket.go` | Deviation: "Timeouts act when due"; reset bookkeeping matched (flood corpus) |
 | `utp_getpeername`, `utp_get_context`, user data | `Cid().Peer`, Go values | N/A (API shape) |
 | `utp_get_delays`: our filtered delay, the peer's, and an age | `ControllerStats` | N/A: a diagnostic. Ours reports the base and the latest raw sample, not the filtered value |
-| `utp_close`: read side shut, FIN queued, destroyed once it is acknowledged; destroyed at once if still connecting | `Close` | Matched in effect; that `Close` waits is a recorded deviation |
+| `utp_close`: read side shut, FIN queued, destroyed once it is acknowledged; destroyed at once if still connecting | `Close` | Matched: returns at once, and the connection goes on delivering. `UtpSocket.Close` waits for closed streams while their peers answer, where destroying a libutp context discards them (DEVIATIONS.md, "Closing a stream returns at once") |
 | `utp_shutdown(SHUT_RD / SHUT_WR)` | `CloseRead`, `CloseWrite` | Matched (KNOWN-LIMITATIONS.md, "`utp_shutdown(SHUT_RD)`") |
 | logging, `utp_get_stats` | `slog`, `ConnectionMetrics` | N/A |
 

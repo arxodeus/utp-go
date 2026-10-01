@@ -712,7 +712,9 @@ the connection's event loop to exit. A loop with unacknowledged data does not
 exit until its ladder runs out -- 1+2+4+8+16 seconds -- and behind that the
 60-second idle timeout. Measured: 31 s in one shape, 60.001 s in another, with
 the caller held throughout. libutp's `utp_close` never blocks at all
-(`utp_internal.cpp:3232-3247`).
+(`utp_internal.cpp:3232-3247`). (Later the stream's Close stopped waiting
+altogether and the bounded wait below moved to the socket's Close;
+DEVIATIONS.md.)
 
 Capping the wait is the wrong fix and the interesting part of the patch.
 `Write` returns once the data is in the send buffer rather than once it is

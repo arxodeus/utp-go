@@ -93,6 +93,11 @@ worse.
 **Better on reasoning.** libutp has a defect or a hazard here that was not
 copied. Not measured as an improvement.
 
+- *Closing the socket delivers what closed streams still hold:* libutp's
+  embedder must keep its context pumping or lose the tail; `UtpSocket.Close`
+  waits for it while the peer answers. Closing a stream returns at once in
+  both. Measured on this side only: a 512 KB tail over 2 Mbps delivered in
+  full, where without the wait it was lost.
 - *Completing an incoming connection:* libutp never completes a zero-length
   transfer.
 - *A retransmitted SYN is answered:* libutp ignores a SYN for a connection it
@@ -183,8 +188,6 @@ consequence, or equivalent on the wire.
   receiver's socket to its acknowledgement leaving is 110-120 us here and
   60-70 us in libutp. The packet crosses three goroutines on the way in; libutp
   handles it on the thread that read it. No throughput cost has been measured.
-- *Close waits:* a caller is held for up to one flush or two seconds of peer
-  silence; libutp's `utp_close` returns at once.
 
 ## Intentional deviations
 
@@ -634,29 +637,36 @@ end of the stream up to a round trip sooner. Not measured against libutp: its
 driver's window of one packet holds the data before the FIN in the corpus,
 which hides the difference.
 
-## Close waits; libutp's does not
+## Closing a stream returns at once; closing the socket delivers what is left
 
-**libutp's `utp_close` never blocks the application.** It sends the FIN, sets
-`close_requested` and returns (`utp_internal.cpp:3232-3247`); the socket stays
-in `CS_FIN_SENT` until `utp_check_timeouts` retires it, and whether the tail
-was delivered is the embedder's problem.
+**libutp's `utp_close` never blocks the application.** It queues the FIN, sets
+`close_requested` and returns (`utp_internal.cpp:3358-3380`); the socket goes
+on sending in `CS_FIN_SENT` until `utp_check_timeouts` retires it. Whether the
+tail is delivered is the embedder's problem: it has to keep the context alive
+and pumping, and destroying the context throws away whatever its sockets still
+held.
 
-`UtpStream.Close` waits for the connection to flush what is queued. The reason
-is an API difference rather than a protocol one: `Write` here returns once the
-data is in the send buffer, so `Write(payload); Close()` -- the shape every Go
-caller writes -- would otherwise lose whatever had not gone out yet. libutp's
-embedders arrange that themselves by keeping the context alive and pumping it;
-this library has no equivalent thing for a caller to keep alive.
+`UtpStream.Close` now does the same: it queues the FIN and returns, and the
+connection goes on delivering in the background. It used to wait, for the
+reason libutp leaves to its embedders -- `Write` returns once the data is in
+the send buffer, so `Write(payload); Close()` followed by the program exiting
+would lose whatever had not gone out yet. That wait has moved to where the
+data is actually lost: `UtpSocket.Close`, this library's equivalent of
+destroying the context, first waits for every stream already closed to finish
+(`UtpSocket.awaitLingering`). It waits while the peer is still answering and
+gives up after two seconds of silence (`closeStallTimeout`, twice libutp's
+1000 ms RTO floor), the bound that used to apply to the stream's Close.
 
-The wait is bounded by the peer going silent rather than by a clock
-(`closeStallTimeout`, two seconds -- twice libutp's 1000 ms RTO floor), and
-when it gives up it gives up only on waiting: the connection goes on
-retransmitting and ends on its own, exactly as libutp's would. So the
-divergence is that a caller here is held for up to one flush or two seconds of
-silence, whichever comes first, where libutp's is held for neither.
+So against libutp: closing a stream holds its caller no longer than
+`utp_close` does, and closing the socket delivers what libutp's context
+teardown would discard. Measured (`netem.TestCloseFlushesASlowTail`,
+`TestCloseDoesNotWaitForASilentPeer`): the stream's Close returns at once; the
+socket's Close delivered a 512 KB tail over 2 Mbps in full in 2.26 s, and
+returned after 2.02 s for a peer that had gone silent. Without the socket's
+wait the tail was lost and the reader timed out.
 
-It was unbounded before, which was a defect rather than a deviation, and cost
-31 to 60 seconds per close on a connection whose peer had gone. See
+The wait was once unbounded, which was a defect rather than a deviation, and
+cost 31 to 60 seconds per close on a connection whose peer had gone. See
 [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
 
 ## ~~The delay clamp uses one packet's RTT, not the batch minimum~~ — no longer

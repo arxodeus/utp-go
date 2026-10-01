@@ -255,8 +255,11 @@ type UtpSocket struct {
 	// so a test can tell "refused" from "lost".
 	refusedByFirewall atomic.Uint64
 	closeOnce         sync.Once
-	readNextCh        chan struct{}
-	incomingBuf       chan *IncomingPacketRaw
+	// lingering holds the streams the application has closed whose
+	// connections are still delivering. Close waits for them. See linger.
+	lingering   sync.Map // *UtpStream -> struct{}
+	readNextCh  chan struct{}
+	incomingBuf chan *IncomingPacketRaw
 	// firewall, when set, is asked about every SYN for a connection this
 	// socket does not already have, before any state is created for it.
 	// Reporting true refuses the connection. Set once at construction and
@@ -946,6 +949,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) chan *stre
 		newConnStream := make(chan *streamEvent, 1000)
 		s.putConnStream(cidHash, newConnStream)
 		stream := NewUtpStream(s.ctx, s.logger, cid, s.configForPeer(accept.config, cid.Peer), packetPtr, s.socketEvents, newConnStream, connected, s.retransmitTimers)
+		stream.linger = s.linger
 		go s.awaitConnected(stream, accept, connected)
 	} else if accept := s.takePendingAccept(); accept != nil {
 		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
@@ -1240,8 +1244,13 @@ func (s *UtpSocket) NumConnections() int {
 // Close shuts the socket down. It is idempotent: `defer sock.Close()`
 // alongside an explicit Close is ordinary Go, and the second call used to
 // panic closing an already-closed channel.
+//
+// It first waits for the streams already closed to finish delivering what was
+// written to them, for as long as each one's peer is still answering
+// (awaitLingering); everything else is ended at once.
 func (s *UtpSocket) Close() {
 	s.closeOnce.Do(func() {
+		s.awaitLingering()
 		s.cancel()
 		s.sendShutdownEventToConns()
 		s.awaitingExpirations.stop()
@@ -1259,6 +1268,44 @@ func (s *UtpSocket) Close() {
 			}
 		}
 	})
+}
+
+// linger keeps a closed stream's connection going until it has delivered
+// what was queued and ended, and lets Close wait for it.
+//
+// UtpStream.Close returns at once, as libutp's utp_close does
+// (utp_internal.cpp:3358-3380): the FIN is queued and the connection goes on
+// sending in the background. libutp leaves the rest to its embedder, which
+// must keep the context alive and pumping until its sockets have finished;
+// destroying the context throws away whatever they still held. Here closing
+// the socket is that moment, and it waits instead (awaitLingering), so that
+// writing, closing the stream, closing the socket and exiting delivers every
+// byte.
+func (s *UtpSocket) linger(stream *UtpStream) {
+	s.lingering.Store(stream, struct{}{})
+	go func() {
+		stream.connHandle.Wait()
+		s.lingering.Delete(stream)
+		stream.streamCancel()
+	}()
+}
+
+// awaitLingering waits for every closed stream's connection to finish
+// delivering, while its peer is still answering: a connection whose peer has
+// been silent for closeStallTimeout is waited for no longer, and the socket's
+// cancellation then ends it. See UtpStream.waitForFlush.
+func (s *UtpSocket) awaitLingering() {
+	var wg sync.WaitGroup
+	s.lingering.Range(func(key, _ any) bool {
+		stream := key.(*UtpStream)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			stream.waitForFlush()
+		}()
+		return true
+	})
+	wg.Wait()
 }
 
 func (s *UtpSocket) Cid(peer ConnectionPeer, isInitiator bool) *ConnectionId {
@@ -1393,6 +1440,7 @@ func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *Co
 		connectedCh,
 		s.retransmitTimers,
 	)
+	stream.linger = s.linger
 
 	// Wait for connection result
 	select {
@@ -1449,6 +1497,7 @@ func (s *UtpSocket) ConnectWithCid(
 		connected,
 		s.retransmitTimers,
 	)
+	stream.linger = s.linger
 	// Honour the caller's context, as Connect does. A bare receive here meant
 	// that cancelling the context during connection setup never returned: the
 	// connection's event loop exits on the same cancellation without
@@ -1540,6 +1589,7 @@ func (s *UtpSocket) selectAcceptHelper(
 		connected,
 		s.retransmitTimers,
 	)
+	stream.linger = s.linger
 
 	go s.awaitConnected(stream, accept, connected)
 }

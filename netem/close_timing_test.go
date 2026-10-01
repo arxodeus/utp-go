@@ -98,8 +98,15 @@ func TestCloseFlushesASlowTail(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
+	// The stream's Close returns at once, as libutp's utp_close does; the
+	// socket's Close is where the wait is (UtpSocket.awaitLingering).
 	start := time.Now()
 	stream.Close()
+	if took := time.Since(start); took > streamCloseBound {
+		t.Errorf("the stream's Close held its caller for %v", took.Round(time.Millisecond))
+	}
+	start = time.Now()
+	sockA.Close()
 	closeTook := time.Since(start)
 
 	select {
@@ -108,7 +115,7 @@ func TestCloseFlushesASlowTail(t *testing.T) {
 			t.Fatalf("the peer failed to read: %v", res.err)
 		}
 		if len(res.data) != size {
-			t.Fatalf("the peer received %d of %d bytes after a Close that took %v; the wait "+
+			t.Fatalf("the peer received %d of %d bytes after a socket Close that took %v; the wait "+
 				"gave up while there was still something to deliver",
 				len(res.data), size, closeTook.Round(time.Millisecond))
 		}
@@ -122,12 +129,12 @@ func TestCloseFlushesASlowTail(t *testing.T) {
 	// The point of the measurement: this is well past any flat bound that
 	// would also have fixed the vanished-peer case.
 	if closeTook < 2*time.Second {
-		t.Errorf("Close returned in %v, which is inside closeStallTimeout -- the link is no "+
-			"longer slow enough for this test to distinguish a stall bound from a clock",
+		t.Errorf("the socket's Close returned in %v, which is inside closeStallTimeout -- the "+
+			"link is no longer slow enough for this test to distinguish a stall bound from a clock",
 			closeTook.Round(time.Millisecond))
 	}
-	t.Logf("Close flushed a %d-byte transfer's tail over a 2 Mbps link in %v, delivering all of it",
-		size, closeTook.Round(time.Millisecond))
+	t.Logf("the socket's Close flushed a %d-byte transfer's tail over a 2 Mbps link in %v, "+
+		"delivering all of it", size, closeTook.Round(time.Millisecond))
 }
 
 // A close whose peer has gone silent must return promptly.
@@ -196,6 +203,11 @@ func TestCloseDoesNotWaitForASilentPeer(t *testing.T) {
 
 	start := time.Now()
 	stream.Close()
+	if took := time.Since(start); took > streamCloseBound {
+		t.Errorf("the stream's Close held its caller for %v", took.Round(time.Millisecond))
+	}
+	start = time.Now()
+	sockA.Close()
 	elapsed := time.Since(start)
 
 	// Unbounded, this waits out the retransmission ladder (1+2+4+8+16 = 31s)
@@ -204,17 +216,21 @@ func TestCloseDoesNotWaitForASilentPeer(t *testing.T) {
 	// seconds of silence plus whatever the last exchange was still doing is
 	// the bound; anything near either of those numbers means it is gone.
 	if elapsed > 10*time.Second {
-		t.Fatalf("Close took %v for a peer that had gone silent; it is waiting out the "+
+		t.Fatalf("the socket's Close took %v for a peer that had gone silent; it is waiting out the "+
 			"retransmission ladder again", elapsed.Round(time.Millisecond))
 	}
 	// And it should not be instant either: there was unacknowledged data, so
 	// Close had something to wait for and did wait, rather than returning
 	// because the connection had already finished.
 	if elapsed < 500*time.Millisecond {
-		t.Errorf("Close returned in %v, too fast to have waited for anything; the connection "+
+		t.Errorf("the socket's Close returned in %v, too fast to have waited for anything; the connection "+
 			"had probably already ended, so this is not measuring a silent peer",
 			elapsed.Round(time.Millisecond))
 	}
-	t.Logf("Close on a silent peer returned in %v; unbounded it took 60.001s here, and 31s "+
+	t.Logf("the socket's Close on a silent peer returned in %v; unbounded it took 60.001s here, and 31s "+
 		"in the net.Conn suite", elapsed.Round(time.Millisecond))
 }
+
+// streamCloseBound is how long a stream's Close may take: it waits for
+// nothing, so this is scheduling.
+const streamCloseBound = 100 * time.Millisecond

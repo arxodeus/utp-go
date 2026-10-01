@@ -37,7 +37,10 @@ type UtpStream struct {
 	readClosed atomic.Bool
 	connHandle *sync.WaitGroup
 	conn       *connection
-	closeOnce  sync.Once
+	// linger, set by the socket that made this stream, takes it over at
+	// Close. See UtpSocket.linger.
+	linger    func(*UtpStream)
+	closeOnce sync.Once
 	// abandoned is closed by Close, telling the connection that whatever is
 	// still buffered for this reader is owed to nobody.
 	abandoned  chan struct{}
@@ -411,6 +414,10 @@ func (s *UtpStream) CloseRead() error {
 	return nil
 }
 
+// Close ends the stream and returns at once. What has been written goes on
+// being delivered in the background, the FIN after it, until the peer has
+// acknowledged everything or stopped answering; closing the socket waits for
+// that (UtpSocket.Close). libutp's utp_close (utp_internal.cpp:3358-3380).
 func (s *UtpStream) Close() {
 	s.closeOnce.Do(func() {
 		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
@@ -418,9 +425,8 @@ func (s *UtpStream) Close() {
 		}
 		s.shutdown.Store(true)
 		// Tell the connection's final drain not to wait for a reader that is
-		// no longer there. Closing is what makes Close safe against its own
-		// wait below: the loop would otherwise block handing over bytes that
-		// this consumer has just said it does not want.
+		// no longer there: the loop would otherwise block handing over bytes
+		// that this consumer has just said it does not want.
 		close(s.abandoned)
 		// Wake the event loop.
 		//
@@ -437,49 +443,27 @@ func (s *UtpStream) Close() {
 			// The queue is full, so the loop has plenty to wake it and will
 			// see the flag on its next pass.
 		}
-		// Wait for the connection to flush what is queued -- but only while it
-		// is still getting somewhere.
+		// Return, and let the connection finish in the background: libutp's
+		// utp_close queues the FIN, sets close_requested and returns
+		// (utp_internal.cpp:3358-3380), and the socket goes on sending until
+		// utp_check_timeouts retires it.
 		//
-		// This was a bare connHandle.Wait(), which waits for the event loop to
-		// exit. A loop with unacknowledged data does not exit until its
-		// retransmission ladder runs out -- 1 + 2 + 4 + 8 + 16 seconds -- and
-		// where that is not enough, the 60-second idle timeout behind it.
-		// Measured, closing a connection whose peer had gone took 31 seconds
-		// in the standard library's net.Conn suite and 60.001 seconds on a
-		// blackholed link, with the caller held for all of it; the eleven
-		// subtests that kernel TCP finishes in 0.43s took 140. A BitTorrent
-		// client drops peers constantly, and a minute per dropped peer is not
-		// a close, it is a leak with a timer on it.
-		//
-		// The wait cannot simply be capped. Write returns once the data is in
-		// the send buffer rather than once it is acknowledged (conn.go,
-		// processWrites), so a write followed by a close leaves a tail of up
-		// to a send buffer still to go -- and how long that takes is a
-		// property of the link, not of the caller: measured at 2.29s for a
-		// 512 KB transfer over 2 Mbps, which is past any cap short enough to
-		// be worth having. A flat timeout would truncate exactly the
-		// transfers that need the wait most. What separates the two cases is
-		// not elapsed time but whether the peer is still answering, so that
-		// is what is measured.
-		//
-		// libutp does not wait at all: utp_close sends the FIN, sets
-		// close_requested and returns (utp_internal.cpp:3232-3247), and the
-		// socket is destroyed later by utp_check_timeouts. The deviation is
-		// deliberate and recorded in DEVIATIONS.md -- a caller that writes,
-		// closes and exits should not lose its tail, which libutp leaves to
-		// the embedder to arrange and this library does not.
-		if s.waitForFlush() {
-			s.streamCancel()
+		// This used to wait for the connection to flush what was queued,
+		// while its peer was still answering (waitForFlush): Write returns
+		// once the data is in the send buffer, so Write then Close then exit
+		// would otherwise lose the tail. That wait now happens when the
+		// socket is closed (UtpSocket.awaitLingering), which is where an
+		// exiting program loses whatever was still in flight; closing a
+		// stream never holds its caller. Measured before: a 512 KB tail over
+		// 2 Mbps held Close for 2.3 s.
+		if s.linger != nil {
+			s.linger(s)
+			return
 		}
-		// If the flush did not finish, the stream context is deliberately left
-		// alone. Cancelling it here would stop the event loop mid-flight and
-		// discard whatever it still had to send, which is the opposite of what
-		// giving up on *waiting* should mean -- and it is not what libutp does
-		// either: a socket closed with unacknowledged data stays alive in
-		// CS_FIN_SENT until utp_check_timeouts retires it. The loop reaches the
-		// same end on its own, and its deferred cleanup drops the connection
-		// from the socket when it does. Closing the socket cancels everything
-		// regardless.
+		go func() {
+			s.connHandle.Wait()
+			s.streamCancel()
+		}()
 	})
 }
 
