@@ -179,8 +179,10 @@ consequence, or equivalent on the wire.
   arrives against libutp's 170-210 us.
 - *The base delay is the lowest over two minutes, not about thirteen.* A
   clock drift's phantom queue grows with the window, measured linear, so
-  libutp's is 6.5 times ours. What the shorter memory costs -- a queue that
-  stands for two minutes is taken for the empty path -- is not measured.
+  libutp's is 6.5 times ours. The cost -- a queue that stands for two
+  minutes is taken for the empty path -- measured against a Reno flow
+  holding a queue for five minutes: 5.31 Mbps to the 13-minute window's
+  4.96, 7% less yielding, within the run-to-run spread of three runs each.
 
 **Worse than libutp, accepted.** Each has a stated reason for being carried.
 
@@ -877,8 +879,21 @@ library (`OnPeerDelay`), with the shorter window as well.
 The cost is the other side of the same memory. A queue that stands for longer
 than the window becomes the base, after which the controller reads it as an
 empty path and adds its own queue on top: LEDBAT's latecomer problem, which a
-longer memory postpones. That is not measured. Setting `DelayWindow` to 13
-minutes recovers libutp's length, though not its bucket granularity.
+longer memory postpones. Setting `DelayWindow` to 13 minutes recovers libutp's
+length, though not its bucket granularity.
+
+Measured: a uTP flow learns the empty path alone for 20 seconds on a 10 Mbps
+link with a 256 KB queue, then a Reno flow joins and keeps the queue standing
+for five minutes. Over the last three minutes, three runs of each, the uTP
+flow averaged 5.31 Mbps with the two-minute window (per run 5.25, 5.28, 5.42)
+and 4.96 with a 13-minute one (4.24, 4.99, 5.64): the shorter memory yields
+about 7% less, which is the direction the argument above predicts, by about
+one standard error. Both take about half the link from Reno; deferring to a
+loss-based flow on a queue deeper than the target is LEDBAT's weakness either
+way. (The first attempt at this measurement ran the Reno emulator with a
+payload too large for its 32-bit byte offsets and found, instead, a defect of
+this library's own: KNOWN-LIMITATIONS.md, "A connection stopped after 65,535
+packets".)
 
 ## A connection whose peer falls silent is closed after `MaxIdleTimeout`
 
