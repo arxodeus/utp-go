@@ -156,7 +156,7 @@ func TestDriftIgnoresZeroSamples(t *testing.T) {
 	d, push := driftAt(t, start)
 
 	push(0, time.Second)
-	if d.haveBase {
+	if d.base != 0 {
 		t.Error("a zero sample set the base; zero means the peer has no measurement")
 	}
 	if d.samples != 0 {
@@ -209,5 +209,21 @@ func TestDriftRenormalisationBoundsTheAverage(t *testing.T) {
 	if d.average > 2*step || d.average < -2*step {
 		t.Errorf("average %d after 40 slots of +%d; renormalisation should keep it "+
 			"within a slot or two of zero, not accumulate", d.average, step)
+	}
+}
+
+// libutp takes a base of zero as unset and seeds it from the next sample
+// (utp_internal.cpp:2028), including when a renormalisation has left it there.
+func TestDriftBaseOfZeroIsReseeded(t *testing.T) {
+	start := time.Unix(0, 0)
+	d, push := driftAt(t, start)
+	push(50000, time.Second)
+	d.base = 0 // as a renormalisation can leave it
+	push(70000, 2*time.Second)
+	if d.base != 70000 {
+		t.Errorf("base %d after a sample of 70000 with the base at zero; libutp seeds it from the sample", d.base)
+	}
+	if want := int64(0); d.sum != want {
+		t.Errorf("slot sum %d; the reseeding sample is at distance 0 from its own base", d.sum)
 	}
 }

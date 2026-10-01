@@ -317,10 +317,15 @@ func TestOnFinClosingNonMatchingFin(t *testing.T) {
 	err := conn.onFin(altFin, []byte{})
 	require.NoError(t, err, "expected no error")
 
-	// Step 5: Verify error state
-	require.Equal(t, ConnClosed, conn.state.stateType, "expected state to be closed")
-	require.ErrorIs(t, conn.state.Err, ErrInvalidFin,
-		"expected error to be %v, got %v", ErrInvalidFin, conn.state.Err)
+	// Step 5: The end of the stream is still the first FIN's, and the
+	// connection carries on. This used to assert a reset; libutp records
+	// eof_pkt only for the first FIN (utp_internal.cpp:2316) and drops a
+	// packet numbered past it without acknowledging it (:2381-2386).
+	// TestConformanceSecondFinDoesNotMoveTheEnd compares the two directly.
+	require.Equal(t, ConnConnected, conn.state.stateType, "expected the connection to stay up")
+	require.NoError(t, conn.state.Err)
+	require.Equal(t, fin, *conn.state.closing.RemoteFin, "the end of the stream moved")
+	require.True(t, conn.dropUnacked, "a FIN numbered past the end should be dropped unacknowledged")
 }
 
 func TestOnResetNonClosed(t *testing.T) {

@@ -663,3 +663,41 @@ func TestConformanceFinBeforeAnyData(t *testing.T) {
 	t.Logf("deliberate divergence: a FIN before any data -- libutp stays in CS_SYN_RECV and " +
 		"drops it silently, we acknowledge it")
 }
+
+// Only an ST_STATE carries a selective ack. With a hole in what the peer has
+// sent, libutp's data packet still goes out with no extension: send_ack is the
+// one place it sets `ext = 1` (utp_internal.cpp:795), and a data packet is
+// built with `ext = 0` (:1080). Its deferred acknowledgement, which would
+// have carried the selective ack, is cancelled by the data packet (:768).
+// This library used to attach the selective ack to every data packet.
+func TestConformanceDataPacketCarriesNoSelectiveAck(t *testing.T) {
+	runResponderCorpus(t, []step{
+		{name: "handshake", inject: synPacketFor(corpusSynConnID, corpusSynSeq)},
+		{
+			name: "data past a hole is selectively acknowledged",
+			inject: NewPacketBuilder(st_data, corpusSynConnID+1, 200000, corpusWindow, corpusSynSeq+2).
+				WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("after the gap")).Build(),
+			wantAck: ackNum(corpusSynSeq),
+		},
+		{
+			name:  "a data packet sent with the hole still open",
+			write: []byte("reply"),
+		},
+	})
+}
+
+// A packet whose timestamp is zero carries no timestamp. libutp echoes no delay
+// for it and takes no sample: `their_delay = (p == 0 ? 0 : time - p)`
+// (utp_internal.cpp:2000). This library used to echo `now - 0`, the whole of
+// its clock.
+func TestConformanceZeroTimestampIsNotADelay(t *testing.T) {
+	runResponderCorpus(t, []step{
+		{name: "handshake", inject: synPacketFor(corpusSynConnID, corpusSynSeq)},
+		{
+			name: "data with a zero timestamp is acked with a zero delay",
+			inject: NewPacketBuilder(st_data, corpusSynConnID+1, 0, corpusWindow, corpusSynSeq+1).
+				WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("no clock")).Build(),
+			wantAck: ackNum(corpusSynSeq + 1),
+		},
+	})
+}

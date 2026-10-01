@@ -65,15 +65,14 @@ const (
 	mtuSearchInterval = 30 * time.Minute
 
 	// mtuHeaderOverhead is what a uTP packet spends before payload: the
-	// 20-byte header plus room for a selective-ack extension.
+	// 20-byte header, as libutp's get_packet_size subtracts
+	// (`sizeof(PacketFormatV1)`, utp_internal.cpp:1759).
 	//
-	// libutp subtracts only `sizeof(PacketFormatV1)` (utp_internal.cpp:1759),
-	// because it appends the extension to a separately sized buffer. This
-	// library builds one buffer, so the extension has to be accounted for
-	// here or a packet carrying one would exceed the discovered size -- which
-	// is exactly the packet that must not.
-	mtuHeaderOverhead uint32 = MINIMAL_HEADER_SIZE + EXTENSION_TYPE_LEN +
-		EXTENSION_LEN_LEN + SELECTIVE_ACK_BITS/8
+	// It used to reserve room for a selective-ack extension as well, because
+	// this library attached one to data packets. libutp never does, and now
+	// neither does this library (conn.go, dataPacketsCarryNoSelectiveAck), so
+	// a packet carrying payload is never longer than the header plus it.
+	mtuHeaderOverhead uint32 = MINIMAL_HEADER_SIZE
 )
 
 // mtuSearch is one connection's path-MTU state.

@@ -12,10 +12,10 @@ The reference is `github.com/anacrolix/go-libutp@v1.3.2`, the copy this
 repository builds and tests against (REFERENCE.md). Line numbers are that
 copy's.
 
-**Status: in progress.** Done: `utp_internal.cpp` lines 1-1766 (constants,
+**Status: in progress.** Done: `utp_internal.cpp` lines 1-2478 (constants,
 types, the send path, timeouts, the MTU search, acknowledgement, selective
-ack, congestion control). Still to read: 1767-3489 (`utp_process_incoming`,
-socket lifecycle, options, connect, `utp_process_udp`, ICMP, the public API)
+ack, congestion control, `utp_process_incoming`). Still to read: 2479-3489
+(socket lifecycle, options, connect, `utp_process_udp`, ICMP, the public API)
 and the support files (`utp_api.cpp`, `utp_utils.cpp`, `utp_callbacks.cpp`,
 `utp_hash.cpp`, `utp_packedsockaddr.cpp`, `utp_internal.h`,
 `utp_templates.h`). Until they are done, DEVIATIONS.md's own caveat stands.
@@ -48,7 +48,18 @@ and the support files (`utp_api.cpp`, `utp_utils.cpp`, `utp_callbacks.cpp`,
 | N10 | `selective_ack`, `:1612` | A selective ack sets the duplicate-ack count to the packets it names, which moves when the MTU probe is judged too big | Fixed: `TestSelectiveAckSetsTheDuplicateCountOnArrival` |
 | N11 | `ack_packet`, `:1380`; `check_timeouts`, `:1179` | libutp's timeout has no upper bound; ours stops at `MaxTimeout` | Deviation: "The retransmission timeout is capped at `MaxTimeout`" |
 | N12 | `ack_packet`, `:1362-1380` | libutp's round-trip estimator works in whole milliseconds; ours carried microseconds, so the timeout differed by the fractions | Fixed: `TestRTTSamplesAreWholeMilliseconds`. The loss probe, which libutp does not have, keeps a microsecond estimate of its own |
-| N13 | `send_data`/`send_packet`, `:1080`; `send_ack`, `:780-796` | Only libutp's `ST_STATE` carries a selective ack; ours attached one to data, FIN and resent packets, and reserved room for it in every packet's payload | Open: next change |
+| N13 | `send_data`/`send_packet`, `:1080`; `send_ack`, `:780-796` | Only libutp's `ST_STATE` carries a selective ack; ours attached one to data, FIN and resent packets, and reserved room for it in every packet's payload | Fixed: `TestConformanceDataPacketCarriesNoSelectiveAck`, differential. Two-way transfers over loss, 15 seeds each, before and after: medians 1.39/1.86/5.53 s against 1.41-1.47/1.91-1.92/4.76 s at 1/3/5% loss, and five more repetitions at 5% gave 4.97-5.55 s; retransmissions 238/752/1277 against 244-248/737-748/1254. No loss of recovery visible within run-to-run spread |
+| N14 | `utp_process_incoming`, `:1850-1856` | An "extension bits" extension (type 2) of any length but 8 makes libutp drop the packet; ours accepts it | Open: the SYN path decides where the check belongs |
+| N15 | `utp_process_incoming`, `:2000-2002` | A zero timestamp is no timestamp: libutp echoes no delay and takes no sample; ours echoed `now - 0` | Fixed: `TestConformanceZeroTimestampIsNotADelay`, differential |
+| N16 | `utp_process_incoming`, `:2144` | The peer's window is read only from a packet that has passed the acknowledgement and reorder-window checks; ours took it from every packet, so a forged one could close it | Fixed: `TestDiscardedPacketDoesNotSetThePeerWindow` |
+| N17 | `utp_process_incoming`, `:2148-2151` | Every zero-window packet restarts the 15-second probe deadline; ours kept the first | Fixed: `TestZeroWindowProbeDeadlineRestartsOnEachZeroWindow` |
+| N18 | `utp_process_incoming`, `:2381-2386` | Data numbered past the peer's FIN is dropped unacknowledged; ours closed the connection | Fixed: `TestConformanceDataPastTheFinIsDropped`, differential |
+| N19 | `utp_process_incoming`, `:2316` | A second FIN with another number does not move the end of the stream and is handled as data; ours reset the connection | Fixed: `TestConformanceSecondFinDoesNotMoveTheEnd`, differential |
+| N20 | `utp_process_incoming`, `:2425-2431` | An out-of-order packet already held is discarded unacknowledged; ours acknowledged it | Fixed: `TestConformanceDuplicateOutOfOrderData`, differential |
+| N21 | `flush_packets`/`is_full`, `:931-985` | The FIN waits for room for a packet like any queued packet; ours went as soon as the send buffer emptied, and with more in flight than a halved window the controller refused it and `transmit` panicked -- one two-way run in six at 5% loss crashed | Fixed: `TestFinWaitsForRoomInTheWindow` (panics without the fix) |
+| N22 | `utp_process_incoming`, `:2028` | The clock-drift average's base is re-seeded whenever it is zero; ours seeded it once | Fixed: `TestDriftBaseOfZeroIsReseeded` |
+| N24 | `utp_process_incoming`, `:2358`; `check_timeouts`, `:1144-1200` | Once the peer's stream has ended, libutp arms its timeout 60 ms out (`min(rto * 3, 60)` with `rto` at least 1000). With nothing in flight that only decays an idle window early; with data in flight it is a spurious retransmission timeout that cuts the window to one packet. Measured: libutp's first resend moves from 3.1 s to 100 ms; ours stays at 3.1 s | Deviation: "Reaching the end of the peer's stream does not time out what is in flight" (`TestPeerFinDoesNotTimeOutWhatIsInFlight`) |
+| N23 | `utp_process_incoming`, `:2339-2343` | libutp hands every in-order byte to its embedder and has no buffer to overflow; ours drops a packet that does not fit its receive buffer | Deviation: "A packet that does not fit the receive buffer is dropped" |
 | -- | `DELAY_BASE_HISTORY`, `:50` | Base delay over about thirteen minutes; ours two | Deviation, and now recorded as one: "The base delay is the lowest over two minutes" |
 
 ## Ledger
@@ -162,3 +173,41 @@ and the support files (`utp_api.cpp`, `utp_utils.cpp`, `utp_callbacks.cpp`,
 | --- | --- | --- |
 | `utp_register_recv_packet` | none | N/A (statistics) |
 | `get_packet_size`: MTU less the 20-byte header | `mtuSearch.payloadSize`: less 26, room for a selective ack | Open (N13) |
+
+### 1767-2478: `utp_process_incoming`
+
+| libutp | Ours | Verdict |
+| --- | --- | --- |
+| type past `ST_NUM_STATES` dropped | `DecodePacketHeader` | Matched |
+| acknowledgement number outside `[seq_nr - 1 - max(cur_window_packets + 3, 3), seq_nr - 1]` dropped, SYN in `CS_SYN_RECV` excepted (`:1794-1807`) | `invalidAckNum` | Matched, differential (`TestStaleAckIsIgnoredNotFatal`, corpus) |
+| header shorter than its size dropped | `DecodePacket` | Matched |
+| extension chain: truncated chain dropped; last selective ack wins; type 2 must be 8 bytes; other types skipped | `DecodeRawExtensions` | Matched except type 2's length (N14); a first extension of 3 or more is rejected by both (DEVIATIONS.md, "Unknown extension types") |
+| `CS_SYN_SENT`: `ack_nr` from the SYN-ACK | `onState` | Matched (initiator corpus) |
+| reorder window: 1024 ahead; an old packet re-acknowledged unless ST_STATE (`:1886-1899`) | `outsideReorderWindow` | Matched, differential |
+| acknowledged count, old acknowledgements count none (`:1904-1907`) | `onAck` | Matched |
+| duplicate acknowledgements and the MTU probe (`:1921-1941`) | `noteDuplicateAck` | Matched, and N10 |
+| acked bytes and minimum round trip (`:1956-1987`) | `ackBatch` | Fixed (N9) |
+| `reply_micro` and `their_hist` (`:1994-2016`) | `peerTsDiff`, `OnPeerDelay` | Matched except a zero timestamp (N15) |
+| `our_hist` sample, skipped when zero (`:2017-2024`) | `OnAckDelay` | Fixed (N7, N8) |
+| clock-drift average (`:2025-2107`) | `driftEstimator` | Matched, measured; base re-seeding was N22 |
+| base raised when the delay exceeds the round trip (`:2127-2133`) | `ApplyAck` | Fixed (N9b) |
+| one `apply_ccontrol` per acknowledgement (`:2139`) | `ApplyAck` | Fixed (N8, N9) |
+| peer window and zero-window deadline (`:2143-2151`) | `onPacket` | Fixed (N16, N17) |
+| `CS_SYN_RECV` completes on ST_DATA only (`:2157`) | completes on any packet | Deviation: "Completing an incoming connection" |
+| `CS_SYN_SENT` completes on ST_STATE | `onState` | Matched |
+| FIN acknowledged in full: `fin_sent_acked`, destroy if close was requested | `updateClosingState` | Matched (close corpus, netem close tests) |
+| `fast_resend_seq_nr` advanced with the cumulative acknowledgement | `OnAckNum` | Matched |
+| `ack_packet` loop; window shrunk past selectively acknowledged packets | `onAck` | Matched |
+| Nagle flush of a lone unsent packet (`:2237-2245`) | none | Deviation: "No Nagle" |
+| fast timeout-retry (`:2247-2276`), before the selective ack | `onFastTimeout`, before `retransmitLostPackets` | Matched in effect: the same packet goes once, in the same order |
+| selective ack (`:2289`) | `onAck`, `TakeLostPackets` | Matched, and N10 |
+| writable again when the window drops below full | `writable` channel | Matched in effect |
+| ST_STATE stops here; data refused outside `CS_CONNECTED` | `onData` state switch | Matched |
+| first FIN sets `eof_pkt` (`:2316`) | `onFin` | Fixed (N19) |
+| in-order data: delivered unless read-shut, `ack_nr++` regardless (`:2339-2343`) | `receiveBuffer.Write` | Matched (`TestReadShutdownAcksWithoutBuffering`); no buffer limit is N23 |
+| end of stream reached: immediate ack | `st_fin` handling | Matched (the double acknowledgement is asserted in the corpus) |
+| end of stream reached: `rto_timeout = now + min(rto * 3, 60)` (`:2358`) | deadline unchanged | Deviation (N24) |
+| reorder buffer drained in order | `receiveBuffer` | Matched |
+| out-of-order data past the FIN dropped (`:2381-2386`) | `onData` | Fixed (N18); ours wraps the comparison, libutp's does not |
+| out-of-order duplicate dropped unacknowledged (`:2425-2431`) | `onData` | Fixed (N20) |
+| out-of-order data stored, acknowledgement scheduled | `receiveBuffer.Write` | Matched, differential |

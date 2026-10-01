@@ -48,9 +48,9 @@ const driftPenaltyDivisor = 7
 type driftEstimator struct {
 	// base is the offset every sample is measured against, so that a wrapping
 	// uint32 can be averaged as a signed quantity. libutp's
-	// average_delay_base, which it also renormalises (see push).
-	base     uint32
-	haveBase bool
+	// average_delay_base, which it also renormalises (see push). Zero means
+	// unset, as in libutp.
+	base uint32
 
 	// sum and samples accumulate the current slot. libutp's
 	// current_delay_sum and current_delay_samples.
@@ -88,9 +88,12 @@ func (d *driftEstimator) push(sample uint32, now time.Time) {
 	if sample == 0 {
 		return
 	}
-	if !d.haveBase {
+	// `if (conn->average_delay_base == 0) conn->average_delay_base =
+	// actual_delay;` (utp_internal.cpp:2028). Zero is libutp's "unset", so a
+	// base that a renormalisation has left at exactly zero is seeded again
+	// from the next sample; a separate flag, as this used to have, kept it.
+	if d.base == 0 {
 		d.base = sample
-		d.haveBase = true
 	}
 
 	// The signed distance from base to sample, on a wrapping uint32. Both

@@ -368,6 +368,11 @@ type connection struct {
 	// which is sent once at the end of the event-loop pass that received it.
 	// libutp's schedule_ack / utp_issue_deferred_acks.
 	ackPending bool
+	// dropUnacked is set while a packet is being handled when libutp would
+	// discard it without scheduling an acknowledgement -- its early `return
+	// 0`s in utp_process_incoming (utp_internal.cpp:2381-2386, :2425-2431).
+	// Cleared at the start of every packet.
+	dropUnacked bool
 	// clk is this connection's time source: deadlines and timers. Never nil
 	// after newConnection; read through c.now() for the nil-safe path that
 	// struct-literal tests need.
@@ -1177,6 +1182,35 @@ func (c *connection) notifySocketShutdown() {
 	}
 }
 
+// finFits reports whether the FIN may go now.
+//
+// libutp queues its FIN in the outgoing buffer like any data packet
+// (`write_outgoing_packet(0, ST_FIN, NULL, 0)`, utp_internal.cpp:3377, :3419) and
+// flush_packets sends it only while !is_full(), whose default is room for a
+// whole packet (:931-985) -- behind anything owed a resend, since the walk
+// is oldest first. This sent the FIN as soon as the send buffer was empty,
+// whatever the window said. With bytes in flight above a window a loss had
+// just halved, the controller refused even the FIN's zero bytes, and
+// transmit panicked: 1 run in 6 of fifteen two-way transfers at 5% loss
+// took the process down. Shutdown runs on every pass of the event loop, so
+// a FIN held back here goes on the pass that finds room.
+func (c *connection) finFits(now time.Time) bool {
+	sp := c.state.SentPackets
+	if sp == nil {
+		return false
+	}
+	if _, owed := sp.NextNeedingResend(); owed {
+		return false
+	}
+	maxSend := minUint32(sp.CongestionWindow(), c.effectivePeerWindow(now))
+	if uint64(sp.BytesInFlight())+uint64(c.mtu.payloadSize()) > uint64(maxSend) {
+		// libutp's is_full records this too (:945, :957).
+		sp.OnWindowFull(now)
+		return false
+	}
+	return true
+}
+
 func (c *connection) shutdown() {
 	switch c.state.stateType {
 	case ConnConnecting:
@@ -1188,19 +1222,19 @@ func (c *connection) shutdown() {
 			localFin := c.state.closing.LocalFin
 			// If we have not sent our FIN, and there are no pending writes, and there is no
 			// pending data in the send buffer, then send our FIN
-			if localFin == nil && len(c.pendingWrites) == 0 && c.state.SendBuf.IsEmpty() {
+			if localFin == nil && len(c.pendingWrites) == 0 && c.state.SendBuf.IsEmpty() && c.finFits(c.now()) {
 				recvWindow := uint32(c.state.RecvBuf.Window())
 				seqNum := c.state.SentPackets.NextSeqNum()
 				ackNum := c.state.RecvBuf.AckNum()
-				selectiveAck := c.state.RecvBuf.SelectiveAck()
 
+				// No selective ack: see dataPacketsCarryNoSelectiveAck.
 				fin := NewPacketBuilder(
 					st_fin,
 					c.cid.Send,
 					c.nowMicros(),
 					recvWindow,
 					seqNum,
-				).WithAckNum(ackNum).WithSelectiveAck(selectiveAck).Build()
+				).WithAckNum(ackNum).Build()
 
 				c.state.closing.LocalFin = &seqNum
 				if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
@@ -1211,12 +1245,12 @@ func (c *connection) shutdown() {
 			}
 		} else {
 			var localFin *uint16
-			if len(c.pendingWrites) == 0 && c.state.SendBuf.IsEmpty() {
+			if len(c.pendingWrites) == 0 && c.state.SendBuf.IsEmpty() && c.finFits(c.now()) {
 				recvWindow := uint32(c.state.RecvBuf.Window())
 				seqNum := c.state.SentPackets.NextSeqNum()
 				ackNum := c.state.RecvBuf.AckNum()
-				selectiveAck := c.state.RecvBuf.SelectiveAck()
 
+				// No selective ack: see dataPacketsCarryNoSelectiveAck.
 				fin := NewPacketBuilder(
 					st_fin,
 					c.cid.Send,
@@ -1224,7 +1258,6 @@ func (c *connection) shutdown() {
 					recvWindow,
 					seqNum,
 				).WithAckNum(ackNum).
-					WithSelectiveAck(selectiveAck).
 					Build()
 
 				localFin = &seqNum
@@ -1476,16 +1509,16 @@ func (c *connection) processWrites(now time.Time) {
 	seqNum := c.state.SentPackets.NextSeqNum()
 	recvWindow := uint32(c.state.RecvBuf.Window())
 	ackNum := c.state.RecvBuf.AckNum()
-	selectiveAck := c.state.RecvBuf.SelectiveAck()
 
 	for _, payload := range payloads {
+		// No selective ack: see dataPacketsCarryNoSelectiveAck.
 		packetInst := NewPacketBuilder(
 			st_data,
 			c.cid.Send,
 			c.nowMicros(),
 			recvWindow,
 			seqNum,
-		).WithPayload(payload).WithTsDiffMicros(uint32(c.peerTsDiff.Microseconds())).WithAckNum(ackNum).WithSelectiveAck(selectiveAck).Build()
+		).WithPayload(payload).WithTsDiffMicros(uint32(c.peerTsDiff.Microseconds())).WithAckNum(ackNum).Build()
 
 		c.transmit(packetInst, now, true)
 		seqNum = seqNum + 1 // wrapping add in uint16
@@ -2058,9 +2091,10 @@ func (c *connection) flushAck() {
 func (c *connection) retransmit(originPacket *packet, now time.Time) {
 	retransmissionPacket := &packet{
 		Header: &PacketHeaderV1{
-			PacketType:    originPacket.Header.PacketType,
-			Version:       originPacket.Header.Version,
-			Extension:     originPacket.Header.Extension,
+			PacketType: originPacket.Header.PacketType,
+			Version:    originPacket.Header.Version,
+			// No selective ack: see dataPacketsCarryNoSelectiveAck.
+			Extension:     0,
 			ConnectionId:  originPacket.Header.ConnectionId,
 			SeqNum:        originPacket.Header.SeqNum,
 			WndSize:       uint32(c.state.RecvBuf.Window()),
@@ -2069,7 +2103,6 @@ func (c *connection) retransmit(originPacket *packet, now time.Time) {
 			AckNum:        c.state.RecvBuf.AckNum(),
 		},
 		Body: originPacket.Body,
-		Eack: c.state.RecvBuf.SelectiveAck(),
 	}
 	c.transmit(retransmissionPacket, now, false)
 }
@@ -2085,10 +2118,10 @@ func (c *connection) resendSentPacket(pkt *sentPacket, now time.Time) *packet {
 	if pkt.data != nil {
 		builder.WithPayload(pkt.data)
 	}
+	// No selective ack: see dataPacketsCarryNoSelectiveAck.
 	resend := builder.
 		WithTsDiffMicros(uint32(c.peerTsDiff.Microseconds())).
 		WithAckNum(c.state.RecvBuf.AckNum()).
-		WithSelectiveAck(c.state.RecvBuf.SelectiveAck()).
 		Build()
 	c.packetsRetransmitted++
 	c.bytesRetransmitted += uint64(len(pkt.data))
@@ -2408,26 +2441,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	// which is what Close watches to decide whether waiting for the flush is
 	// still worth anything.
 	c.peerActivity.Add(1)
-	c.peerRecvWindow = packet.Header.WndSize
-
-	// Arm or disarm the zero-window probe.
-	//
-	// libutp arms it whenever an acknowledgement reports a zero window
-	// (utp_internal.cpp:2149-2151), and lets the next acknowledgement
-	// overwrite the forced one-packet window with whatever the peer now
-	// reports (:2145).
-	if c.peerRecvWindow == 0 {
-		if c.zeroWindowProbeDue.IsZero() {
-			interval := c.zeroWindowProbeIntervalOrDefault()
-			c.zeroWindowProbeDue = now.Add(interval)
-			if c.armProbeTimer != nil {
-				c.armProbeTimer(interval)
-			}
-		}
-	} else {
-		c.zeroWindowProbeDue = time.Time{}
-	}
-	c.probingZeroWindow = false
+	c.dropUnacked = false
 	c.packetsReceived++
 	c.bytesReceived += uint64(len(packet.Body))
 
@@ -2445,6 +2459,29 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	if c.outsideReorderWindow(packet) {
 		return
 	}
+
+	// The peer's window, and the zero-window probe, from a packet that has
+	// passed both checks above. libutp reads `pf1->windowsize` only there
+	// (utp_internal.cpp:2144, reached after :1794-1807 and :1886-1899); this
+	// used to take it first thing, so a packet the reference discards -- one
+	// anybody who can guess a connection id can send -- could close our view
+	// of the peer's window.
+	c.peerRecvWindow = packet.Header.WndSize
+	// libutp restarts the deadline on *every* packet reporting a zero window
+	// (`zerowindow_time = current_ms + 15000`, :2148-2151), so the probe goes
+	// 15 seconds after the last one, not the first; this used to keep the
+	// first deadline. The next packet overwrites the forced one-packet
+	// window with whatever the peer now reports (:2145).
+	if c.peerRecvWindow == 0 {
+		interval := c.zeroWindowProbeIntervalOrDefault()
+		c.zeroWindowProbeDue = now.Add(interval)
+		if c.armProbeTimer != nil {
+			c.armProbeTimer(interval)
+		}
+	} else {
+		c.zeroWindowProbeDue = time.Time{}
+	}
+	c.probingZeroWindow = false
 
 	// Measure how long ago the peer stamped this packet. That value is what we
 	// echo back in timestamp_difference_microseconds, and it is the peer's
@@ -2485,12 +2522,21 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	// here put a number on the wire that no libutp would have sent, and
 	// FuzzDifferentialResponder showed it the moment the timestamp fields
 	// could be compared: ours 1000000 against libutp's 3487502864.
-	c.peerTsDiff = timestampDiffMicros(c.nowMicros(), uint32(packet.Header.Timestamp))
+	//
+	// A zero timestamp is no timestamp: `their_delay = (p == 0 ? 0 : time -
+	// p)` (:2000), and a zero is neither echoed as a delay nor sampled
+	// (:2002). This used to echo the whole of our clock back.
+	peerStamp := uint32(packet.Header.Timestamp)
+	if peerStamp == 0 {
+		c.peerTsDiff = 0
+	} else {
+		c.peerTsDiff = timestampDiffMicros(c.nowMicros(), peerStamp)
+	}
 	// The delay in the peer's direction is not a congestion signal for this
 	// sender -- it describes the other half of the path -- but it is how
 	// clock drift between the two ends becomes visible. libutp feeds its
-	// `their_hist` from exactly this value, on every packet and before the
-	// acknowledgement number is even looked at (utp_internal.cpp:2000-2004).
+	// `their_hist` from exactly this value, on every packet that passes the
+	// checks above (utp_internal.cpp:2000-2004).
 	//
 	// The *uncapped*, raw wrapping value is what goes to the controller,
 	// which is what libutp feeds its their_hist (`their_delay`, :2000-2004).
@@ -2500,9 +2546,9 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	// this measurement shrink until it passes zero and wraps, and a wrapped
 	// value capped to one second is a base that has stopped moving. See
 	// peerDelayHist.
-	if c.state != nil && c.state.SentPackets != nil {
+	if c.state != nil && c.state.SentPackets != nil && peerStamp != 0 {
 		c.state.SentPackets.OnPeerDelay(
-			wrappingSubUint32(c.nowMicros(), uint32(packet.Header.Timestamp)), now)
+			wrappingSubUint32(c.nowMicros(), peerStamp), now)
 	}
 
 	// Handle different packet types
@@ -2606,6 +2652,9 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 		// event loop, so by the time the deferred acknowledgement would be
 		// sent there is no connection left to build one from, and the peer
 		// gets nothing at all. Two corpus cases caught that immediately.
+		if c.dropUnacked {
+			break
+		}
 		if statePacket := c.statePacket(); statePacket != nil {
 			// Kept so the socket can send it again if the peer retransmits
 			// this FIN after the connection has gone -- see lingerAck. It has
@@ -2629,7 +2678,9 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 		// from us. On an asymmetric path -- ADSL, cellular -- that reverse
 		// traffic is not free, and on a shared bottleneck it competes with
 		// the forward data.
-		c.ackPending = true
+		if !c.dropUnacked {
+			c.ackPending = true
+		}
 	}
 
 	// Notify writable on STATE packets
@@ -3108,8 +3159,17 @@ func (c *connection) onData(seqNum uint16, data []byte) error {
 			start := c.state.RecvBuf.InitSeqNum()
 			seqRange := newCircularRangeInclusive(start, *c.state.closing.RemoteFin)
 			if !seqRange.Contains(seqNum) {
-				c.state.stateType = ConnClosed
-				c.state.Err = ErrInvalidSeqNum
+				// Numbered past the end of the stream: dropped, unacknowledged,
+				// and the connection carries on. libutp: `if (conn->got_fin &&
+				// pk_seq_nr > conn->eof_pkt) return 0;` (utp_internal.cpp:
+				// 2381-2386). This used to close the connection with
+				// ErrInvalidSeqNum, which handed anyone able to guess a
+				// connection id a way to end it once the peer's FIN was in.
+				//
+				// libutp compares the two numbers without wrapping; this
+				// range does wrap, so a stream whose FIN is numbered just
+				// past 65535 is not cut short by it.
+				c.dropUnacked = true
 				return nil
 			}
 		}
@@ -3126,6 +3186,15 @@ func (c *connection) onData(seqNum uint16, data []byte) error {
 		// like any other.
 		if c.readShutdown {
 			data = nil
+		}
+		// An out-of-order packet that is already held is discarded without
+		// an acknowledgement: libutp returns before schedule_ack
+		// (utp_internal.cpp:2425-2431). An in-order duplicate never gets here
+		// -- it is behind the acknowledgement number, and
+		// outsideReorderWindow re-acknowledges it, as libutp does (:1891).
+		if seqNum != c.state.RecvBuf.AckNum()+1 && c.state.RecvBuf.HoldsOutOfOrder(seqNum) {
+			c.dropUnacked = true
+			return nil
 		}
 		// not closing should send data
 		if len(data) <= c.state.RecvBuf.Available() {
@@ -3171,7 +3240,12 @@ func (c *connection) onFin(seqNum uint16, data []byte) error {
 				// If we have already received a FIN, a subsequent FIN with a different
 				// sequence number is incorrect behavior
 				if seqNum != *c.state.closing.RemoteFin {
-					c.reset(ErrInvalidFin)
+					// The end of the stream is the first FIN's. A later one
+					// with another number is handled as data: libutp records
+					// eof_pkt only `if (pk_flags == ST_FIN && !conn->got_fin)`
+					// (utp_internal.cpp:2316) and the packet then takes the
+					// data path below it. This used to reset the connection.
+					return c.onData(seqNum, data)
 				}
 			} else {
 				remoteFin := seqNum
@@ -3374,6 +3448,21 @@ func (c *connection) synPacket(seqNum uint16) *packet {
 	).Build()
 }
 
+// dataPacketsCarryNoSelectiveAck documents a rule rather than implementing
+// one: only an ST_STATE carries a selective ack. libutp attaches the extension
+// in send_ack alone (`pfa.pf.ext = 1`, utp_internal.cpp:795); a data packet,
+// a FIN and every resend go out with `ext = 0` (:1080, :2781), and its
+// packet size leaves room for the 20-byte header and nothing else (:1757-
+// 1761). This library used to attach the receive buffer's selective ack to
+// all of them, and to reserve room for it in every packet.
+//
+// On a connection carrying data both ways, that means the peer hears about a
+// hole in what it sent only from an ST_STATE -- and a data packet that goes
+// out carrying the same acknowledgement number cancels the pending one
+// (send_data, :768; transmit here). libutp lives with that, and so does this
+// library now.
+const dataPacketsCarryNoSelectiveAck = true
+
 func (c *connection) statePacket() *packet {
 	now := int64(c.nowMicros())
 	tsDiffMicros := uint32(c.peerTsDiff.Microseconds())
@@ -3451,10 +3540,10 @@ func (c *connection) retransmitLostPackets(now time.Time) {
 			builder.WithPayload(payload)
 		}
 
+		// No selective ack: see dataPacketsCarryNoSelectiveAck.
 		packetInst := builder.
 			WithTsDiffMicros(tsDiffMicros).
 			WithAckNum(c.state.RecvBuf.AckNum()).
-			WithSelectiveAck(c.state.RecvBuf.SelectiveAck()).
 			Build()
 		c.packetsRetransmitted++
 		c.bytesRetransmitted += uint64(len(payload))

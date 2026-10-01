@@ -172,6 +172,12 @@ func (rb *receiveBuffer) WasWritten(seqNum uint16) bool {
 	return exists || writtenRange.Contains(seqNum)
 }
 
+// HoldsOutOfOrder reports whether seqNum is held past a gap, waiting for it
+// to fill.
+func (rb *receiveBuffer) HoldsOutOfOrder(seqNum uint16) bool {
+	return rb.pending.Has(&pendingItem{seqNum: seqNum})
+}
+
 // Readable reports how many contiguous bytes are ready to be read.
 //
 // It is what a caller needs to size a buffer to the data rather than to the

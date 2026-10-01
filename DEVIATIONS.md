@@ -51,10 +51,13 @@ packets, not every line of a 3,500-line file.
 
 That proof is now being built. [LIBUTP-AUDIT.md](LIBUTP-AUDIT.md) reads
 `utp_internal.cpp` line by line and gives every function a verdict: matched,
-fixed, or recorded here. Lines 1-1766 are done. They turned up fifteen
-differences no earlier pass had found: ten fixed, one recorded below
-("The retransmission timeout is capped at `MaxTimeout`"), and four still
-open.
+fixed, or recorded here. Lines 1-2478 are done, through
+`utp_process_incoming`. They turned up twenty-six differences no earlier pass
+had found: nineteen fixed, three recorded below ("The retransmission timeout
+is capped at `MaxTimeout`", "A packet that does not fit the receive buffer is
+dropped", "Reaching the end of the peer's stream does not time out what is in
+flight"), and four still open. One of the fixed ones was a crash: a FIN sent
+into a window a loss had just halved panicked the process.
 One further difference had been measured and documented elsewhere but never
 entered here ("The base delay is the lowest over two minutes"). Until the rest
 of the file and its support files are read, this list is still only as
@@ -87,6 +90,11 @@ copied. Not measured as an improvement.
 
 - *Completing an incoming connection:* libutp never completes a zero-length
   transfer.
+- *Reaching the end of the peer's stream does not time out what is in
+  flight:* libutp's does, 60 ms later, which cuts its window to one packet.
+  Measured against libutp: its first resend of an unacknowledged response
+  moves from 3.1 s to 100 ms when the peer's FIN arrives; ours stays at
+  3.1 s.
 - *An initiator can fast-retransmit from its first packet:* a libutp initiator
   whose random first sequence number lands in the wrong half never can.
   Measured against libutp: its sender took twice as long at 3-5% loss on
@@ -105,7 +113,8 @@ copied. Not measured as an improvement.
 consequence, or equivalent on the wire.
 
 - *Larger default UDP socket buffers* (this library owns the socket; libutp
-  does not), *`ReadToEOF` returns nil*, *`Controller.Stats()`*,
+  does not), *a packet that does not fit the receive buffer is dropped*
+  (this library owns that buffer; libutp has none), *`ReadToEOF` returns nil*, *`Controller.Stats()`*,
   *`MaxConnAttempts` counts transmissions*, *the selective-ack window* (always
   30 entries), *read-side half-close discards what is buffered* (libutp has no
   buffer to discard), *ICMP: no CS_IDLE state*, *`WriteV` blocks*.
@@ -302,6 +311,62 @@ changes. It is also why `FuzzDifferentialResponder` primes both implementations
 with one data packet before feeding them generated input: without that, every
 sequence not starting with data reports this divergence instead of finding a
 new one.
+
+## Reaching the end of the peer's stream does not time out what is in flight
+
+When the last packet before the peer's FIN arrives, libutp acknowledges it and
+then sets its retransmission deadline:
+
+```c
+conn->rto_timeout = conn->ctx->current_ms + min<uint>(conn->rto * 3, 60);
+                                        (utp_internal.cpp:2358)
+```
+
+`rto` is in milliseconds and never below 1000 (`:1380`), so the `min` is always
+60: the deadline is 60 ms away whatever the path. If nothing is in flight, the
+timeout that follows only brings forward the decay of an idle window (`:1207`),
+which this library leaves on its ordinary schedule. If
+something is in flight, it is an ordinary retransmission timeout: every packet
+is marked for resend, the window drops to one packet, slow start begins again,
+and the oldest packet is resent (`:1144-1235`). Nothing was lost. The peer
+had simply finished sending.
+
+That is the request-and-response shape: one side writes a request and closes
+its write half, and the other is still sending its answer when the FIN
+arrives. libutp pays for it with its window every time. This library keeps
+its retransmission deadline where the packets in flight put it.
+
+**Measured** (`TestPeerFinDoesNotTimeOutWhatIsInFlight`), each side sending a
+response and receiving nothing back. Without the FIN, both first resend it at
+3.1 s, libutp's initial 3000 ms timeout on both. When the peer's FIN arrives
+after the response has gone, libutp resends it at 100 ms, on the driver's
+first timeout pass after the 60 ms deadline; ours still resends at 3.1 s. The
+test asserts libutp's half as well, so a change in the vendored copy shows.
+
+The constant reads like a unit slip. That is a guess about intent, and it is
+not the reason for the difference. The reason is that the behaviour is a
+spurious timeout on a path that lost nothing.
+
+## A packet that does not fit the receive buffer is dropped
+
+libutp has no receive buffer. It hands every in-order byte to its embedder's
+`on_read` callback as it arrives (`utp_internal.cpp:2339-2343`) and works out
+the window it advertises from `opt_rcvbuf` less what the embedder reports it
+is still holding (`get_rcv_window`). Nothing in libutp ever refuses data for
+want of room: if a peer sends past the advertised window, the embedder gets
+it anyway.
+
+This library owns a bounded receive buffer, advertises what is free in it,
+and drops a data packet that does not fit. The acknowledgement that goes
+out does not cover it, so the peer resends it once there is room. `ConnectionMetrics.RecvBufferDrops` counts
+them.
+
+The reason is structural: a buffer this library owns has to have a bound, or
+a peer that ignores the advertised window decides how much memory this end
+holds. Against a peer that respects the window -- libutp does, and so does
+this library, since bytes in flight count against the peer's window -- no
+packet is dropped. Found by the line-by-line audit (LIBUTP-AUDIT.md, N23);
+already true before it, and not previously listed here.
 
 ## Read-side half-close discards what is already buffered
 
