@@ -100,8 +100,10 @@ type ConnectionConfig struct {
 	MaxIdleTimeout  time.Duration
 	InitialTimeout  time.Duration
 	MinTimeout      time.Duration
-	MaxTimeout      time.Duration
-	TargetDelay     time.Duration
+	// MaxTimeout caps the retransmission timeout and its backoff. Zero, the
+	// default, is no cap, as in libutp.
+	MaxTimeout  time.Duration
+	TargetDelay time.Duration
 	// Clock is where this connection reads time and gets its timers.
 	// Defaults to RealClock; see Clock.
 	//
@@ -2000,10 +2002,7 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 			// none, because its own give-up limit of two timeouts in
 			// CS_SYN_SENT bounds the backoff. It is unreachable at the
 			// default MaxConnAttempts and only matters if a caller raises it.
-			c.synTimeout *= 2
-			if c.synTimeout > c.config.MaxTimeout {
-				c.synTimeout = c.config.MaxTimeout
-			}
+			c.synTimeout = capTimeout(c.synTimeout*2, c.config.MaxTimeout)
 
 			c.armRetransmit(originPacket, c.synTimeout)
 

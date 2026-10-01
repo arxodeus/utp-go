@@ -17,7 +17,13 @@ const (
 	// rto = max(rtt + rtt_var * 4, 1000) in milliseconds
 	// (utp_internal.cpp:1380), so the floor is one second.
 	defaultMinTimeout = 1000 * time.Millisecond
-	defaultMaxTimeout = 60 * time.Second
+	// defaultMaxTimeout is no cap, as libutp has none: its timeout is
+	// max(rtt + rtt_var * 4, 1000) with no upper bound (utp_internal.cpp:1380)
+	// and doubles on each timeout without one (:1179), and the connection gives
+	// up at the fifth (:1191). This was 60 seconds, which bound only the last
+	// wait on a path whose timeout was past 3.75 seconds, where it gave up a
+	// little sooner than libutp. ConnectionConfig.MaxTimeout sets one.
+	defaultMaxTimeout = 0
 	// defaultMaxPacketSizeBytes is the largest datagram this library will
 	// ever try -- the ceiling of the path-MTU search, not a size it sends
 	// straight away.
@@ -852,7 +858,7 @@ func (c *defaultController) OnTimeout(hasPacketsInFlight bool) {
 	if c.maxWindowSizeBytes < c.minWindowSizeBytes {
 		c.maxWindowSizeBytes = c.minWindowSizeBytes
 	}
-	c.timeout = time.Duration(math.Min(float64(c.timeout*2), float64(c.maxTimeout)))
+	c.timeout = capTimeout(c.timeout*2, c.maxTimeout)
 }
 
 // applyMaxWindowSizeAdjustment adjusts the maximum window size based on the given adjustment.
@@ -1019,10 +1025,7 @@ func (c *defaultController) applyTimeoutAdjustment() {
 	if rto < c.minTimeout {
 		rto = c.minTimeout
 	}
-	if rto > c.maxTimeout {
-		rto = c.maxTimeout
-	}
-	c.timeout = rto
+	c.timeout = capTimeout(rto, c.maxTimeout)
 }
 
 // computeMaxWindowSizeAdjustment returns the adjustment in bytes to the maximum window (i.e. congestion window) size
@@ -1382,4 +1385,13 @@ func (h *delayHeap) Pop() interface{} {
 	x := old[n]
 	*h = old[:n]
 	return x
+}
+
+// capTimeout bounds a timeout by max, where max is positive; zero or less is
+// no bound, the default.
+func capTimeout(d, max time.Duration) time.Duration {
+	if max > 0 && d > max {
+		return max
+	}
+	return d
 }

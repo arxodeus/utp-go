@@ -57,7 +57,7 @@ libutp it was, and the tests named are what stands behind each verdict.
 | N9 | `utp_process_incoming`, `:1956-1987`, `:2139` | One window update per acknowledgement, with the bytes of every packet it covers and their minimum round trip; ours updated per packet, which compounds | Fixed: `TestOneWindowUpdatePerAcknowledgement`. Closes the DEVIATIONS.md entry on the clamp's round trip |
 | N9b | `utp_process_incoming`, `:2127-2133` | A delay longer than the round trip raises the base by the excess | Fixed: `TestDelayOverTheRoundTripRaisesTheBase` |
 | N10 | `selective_ack`, `:1612` | A selective ack sets the duplicate-ack count to the packets it names, which moves when the MTU probe is judged too big | Fixed: `TestSelectiveAckSetsTheDuplicateCountOnArrival` |
-| N11 | `ack_packet`, `:1380`; `check_timeouts`, `:1179` | libutp's timeout has no upper bound; ours stops at `MaxTimeout` | Deviation: "The retransmission timeout is capped at `MaxTimeout`" |
+| N11 | `ack_packet`, `:1380`; `check_timeouts`, `:1179` | libutp's timeout has no upper bound; ours stopped at `MaxTimeout`, 60 s by default | Fixed: no cap by default; `MaxTimeout` sets one |
 | N12 | `ack_packet`, `:1362-1380` | libutp's round-trip estimator works in whole milliseconds; ours carried microseconds, so the timeout differed by the fractions | Fixed: `TestRTTSamplesAreWholeMilliseconds`. The loss probe, which libutp does not have, keeps a microsecond estimate of its own |
 | N13 | `send_data`/`send_packet`, `:1080`; `send_ack`, `:780-796` | Only libutp's `ST_STATE` carries a selective ack; ours attached one to data, FIN and resent packets, and reserved room for it in every packet's payload | Fixed: `TestConformanceDataPacketCarriesNoSelectiveAck`, differential. Two-way transfers over loss, 15 seeds each, before and after: medians 1.39/1.86/5.53 s against 1.41-1.47/1.91-1.92/4.76 s at 1/3/5% loss, and five more repetitions at 5% gave 4.97-5.55 s; retransmissions 238/752/1277 against 244-248/737-748/1254. No loss of recovery visible within run-to-run spread |
 | N14 | `utp_process_incoming`, `:1850-1856` | An "extension bits" extension (type 2) of any length but 8 makes libutp drop the packet; ours accepts it | Fixed: `TestConformanceExtensionBitsMustBeEightBytes`, differential. Checked on a connection's packets only: libutp answers a SYN whatever its extensions say, because `utp_process_udp` sends the SYN-ACK whatever `utp_process_incoming` returns (`:2984-2990`) |
@@ -137,7 +137,7 @@ libutp it was, and the tests named are what stands behind each verdict.
 | `check_timeouts`: MTU probe branch | `onTimeout` | Fixed (N4) |
 | `check_timeouts`: `CS_SYN_RECV` destroyed at the first timeout | acceptor ignores it | Open (N5) |
 | `check_timeouts`: give up at the fifth timeout, two for a SYN | `maxConsecutiveTimeouts`, `MaxConnAttempts` | Matched; the SYN count is a deviation ("`MaxConnAttempts` counts transmissions") |
-| `check_timeouts`: timeout doubling, `fast_timeout`, `need_resend` | `onTimeout` | Matched, measured (`TestConformanceRetransmissionTimeoutComputation`); the cap is N11 |
+| `check_timeouts`: timeout doubling, `fast_timeout`, `need_resend` | `onTimeout` | Matched, measured (`TestConformanceRetransmissionTimeoutComputation`); no cap by default (N11) |
 | `check_timeouts`: keep-alive only before our FIN | `keepAlive` | Matched |
 | `mtu_search_update`, `mtu_reset` | `mtuSearch` | Matched, measured; the start, at the midpoint until it was moved to libutp's ceiling (DEVIATIONS.md, "The MTU search starts at the ceiling"), and N6 (fixed) |
 
@@ -149,7 +149,7 @@ libutp it was, and the tests named are what stands behind each verdict.
 | round trip only from a packet sent once (Karn) | `NumTransmissions == 1` | Matched: `TestRetransmittedPacketDoesNotUpdateRTT` |
 | estimator in whole milliseconds | `updateRTT` | Fixed (N12) |
 | `rtt_hist` | none | N/A (feeds only a log field) |
-| `rto = max(rtt + 4 rtt_var, 1000)` | `applyTimeoutAdjustment` | Matched; upper bound N11 |
+| `rto = max(rtt + 4 rtt_var, 1000)` | `applyTimeoutAdjustment` | Matched; no upper bound by default (N11) |
 | deadline restarted by every acknowledged packet, selectively acknowledged ones included | cumulative only | Deviation: "A selective ack does not restart the retransmission timeout" |
 | `cur_window -= payload` unless `need_resend` | `OnAck` | Matched |
 | `retransmit_count = 0` | `processAck` | Matched |

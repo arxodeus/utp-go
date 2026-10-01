@@ -135,13 +135,6 @@ consequence, or equivalent on the wire.
   *`MaxConnAttempts` counts transmissions*, *the selective-ack window* (always
   30 entries), *read-side half-close discards what is buffered* (libutp has no
   buffer to discard), *ICMP: no CS_IDLE state*, *`WriteV` blocks*.
-- *A connection whose peer falls silent is closed after `MaxIdleTimeout`:*
-  60 seconds by default. libutp never closes one: measured, a libutp
-  connection whose peer vanished was still open after 600 seconds, sending a
-  keep-alive into the silence every 29.
-- *The retransmission timeout is capped at `MaxTimeout`:* 60 seconds by
-  default. It binds only once the timeout itself is past 3.75 seconds, and
-  then only on the last backed-off wait before the connection gives up.
 - *A path MTU report lowers the ceiling but does not raise it past
   `MaxPacketSize`:* the default ceiling is libutp's default, 1402 (1232 for
   IPv6), which libutp's own `get_udp_mtu` returns without asking the
@@ -161,6 +154,14 @@ consequence, or equivalent on the wire.
 
 **A trade-off.** Better on one measure, worse on another.
 
+- *A connection whose peer falls silent is closed after `MaxIdleTimeout`:*
+  60 seconds by default. libutp never closes one: measured, a libutp
+  connection whose peer vanished was still open after 600 seconds, sending a
+  keep-alive into the silence every 29.
+  That is the gain. The cost: an outage longer than the timeout -- a laptop
+  asleep, a route down for minutes -- ends a connection that libutp would
+  resume when the path came back (reasoned from the code, not measured).
+  `MaxIdleTimeout` sets the figure.
 - *LEDBAT++* (opt-in): takes about a third of a link from a loss-based flow
   where classic LEDBAT takes two thirds; twice the throughput on a
   high-BDP path, 60-75% less on lossy ones. (It used to be credited with 7
@@ -236,10 +237,8 @@ is `MaxConnAttempts: 3`.
 
 The SYN retransmission *schedule* now matches: the timeout doubles from its
 current value on each attempt, starting at 3000 ms, as libutp does
-(`utp_internal.cpp:1179` applied at `:1203`, initial value at `:2762`). The
-only addition is a cap at `MaxTimeout`, which libutp does not have because its
-own two-timeout limit bounds the backoff; it is unreachable at the default
-`MaxConnAttempts` and only matters if a caller raises it.
+(`utp_internal.cpp:1179` applied at `:1203`, initial value at `:2762`), with
+no cap unless `MaxTimeout` sets one.
 
 ## Selective acks whose length is not a multiple of 4 bytes
 
@@ -911,23 +910,15 @@ libutp's behaviour.
 Not previously listed here; found by the line-by-line audit while settling
 the half-open acceptor (LIBUTP-AUDIT.md, N5 and N26).
 
-## The retransmission timeout is capped at `MaxTimeout`
+## ~~The retransmission timeout is capped at `MaxTimeout`~~ — closed
 
 libutp's timeout is `max(rtt + rtt_var * 4, 1000)` milliseconds with no upper
 bound (`utp_internal.cpp:1380`), and it doubles on each timeout with none
-either (`:1179`). This library caps both at `ConnectionConfig.MaxTimeout`, 60
-seconds by default.
-
-The reason is that it is a configuration knob callers already have, and at
-its default it binds only on paths libutp itself serves badly. Both give up at
-the fifth consecutive timeout (`:1191`), so the waits are 1, 2, 4, 8 and 16
-times the timeout, and the cap touches only the last of them, and only once
-the timeout is past 3.75 seconds (16 times it exceeds 60). That takes a
-smoothed round trip of 1.25 seconds with the variance at its first-sample
-value of half the round trip (`rtt + 4 * rtt_var`), or less on a path whose
-round trip swings widely. There, this
-library gives up a little sooner than libutp would. Setting `MaxTimeout` very
-high recovers libutp's behaviour exactly.
+either (`:1179`). This library capped both at `ConnectionConfig.MaxTimeout`, 60
+seconds by default, which bound only the last of the five waits before giving
+up (`:1191`), and only once the timeout itself was past 3.75 seconds: there it
+gave up a little sooner than libutp. The default is now no cap, as libutp's;
+`MaxTimeout` sets one for a caller that wants it.
 
 ## Timeouts act when due, not on a 500ms pass
 
