@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,9 +33,10 @@ import (
 //
 // The sender is held fixed while the receiver changes, so that a difference
 // between two rows with the same sender belongs to the receiver. The gate is
-// that, for each sender and path, our receiver's 90th-percentile turnaround
-// stays within ackTurnaroundSlack of libutp's. Delaying our flush by 1 ms
-// fails it (p90 2.7 ms against 0.14 ms), and leaves libutp's rows unchanged.
+// that, for each sender and path, our receiver's median turnaround stays
+// within ackTurnaroundSlack of libutp's. Delaying our flush by 1 ms fails it
+// on every path (medians 1.39-3.03 ms against 0.05-0.18 ms), and leaves
+// libutp's rows unchanged.
 func TestAckTurnaround(t *testing.T) {
 	if testing.Short() {
 		t.Skip("not a -short test")
@@ -50,14 +52,17 @@ func TestAckTurnaround(t *testing.T) {
 	for _, p := range paths {
 		payload := makePayload(p.size)
 		// Each pairing runs ackTurnaroundRounds times, the pairings
-		// interleaved, and the gate compares each receiver's best p90: what
-		// it does when the rest of the machine leaves it alone. Run once each
-		// and in sequence, a burst of load from elsewhere landed on one
-		// receiver and not the other: under the full suite, with netem
-		// running alongside, our p90 read 1.9 ms against libutp's 0.55 ms on a
-		// run that read 0.28 ms against 0.12 ms alone. Medians of three were
-		// not enough either: 2.8 ms against 1.16 ms, again under the full
-		// suite. A defect is in every round, so the best one still shows it.
+		// interleaved, and the gate compares each receiver's best median.
+		//
+		// It used to compare the 90th percentile, and failed three times
+		// under the full suite -- netem's CPU-heavy tests run alongside --
+		// with our p90 at 1.9, 2.8 and 3.7 ms against libutp's 0.55-1.16 ms,
+		// on code that measures 0.28 against 0.12 alone. Load lands in the
+		// tail, and it lands harder on a receiver that hands each packet
+		// between goroutines than on one that handles it inline on a thread,
+		// so the tail measured the machine. A defect that delays the flush
+		// delays every acknowledgement, the median with them: a 1 ms delay
+		// moves it by a millisecond, well clear of the slack.
 		results := map[string][]turnaroundStats{}
 		for round := 0; round < ackTurnaroundRounds; round++ {
 			for _, pair := range []string{"libutp->libutp", "libutp->go", "go->libutp", "go->go"} {
@@ -76,7 +81,12 @@ func TestAckTurnaround(t *testing.T) {
 					defer func() { onNewRelay = nil }()
 					runPair(t, pair, p.cfg, payload)
 					s := turnaround(data, acks)
-					if s.unacked > 0 {
+					if s.unacked > 0 && strings.HasSuffix(pair, "->go") {
+						// Our receiver's rows only. libutp's own pair left one
+						// packet unacknowledged inside the trace window twice
+						// under the full suite's load; it is the reference,
+						// and the harness's window closing on its last
+						// acknowledgement is not something this test is about.
 						t.Errorf("%d data packets were never acknowledged", s.unacked)
 					}
 					if s.packets > 0 {
@@ -92,8 +102,8 @@ func TestAckTurnaround(t *testing.T) {
 			if len(ours) == 0 || len(ref) == 0 {
 				continue // a subtest failed and said why
 			}
-			if o, r := bestP90(ours), bestP90(ref); o > r+ackTurnaroundSlack {
-				t.Errorf("%s, %s sending: our receiver acknowledges in %v at the 90th percentile, libutp's in %v (best of %d and %d runs)",
+			if o, r := bestP50(ours), bestP50(ref); o > r+ackTurnaroundSlack {
+				t.Errorf("%s, %s sending: our receiver's median acknowledgement takes %v, libutp's %v (best of %d and %d runs)",
 					p.name, sender, o, r, len(ours), len(ref))
 			}
 		}
@@ -103,20 +113,20 @@ func TestAckTurnaround(t *testing.T) {
 // ackTurnaroundRounds is how many times each pairing runs.
 const ackTurnaroundRounds = 3
 
-// bestP90 is the lowest of the runs' 90th percentiles.
-func bestP90(runs []turnaroundStats) time.Duration {
-	best := runs[0].p90
+// bestP50 is the lowest of the runs' medians.
+func bestP50(runs []turnaroundStats) time.Duration {
+	best := runs[0].p50
 	for _, r := range runs[1:] {
-		if r.p90 < best {
-			best = r.p90
+		if r.p50 < best {
+			best = r.p50
 		}
 	}
 	return best
 }
 
-// ackTurnaroundSlack is how much slower than libutp's our receiver's p90 may
-// be. Measured, the two are within about 0.2 ms of each other either way.
-const ackTurnaroundSlack = time.Millisecond
+// ackTurnaroundSlack is how much slower than libutp's our receiver's median
+// may be. Measured alone, the two medians are within about 0.1 ms.
+const ackTurnaroundSlack = 500 * time.Microsecond
 
 type turnaroundStats struct {
 	p50, p90, p99, max time.Duration

@@ -10,7 +10,7 @@ here is a bug, not a decision.
 
 ## Status
 
-**Better founded than it was, and still not a complete inventory.**
+**Complete for libutp as read line by line, with the limits stated below.**
 
 This note used to say that there was no `COMPATIBILITY.md` and no conformance
 harness, and that everything below had been noticed incidentally while fixing
@@ -49,19 +49,24 @@ accident, and the list is worth trusting for what it contains. It is still not
 a proof that nothing else differs — the sweep read the paths that carry
 packets, not every line of a 3,500-line file.
 
-That proof is now being built. [LIBUTP-AUDIT.md](LIBUTP-AUDIT.md) reads
-`utp_internal.cpp` line by line and gives every function a verdict: matched,
-fixed, or recorded here. Lines 1-2478 are done, through
-`utp_process_incoming`. They turned up twenty-six differences no earlier pass
-had found: nineteen fixed, three recorded below ("The retransmission timeout
-is capped at `MaxTimeout`", "A packet that does not fit the receive buffer is
-dropped", "Reaching the end of the peer's stream does not time out what is in
-flight"), and four still open. One of the fixed ones was a crash: a FIN sent
-into a window a loss had just halved panicked the process.
-One further difference had been measured and documented elsewhere but never
-entered here ("The base delay is the lowest over two minutes"). Until the rest
-of the file and its support files are read, this list is still only as
-complete as the paths the sweep covered.
+That reading has now been done. [LIBUTP-AUDIT.md](LIBUTP-AUDIT.md) goes
+through every line of `utp_internal.cpp` and its support files and gives each
+function a verdict: matched, fixed, or recorded here. It found thirty-three
+differences no earlier pass had: twenty-five fixed, each with a test that
+fails without the fix; seven recorded below; and one that turned out to be
+dead code in libutp. It also found one difference that had been measured and
+written up elsewhere but never entered here ("The base delay is the lowest
+over two minutes"), and two notes here that claimed agreement where there was
+none (the duplicate SYN, and the per-packet delay clamp's equivalence). Two of
+the fixed differences were serious: a FIN sent into a window a loss had just
+halved panicked the process, and one direction of a two-way transfer could sit
+idle for half a minute (KNOWN-LIMITATIONS.md, "The line-by-line audit").
+
+So the list below is meant to be every difference there is, not every one
+someone happened to find. What stands behind that is a reading, checked by
+measurement wherever libutp could be driven, and a reading can miss things:
+two of the audit's own verdicts were wrong until a measurement corrected them.
+A difference not listed here is still a bug.
 
 ## What kind of deviation each one is
 
@@ -90,6 +95,9 @@ copied. Not measured as an improvement.
 
 - *Completing an incoming connection:* libutp never completes a zero-length
   transfer.
+- *A retransmitted SYN is answered:* libutp ignores a SYN for a connection it
+  already has, so a lost SYN-ACK ends its handshake. Measured against libutp:
+  retries at 3 s and 9 s drew nothing in 30 s.
 - *Reaching the end of the peer's stream does not time out what is in
   flight:* libutp's does, 60 ms later, which cuts its window to one packet.
   Measured against libutp: its first resend of an unacknowledged response
@@ -100,6 +108,8 @@ copied. Not measured as an improvement.
   Measured against libutp: its sender took twice as long at 3-5% loss on
   those connections.
 - *`WriteV` has no 1024-buffer limit:* libutp silently drops buffers past 1024.
+- *ICMP: a report below the known floor lowers the floor:* libutp's search
+  is left inverted, sending at sizes the router has refused. Not measured.
 - *ICMP: the next-hop MTU is converted to a payload size:* libutp's ceiling
   ends up 28 bytes too large. The tests measure what an ICMP report saves, not
   this conversion against libutp's.
@@ -112,12 +122,18 @@ copied. Not measured as an improvement.
 **Different, neither better nor worse.** An API choice, a structural
 consequence, or equivalent on the wire.
 
-- *Larger default UDP socket buffers* (this library owns the socket; libutp
+- *An IPv6 zone is part of the peer's address* (libutp drops it, so two
+  link-local peers on different interfaces can collide),
+  *larger default UDP socket buffers* (this library owns the socket; libutp
   does not), *a packet that does not fit the receive buffer is dropped*
   (this library owns that buffer; libutp has none), *`ReadToEOF` returns nil*, *`Controller.Stats()`*,
   *`MaxConnAttempts` counts transmissions*, *the selective-ack window* (always
   30 entries), *read-side half-close discards what is buffered* (libutp has no
   buffer to discard), *ICMP: no CS_IDLE state*, *`WriteV` blocks*.
+- *A connection whose peer falls silent is closed after `MaxIdleTimeout`:*
+  60 seconds by default. libutp never closes one: measured, a libutp
+  connection whose peer vanished was still open after 600 seconds, sending a
+  keep-alive into the silence every 29.
 - *The retransmission timeout is capped at `MaxTimeout`:* 60 seconds by
   default. It binds only once the timeout itself is past 3.75 seconds, and
   then only on the last backed-off wait before the connection gives up.
@@ -151,8 +167,9 @@ consequence, or equivalent on the wire.
 - *No Nagle:* many small writes become many small packets. Implementing it
   showed no benefit on the workloads tried; the likely BitTorrent case, small
   messages written faster than a round trip, was not among them.
-- *A discovered path MTU only lowers the ceiling:* capped at 1400, so about 6%
-  of the packet is given up on a 1500-byte path (arithmetic, not a throughput
+- *A discovered path MTU only lowers the ceiling:* capped at 1402, libutp's
+  own default for IPv4, so about 6% of the packet is given up on a 1500-byte
+  path (arithmetic, not a throughput
   measurement), and jumbo frames are never used.
 - *Close waits:* a caller is held for up to one flush or two seconds of peer
   silence; libutp's `utp_close` returns at once.
@@ -347,6 +364,24 @@ The constant reads like a unit slip. That is a guess about intent, and it is
 not the reason for the difference. The reason is that the behaviour is a
 spurious timeout on a path that lost nothing.
 
+## An IPv6 zone is part of the peer's address
+
+libutp keys every connection on a packed address: sixteen bytes of IPv6
+address, with IPv4 stored as IPv4-mapped, and the port
+(`utp_packedsockaddr.cpp:63-81`). The scope id of a link-local IPv6 address is
+not copied, so `fe80::1%eth0` and `fe80::1%wlan0` are the same peer to
+libutp. They are not the same host. Two of them that happen to choose the
+same connection ids collide: one's packets land on the other's connection.
+
+This library keys on the address as `net.UDPAddr` prints it, zone included.
+IPv4 and IPv4-mapped IPv6 still compare equal, as in libutp, because Go prints
+a mapped address in dotted-quad form.
+
+Pinned by `utpnet.TestIPv6PeersDifferingOnlyInAddressAreDistinct`, which holds
+connections with identical ids open to peers differing only in address, and
+only in zone, and fails if either is dropped from the key. libutp's side is
+by reading: there is no driver for two interfaces.
+
 ## A packet that does not fit the receive buffer is dropped
 
 libutp has no receive buffer. It hands every in-order byte to its embedder's
@@ -367,6 +402,29 @@ holds. Against a peer that respects the window -- libutp does, and so does
 this library, since bytes in flight count against the peer's window -- no
 packet is dropped. Found by the line-by-line audit (LIBUTP-AUDIT.md, N23);
 already true before it, and not previously listed here.
+
+## A retransmitted SYN is answered
+
+An initiator that hears nothing back resends its SYN. If the first one
+arrived and only the SYN-ACK was lost, the acceptor already has the
+connection. libutp's `utp_process_udp` looks it up and returns without a word
+(`utp_internal.cpp:2955-2958`). Nothing else on that side resends the SYN-ACK
+either, and the `CS_SYN_RECV` timeout that would clean the socket up never
+runs: `send_ack` does not arm `rto_timeout`, which stays 0, and
+`check_timeouts` acts only on a non-zero one (`:1144-1145`). The initiator
+gives up.
+
+This library sends the same SYN-ACK again.
+
+**Measured** against libutp's driver: an acceptor whose SYN-ACK was lost,
+offered the same SYN again at 3 s and at 9 s, emitted nothing in 30 seconds
+and still held the half-open connection.
+`TestConformanceDuplicateSynBeforeData` asserts the difference packet by
+packet: libutp silent, ours one SYN-ACK.
+
+Earlier notes here and in KNOWN-LIMITATIONS.md said libutp acknowledges a
+duplicate SYN, citing a line that turned out to be in the socket destructor.
+The line-by-line audit found it.
 
 ## Read-side half-close discards what is already buffered
 
@@ -663,8 +721,10 @@ connection waits out the 3-second initial timeout.
 libutp sends its first packets at the ceiling: `mtu_last = mtu_ceiling` when a
 socket is created (`utp_internal.cpp:2562`), and the first of them is the
 probe. The search here starts at the midpoint between 576 and the ceiling --
-988 bytes against a 1400 ceiling -- and moves up only as probes are
-acknowledged. The reasoning is in KNOWN-LIMITATIONS.md, M6: an untested path
+989 bytes against a 1402 ceiling -- and moves up only as probes are
+acknowledged. (The measurements in this section were taken when the ceiling
+was 1400; it became libutp's default IPv4 figure, 1402, in the line-by-line
+audit. Two bytes do not change which paths fit.) The reasoning is in KNOWN-LIMITATIONS.md, M6: an untested path
 gets a smaller packet.
 
 **Why, measured.** libutp's start was implemented behind a switch. On healthy
@@ -757,6 +817,36 @@ empty path and adds its own queue on top: LEDBAT's latecomer problem, which a
 longer memory postpones. That is not measured. Setting `DelayWindow` to 13
 minutes recovers libutp's length, though not its bucket granularity.
 
+## A connection whose peer falls silent is closed after `MaxIdleTimeout`
+
+libutp has no idle timeout. A connection with nothing in flight is only ever
+ended by its application, by a reset from the peer, or by the retransmission
+timeout giving up -- and that last one counts only while something is
+outstanding (`retransmit_count++` under `cur_window_packets > 0`,
+`utp_internal.cpp:1239-1240`). The keep-alive it sends every 29 seconds is a
+bare ST_STATE that nothing retransmits (`:834-844`). So if the peer vanishes
+while the connection is idle, libutp keeps the socket for good.
+
+This library closes a connection with `ErrTimedOut` when nothing has arrived
+from the peer and nothing has been written for `ConnectionConfig.
+MaxIdleTimeout`, 60 seconds by default.
+
+The reason is the vanished peer. A socket held for good is memory and a
+connection id that an embedder has to reclaim with a timer of its own, and an
+embedder that does not -- the usual case -- leaks one per peer that went
+away. A live peer is unaffected: both implementations send a keep-alive after
+29 seconds of silence, so a live but quiet connection hears from its peer at
+least twice a minute (`netem.TestQuietConnectionDoesNotTimeOut`).
+
+**Measured** against libutp's driver: a connection whose peer sent one data
+packet and then nothing was still open after 600 seconds, having sent 20
+keep-alives. Ours ends at 60 (`integrated.TestCloseErrorsIfAllPacketsDropped`
+waits for exactly that error). Setting `MaxIdleTimeout` very high recovers
+libutp's behaviour.
+
+Not previously listed here; found by the line-by-line audit while settling
+the half-open acceptor (LIBUTP-AUDIT.md, N5 and N26).
+
 ## The retransmission timeout is capped at `MaxTimeout`
 
 libutp's timeout is `max(rtt + rtt_var * 4, 1000)` milliseconds with no upper
@@ -815,7 +905,8 @@ repository runs over. Raising the ceiling is a separate decision from fixing
 the case where 1400 is too big, and only the second one has evidence behind
 it.
 
-So the fixed 1400 ceiling remains as a cap, and the deviation that recorded it
+So the fixed ceiling remains as a cap -- 1402 now, libutp's default for IPv4,
+and 1232 for IPv6 -- and the deviation that recorded it
 stands. What has changed is that it is no longer also a *floor* on the
 ceiling: a tunnel that carries 1392 is now discovered before the first packet
 rather than after a stall.
@@ -864,6 +955,25 @@ Measured: `TestMtuIcmpFragmentationNeededLeavesRoomForTheHeaders`,
 `TestMtuIcmpFragmentationNeededSavesProbes` (six probe rounds and three losses
 without the report against four and one with it), and
 `netem.TestIcmpBringsTheSearchWithinThePath`.
+
+## ICMP: a report below the known floor lowers the floor
+
+libutp's search assumes `mtu_floor <= mtu_ceiling` and asserts it
+(`utp_internal.cpp:1291`). An ICMP report can break that: a route that
+shrinks after the search has proved a larger size reports a next-hop MTU
+below the floor, and libutp sets the ceiling to it regardless (`:3086`).
+In a release build the assertion is gone. The next size becomes the midpoint
+of an inverted range, which is above the new ceiling, so the packets that
+follow are the ones the router just refused. `ceiling - floor` wraps
+unsigned, so the search never counts as finished. No probe can be sent
+either: eligibility needs a size above the floor and at most the ceiling.
+That lasts until the 30-minute re-search.
+
+This library lowers the floor to the new ceiling (`mtuSearch.searchUpdate`),
+so the next packets are the size the router quoted.
+
+Better on reasoning, and not measured: none of the emulated paths changes
+its MTU under a running search.
 
 ## ICMP: no CS_IDLE state, and one terminal state instead of two
 

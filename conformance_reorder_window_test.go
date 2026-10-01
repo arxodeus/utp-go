@@ -114,7 +114,7 @@ func TestReorderedDataDoesNotBlockOurWindow(t *testing.T) {
 // returns the receive window each ends up advertising.
 func windowsAfter(t *testing.T, raws [][]byte) (ours, libutpOut uint32) {
 	t.Helper()
-	ourRaw, libutpRaw := runDivergenceSteps(t, raws)
+	ourRaw, libutpRaw := runDivergenceStepsAnswered(t, raws)
 
 	last := func(tag string, raw [][]byte) uint32 {
 		t.Helper()

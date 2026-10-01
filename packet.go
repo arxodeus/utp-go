@@ -275,6 +275,20 @@ func (p *packet) EncodedLen() int {
 	return length
 }
 
+// extensionBits is the "extension bits" extension's type (BEP 29).
+const extensionBits = 2
+
+// malformedExtensionBits reports an extension-bits extension of any length
+// but 8, which libutp refuses (utp_internal.cpp:1850-1856).
+func (p *packet) malformedExtensionBits() bool {
+	for _, e := range p.chain {
+		if e.extension == extensionBits && len(e.payload) != 8 {
+			return true
+		}
+	}
+	return false
+}
+
 // wireExtensions is the extension chain Encode writes, in order.
 //
 // A packet built here carries at most a selective ack. A decoded packet

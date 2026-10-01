@@ -1202,6 +1202,10 @@ func (c *connection) finFits(now time.Time) bool {
 	if _, owed := sp.NextNeedingResend(); owed {
 		return false
 	}
+	if int(sp.UnackedCount()) >= maxOutstandingPackets {
+		sp.OnWindowFull(now)
+		return false
+	}
 	maxSend := minUint32(sp.CongestionWindow(), c.effectivePeerWindow(now))
 	if uint64(sp.BytesInFlight())+uint64(c.mtu.payloadSize()) > uint64(maxSend) {
 		// libutp's is_full records this too (:945, :957).
@@ -1430,6 +1434,15 @@ func (c *connection) processWrites(now time.Time) {
 	// application may queue, not what may be in flight.
 	packetSize := c.mtu.payloadSize()
 	maxSend := minUint32(c.state.SentPackets.CongestionWindow(), c.effectivePeerWindow(now))
+	// And never more than maxOutstandingPackets in flight, however small
+	// they are. libutp's is_full refuses at `cur_window_packets >=
+	// OUTGOING_BUFFER_MAX_SIZE - 1` before it looks at bytes
+	// (utp_internal.cpp:939-947), so the flush stops there, resends
+	// included. There was no such bound here: a run of small writes into a
+	// large window could put more packets in flight than a libutp receiver
+	// will reorder (1024, :1890) -- and, past 32768, more than 16-bit
+	// sequence numbers can order at all.
+	outstanding := int(c.state.SentPackets.UnackedCount())
 
 	// Packets a retransmission timeout gave up as lost go first, oldest
 	// first, under the same rule as new data. libutp's flush_packets walks
@@ -1442,7 +1455,8 @@ func (c *connection) processWrites(now time.Time) {
 		if !ok {
 			break
 		}
-		if uint64(c.state.SentPackets.BytesInFlight())+uint64(packetSize) > uint64(maxSend) {
+		if outstanding >= maxOutstandingPackets ||
+			uint64(c.state.SentPackets.BytesInFlight())+uint64(packetSize) > uint64(maxSend) {
 			// No room even for what is owed; new data waits behind it.
 			resendsWaiting = true
 			break
@@ -1461,7 +1475,8 @@ func (c *connection) processWrites(now time.Time) {
 	windowFull := resendsWaiting
 
 	for !resendsWaiting && c.state.SendBuf.Pending() > 0 {
-		if uint64(inFlight)+uint64(composed)+uint64(packetSize) > uint64(maxSend) {
+		if outstanding+len(payloads) >= maxOutstandingPackets ||
+			uint64(inFlight)+uint64(composed)+uint64(packetSize) > uint64(maxSend) {
 			windowFull = true
 			break
 		}
@@ -2258,6 +2273,11 @@ func (c *connection) onFastTimeout(now time.Time) {
 	c.resendSentPacket(oldest, now)
 }
 
+// maxOutstandingPackets is how many packets may be in flight at once:
+// libutp's `OUTGOING_BUFFER_MAX_SIZE - 1` (utp_internal.cpp:52, applied in
+// is_full at :939). See processWrites.
+const maxOutstandingPackets = 1024 - 1
+
 // defaultZeroWindowProbeInterval is how long libutp tolerates a closed peer
 // window before forcing a packet through: "Reset max_window_user to 1 every 15
 // seconds" (utp_internal.cpp:2150-2151).
@@ -2456,6 +2476,15 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 		return
 	}
 
+	// An "extension bits" extension must be exactly 8 bytes, or libutp drops
+	// the packet (utp_internal.cpp:1850-1856). Not for a SYN: libutp creates
+	// the connection and answers it whatever its extensions say
+	// (:2984-2990), and a SYN does not reach here once the connection
+	// exists.
+	if packet.Header.PacketType != st_syn && packet.malformedExtensionBits() {
+		return
+	}
+
 	if c.outsideReorderWindow(packet) {
 		return
 	}
@@ -2621,8 +2650,14 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 				c.synState = statePacket
 				c.emit(c.synState)
 			} else {
+				// Built as libutp's send_rst builds every reset, and as the
+				// socket's own does: no timestamps, no window, and the
+				// sequence number of the packet that drew it
+				// (utp_internal.cpp:846-865). This one used to carry a
+				// timestamp and a 100000-byte window.
 				randSeqNum := RandomUint16()
-				resetPacket := NewPacketBuilder(st_reset, packet.Header.ConnectionId, c.nowMicros(), 100_000, randSeqNum).Build()
+				resetPacket := NewPacketBuilder(st_reset, packet.Header.ConnectionId, 0, 0, randSeqNum).
+					WithAckNum(packet.Header.SeqNum).Build()
 				c.emit(resetPacket)
 			}
 		} else {
@@ -2630,8 +2665,13 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 			// retransmitting because our SYN-ACK was lost. Re-send the same
 			// SYN-ACK: nothing else ever retransmits it, so dropping this
 			// duplicate silently strands the peer until it gives up.
-			// libutp does the same -- utp_internal.cpp:2549 acks a duplicate
-			// SYN on an already-established connection rather than ignoring it.
+			//
+			// libutp does not do this. A SYN whose connection already exists
+			// is dropped in utp_process_udp (utp_internal.cpp:2955-2958), and
+			// a libutp acceptor whose SYN-ACK was lost answers none of the
+			// retries. This comment used to say the opposite, citing a line
+			// in the socket destructor. DEVIATIONS.md, "A retransmitted SYN
+			// is answered"; TestConformanceDuplicateSynBeforeData.
 			if c.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
 				c.logger.Debug("re-sending SYN-ACK for retransmitted SYN",
 					"dst.peer", c.cid.Peer, "cid.send", c.cid.Send, "cid.recv", c.cid.Recv,
@@ -2683,8 +2723,22 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 		}
 	}
 
-	// Notify writable on STATE packets
-	if packet.Header.PacketType == st_state {
+	// Wake the writer on any packet that carries an acknowledgement, not only
+	// on ST_STATE. libutp makes the socket writable again whenever an incoming
+	// packet leaves the window below full, before the early return that is
+	// specific to ST_STATE (utp_internal.cpp:2302-2308), so its embedder
+	// writes on the acknowledgements a data packet carries as well.
+	//
+	// This woke only for ST_STATE. On a connection carrying data both ways,
+	// the peer's acknowledgements ride on its data packets -- a data packet
+	// carrying the pending acknowledgement replaces the ST_STATE (send_data,
+	// :768) -- so the window opened and nothing used it until a timer
+	// happened to run. Measured: two-way transfers of 1 MB each way over
+	// 20 Mb/s, 20 ms and 5% loss took about 36 s in 3 runs of 15, against a
+	// 5 s median, one direction sitting idle with 1 MB queued, nothing in
+	// flight and a window that had room, until the idle timeout fired.
+	switch packet.Header.PacketType {
+	case st_state, st_data, st_fin:
 		select {
 		case c.writable <- struct{}{}:
 		default:

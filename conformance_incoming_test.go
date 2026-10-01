@@ -105,3 +105,54 @@ func TestConformanceSecondFinDoesNotMoveTheEnd(t *testing.T) {
 		},
 	}...))
 }
+
+// A SYN for a connection that already exists draws nothing from libutp: the
+// lookup of (address, id + 1) finds the socket and utp_process_udp returns
+// (utp_internal.cpp:2955-2958). This library sends its SYN-ACK again, which is
+// a recorded deviation ("A retransmitted SYN is answered"): a libutp acceptor
+// whose SYN-ACK was lost never answers the initiator's retries.
+func TestConformanceDuplicateSynBeforeData(t *testing.T) {
+	runResponderCorpus(t, []step{
+		{name: "handshake", inject: synPacketFor(corpusSynConnID, corpusSynSeq)},
+		{
+			name:      "the same SYN again",
+			inject:    synPacketFor(corpusSynConnID, corpusSynSeq),
+			oursExtra: 1,
+			divergenceReason: "libutp ignores a SYN for a connection it already has; we " +
+				"repeat the SYN-ACK so a lost one does not end the handshake",
+		},
+	})
+}
+
+// withExtensionBits returns the encoded packet with an "extension bits"
+// extension (type 2) of n bytes ahead of its payload.
+func withExtensionBits(p *packet, n int) []byte {
+	raw := p.Encode()
+	if raw[1] != 0 {
+		panic("withExtensionBits expects a packet with no extensions")
+	}
+	out := append([]byte(nil), raw[:20]...)
+	out[1] = 2
+	out = append(out, 0, byte(n))
+	out = append(out, make([]byte, n)...)
+	return append(out, raw[20:]...)
+}
+
+// An "extension bits" extension must be 8 bytes long, or libutp drops the
+// packet (utp_internal.cpp:1850-1856).
+func TestConformanceExtensionBitsMustBeEightBytes(t *testing.T) {
+	runResponderCorpus(t, append(establishedSteps(), []step{
+		{
+			name: "data with 4 bytes of extension bits draws nothing",
+			injectRaw: withExtensionBits(NewPacketBuilder(st_data, corpusSynConnID+1, 200000, corpusWindow, corpusSynSeq+2).
+				WithAckNum(corpusPinnedSeq-1).WithPayload([]byte("short bits")).Build(), 4),
+			wantNoEmission: true,
+		},
+		{
+			name: "the same with 8 bytes is acknowledged",
+			injectRaw: withExtensionBits(NewPacketBuilder(st_data, corpusSynConnID+1, 210000, corpusWindow, corpusSynSeq+2).
+				WithAckNum(corpusPinnedSeq-1).WithPayload([]byte("full bits")).Build(), 8),
+			wantAck: ackNum(corpusSynSeq + 2),
+		},
+	}...))
+}

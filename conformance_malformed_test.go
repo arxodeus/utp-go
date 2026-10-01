@@ -5,6 +5,7 @@ package utp_go
 import (
 	"encoding/binary"
 	"testing"
+	"time"
 )
 
 // Malformed and hostile input, compared against libutp.
@@ -249,6 +250,18 @@ func runDivergenceCase(t *testing.T, raw []byte) (ours, libutpOut [][]byte) {
 // deliberately do not.
 func runDivergenceSteps(t *testing.T, raws [][]byte) (ours, libutpOut [][]byte) {
 	t.Helper()
+	return runDivergence(t, raws, false)
+}
+
+// runDivergenceStepsAnswered is runDivergenceSteps for a caller that expects
+// an answer to the last packet: it waits for one rather than for quiet.
+func runDivergenceStepsAnswered(t *testing.T, raws [][]byte) (ours, libutpOut [][]byte) {
+	t.Helper()
+	return runDivergence(t, raws, true)
+}
+
+func runDivergence(t *testing.T, raws [][]byte, answered bool) (ours, libutpOut [][]byte) {
+	t.Helper()
 
 	drv, err := libutpNewDriverForCorpus()
 	if err != nil {
@@ -276,6 +289,14 @@ func runDivergenceSteps(t *testing.T, raws [][]byte) (ours, libutpOut [][]byte) 
 		conn.takeEmitted()
 		conn.inject(raw)
 		conn.settle()
+	}
+	// settle calls a connection done after 60 ms with nothing new, which on a
+	// loaded machine can come before its answer to the last packet: under the
+	// full suite TestReorderedDataDoesNotBlockOurWindow read "ours emitted
+	// nothing" from a connection that answers every packet when run alone. A
+	// caller that expects an answer waits for one.
+	for deadline := time.Now().Add(5 * time.Second); answered && conn.emittedCount() == 0 && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
 	}
 	ours = conn.takeEmitted()
 

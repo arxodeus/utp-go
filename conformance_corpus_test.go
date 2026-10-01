@@ -56,6 +56,10 @@ type step struct {
 	// explicitly rather than hidden inside a tolerance.
 	libutpExtraDuplicates int
 	divergenceReason      string
+	// oursExtra is the same thing the other way round: we emit this many
+	// packets that libutp does not, after everything it does emit, for the
+	// recorded reason in divergenceReason.
+	oursExtra int
 }
 
 // corpusPinnedSeq is the sequence number both implementations are pinned to
@@ -216,6 +220,21 @@ func compareStep(t *testing.T, i int, st step, oursOut, libutpOut [][]byte) {
 		t.Logf("step %d (%s): deliberate divergence -- libutp emitted %d extra duplicate packet(s). %s",
 			i, st.name, st.libutpExtraDuplicates, st.divergenceReason)
 		libutpOut = libutpOut[:len(oursOut)]
+	}
+
+	if st.oursExtra > 0 {
+		if len(oursOut) != len(libutpOut)+st.oursExtra {
+			t.Errorf("step %d (%s): expected us to emit %d packets (%d of libutp's plus %d: %s), got %d%s",
+				i, st.name, len(libutpOut)+st.oursExtra, len(libutpOut), st.oursExtra, st.divergenceReason,
+				len(oursOut), describePackets(oursOut))
+			return
+		}
+		t.Logf("step %d (%s): deliberate divergence -- we emitted %d packet(s) libutp does not. %s",
+			i, st.name, st.oursExtra, st.divergenceReason)
+		oursOut = oursOut[:len(libutpOut)]
+		if len(oursOut) == 0 {
+			return
+		}
 	}
 
 	if len(oursOut) != len(libutpOut) {

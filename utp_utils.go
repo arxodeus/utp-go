@@ -37,9 +37,29 @@ func ClampUint32(value, min, max uint32) uint32 {
 	return value
 }
 
+// NowMicro is the timestamp uTP puts on the wire: microseconds, truncated to
+// 32 bits, from a clock that never jumps.
+//
+// libutp stamps packets from CLOCK_MONOTONIC (utp_utils.cpp:158-175), and
+// guards even that against running backwards. This used the wall clock,
+// time.Now().UnixMicro(), which an NTP step moves by however far it is
+// wrong. The peer reads the difference between our stamp and its own clock
+// as the one-way delay, so a step back of a second became a second of queue,
+// or a delay below the base that the base then followed down and kept.
+//
+// The value is the wall clock as it stood when the process started, carried
+// forward by the monotonic clock: the same number time.Now().UnixMicro() would
+// give while nobody touches the clock, and unaffected when somebody does. Only
+// differences between stamps carry meaning, so where it starts does not matter.
 func NowMicro() uint32 {
-	return uint32(time.Now().UnixMicro())
+	return uint32(wireClockEpochMicros + time.Since(wireClockEpoch).Microseconds())
 }
+
+// wireClockEpoch carries Go's monotonic reading, which time.Since uses.
+var (
+	wireClockEpoch       = time.Now()
+	wireClockEpochMicros = wireClockEpoch.UnixMicro()
+)
 
 // wrappingSubUint32 returns later-earlier over the uint32 ring.
 //

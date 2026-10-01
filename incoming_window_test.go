@@ -117,3 +117,58 @@ func TestFinWaitsForRoomInTheWindow(t *testing.T) {
 		t.Fatal("the FIN did not go once the window had room")
 	}
 }
+
+// An acknowledgement wakes the writer whichever packet carries it. libutp
+// makes the socket writable after any incoming packet that leaves the window
+// below full (utp_internal.cpp:2302-2308). This woke only for ST_STATE, so on
+// a connection carrying data both ways -- where the peer's acknowledgements
+// ride on its data packets -- the window opened and nothing used it until a
+// timer ran: about 36 s instead of 5 for 1 MB each way at 5% loss, in 3 runs
+// of 15.
+func TestAcknowledgementOnADataPacketWakesTheWriter(t *testing.T) {
+	for _, pt := range []PacketType{st_state, st_data} {
+		t.Run(pt.String(), func(t *testing.T) {
+			conn, now := incomingWindowConn(t)
+			const syn = uint16(100)
+			// Drain any wake left over from setting up.
+			for len(conn.writable) > 0 {
+				<-conn.writable
+			}
+			b := NewPacketBuilder(pt, conn.cid.Send, uint32(now.UnixMicro()), 1<<20, syn+1).WithAckNum(102)
+			if pt == st_data {
+				b = b.WithPayload([]byte("the peer's own data"))
+			}
+			conn.onPacket(b.Build(), now)
+			if conn.state.SentPackets.HasUnackedPackets() {
+				t.Fatal("the acknowledgement did not retire the outstanding packet")
+			}
+			if len(conn.writable) == 0 {
+				t.Errorf("an acknowledgement on %s retired a packet and did not wake the writer", pt.String())
+			}
+		})
+	}
+}
+
+// No more than 1023 packets in flight, however small they are. libutp's
+// is_full refuses at `cur_window_packets >= OUTGOING_BUFFER_MAX_SIZE - 1`
+// before it counts bytes (utp_internal.cpp:939-947). There was no packet
+// bound here at all.
+func TestOutstandingPacketsAreCappedAt1023(t *testing.T) {
+	for _, already := range []int{1021, 1022} {
+		conn := drainTestConn(t, 0, TEST_BUFFER_SIZE)
+		conn.mtu = newMtuSearch(uint32(conn.config.MaxPacketSize), time.Now())
+		p := conn.mtu.payloadSize()
+		conn.testWidenCongestionWindow(1 << 30)
+		conn.peerRecvWindow = 1 << 30
+		now := time.Now()
+		for i := 1; i <= already; i++ {
+			conn.state.SentPackets.OnTransmit(101+uint16(i), st_data, []byte{1}, 1, now)
+		}
+		sent := sendAndCount(t, conn, make([]byte, 3*p))
+		if want := 1023 - already; len(sent) != want {
+			t.Errorf("with %d tiny packets in flight and a vast window, %d more went out; "+
+				"libutp stops at 1023 in flight, which leaves room for %d",
+				already, len(sent), want)
+		}
+	}
+}

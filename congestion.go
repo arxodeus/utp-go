@@ -23,18 +23,21 @@ const (
 	// straight away.
 	//
 	// libutp derives its ceiling from the interface MTU (`get_udp_mtu`,
-	// utp_internal.cpp:1316) and searches downward from there. 1400 is the
-	// same idea with a fixed, conservative starting assumption: below a
-	// 1500-byte Ethernet MTU with room for tunnelling overhead.
+	// utp_internal.cpp:1316) and searches downward from there. With no
+	// embedder callback its default for IPv4 is UDP_IPV4_MTU, 1402: a
+	// 1500-byte Ethernet MTU less the IPv4 and UDP headers and an allowance
+	// for GRE, PPPoE, MPPE and 36 bytes of "fudge" (utp_utils.cpp:211-228).
+	// This used to be 1400, two bytes short of it for no reason anyone
+	// recorded. IPv6 peers get libutp's 1232 (path_mtu.go).
 	//
 	// This was a flat 1024 before path-MTU discovery existed, because without
 	// discovery the only safe fixed size is a small one. It is safe to raise
 	// now precisely because it is no longer what gets sent: the search starts
 	// at the midpoint between 576 and this, and grows only once a probe of a
 	// given size has been acknowledged. An untested path therefore still gets
-	// a 988-byte packet, close to the old 1024, and reaches 1400 only after
+	// a 989-byte packet, close to the old 1024, and reaches 1402 only after
 	// proving it can. See mtu.go.
-	defaultMaxPacketSizeBytes = 1400
+	defaultMaxPacketSizeBytes = 1402
 	// defaultMaxWindowSizeIncBytes is the cap on how far the congestion
 	// window may grow in one RTT. libutp:
 	// `#define MAX_CWND_INCREASE_BYTES_PER_RTT 3000` (utp_internal.cpp:43).

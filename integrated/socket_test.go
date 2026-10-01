@@ -25,7 +25,9 @@ const (
 
 // numTransfers is the concurrency this test runs at. It is overridable
 // because the default does not fit everywhere: 1000 concurrent 1 MB transfers
-// peak at roughly 5 GB RSS without the race detector, and the race detector's
+// peaked at 7.7 GB RSS without the race detector when last measured (the whole
+// package at 9.5 GB, enough for the kernel to kill it when other packages'
+// tests run beside it on a 16 GB host), and the race detector's
 // shadow memory puts that well past what a typical CI container allows. Set
 // UTP_TEST_TRANSFERS to run the same test at a size that fits.
 func numTransfers() int {
