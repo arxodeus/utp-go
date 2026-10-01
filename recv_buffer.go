@@ -168,8 +168,15 @@ func (rb *receiveBuffer) WasWritten(seqNum uint16) bool {
 	if rb.logger != nil && rb.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 		rb.logger.Trace("checking written", "seqNum", seqNum, "initSeqNum", rb.initSeqNum, "consumed", rb.consumed, "exists", exists)
 	}
-	writtenRange := circularRangeInclusive{start: rb.initSeqNum, end: rb.initSeqNum + rb.consumed}
-	return exists || writtenRange.Contains(seqNum)
+	// At or before the acknowledgement number, in wrapping order: delivered.
+	//
+	// This was the range from the initial sequence number to the
+	// acknowledgement number, which is the same thing until the connection
+	// has received 32,768 packets and is everything after 65,535: from then
+	// on every new packet was taken for one already delivered and dropped,
+	// and the connection stalled. libutp decides it from ack_nr alone:
+	// `(pk_seq_nr - conn->ack_nr - 1) & SEQ_NR_MASK` (utp_internal.cpp:1887).
+	return exists || !wrappingLessThan(rb.AckNum(), seqNum)
 }
 
 // HoldsOutOfOrder reports whether seqNum is held past a gap, waiting for it

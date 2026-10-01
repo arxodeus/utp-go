@@ -4359,3 +4359,40 @@ into its own. It is three things libutp's sender does:
    receiver as with ours. (A first trace blamed our receiver for this; its
    libutp-to-libutp control had not closed the stream, so it never queued a
    FIN.)
+
+## A connection stopped after 65,535 packets
+
+Found while measuring something else: a uTP flow sharing a link with a Reno
+flow for five minutes. About 90 MB in, the uTP sender began sending 22,000
+packets a second into a 10 Mbps link, with one packet counted in flight and
+no retransmissions counted. No test had ever sent 65,536 packets on one
+connection; the longest benchmark transfer is about 6,000.
+
+Three defects, each enough on its own to stop a connection there:
+
+- **The sender kept every packet it had ever sent.** `sentPackets.packets`
+  grew forever, indexed by distance from the first sequence number modulo
+  65536. Once the numbers wrapped, a new packet landed on an old,
+  acknowledged entry and was booked as a retransmission of it, so bytes in
+  flight never counted it. It also held every byte the connection had sent.
+  Now a sliding window, as libutp's `outbuf` is: acknowledged packets at the
+  front are dropped as new ones are added.
+- **The congestion controller's records were never pruned either**, so the
+  wrapped sequence number collided with a record from 65,536 packets ago
+  and the transmission was refused as a duplicate. A record already
+  acknowledged now gives way.
+- **The receiver judged a packet received if it lay between the first
+  sequence number and the acknowledgement number.** Past 32,768 packets that
+  range covered most of the circle, and past 65,535 all of it: every new
+  packet was a duplicate, and was dropped. Now judged from the ack number
+  alone, as libutp does (`utp_internal.cpp:1887`).
+
+The sender's acknowledgement processing also walked every sequence number
+since the connection opened, on every acknowledgement, to check for an MTU
+probe; with the window it walks only what the acknowledgement covers.
+
+`netem.TestTransferPastSequenceWrap` sends 70,000 packets clean and 140,000
+at 1% loss, each verified, and fails with any one of the three undone (the
+first two as a timeout or a panic, the third as a stall). libutp sent 101 MB,
+70,000 packets, to this library's receiver over real sockets without error.
+

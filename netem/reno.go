@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"math"
 	"time"
 
 	utp "github.com/zen-eth/utp-go"
@@ -100,6 +102,11 @@ func RunRenoFlow(
 ) (*RenoResult, error) {
 	if mss <= 0 {
 		mss = 1024
+	}
+	// Byte offsets are uint32 on the wire here; a larger payload would wrap
+	// them and the sender would flood rather than fail.
+	if payloadBytes < 0 || uint64(payloadBytes) > math.MaxUint32 {
+		return nil, fmt.Errorf("netem: a Reno flow carries at most %d bytes, not %d", uint64(math.MaxUint32), payloadBytes)
 	}
 
 	recvDone := make(chan int, 1)

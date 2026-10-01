@@ -477,7 +477,11 @@ func (c *defaultController) OnTransmit(seqNum uint16, transmission Transmit, dat
 
 	var packetInst *packetRecord
 	if transmission == Initial {
-		if _, exists := c.transmissions[seqNum]; exists {
+		// A record already acknowledged is from 65,536 packets ago: sequence
+		// numbers wrap, and the new packet takes its place. Only one still
+		// outstanding is a real duplicate. (This map is never otherwise
+		// pruned, so it holds at most one record per sequence number.)
+		if old, exists := c.transmissions[seqNum]; exists && !old.Acked {
 			return ErrDuplicateTransmission
 		}
 		packetInst = &packetRecord{

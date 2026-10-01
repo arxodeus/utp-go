@@ -2,7 +2,6 @@ package utp_go
 
 import (
 	"errors"
-	"math"
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
@@ -59,8 +58,29 @@ func (l LostPacketSeqNums) Remove(seq uint16) LostPacketSeqNums {
 }
 
 type sentPackets struct {
-	logger      log.Logger
-	packets     []*sentPacket
+	logger log.Logger
+	// packets is the send window: packets[0] is sequence number base, and
+	// each one after it the next. Acknowledged packets at the front are
+	// dropped when a new one is added (trimAcked), so this holds what is
+	// outstanding and little else -- libutp's outbuf, which holds
+	// cur_window_packets (utp_internal.cpp:1071-1077).
+	//
+	// It used to hold every packet the connection had ever sent, indexed by
+	// distance from the initial sequence number modulo 65536. Past 65,535
+	// packets -- about 90 MB -- a new sequence number landed on an old,
+	// acknowledged entry: the new packet was booked as a retransmission of
+	// it, bytes in flight stopped counting it, and the sender ran away at
+	// the full rate of its event loop, measured at 22,000 packets a second
+	// into a 10 Mbps link. Nothing acknowledged was ever freed either.
+	packets []*sentPacket
+	// base is the sequence number of packets[0], or the next to be sent
+	// when packets is empty.
+	base uint16
+	// lastAck is the highest sequence number acknowledged in order from the
+	// first, among those already dropped from packets; hasAck says whether
+	// there is one. See LastAckNum.
+	lastAck     uint16
+	hasAck      bool
 	initSeqNum  uint16
 	lostPackets *btree.BTreeG[uint16]
 	// fastResendSeqNum is the lowest sequence number still eligible for fast
@@ -86,6 +106,8 @@ func newSentPackets(initSeqNum uint16, congestionCtrl Controller, logger log.Log
 	return &sentPackets{
 		logger:      logger,
 		packets:     make([]*sentPacket, 0),
+		base:        initSeqNum + 1,
+		lastAck:     initSeqNum,
 		initSeqNum:  initSeqNum,
 		lostPackets: btree.NewOrderedG[uint16](2),
 		// The number the next packet will take, in both roles. libutp's
@@ -108,7 +130,24 @@ func (s *sentPackets) OnTimeout() {
 }
 
 func (s *sentPackets) NextSeqNum() uint16 {
-	return s.initSeqNum + uint16(len(s.packets)) + uint16(1)
+	return s.base + uint16(len(s.packets))
+}
+
+// trimAcked drops the acknowledged packets at the front of the window.
+func (s *sentPackets) trimAcked() {
+	n := 0
+	for n < len(s.packets) && len(s.packets[n].acks) != 0 {
+		n++
+	}
+	if n == 0 {
+		return
+	}
+	s.lastAck, s.hasAck = s.packets[n-1].seqNum, true
+	for i := 0; i < n; i++ {
+		s.packets[i] = nil
+	}
+	s.packets = s.packets[n:]
+	s.base += uint16(n)
 }
 
 func (s *sentPackets) AckNum() uint16 {
@@ -119,9 +158,11 @@ func (s *sentPackets) AckNum() uint16 {
 	return num
 }
 
+// SeqNumRange is the sequence numbers an acknowledgement may name: the one
+// before the window, which acknowledges nothing new, through the last sent.
 func (s *sentPackets) SeqNumRange() *circularRangeInclusive {
 	end := s.NextSeqNum() - uint16(1)
-	return newCircularRangeInclusive(s.initSeqNum, end)
+	return newCircularRangeInclusive(s.base-1, end)
 }
 
 func (s *sentPackets) Timeout() time.Duration {
@@ -220,29 +261,33 @@ func (s *sentPackets) TakeLostPackets() []*LostPacket {
 	var result []*LostPacket
 	var stale []uint16
 
+	// In window order, oldest first. The set is ordered by raw sequence
+	// number, which puts 0 before 65535 and so the newest packets first
+	// whenever the window spans a wrap.
 	s.lostPackets.Ascend(func(seqNum uint16) bool {
-		if wrappingLessThan(seqNum, s.fastResendSeqNum) {
+		if wrappingLessThan(seqNum, s.fastResendSeqNum) || s.SeqNumIndex(seqNum) >= len(s.packets) {
 			// Already acked or already fast retransmitted.
 			stale = append(stale, seqNum)
-			return true
 		}
-		if len(result) >= maxFastResendsPerAck {
-			return false
+		return true
+	})
+	for _, seqNum := range stale {
+		s.lostPackets.Delete(seqNum)
+	}
+	for _, packetInst := range s.packets {
+		if len(result) >= maxFastResendsPerAck || s.lostPackets.Len() == 0 {
+			break
 		}
-		index := s.SeqNumIndex(seqNum)
-		packetInst := s.packets[index] // lost packets are always present
+		if !s.lostPackets.Has(packetInst.seqNum) {
+			continue
+		}
 		result = append(result, &LostPacket{
 			packetInst.seqNum,
 			packetInst.packetType,
 			packetInst.data,
 		})
-		stale = append(stale, seqNum)
-		s.fastResendSeqNum = seqNum + 1
-		return true
-	})
-
-	for _, seqNum := range stale {
-		s.lostPackets.Delete(seqNum)
+		s.lostPackets.Delete(packetInst.seqNum)
+		s.fastResendSeqNum = packetInst.seqNum + 1
 	}
 	return result
 }
@@ -254,11 +299,19 @@ func (s *sentPackets) OnTransmit(
 	dataLen uint32,
 	now time.Time,
 ) {
+	if seqNum == s.NextSeqNum() {
+		s.trimAcked()
+	}
 	index := s.SeqNumIndex(seqNum)
 	isRetransmission := index < len(s.packets)
 
 	// Check for out of order transmit
 	if index > len(s.packets) {
+		if index >= 1<<15 {
+			// Behind the window: a packet already acknowledged and dropped.
+			// Nothing to account.
+			return
+		}
 		panic("out of order transmit")
 	}
 
@@ -506,6 +559,10 @@ func (s *sentPackets) DetectLostPackets(firstUnacked uint16) []uint16 {
 
 func (s *sentPackets) Ack(seqNum uint16, delay time.Duration, now time.Time) error {
 	index := s.SeqNumIndex(seqNum)
+	if index >= 1<<15 {
+		// Behind the window: already acknowledged and dropped.
+		return nil
+	}
 	packetInst := s.packets[index]
 	ack := Ack{
 		Delay:      delay,
@@ -547,11 +604,10 @@ func (s *sentPackets) AckPriorUnacked(seqNum uint16, firstUnacked uint16, delay 
 }
 
 func (s *sentPackets) LastAckNum() (uint16, bool) {
-	if len(s.packets) == 0 {
-		return 0, true
+	num, none := s.lastAck, !s.hasAck
+	if none {
+		num = 0
 	}
-	var num uint16
-	none := true
 	for _, packetInst := range s.packets {
 		if len(packetInst.acks) != 0 {
 			num = packetInst.seqNum
@@ -575,13 +631,10 @@ func (s *sentPackets) OnLost(seqNum uint16, retransmitting bool, now time.Time) 
 	return nil
 }
 
+// SeqNumIndex is seqNum's position in the window, counting from packets[0].
+// A number before the window comes out at 32768 or more.
 func (s *sentPackets) SeqNumIndex(seqNum uint16) int {
-	// The first sequence number is equal to `s.initSeqNum + uint16(1)`.
-	if seqNum > s.initSeqNum {
-		return int(seqNum - s.initSeqNum - uint16(1))
-	} else {
-		return int(math.MaxUint16 - s.initSeqNum + seqNum)
-	}
+	return int(seqNum - s.base)
 }
 
 // Outstanding reports whether seqNum names a packet that was sent and has not
@@ -669,9 +722,8 @@ func (s *sentPackets) FirstUnackedSeqNum() (uint16, error) {
 		s.logger.Trace("get last innerMap num",
 			"lastAckNum", lastAckNum, "isNone", isNone)
 	}
-	const one = uint16(1)
 	if isNone {
-		seqNum = s.initSeqNum + one
+		seqNum = s.base
 	} else {
 		if s.packets[len(s.packets)-1].seqNum == lastAckNum {
 			return 0, ErrNoneAckNum
