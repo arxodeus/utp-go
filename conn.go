@@ -397,13 +397,12 @@ type connection struct {
 	// -- libutp's model, where the embedder's read loop runs the protocol.
 	mu sync.Mutex
 	// ready is set once the event loop has finished setting the connection
-	// up; until then a packet goes through streamEvents. finished is set once
-	// the loop has stopped running passes; from then on nothing touches the
-	// state but the loop's own teardown. Both under mu.
+	// up. NewUtpStream holds mu from creation until then, so the reader never
+	// sees it unset on a connection the socket made; a connection built by
+	// hand, without an event loop, declines inline packets. finished is set
+	// once the loop has stopped running passes; from then on nothing touches
+	// the state but the loop's own teardown. Both under mu.
 	ready, finished bool
-	// setupDone is closed when ready is set. NewUtpStream waits for it, so a
-	// connection is never registered with its socket half made.
-	setupDone chan struct{}
 	// inBatch is set while the socket's reader is part way through a read
 	// batch that has delivered packets to this connection, and holds the
 	// acknowledgement back until the batch is done: libutp's embedder reads
@@ -595,7 +594,6 @@ func newConnection(
 		timerScope:     timers.newScope(),
 		armed:          make(map[uint16]struct{}),
 		unackTimeoutCh: unackTimeoutCh,
-		setupDone:      make(chan struct{}),
 		kick:           make(chan struct{}, 1),
 		reads:          reads,
 		abandoned:      abandoned,
@@ -707,9 +705,8 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 		c.logger.Trace("uTP conn starting", "dst.peer", c.cid.Peer, "cid.Send", c.cid.Send, "cid.Recv", c.cid.Recv)
 	}
-	// Held for setup and for every pass; released only while the loop waits.
-	// See connection.mu.
-	c.mu.Lock()
+	// mu is held for setup, from NewUtpStream, and for every pass; it is
+	// released only while the loop waits. See connection.mu.
 	// Initialize connection based on endpoint type
 	if c.endpoint.Type == Initiator {
 		synSeqNum := c.endpoint.SynNum
@@ -983,7 +980,6 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	c.stream = stream
 	c.resetIdle = resetIdleTimer
 	c.ready = true
-	close(c.setupDone)
 	for {
 		maxStreamEventLen = max(maxStreamEventLen, len(stream.streamEvents))
 		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {

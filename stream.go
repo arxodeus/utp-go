@@ -87,10 +87,20 @@ func NewUtpStream(
 
 	utpStream.conn = newConnection(streamCtx, logger, cid, config, syn, connected, socketEvents, utpStream.reads, utpStream.abandoned, timers)
 	utpStream.conn.out = out
+	// The connection's lock is taken here and released by its event loop once
+	// it has set the connection up, so a packet the socket's reader brings
+	// before then waits for the setup rather than finding it half done.
+	//
+	// It used to be taken by the event loop itself, and this waited for the
+	// setup to finish -- with the socket's dispatch lock held, since the
+	// connection has to be registered atomically. That put a goroutine's
+	// scheduling latency in front of every packet on the socket, once per new
+	// connection: with 1000 connections starting together the acknowledgements
+	// of those already running were held up for seconds, their RTT samples
+	// reached 15 s, and a retransmission timeout grown from them stalled a
+	// transfer past TestManyConcurrentTransfers' two minutes.
+	utpStream.conn.mu.Lock()
 	go utpStream.start()
-	// Return a connection that is set up, so that whoever registers it with
-	// the socket never exposes one the reader cannot yet deliver to.
-	<-utpStream.conn.setupDone
 	return utpStream
 }
 

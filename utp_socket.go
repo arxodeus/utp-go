@@ -1427,8 +1427,10 @@ func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *Co
 	connectedCh := make(chan error, 1)
 	streamEvents := make(chan *streamEvent, 1000)
 
-	// Registration and setup under the reader's lock, so the answer to the
-	// SYN finds a connection ready to take it inline. See dispatch.
+	// Registered under the reader's lock, so the reader never finds the
+	// connection's queue without the connection behind it. Nothing here
+	// waits: a packet for the connection that arrives before its event loop
+	// has set it up waits on the connection's own lock. See NewUtpStream.
 	s.dispatchMu.Lock()
 	// Generate connection ID
 	cid := s.GenerateCid(peer, true, streamEvents)
