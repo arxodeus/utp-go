@@ -4506,29 +4506,36 @@ application writes, teardown -- and, below, sending.
   documented on `Conn`, and the integration tests' mock link now drops when
   full instead of blocking.
 
-### Open: retransmission timeouts under overload
+### Retransmission timeouts under overload: as libutp, decided
 
 The two stalls on the commit before were the same as the one this work
 first found: a few packets before the FIN were lost, and the sender's
 retransmission timeout, grown from RTT samples inflated while 1000
 connections started at once, had not fired by the time the test gave up --
-the largest timeouts in those runs were 1 min 34 s and 1 min 59 s. libutp's timeout has no upper bound and
-neither, by default, has this one (DEVIATIONS.md). `ConnectionConfig.MaxTimeout`
-bounds it. Whether the default should is a decision, not a fix, and is not
-made here.
+the largest timeouts in those runs were 1 min 34 s and 1 min 59 s. libutp's
+timeout has no upper bound, and neither, by default, has this one: a default
+cap was measured to give up sooner than libutp (DEVIATIONS.md, "The
+retransmission timeout is capped at `MaxTimeout`" -- closed). Matching libutp
+is the rule here, so there is still no default cap;
+`ConnectionConfig.MaxTimeout` sets one. What this work changed is the cause
+it can control: the RTT tail inflated by the library's own processing, now
+1.0-3.0 s at worst in seven runs of eight against 3.7-18 s.
 
-### Open: the MTU search and batched acknowledgements
+### ~~The MTU search and batched acknowledgements~~ -- fixed, better than libutp
 
 libutp concludes that an MTU probe was refused on the third duplicate
 acknowledgement of the packet before it, and sets the duplicate count from
 the selective ack (`duplicate_ack = count`, `utp_internal.cpp:1612`); the test
 is equality with three. An acknowledgement that covers a batch can name more
 than three later packets at once, so the count passes three without equalling
-it, and the conclusion never comes. This library does the same. netem
-briefly implemented `QueuedReader`, and `TestDontFragmentBringsTheSearchWithinThePath`
-then failed 9 runs in 10 (5 probes inferred lost without it, none with it);
-netem no longer batches, so its measurements stay comparable. A real socket's
-batched reads meet the same limit, as they did before this work.
+it, and the conclusion never comes. This library did the same, so a real
+socket's batched reads defeated its MTU search too. It now judges at three or
+more, once per run (DEVIATIONS.md, "A refused MTU probe is judged at three
+duplicates or more"). With a receiver that batches as a real socket does, the
+search narrowed to 999 bytes on a 1000-byte path in 5 runs of 5; under
+libutp's rule it stayed at 1402 in 3 runs of 3. netem's own endpoints still
+acknowledge each datagram, so its other measurements stay comparable; the
+test runs both ways.
 
 ### API changes
 

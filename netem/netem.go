@@ -269,13 +269,9 @@ func (e *Endpoint) ReadFrom(b []byte) (int, utp.ConnectionPeer, error) {
 
 // Endpoint does not implement utp_go.QueuedReader, so a socket on it treats
 // each datagram as a read batch of its own and acknowledges it alone (unless
-// the acknowledgement-rate hold defers it). It did, briefly, and the
-// acknowledgements it then merged starved the MTU search of the duplicate
-// acknowledgements it infers a refused probe from:
-// TestDontFragmentBringsTheSearchWithinThePath failed 9 runs in 10. That is a
-// limit of libutp's inference, which a real socket's batched reads meet too
-// (KNOWN-LIMITATIONS.md); this emulator keeps the behaviour its measurements
-// were taken with.
+// the acknowledgement-rate hold defers it), which is what its measurements
+// were taken with. A test that wants a receiver batching as a real socket
+// does wraps it; see batchedReader in dont_fragment_test.go.
 
 // WriteTo sends a packet towards dst, and satisfies utp_go.Conn.
 //

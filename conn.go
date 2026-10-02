@@ -363,6 +363,9 @@ type connection struct {
 	// same sequence number. libutp's conn->duplicate_ack; see
 	// noteDuplicateAck.
 	duplicateAcks uint32
+	// duplicatesJudged records that the current run of duplicates has
+	// already been used to judge an MTU probe. See judgeProbeFromDuplicates.
+	duplicatesJudged bool
 	// mtuProbesLostToDuplicateAcks counts probes the duplicate-acknowledgement
 	// path concluded were too big. Exposed so a test can assert the mechanism
 	// ran rather than inferring it from where the search happened to settle.
@@ -3313,8 +3316,20 @@ const duplicateAcksBeforeResend = 3
 // the probe, which says nothing about size -- the probe is forgotten so
 // another can be sent, and the ceiling is left alone.
 //
-// It fires once per run of duplicates, not once per duplicate, because the
-// test is equality with three rather than "three or more".
+// It acts once per run of duplicates -- a run ends when the acknowledgement
+// moves -- on the first duplicate that finds the count at three or more. That
+// is the one place this differs from libutp, whose test is equality with three
+// (`duplicate_ack == DUPLICATE_ACKS_BEFORE_RESEND`, :1928). The selective ack
+// sets the count (noteSelectiveAckCount), and an acknowledgement covering a
+// read batch can name more than three later packets at once: the count jumps
+// past three without ever equalling it, and libutp never concludes anything
+// from that run. Its own embedders batch reads that way, and so does ours on a
+// real socket. Measured over netem with a receiver that batches as a real
+// socket does: TestDontFragmentBringsTheSearchWithinThePath failed 9 runs in
+// 10 under the equality test, the search never once hearing that a probe was
+// refused. Three or more is the same evidence -- at least three packets after
+// the hole arrived and the hole did not -- that libutp's selective ack already
+// resends on (`count >= DUPLICATE_ACKS_BEFORE_RESEND`, :1590).
 func (c *connection) noteDuplicateAck(packetType PacketType, ackNum uint16) {
 	if c.state.stateType != ConnConnected || c.state.SentPackets == nil {
 		return
@@ -3324,13 +3339,21 @@ func (c *connection) noteDuplicateAck(packetType PacketType, ackNum uint16) {
 	}
 	if packetType != st_state || ackNum != c.state.SentPackets.LastAckedSeqNum() {
 		c.duplicateAcks = 0
+		c.duplicatesJudged = false
 		return
 	}
 
 	c.duplicateAcks++
-	if c.duplicateAcks != duplicateAcksBeforeResend || !c.mtu.probing {
+	c.judgeProbeFromDuplicates(ackNum)
+}
+
+// judgeProbeFromDuplicates draws libutp's conclusion about an outstanding MTU
+// probe once a run of duplicates has reached three. See noteDuplicateAck.
+func (c *connection) judgeProbeFromDuplicates(ackNum uint16) {
+	if c.duplicateAcks < duplicateAcksBeforeResend || c.duplicatesJudged || !c.mtu.probing {
 		return
 	}
+	c.duplicatesJudged = true
 
 	if ackNum == c.mtu.probeSeq-1 {
 		c.mtu.onProbeLost(c.now())
@@ -3363,6 +3386,9 @@ func (c *connection) noteDuplicateAck(packetType PacketType, ackNum uint16) {
 // It runs for every packet type that carries the extension, as libutp's
 // does, and after the acknowledgement has been applied, which is where
 // libutp's window stands when it counts (:2289, after :2194).
+//
+// A count that reaches three judges an outstanding probe there and then,
+// which libutp does not do: see noteDuplicateAck.
 func (c *connection) noteSelectiveAckCount(ackNum uint16, sack *SelectiveAck) {
 	sp := c.state.SentPackets
 	if c.state.stateType != ConnConnected || sp == nil {
@@ -3381,6 +3407,9 @@ func (c *connection) noteSelectiveAckCount(ackNum uint16, sack *SelectiveAck) {
 		}
 	}
 	c.duplicateAcks = count
+	if ackNum == sp.LastAckedSeqNum() {
+		c.judgeProbeFromDuplicates(ackNum)
+	}
 }
 
 func (c *connection) processAck(

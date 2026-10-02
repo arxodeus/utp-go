@@ -15,8 +15,14 @@ import (
 // down on a path that drops probes.
 
 // dupAckConn builds a connected connection with three packets outstanding and
-// an MTU probe on the last of them.
+// an MTU probe on the first of them.
 func dupAckConn(t *testing.T) (*connection, uint16) {
+	t.Helper()
+	return dupAckConnN(t, 3)
+}
+
+// dupAckConnN is dupAckConn with n packets outstanding.
+func dupAckConnN(t *testing.T, n uint16) (*connection, uint16) {
 	t.Helper()
 	const syn = uint16(100)
 	const synAck = uint16(101)
@@ -26,7 +32,7 @@ func dupAckConn(t *testing.T) (*connection, uint16) {
 	sentPackets := newSentPacketsWithoutLogger(synAck, congestionCtrl)
 
 	now := time.Now()
-	for i := uint16(1); i <= 3; i++ {
+	for i := uint16(1); i <= n; i++ {
 		sentPackets.OnTransmit(synAck+i, st_data, []byte{byte(i)}, 64, now)
 	}
 	conn.state = &ConnState{
@@ -234,5 +240,55 @@ func TestSelectiveAckSetsTheDuplicateCountOnArrival(t *testing.T) {
 	if conn.mtu.ceiling != 1200-1 {
 		t.Errorf("two duplicates, the first naming two packets, left the ceiling at %d; "+
 			"libutp's count reaches three on the second and sets it to 1199", conn.mtu.ceiling)
+	}
+}
+
+// A selective ack that names more than three packets after the probe judges
+// it refused there and then. libutp's test is equality with three, so a count
+// that jumps from below three to above it -- an acknowledgement covering a
+// whole read batch -- concludes nothing in libutp, ever, for that run. It is
+// the same evidence as three duplicates: at least three packets after the
+// probe arrived and the probe did not.
+func TestSelectiveAckPastThreeJudgesTheProbe(t *testing.T) {
+	conn, dup := dupAckConnN(t, 8)
+	// dup+2 .. dup+6: five packets after the probe.
+	sack := NewSelectiveAck([]bool{true, true, true, true, true})
+	conn.noteSelectiveAckCount(dup, sack)
+	if conn.duplicateAcks != 5 {
+		t.Fatalf("a selective ack naming five packets in the window set the count to %d", conn.duplicateAcks)
+	}
+	if conn.mtu.ceiling != 1200-1 {
+		t.Errorf("five packets after the probe arrived and it did not, and the ceiling is %d; "+
+			"want 1199", conn.mtu.ceiling)
+	}
+	if conn.mtuProbesLostToDuplicateAcks != 1 {
+		t.Errorf("the probe was judged %d times, want 1", conn.mtuProbesLostToDuplicateAcks)
+	}
+}
+
+// One run of duplicates judges once, however long it goes on and whichever
+// route took the count past three; an acknowledgement that moves starts a new
+// run.
+func TestDuplicateRunJudgesOnce(t *testing.T) {
+	conn, dup := dupAckConnN(t, 8)
+	probeSeq := conn.mtu.probeSeq
+	for i := 0; i < 6; i++ {
+		conn.noteDuplicateAck(st_state, dup)
+	}
+	conn.noteSelectiveAckCount(dup, NewSelectiveAck([]bool{true, true, true, true}))
+	conn.noteDuplicateAck(st_state, dup)
+	if conn.mtuProbesLostToDuplicateAcks != 1 {
+		t.Fatalf("one run of duplicates judged the probe %d times", conn.mtuProbesLostToDuplicateAcks)
+	}
+
+	// A new probe, and an acknowledgement that is not the repeated one, ends
+	// the run: the next three judge again.
+	conn.mtu.beginProbe(probeSeq, 1100)
+	conn.noteDuplicateAck(st_state, dup+5)
+	for i := 0; i < 3; i++ {
+		conn.noteDuplicateAck(st_state, dup)
+	}
+	if conn.mtuProbesLostToDuplicateAcks != 2 {
+		t.Errorf("a second run judged %d probes in all, want 2", conn.mtuProbesLostToDuplicateAcks)
 	}
 }

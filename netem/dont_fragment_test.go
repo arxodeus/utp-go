@@ -17,9 +17,17 @@ import (
 // interface existed, and it is the control these cases are measured against.
 type noDontFragment struct{ utp.Conn }
 
+// batchedReader tells the socket how many datagrams are already waiting, so
+// it reads them all before acknowledging, as it does from a real socket's
+// batched read (utp.QueuedReader). Endpoint itself does not; see there.
+type batchedReader struct{ *Endpoint }
+
+func (b batchedReader) Queued() int { return len(b.inbox) }
+
 // dfTransfer runs one transfer and reports where the sender's MTU search
-// settled, plus the link's stats. wrap is applied to the sender's Conn.
-func dfTransfer(t *testing.T, cfg Config, wrap func(utp.Conn) utp.Conn, cid uint16) (current, floor, ceiling uint32, dupAckProbeLosses uint64, fwd Stats) {
+// settled, plus the link's stats. wrap is applied to the sender's Conn, and
+// batched makes the receiver read as a real socket does.
+func dfTransfer(t *testing.T, cfg Config, wrap func(utp.Conn) utp.Conn, batched bool, cid uint16) (current, floor, ceiling uint32, dupAckProbeLosses uint64, fwd Stats) {
 	t.Helper()
 
 	n := NewNetwork(51)
@@ -37,7 +45,11 @@ func dfTransfer(t *testing.T, cfg Config, wrap func(utp.Conn) utp.Conn, cid uint
 	}
 	sendSock := utp.WithSocket(ctx, senderConn, quiet())
 	defer sendSock.Close()
-	recvSock := utp.WithSocket(ctx, b, quiet())
+	var recvConn utp.Conn = b
+	if batched {
+		recvConn = batchedReader{b}
+	}
+	recvSock := utp.WithSocket(ctx, recvConn, quiet())
 	defer recvSock.Close()
 
 	acceptCid := utp.NewConnectionId(a.Addr(), cid+1, cid)
@@ -129,7 +141,18 @@ func dfTransfer(t *testing.T, cfg Config, wrap func(utp.Conn) utp.Conn, cid uint
 // (utp_internal.cpp:1927-1940) is what lets the search hear about it during a
 // bulk transfer, because its other route needs the probe to be the only
 // packet outstanding and a saturated window never leaves it that way.
+//
+// The receiver is run both ways: acknowledging each datagram, and reading in
+// batches as on a real socket, where one acknowledgement can cover many
+// packets. The second needs the duplicate count to be judged at three or
+// more rather than at exactly three, as libutp judges it; under libutp's test
+// it failed 9 runs in 10 (see connection.noteDuplicateAck).
 func TestDontFragmentBringsTheSearchWithinThePath(t *testing.T) {
+	t.Run("per datagram", func(t *testing.T) { dontFragmentNarrowsTheSearch(t, false, 810) })
+	t.Run("batched reads", func(t *testing.T) { dontFragmentNarrowsTheSearch(t, true, 830) })
+}
+
+func dontFragmentNarrowsTheSearch(t *testing.T, batched bool, cid uint16) {
 	cfg := Config{
 		Delay:             10 * time.Millisecond,
 		BandwidthBps:      20_000_000,
@@ -140,8 +163,8 @@ func TestDontFragmentBringsTheSearchWithinThePath(t *testing.T) {
 
 	withoutDF, floorWithout, ceilWithout, dupWithout, statsWithout := dfTransfer(t, cfg, func(c utp.Conn) utp.Conn {
 		return noDontFragment{Conn: c}
-	}, 810)
-	withDF, floorWith, ceilWith, dupWith, statsWith := dfTransfer(t, cfg, nil, 820)
+	}, batched, cid)
+	withDF, floorWith, ceilWith, dupWith, statsWith := dfTransfer(t, cfg, nil, batched, cid+10)
 
 	t.Logf("without the bit: current=%d floor=%d ceiling=%d, %d probes lost to duplicate acks; link %s",
 		withoutDF, floorWithout, ceilWithout, dupWithout, statsWithout)

@@ -89,6 +89,11 @@ worse.
   A lost fast retransmission no longer waits a second: no LAN stalls in 120
   runs against about 7% without, 15-30% more throughput at 1-5% loss, and no
   change in deference. Not applied to LEDBAT++, whose deference it cost.
+- *A refused MTU probe is judged at three duplicates or more, not exactly
+  three.* With a receiver that batches its reads, libutp's rule judged no
+  probe in 3 runs of 3 and the search stayed at 1402 bytes on a 1000-byte
+  path; ours judged 5 and narrowed to 999, in 5 runs of 5. Unchanged with
+  a receiver that acknowledges each datagram.
 
 **Better on reasoning.** libutp has a defect or a hazard here that was not
 copied. Not measured as an improvement.
@@ -977,6 +982,40 @@ Nothing is gained by reproducing the delay, and it is not a protocol rule: it
 is how often libutp's sockets are walked. The measurements that compare the
 two account for it (`libutpRTO` in `conformance_recovery_test.go` recovers
 libutp's deadline from under it).
+
+## A refused MTU probe is judged at three duplicates or more
+
+**libutp concludes it at exactly three; we conclude it at three or more,
+once per run of duplicates.**
+
+libutp counts duplicate acknowledgements of the packet before the oldest
+outstanding one, and on the third judges an outstanding MTU probe: if the
+probe is the hole, the ceiling drops below it (`utp_internal.cpp:1921-1941`).
+The selective ack also sets the count, to the number of later packets it
+names (`duplicate_ack = count`, `:1612`). The judgement is an equality test,
+`duplicate_ack == DUPLICATE_ACKS_BEFORE_RESEND` (`:1928`), so a count that
+jumps from below three to above it never equals three. That is what an
+acknowledgement covering a read batch does: it can name many later packets
+at once. libutp's embedders batch reads that way (`utp.h:512-517`), and so
+does this library on a real socket. The run then teaches the MTU search
+nothing, and a probe refused for its size is resent fragmentable, arrives,
+and the search concludes the size was fine.
+
+We judge on the first duplicate, or the first selective ack, that finds the
+count at three or more, once per run; a run ends when the acknowledgement
+moves (`connection.noteDuplicateAck`, `judgeProbeFromDuplicates`). The
+evidence is the same as libutp's -- at least three packets after the probe
+arrived and the probe did not -- and it is what libutp's own selective ack
+resends on (`count >= DUPLICATE_ACKS_BEFORE_RESEND`, `:1590`).
+
+Measured over netem, 1000-byte path, 1400-byte ceiling, the probe sent with
+the don't-fragment bit, the receiver reading in batches
+(`TestDontFragmentBringsTheSearchWithinThePath/batched_reads`): with libutp's
+equality, no probe judged in 3 runs of 3 and the search left at 1402; with
+this rule, 5 probes judged and the search at 999 in 5 runs of 5. With a
+receiver that acknowledges each datagram the two rules agree.
+`TestSelectiveAckPastThreeJudgesTheProbe` and `TestDuplicateRunJudgesOnce`
+pin the rule.
 
 ## A discovered path MTU only lowers the ceiling, never raises it
 
