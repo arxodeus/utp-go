@@ -65,10 +65,10 @@ func ourSynRetransmissions(t *testing.T, within time.Duration) []time.Duration {
 	cid := NewConnectionId(conn.peer, initiatorConnSeed, initiatorConnSeed+1)
 	go func() { _, _ = sock.ConnectWithCid(ctx, cid, cfg) }()
 
-	// Three participants register on this clock: the socket's retransmission
-	// wheel and its write loop, both when the socket is built, and this
+	// Four participants register on this clock: the socket's retransmission
+	// wheel and its read and event loops, when the socket is built, and this
 	// connection's event loop when its goroutine runs.
-	clk.AwaitParticipants(3)
+	clk.AwaitParticipants(4)
 
 	// The first SYN is not a retransmission; wait for it and discard it.
 	// Counting is allowed to poll -- it is the *instants* that must not be
@@ -140,7 +140,7 @@ func libutpSynRetransmissions(t *testing.T, within time.Duration) []time.Duratio
 //
 // Clock and IdleBarrier close that. The connection's deadlines, timers and
 // wall clock all come from a clock this test owns, and the event loop, the
-// retransmission wheel and the socket's write loop each report when they are
+// retransmission wheel and the socket's read loop each report when they are
 // parked, so time moves between reactions rather than during one. The
 // instants are then read from the packets, exactly.
 func TestSynRetransmissionInstantsMatchLibutp(t *testing.T) {
@@ -219,7 +219,7 @@ func TestVirtualClockHoldsTheConnectionStill(t *testing.T) {
 	cid := NewConnectionId(conn.peer, initiatorConnSeed, initiatorConnSeed+1)
 	go func() { _, _ = sock.ConnectWithCid(ctx, cid, cfg) }()
 
-	clk.AwaitParticipants(3)
+	clk.AwaitParticipants(4)
 	waitForEmitted(t, conn, 1)
 	conn.takeEmitted()
 
@@ -276,11 +276,12 @@ func ourReplyInstant(t *testing.T) (time.Duration, []byte) {
 		accepted <- err
 	}()
 
-	// Four participants register when the socket is built: the retransmission
-	// wheel and the read, write and event loops. An accepting connection does
-	// not exist yet -- AcceptWithCid parks until a SYN arrives, and the event
-	// loop that would be the fifth is created only then.
-	clk.AwaitParticipants(4)
+	// Three participants register when the socket is built: the
+	// retransmission wheel and the read and event loops. An accepting
+	// connection does not exist yet -- AcceptWithCid parks until a SYN
+	// arrives, and the event loop that would be the fourth is created only
+	// then.
+	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	conn.takeEmitted()
 
@@ -297,14 +298,13 @@ func ourReplyInstant(t *testing.T) (time.Duration, []byte) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the accept neither completed nor failed within 10s of the SYN")
 	}
-	clk.AwaitParticipants(5)
+	clk.AwaitParticipants(4)
 	clk.AwaitQuiet()
 	conn.takeEmitted()
 
 	// Now one data packet, and the question is when the acknowledgement goes
-	// out. AwaitQuiet is the whole inbound chain settling: read loop, socket
-	// event loop, connection event loop, write loop -- each of which reports
-	// when it parks, and each hop of which is accounted for as a handoff.
+	// out. AwaitQuiet is the inbound path settling: the read loop handles the
+	// packet and sends the acknowledgement itself, and reports when it parks.
 	injectedAt := clk.Now()
 	clk.AwaitReactionTo(func() { conn.inject(fuzzPrimingPacket()) })
 

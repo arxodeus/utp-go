@@ -54,10 +54,10 @@ func TestKeepAliveLeavesOneIntervalAfterTheLastPacket(t *testing.T) {
 		accepted <- err
 	}()
 
-	// The read, write and socket event loops and the retransmission wheel
-	// register when the socket is built; the connection's own loop only
+	// The read and socket event loops and the retransmission wheel register
+	// when the socket is built; the connection's own loop only
 	// once the SYN arrives.
-	clk.AwaitParticipants(4)
+	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
 		conn.inject(NewPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
@@ -70,7 +70,7 @@ func TestKeepAliveLeavesOneIntervalAfterTheLastPacket(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the accept neither completed nor failed within 10s of the SYN")
 	}
-	clk.AwaitParticipants(5)
+	clk.AwaitParticipants(4)
 	clk.AwaitQuiet()
 	conn.takeEmitted()
 
@@ -165,7 +165,7 @@ func TestKeepAliveSelectiveAckMatchesItsAckNumber(t *testing.T) {
 		_, err := sock.AcceptWithCid(ctx, cid, cfg)
 		accepted <- err
 	}()
-	clk.AwaitParticipants(4)
+	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
 		conn.inject(NewPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
@@ -173,7 +173,7 @@ func TestKeepAliveSelectiveAckMatchesItsAckNumber(t *testing.T) {
 	if err := <-accepted; err != nil {
 		t.Fatalf("accept: %v", err)
 	}
-	clk.AwaitParticipants(5)
+	clk.AwaitParticipants(4)
 	clk.AwaitQuiet()
 	conn.takeEmitted()
 

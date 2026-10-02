@@ -84,6 +84,15 @@ func (d *DriftingClock) skewNow() time.Duration {
 	return time.Duration(float64(time.Since(d.epoch)) * d.ppm / 1e6)
 }
 
+// Queued passes the wrapped Conn's count through, so wrapping one does not
+// change how its datagrams are batched (utp.QueuedReader).
+func (d *DriftingClock) Queued() int {
+	if q, ok := d.Conn.(utp.QueuedReader); ok {
+		return q.Queued()
+	}
+	return 0
+}
+
 // WriteTo rewrites the outgoing packet's timestamp as the drifting clock
 // would have stamped it, then sends it.
 func (d *DriftingClock) WriteTo(b []byte, dst utp.ConnectionPeer) (int, error) {

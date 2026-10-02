@@ -1621,10 +1621,13 @@ Two things made it tractable. libutp does not set the option either — it
 passes `UTP_UDP_DONTFRAG` to its embedder's sendto callback
 (`utp_internal.cpp:928`) and leaves the mechanism to it — so parity means
 carrying the signal, which `utp.DontFragmentWriter` now does, on the same
-optional-interface pattern as `PathMTUProvider`. And every datagram this
-library sends leaves through one goroutine, `UtpSocket.writeLoop`, so setting
-the option, sending one datagram and clearing it again cannot race with
-another write. That is what makes a socket-wide option usable per packet.
+optional-interface pattern as `PathMTUProvider`. And the socket holds a lock
+exclusively around a probe's send and shared around every other
+(`UtpSocket.writeDatagram`), so setting the option, sending one datagram and
+clearing it again cannot race with another write. That is what makes a
+socket-wide option usable per packet. (This was first done by sending every
+datagram from one goroutine, a write loop; datagrams now leave from whichever
+goroutine decided to send them, and the lock does that job.)
 
 No new dependency. The constants come from the standard library's `syscall`
 package where it has them (Linux, FreeBSD) and are spelled out with their

@@ -116,10 +116,10 @@ func newInitiatorRunMTU(t *testing.T, udpMTU uint16) (*initiatorRun, [][]byte, [
 		cancel: cancel, unpin: unpin, start: start,
 	}
 
-	// Four participants register when the socket is built -- the
-	// retransmission wheel and the read, write and event loops -- and the
-	// connection's event loop is the fifth as soon as ConnectWithCid runs.
-	clk.AwaitParticipants(5)
+	// Three participants register when the socket is built -- the
+	// retransmission wheel and the read and event loops -- and the
+	// connection's event loop is the fourth as soon as ConnectWithCid runs.
+	clk.AwaitParticipants(4)
 	clk.AwaitQuiet()
 	ourSyn := conn.takeEmitted()
 

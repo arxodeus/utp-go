@@ -19,24 +19,16 @@ import (
 // that is asserted here on every run rather than hard-coded, so the test fails
 // if the reference ever changes instead of pinning a stale assumption.
 //
-// We defer too, via connection.ackPending and flushAck, but we cannot match
-// the count, and the reason is structural rather than a missing optimisation.
-// libutp's embedder hands it a whole batch before the flush. Our packets cross
-// three goroutines — socket read loop, dispatcher, connection event loop — so
-// how many end up in one pass depends on whether they arrive faster than the
-// connection drains them. When they do not, each is acknowledged on its own,
-// which is correct and is also what libutp does when its embedder reads one
-// datagram per batch.
+// We match it. The socket's reader handles each packet as it reads it and
+// sends the acknowledgement once nothing more is waiting (UtpSocket.readLoop,
+// QueuedReader), which is libutp's embedder loop.
 //
-// So the assertion here is the structural one — never more acks than data
-// packets, which is what "deferred" has to mean, and where this fork used to
-// sit at exactly one per packet. The *size* of the saving is load-dependent
-// and is measured under load instead, by netem.TestAckCoalescingUnderLoad.
-//
-// An earlier version of this test asserted a fixed bound of two acks per
-// batch. It held on a plain run and failed under -race, where the batch was
-// spread across passes: it was measuring the scheduler, not the code. The
-// deviation is recorded in DEVIATIONS.md.
+// This used to be unmatchable, and asserted only "no more acks than data
+// packets": the packets crossed three goroutines -- read loop, dispatcher,
+// connection event loop -- so how many shared a pass depended on the
+// scheduler. A fixed bound of two held on a plain run and failed under -race.
+// Handled on the reader, the batch is what was queued, not what the scheduler
+// happened to group.
 func TestConformanceAckCoalescing(t *testing.T) {
 	for _, batch := range []int{1, 2, 4, 8, 16} {
 		t.Run(fmt.Sprintf("%d-packets", batch), func(t *testing.T) {
@@ -49,12 +41,8 @@ func TestConformanceAckCoalescing(t *testing.T) {
 				t.Errorf("libutp emitted %d acks for a batch of %d, want 1; "+
 					"the reference behaviour this test pins has changed", theirs, batch)
 			}
-			if ours < 1 {
-				t.Errorf("we emitted %d acks for a batch of %d, want at least 1", ours, batch)
-			}
-			if ours > batch {
-				t.Errorf("we emitted %d acks for a batch of %d, want no more than one "+
-					"per data packet; acks are no longer deferred", ours, batch)
+			if ours != theirs {
+				t.Errorf("we emitted %d acks for a batch of %d, libutp %d", ours, batch, theirs)
 			}
 		})
 	}

@@ -267,6 +267,13 @@ func (e *Endpoint) ReadFrom(b []byte) (int, utp.ConnectionPeer, error) {
 	}
 }
 
+// Queued reports how many datagrams ReadFrom would return without waiting,
+// and satisfies utp_go.QueuedReader: a socket reads them all before it
+// acknowledges, as it does from a real socket's batched read.
+func (e *Endpoint) Queued() int {
+	return len(e.inbox)
+}
+
 // WriteTo sends a packet towards dst, and satisfies utp_go.Conn.
 //
 // It never blocks: the packet is handed to the link, which decides whether it

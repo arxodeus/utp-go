@@ -60,6 +60,7 @@ func NewUtpStream(
 	config *ConnectionConfig,
 	syn *packet,
 	socketEvents chan *socketEvent,
+	out func(*socketEvent),
 	streamEvents chan *streamEvent,
 	connected chan error,
 	timers *retransmitTimers,
@@ -85,7 +86,11 @@ func NewUtpStream(
 	}
 
 	utpStream.conn = newConnection(streamCtx, logger, cid, config, syn, connected, socketEvents, utpStream.reads, utpStream.abandoned, timers)
+	utpStream.conn.out = out
 	go utpStream.start()
+	// Return a connection that is set up, so that whoever registers it with
+	// the socket never exposes one the reader cannot yet deliver to.
+	<-utpStream.conn.setupDone
 	return utpStream
 }
 

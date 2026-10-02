@@ -134,7 +134,7 @@ func TestDontFragmentConnWithoutTheInterface(t *testing.T) {
 // The hop between the connection and the socket: a packet emitted as a probe
 // must carry the bit on its socket event, and an ordinary one must not.
 //
-// The tests above exercise the last hop, from the write loop to the Conn.
+// The tests above exercise the last hop, from the socket to the Conn.
 // This is the one before it, and between them they cover the whole path from
 // mtuSearch.eligibleProbe to WriteToDontFragment.
 func TestDontFragmentTravelsOnTheSocketEvent(t *testing.T) {

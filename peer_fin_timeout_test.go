@@ -95,7 +95,7 @@ func ourFirstResendAfterResponse(t *testing.T, peerFin bool) time.Duration {
 		}
 		accepted <- s
 	}()
-	clk.AwaitParticipants(4)
+	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
 		conn.inject(NewPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
@@ -104,7 +104,7 @@ func ourFirstResendAfterResponse(t *testing.T, peerFin bool) time.Duration {
 	if stream == nil {
 		t.FailNow()
 	}
-	clk.AwaitParticipants(5)
+	clk.AwaitParticipants(4)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
 		conn.inject(NewPacketBuilder(st_data, peerID+1, 190000, 1<<20, peerSeq+1).

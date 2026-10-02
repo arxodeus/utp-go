@@ -275,9 +275,9 @@ func ourRetransmitSchedule(t *testing.T, cfg *ConnectionConfig, afterHandshake b
 		connected <- stream
 	}()
 
-	// The socket's wheel and its read, write and event loops, and the
-	// connection: the SYN has gone out once all five are parked.
-	clk.AwaitParticipants(5)
+	// The socket's wheel and its read and event loops, and the connection:
+	// the SYN has gone out once all four are parked.
+	clk.AwaitParticipants(4)
 	clk.AwaitQuiet()
 	start := clk.Now()
 

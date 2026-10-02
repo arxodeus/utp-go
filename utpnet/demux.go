@@ -65,6 +65,12 @@ func (c *demuxConn) ReadFrom(b []byte) (int, utp.ConnectionPeer, error) {
 	}
 }
 
+// Queued reports how many datagrams ReadFrom would return without waiting,
+// so the uTP socket reads them all before it acknowledges (utp.QueuedReader).
+func (c *demuxConn) Queued() int {
+	return len(c.incoming)
+}
+
 func (c *demuxConn) WriteTo(b []byte, dst utp.ConnectionPeer) (int, error) {
 	select {
 	case <-c.closed:

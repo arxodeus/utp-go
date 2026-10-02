@@ -130,10 +130,8 @@ func TestAcknowledgementOnADataPacketWakesTheWriter(t *testing.T) {
 		t.Run(pt.String(), func(t *testing.T) {
 			conn, now := incomingWindowConn(t)
 			const syn = uint16(100)
-			// Drain any wake left over from setting up.
-			for len(conn.writable) > 0 {
-				<-conn.writable
-			}
+			// Clear any wake left over from setting up.
+			conn.wantWrite = false
 			b := NewPacketBuilder(pt, conn.cid.Send, uint32(now.UnixMicro()), 1<<20, syn+1).WithAckNum(102)
 			if pt == st_data {
 				b = b.WithPayload([]byte("the peer's own data"))
@@ -142,7 +140,7 @@ func TestAcknowledgementOnADataPacketWakesTheWriter(t *testing.T) {
 			if conn.state.SentPackets.HasUnackedPackets() {
 				t.Fatal("the acknowledgement did not retire the outstanding packet")
 			}
-			if len(conn.writable) == 0 {
+			if !conn.wantWrite {
 				t.Errorf("an acknowledgement on %s retired a packet and did not wake the writer", pt.String())
 			}
 		})

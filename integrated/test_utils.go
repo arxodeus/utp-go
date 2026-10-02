@@ -33,25 +33,19 @@ func (d *ManualLinkDecider) shouldSend() bool {
 	return d.upSwitch.Load()
 }
 
+// DropFirstNSent drops the first targetDropsN datagrams. Safe for
+// concurrent use: a socket writes from more than one goroutine.
 type DropFirstNSent struct {
-	targetDropsN int
-	curDropsN    int
+	targetDropsN int64
+	curDropsN    atomic.Int64
 }
 
 func newDropFirstNSent(dropsN int) *DropFirstNSent {
-	return &DropFirstNSent{
-		targetDropsN: dropsN,
-		curDropsN:    0,
-	}
+	return &DropFirstNSent{targetDropsN: int64(dropsN)}
 }
 
 func (d *DropFirstNSent) shouldSend() bool {
-	if d.curDropsN < d.targetDropsN {
-		d.curDropsN += 1
-		return false
-	} else {
-		return true
-	}
+	return d.curDropsN.Add(1) > d.targetDropsN
 }
 
 type MockConnectedPeer struct {
@@ -82,6 +76,12 @@ func (s *MockUdpSocket) ReadFrom(b []byte) (int, utp.ConnectionPeer, error) {
 	copy(b[:n], buf)
 	return n, s.onlyPeer, nil
 }
+
+// Queued implements utp.QueuedReader, as a real socket's batched read would.
+func (s *MockUdpSocket) Queued() int {
+	return len(s.recvCh)
+}
+
 func (s *MockUdpSocket) WriteTo(b []byte, dst utp.ConnectionPeer) (int, error) {
 	if dst.Hash() != s.onlyPeer.Hash() {
 		panic(fmt.Sprintf("MockUdpSocket only supports Writing To one peer: dst.peer = %s, onlyPeer = %s", dst.Hash(), s.onlyPeer.Hash()))
@@ -90,7 +90,16 @@ func (s *MockUdpSocket) WriteTo(b []byte, dst utp.ConnectionPeer) (int, error) {
 		log.Debug("Dropping packet", "dst.peer", dst.Hash(), "onlyPeer", s.onlyPeer.Hash())
 		return len(b), nil
 	}
-	s.sendCh <- b
+	// Like a UDP socket, never wait for the peer: a datagram that finds the
+	// link's queue full is lost. The socket writes from its reader, as
+	// libutp's embedder does, so a WriteTo that waited for the other side to
+	// read would let two sockets each wait on the other for ever.
+	select {
+	case s.sendCh <- b:
+	default:
+		log.Debug("link queue full, dropping packet", "dst.peer", dst.Hash())
+		return len(b), nil
+	}
 	log.Debug("Sent a packet out to dest", "dest.peer", dst, "len", len(b), "data", hex.EncodeToString(b))
 	return len(b), nil
 }
@@ -98,9 +107,14 @@ func (s *MockUdpSocket) Close() error {
 	return nil
 }
 
+// linkQueue is how many datagrams a mock link holds before it drops: more
+// than any window the tests here open, so a drop is what a LinkDecider asks
+// for and not an accident of the harness.
+const linkQueue = 8192
+
 func buildLinkPair(aDecider LinkDecider, bDecider LinkDecider) (*MockUdpSocket, *MockUdpSocket) {
 	peerA, peerB := &MockConnectedPeer{name: "peerA"}, &MockConnectedPeer{name: "peerB"}
-	peerACh, peerBCh := make(chan []byte, 1), make(chan []byte, 1)
+	peerACh, peerBCh := make(chan []byte, linkQueue), make(chan []byte, linkQueue)
 
 	// A -> B
 	a, b := &MockUdpSocket{

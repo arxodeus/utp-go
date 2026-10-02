@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -389,12 +390,44 @@ type connection struct {
 	// handed out, or later if ackEvery lets it wait for more packets.
 	// libutp's schedule_ack / utp_issue_deferred_acks.
 	ackPending bool
-	// lastBatch is the socket read the last packet processed arrived in, and
-	// batchesDone the socket's count of reads handed out in full. While the
-	// first is ahead of the second, more of that read is on its way and the
-	// acknowledgement waits for it. See flushAck.
-	lastBatch   uint64
-	batchesDone *atomic.Uint64
+	// mu guards every field of this connection. The event loop holds it for
+	// each pass, and the socket's reader holds it while it handles a packet
+	// for this connection inline (receiveInline, endBatch), which is what
+	// lets an acknowledgement leave from the goroutine that read the packet
+	// -- libutp's model, where the embedder's read loop runs the protocol.
+	mu sync.Mutex
+	// ready is set once the event loop has finished setting the connection
+	// up; until then a packet goes through streamEvents. finished is set once
+	// the loop has stopped running passes; from then on nothing touches the
+	// state but the loop's own teardown. Both under mu.
+	ready, finished bool
+	// setupDone is closed when ready is set. NewUtpStream waits for it, so a
+	// connection is never registered with its socket half made.
+	setupDone chan struct{}
+	// inBatch is set while the socket's reader is part way through a read
+	// batch that has delivered packets to this connection, and holds the
+	// acknowledgement back until the batch is done: libutp's embedder reads
+	// until the socket would block and then calls utp_issue_deferred_acks
+	// (utp.h:512-517). See endBatch.
+	inBatch bool
+	// wantWrite records, within a pass, that there may be data to send:
+	// an acknowledgement opened the window, or a write moved bytes into the
+	// send buffer. The pass sends it before it ends. These used to be
+	// signals the loop sent itself on writable, for the next pass.
+	wantWrite bool
+	// kick wakes the event loop when a pass the reader ran inline leaves
+	// something only the loop can do: tear the connection down.
+	kick chan struct{}
+	// stream is the stream this connection belongs to, for passes run off
+	// the event loop. Set at setup.
+	stream *UtpStream
+	// resetIdle restarts the idle timeout. Set by the event loop, which owns
+	// the timer, at setup.
+	resetIdle func()
+	// out sends what this connection emits. The socket sets it to write
+	// straight to the wire; when it is nil, as in unit tests that build a
+	// connection by hand, emissions are queued on socketEvents instead.
+	out func(*socketEvent)
 	// dropUnacked is set while a packet is being handled when libutp would
 	// discard it without scheduling an acknowledgement -- its early `return
 	// 0`s in utp_process_incoming (utp_internal.cpp:2381-2386, :2425-2431).
@@ -562,6 +595,8 @@ func newConnection(
 		timerScope:     timers.newScope(),
 		armed:          make(map[uint16]struct{}),
 		unackTimeoutCh: unackTimeoutCh,
+		setupDone:      make(chan struct{}),
+		kick:           make(chan struct{}, 1),
 		reads:          reads,
 		abandoned:      abandoned,
 		readable:       make(chan struct{}, 3),
@@ -641,7 +676,8 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	defer c.disarmAll()
 	// Report the end of the stream to the reader on every exit.
 	//
-	// This goroutine is the only sender on c.reads, so closing it here is
+	// Nothing else sends on c.reads by now -- the passes the socket's reader
+	// runs stop once finished is set, before teardown -- so closing it here is
 	// safe, and it is what lets the loop refuse to block: the end-of-stream
 	// marker is best-effort, and a reader that never got it -- because its
 	// queue was full when the connection ended -- learns from the close
@@ -671,6 +707,9 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 		c.logger.Trace("uTP conn starting", "dst.peer", c.cid.Peer, "cid.Send", c.cid.Send, "cid.Recv", c.cid.Recv)
 	}
+	// Held for setup and for every pass; released only while the loop waits.
+	// See connection.mu.
+	c.mu.Lock()
 	// Initialize connection based on endpoint type
 	if c.endpoint.Type == Initiator {
 		synSeqNum := c.endpoint.SynNum
@@ -843,9 +882,6 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	}
 
 	handleIncoming := func(event *streamEvent) {
-		if event.Type == streamIncoming && event.BatchesDone != nil {
-			c.lastBatch, c.batchesDone = event.Batch, event.BatchesDone
-		}
 		if event.Type == streamIncoming {
 			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 				c.logger.Trace("incoming packet",
@@ -922,6 +958,17 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		}()
 	}
 
+	// takeIncoming takes the handoff the socket noted when it queued an
+	// inbound packet. Only streamIncoming is noted -- see handleIncomingBuf --
+	// so only streamIncoming is taken. Every receive from streamEvents calls
+	// it: the non-blocking ones at the top of the loop took the packet
+	// without it, and left a virtual clock waiting for ever.
+	takeIncoming := func(event *streamEvent) {
+		if barrier != nil && event != nil && event.Type == streamIncoming {
+			barrier.TakeHandoff()
+		}
+	}
+
 	var maxStreamEventLen int
 	// Declared outside the loop so the fast-path `goto afterSelect` above does
 	// not jump over them. Reset on every pass by the select that assigns them.
@@ -933,6 +980,10 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		wokeOK     bool
 		wokeTimer  *packet
 	)
+	c.stream = stream
+	c.resetIdle = resetIdleTimer
+	c.ready = true
+	close(c.setupDone)
 	for {
 		maxStreamEventLen = max(maxStreamEventLen, len(stream.streamEvents))
 		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
@@ -944,6 +995,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		}
 		select {
 		case event := <-stream.streamEvents:
+			takeIncoming(event)
 			handleIncoming(event)
 			// Take whatever else has already arrived before answering, so one
 			// acknowledgement covers it rather than one per packet. flushAck
@@ -956,6 +1008,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			for drained := 0; drained < maxAckCoalesce; drained++ {
 				select {
 				case more := <-stream.streamEvents:
+					takeIncoming(more)
 					handleIncoming(more)
 				default:
 					drained = maxAckCoalesce
@@ -979,10 +1032,13 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		// length is exact; a wake from another goroutine is that goroutine's
 		// to account for.
 		markedIdle = false
-		if barrier != nil && len(c.writable) == 0 && len(c.readable) == 0 {
+		if barrier != nil && len(c.writable) == 0 && len(c.readable) == 0 && len(c.kick) == 0 {
 			barrier.MarkIdle()
 			markedIdle = true
 		}
+		// The socket's reader may handle a packet for this connection while
+		// the loop waits. See receiveInline.
+		c.mu.Unlock()
 		// The select below only *receives*; every case body runs after it,
 		// through the switch. That shape is what lets a virtual clock be told
 		// the loop is running again before any of those bodies can emit a
@@ -1012,21 +1068,18 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			woke = wakeLossProbe
 		case <-idleTimer.C():
 			woke = wakeIdleTimeout
+		case <-c.kick:
+			woke = wakeKick
 		case <-c.ctx.Done():
 			woke = wakeCtxDone
 		}
+		c.mu.Lock()
 		if markedIdle {
 			barrier.MarkBusy()
 		}
 		switch woke {
 		case wakeStreamEvent:
-			// The handoff the socket noted when it queued an inbound packet.
-			// Only streamIncoming is noted -- see handleIncomingBuf -- so
-			// only streamIncoming is taken.
-			if barrier != nil && wokeEvent != nil &&
-				(wokeEvent.Type == streamIncoming || wokeEvent.Type == streamBatchEnd) {
-				barrier.TakeHandoff()
-			}
+			takeIncoming(wokeEvent)
 			handleIncoming(wokeEvent)
 		case wakeWrite:
 			handleWrites(wokeWrite, wokeOK)
@@ -1052,6 +1105,12 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		case wakeAckHold:
 			// Nothing to do but wake: a held acknowledgement goes out from
 			// flushAck in afterSelect.
+		case wakeKick:
+			// The handoff endBatch noted when it kicked. What it wants done
+			// happens in afterSelect.
+			if barrier != nil {
+				barrier.TakeHandoff()
+			}
 		case wakeProbe:
 			// The peer's window has been closed for a whole interval. Let one
 			// packet through, so its acknowledgement carries a fresh window.
@@ -1067,50 +1126,28 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 				c.logger.Trace("stream context done, will force stop...", "c.cid.peer", c.cid.Peer, "c.cid.Send", c.cid.Send, "c.cid.Recv", c.cid.Recv)
 			}
+			c.finished = true
+			c.mu.Unlock()
 			return c.ctx.Err()
 		}
 	afterSelect:
-		// Hand bytes up before acknowledging, so the acknowledgement carries
-		// the window that results rather than the one from before the drain.
-		//
-		// This ordering is libutp's. It hands bytes to its embedder inside
-		// utp_process_incoming and acknowledges afterwards, which is why
-		// utp_read_drained finds nothing to report on an ordinary packet.
-		// Draining on a later pass instead -- which is what this loop did --
-		// makes every drain look like the window growing, and reporting that
-		// doubles the reverse traffic. Measured: every data packet drew two
-		// acknowledgements instead of one, which the corpus caught at once.
-		//
-		// ackPending is a bool and flushAck runs once per pass, so the drain
-		// and the data that prompted it now share one acknowledgement.
-		c.processReads()
-		c.flushAck()
-		c.scheduleIdleRto(c.now())
-		c.sampleMetrics(c.now(), false)
-		// shutdown() sends the local FIN once everything queued has drained.
-		// Both flags reach it: Close means finished entirely, CloseWrite means
-		// finished sending. The difference is not here -- it is that a
-		// CloseWrite connection is not torn down when the peer's FIN arrives,
-		// because its reader is still there.
-		if stream.shutdown.Load() {
-			c.closeRequested = true
-		}
-		if (stream.shutdown.Load() || stream.writeClosed.Load()) &&
-			c.state.stateType != ConnClosed {
-			if !c.writeShut {
-				c.writeShut = true
-				c.processWrites(c.now())
+		if c.afterPass() {
+			// More to send than one pass sends: come round again.
+			select {
+			case c.writable <- struct{}{}:
+			default:
 			}
-			c.shutdown()
-			// And re-check: shutdown may have just sent the FIN that finishes
-			// this connection, and no packet need ever arrive to notice.
-			c.updateClosingState()
 		}
 
 		if c.state.stateType == ConnClosed {
 			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 				c.logger.Trace("uTP conn closing...", "err", c.state.Err, "c.cid.Send", c.cid.Send, "c.cid.Recv", c.cid.Recv)
 			}
+			// No more passes: the reader leaves this connection alone from
+			// here, so the teardown below can block for the application
+			// without holding up the socket.
+			c.finished = true
+			c.mu.Unlock()
 			// Always drain and terminate the read side here. The previous
 			// `if !c.eof()` guard was inverted in effect: eof() is true by
 			// definition once stateType is ConnClosed, so processReads was
@@ -1125,6 +1162,127 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			// observed rather than lost to the throttle.
 			c.sampleMetrics(c.now(), true)
 			return c.state.Err
+		}
+	}
+}
+
+// afterPass is the work that ends every pass, whoever ran it: hand bytes up,
+// send what the window allows, acknowledge, and see whether the application
+// has asked to close. It reports whether there is still data the window would
+// let out, which one pass stops short of sending.
+//
+// Called with mu held, by the event loop and by endBatch.
+func (c *connection) afterPass() (moreToWrite bool) {
+	stream := c.stream
+	// Hand bytes up before acknowledging, so the acknowledgement carries
+	// the window that results rather than the one from before the drain.
+	//
+	// This ordering is libutp's. It hands bytes to its embedder inside
+	// utp_process_incoming and acknowledges afterwards, which is why
+	// utp_read_drained finds nothing to report on an ordinary packet.
+	// Draining on a later pass instead -- which is what this loop did --
+	// makes every drain look like the window growing, and reporting that
+	// doubles the reverse traffic. Measured: every data packet drew two
+	// acknowledgements instead of one, which the corpus caught at once.
+	//
+	// ackPending is a bool and flushAck runs once per pass, so the drain
+	// and the data that prompted it now share one acknowledgement.
+	c.processReads()
+	// Send before acknowledging, as libutp does: an acknowledgement that
+	// opened the window is followed by the data it lets out within
+	// utp_process_incoming, and the deferred acknowledgement after it is
+	// dropped if a data packet already carried it (send_data, :768).
+	for i := 0; c.wantWrite && i < maxWritesPerPass; i++ {
+		c.wantWrite = false
+		c.processWrites(c.now())
+	}
+	c.flushAck()
+	c.scheduleIdleRto(c.now())
+	c.sampleMetrics(c.now(), false)
+	// shutdown() sends the local FIN once everything queued has drained.
+	// Both flags reach it: Close means finished entirely, CloseWrite means
+	// finished sending. The difference is not here -- it is that a
+	// CloseWrite connection is not torn down when the peer's FIN arrives,
+	// because its reader is still there.
+	if stream.shutdown.Load() {
+		c.closeRequested = true
+	}
+	if (stream.shutdown.Load() || stream.writeClosed.Load()) &&
+		c.state.stateType != ConnClosed {
+		if !c.writeShut {
+			c.writeShut = true
+			c.processWrites(c.now())
+		}
+		c.shutdown()
+		// And re-check: shutdown may have just sent the FIN that finishes
+		// this connection, and no packet need ever arrive to notice.
+		c.updateClosingState()
+	}
+	return c.wantWrite
+}
+
+// maxWritesPerPass bounds how many times one pass goes back to processWrites
+// for data it moved into the send buffer. Each time either sends or finds the
+// window full, so this is reached only by an application writing faster than
+// the loop can turn round, and then the next pass carries on.
+const maxWritesPerPass = 64
+
+// receiveInline handles a packet for this connection on the caller's
+// goroutine -- the socket's reader -- and reports whether it did. It does not
+// acknowledge: that waits for endBatch, at the end of the read the packet came
+// in. A connection still being set up declines, and the packet goes through
+// streamEvents; one that has closed takes the packet and drops it, as its
+// channel did once the loop had stopped reading it. Closed but not yet
+// finished is the moment between the pass that closed it and the event loop
+// waking to tear it down.
+func (c *connection) receiveInline(pkt *packet) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.finished || (c.ready && c.state.stateType == ConnClosed) {
+		return true
+	}
+	if !c.ready {
+		return false
+	}
+	c.inBatch = true
+	c.resetIdle()
+	c.onPacket(pkt, c.now())
+	return true
+}
+
+// endBatch ends a read batch that delivered packets to this connection: the
+// pass that receiveInline left open runs now, acknowledgement included.
+// libutp's utp_issue_deferred_acks, which its embedder calls once the socket
+// would block (utp.h:512-517).
+//
+// The event loop is woken only for what it alone can do: tear the
+// connection down, or go on sending past one pass's worth.
+func (c *connection) endBatch() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.finished || !c.ready || !c.inBatch {
+		return
+	}
+	c.inBatch = false
+	more := c.afterPass()
+	if more || c.state.stateType == ConnClosed {
+		c.kickLoop()
+	}
+}
+
+// kickLoop wakes the event loop from another goroutine, accounting for the
+// wake with a virtual clock. See IdleBarrier.NoteHandoff.
+func (c *connection) kickLoop() {
+	barrier, _ := c.timeSource().(IdleBarrier)
+	if barrier != nil {
+		barrier.NoteHandoff()
+	}
+	select {
+	case c.kick <- struct{}{}:
+	default:
+		// A wake is already pending, and it is enough.
+		if barrier != nil {
+			barrier.TakeHandoff()
 		}
 	}
 }
@@ -1147,6 +1305,7 @@ const (
 	wakeIdleRto
 	wakeLossProbe
 	wakeAckHold
+	wakeKick
 	wakeIdleTimeout
 	wakeCtxDone
 )
@@ -1253,6 +1412,10 @@ func (c *connection) rememberLingerState() {
 // nothing left to clean up and blocking here would leak the very goroutine
 // this is trying to tidy up after.
 func (c *connection) notifySocketShutdown() {
+	if c.out != nil {
+		c.out(newShutdownSocketEvent(c.cid, c.lingerAck()))
+		return
+	}
 	timer := c.timeSource().NewTimer(5 * time.Second)
 	defer timer.Stop()
 	select {
@@ -1371,7 +1534,7 @@ func (c *connection) emit(pkt *packet) {
 	c.emitPacket(pkt, false)
 }
 
-// emitPacket queues a packet for the socket's write loop. dontFragment marks
+// emitPacket sends a packet, through the socket. dontFragment marks
 // it as an MTU probe; see DontFragmentWriter.
 func (c *connection) emitPacket(pkt *packet, dontFragment bool) {
 	if pkt == nil {
@@ -1385,17 +1548,24 @@ func (c *connection) emitPacket(pkt *packet, dontFragment bool) {
 		// Kept for the socket to repeat after this connection is gone.
 		c.lastStateSent = pkt
 	}
+	ev := newOutgoingSocketEvent(pkt, c.cid)
+	if dontFragment {
+		ev = newOutgoingProbeSocketEvent(pkt, c.cid)
+	}
+	if c.out != nil {
+		// Straight to the wire, on this goroutine: nothing is in flight
+		// between deciding to send and sending, so a virtual clock has
+		// nothing to wait for.
+		c.out(ev)
+		return
+	}
 	// A virtual clock must not consider the system quiet while this packet is
-	// queued but not yet taken by the socket's write loop. See
+	// queued but not yet taken by whoever reads socketEvents. See
 	// IdleBarrier.NoteHandoff.
 	if b, ok := c.timeSource().(IdleBarrier); ok {
 		b.NoteHandoff()
 	}
-	if dontFragment {
-		c.socketEvents <- newOutgoingProbeSocketEvent(pkt, c.cid)
-		return
-	}
-	c.socketEvents <- newOutgoingSocketEvent(pkt, c.cid)
+	c.socketEvents <- ev
 }
 
 // keepAlivePacket is a STATE acknowledging one less than we actually have.
@@ -1602,10 +1772,7 @@ func (c *connection) processWrites(now time.Time) {
 			writeReq.data = remainingData
 			writeReq.written += bufSpace
 		}
-		select {
-		case c.writable <- struct{}{}:
-		default:
-		}
+		c.wantWrite = true
 	}
 
 	// transmit data packets
@@ -1659,10 +1826,7 @@ func (c *connection) onWrite(writeReq *queuedWrite) {
 		writeReq.resultCh <- result
 	}
 	c.processWrites(c.now())
-	select {
-	case c.writable <- struct{}{}:
-	default:
-	}
+	c.wantWrite = true
 }
 
 func (c *connection) processReads() {
@@ -1685,8 +1849,8 @@ func (c *connection) processReads() {
 	// advertises RecvBuf.Window(), so leaving unread bytes in the receive
 	// buffer is exactly that backpressure.
 	//
-	// This goroutine is the only sender on c.reads, so a free slot observed
-	// here is still free at the send below: consumers only ever remove.
+	// Every sender on c.reads holds mu, so a free slot observed here is
+	// still free at the send below: consumers only ever remove.
 	drained := true
 	for recvBuf != nil && !recvBuf.IsEmpty() {
 		if len(c.reads) == cap(c.reads) {
@@ -2260,8 +2424,8 @@ func (c *connection) flushAck() {
 	// One acknowledgement per socket read, as libutp's embedder sends it: the
 	// datagrams already waiting in the kernel are all processed, and then
 	// utp_issue_deferred_acks runs once (utp.h:512-517). A read that is still
-	// being handed out holds the acknowledgement; the socket wakes this
-	// connection when it has finished (UtpSocket.eventLoop), and the
+	// being handed out holds the acknowledgement; the reader ends the batch
+	// (endBatch) once it has dispatched the whole read, and the
 	// acknowledgement then covers everything the read brought.
 	//
 	// This used to flush at the end of every pass of this loop, and the batch
@@ -2269,7 +2433,7 @@ func (c *connection) flushAck() {
 	// here happened to fall. With batches alone, and ackEvery at one, a
 	// libutp sender at 100 Mb/s got 0.57-0.68 acknowledgements per data
 	// packet from this receiver and 0.58-0.62 from libutp's.
-	if c.batchesDone != nil && c.batchesDone.Load() < c.lastBatch {
+	if c.inBatch {
 		return
 	}
 	if k := c.ackEvery(); k > 1 && c.dataSinceAck > 0 && c.dataSinceAck < k {
@@ -2945,19 +3109,10 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	// flight and a window that had room, until the idle timeout fired.
 	switch packet.Header.PacketType {
 	case st_state, st_data, st_fin:
-		select {
-		case c.writable <- struct{}{}:
-		default:
-		}
+		c.wantWrite = true
 	}
 
-	// Notify readable on data or FIN
-	if len(packet.Body) > 0 || packet.Header.PacketType == st_fin {
-		select {
-		case c.readable <- struct{}{}:
-		default:
-		}
-	}
+	// Data or a FIN is handed up by processReads, which every pass runs.
 
 	c.updateClosingState()
 }
@@ -3896,7 +4051,7 @@ func (c *connection) transmit(packet *packet, now time.Time, firstTransmission b
 	// and sends the probe with fragmentation disabled, by passing
 	// UTP_UDP_DONTFRAG to its embedder's sendto callback (:925-929). This
 	// carries the same bit the same way: the flag travels with the datagram to
-	// the socket's write loop, which asks the Conn to honour it if it can.
+	// the socket, which asks the Conn to honour it if it can.
 	//
 	// A Conn that cannot -- the libutp driver, an emulated network that does
 	// not model fragmentation, an operating system with no such socket option

@@ -221,10 +221,12 @@ func (m ConnectionMetrics) QueueingDelay() time.Duration {
 
 // MetricsObserver receives connection snapshots.
 //
-// It is called from the connection's own event-loop goroutine, which is what
-// makes reading the connection's state race-free. It must not block, and must
-// not call back into the stream or socket: doing either deadlocks the
-// connection it is observing. Copy what you need and return.
+// It is called with the connection's lock held, from whichever goroutine is
+// running the connection at the time -- its own event loop, or the socket's
+// reader handling a packet for it -- which is what makes reading the
+// connection's state race-free. It must not block, and must not call back into
+// the stream or socket: blocking holds up every connection on the socket, and
+// calling back can deadlock. Copy what you need and return.
 type MetricsObserver func(ConnectionMetrics)
 
 // DefaultMetricsInterval is how often metrics are sampled when an observer is

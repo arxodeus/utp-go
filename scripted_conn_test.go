@@ -53,6 +53,17 @@ func newScriptedConn() *scriptedConn {
 	}
 }
 
+// Queued implements QueuedReader: injected packets not held back are what
+// ReadFrom returns at once, as a real socket's queue is.
+func (c *scriptedConn) Queued() int {
+	c.inMu.Lock()
+	defer c.inMu.Unlock()
+	if c.holding {
+		return 0
+	}
+	return len(c.pending)
+}
+
 func (c *scriptedConn) ReadFrom(b []byte) (int, ConnectionPeer, error) {
 	for {
 		c.inMu.Lock()

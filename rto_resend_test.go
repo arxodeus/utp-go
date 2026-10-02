@@ -202,7 +202,7 @@ func newVirtualAccepted(t *testing.T, maxPacket uint16) *virtualAccepted {
 		}
 	}()
 
-	clk.AwaitParticipants(4)
+	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
 		conn.inject(NewPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
@@ -213,7 +213,7 @@ func newVirtualAccepted(t *testing.T, maxPacket uint16) *virtualAccepted {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the accept did not complete within 10s of the SYN")
 	}
-	clk.AwaitParticipants(5)
+	clk.AwaitParticipants(4)
 	clk.AwaitQuiet()
 	// Complete the handshake as a peer would, with data that acknowledges our
 	// SYN-ACK.

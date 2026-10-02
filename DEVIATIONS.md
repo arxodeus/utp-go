@@ -235,8 +235,10 @@ hypothetical concern here -- see the delay-signal and RTT findings in
 [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md), both of which were invisible
 until the window and RTT could be plotted.
 
-Observers are called from the connection's own event-loop goroutine, so they
-add no locking to the data path and nothing to the wire.
+Observers are called with the connection's lock held, from whichever goroutine
+is running it -- its event loop, or the socket's reader handling a packet for
+it -- so they add no locking of their own to the data path and nothing to the
+wire. They must not block: the reader serves every connection on the socket.
 
 ### 4. `MaxConnAttempts` counts transmissions, not timeouts
 

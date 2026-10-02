@@ -1,7 +1,5 @@
 package utp_go
 
-import "sync/atomic"
-
 type StreamEventType int
 
 const (
@@ -16,10 +14,6 @@ const (
 	// has finished reading. libutp's utp_shutdown(SHUT_RD), which sets
 	// read_shutdown (utp_internal.cpp:3409-3411).
 	streamCloseRead
-	// streamBatchEnd wakes a connection that may be holding an
-	// acknowledgement until the read its packets arrived in has been handed
-	// out in full. It carries nothing.
-	streamBatchEnd
 	// streamICMP carries an ICMP report about a packet this connection sent.
 	// The socket parses the quoted uTP header and finds the connection; the
 	// connection decides what the report means, which is where libutp puts
@@ -60,11 +54,6 @@ const (
 type streamEvent struct {
 	Type   StreamEventType
 	Packet *packet
-	// Batch is the socket read this packet arrived in, and BatchesDone the
-	// socket's count of reads fully handed out; see connection.flushAck. Nil
-	// BatchesDone holds nothing back.
-	Batch       uint64
-	BatchesDone *atomic.Uint64
 	// ICMP is set on streamICMP events and nil otherwise.
 	ICMP *icmpNotice
 }

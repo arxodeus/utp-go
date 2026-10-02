@@ -57,6 +57,15 @@ type PeerInfo interface {
 	Hash() [32]byte
 }
 
+// Conn is the datagram transport a UtpSocket runs over.
+//
+// WriteTo must behave like a UDP socket's: it may wait for the local send
+// path, but never for the peer to read. The socket writes from the goroutine
+// that reads -- an acknowledgement leaves from the call stack that received
+// the packet, as libutp's sendto callback does (utp_call_sendto,
+// utp_internal.cpp:713) -- so a WriteTo that waited for the other side to
+// read would let two sockets each wait on the other for ever. A transport
+// that cannot keep up drops, as UDP does. WriteTo is called concurrently.
 type Conn interface {
 	ReadFrom(b []byte) (int, ConnectionPeer, error)
 	WriteTo(b []byte, dst ConnectionPeer) (int, error)
@@ -126,9 +135,9 @@ func (c *UdpConn) WriteTo(b []byte, dst ConnectionPeer) (int, error) {
 //
 // The bit is a socket option on every platform that has one at all -- there is
 // no per-datagram control message for it -- so it is set, one datagram is
-// sent, and it is cleared again. That is safe here for a structural reason:
-// every datagram this library sends leaves through UtpSocket.writeLoop, a
-// single goroutine, so no other write can land between the two.
+// sent, and it is cleared again. That is safe here because the socket holds
+// writeMu exclusively for such a send and shared for every other one, so no
+// other write can land between the two. See UtpSocket.writeDatagram.
 //
 // It is cleared even when the send fails. Leaving it set would make every
 // subsequent datagram on this socket unfragmentable, which is the one thing
@@ -170,10 +179,6 @@ func (c *UdpConn) LocalAddr() net.Addr {
 type IncomingPacketRaw struct {
 	peer    ConnectionPeer
 	payload []byte
-	// batch numbers the read this datagram arrived in, and batchEnd marks the
-	// last datagram of it. See readLoop.
-	batch    uint64
-	batchEnd bool
 }
 
 // datagram is one datagram from a batched read.
@@ -188,6 +193,24 @@ type batchReader interface {
 	readBatch() ([]datagram, error)
 }
 
+// QueuedReader is a Conn that can say how many datagrams ReadFrom would return
+// without waiting. The socket reads those before it acknowledges anything, so
+// a run of datagrams that were already waiting draws one acknowledgement, not
+// one each: libutp's embedder reads until the socket would block and only then
+// calls utp_issue_deferred_acks (utp.h:512-517). A Conn that implements
+// neither this nor batched reads has every datagram treated as a batch of its
+// own, which holds nothing back.
+//
+// Queued may count low, never high: a datagram it counts must be one ReadFrom
+// returns at once.
+type QueuedReader interface {
+	Queued() int
+}
+
+// maxQueuedRun bounds how many datagrams a QueuedReader's run may hold an
+// acknowledgement for, as maxReadBatch does a batched read.
+const maxQueuedRun = 4096
+
 var errBatchReadUnsupported = errors.New("utp: batched reads are not supported on this platform")
 
 type IncomingPacket struct {
@@ -196,9 +219,17 @@ type IncomingPacket struct {
 }
 
 type UtpSocket struct {
-	// batchesDone is the last read batch handed out in full. See readLoop and
-	// connection.flushAck.
-	batchesDone atomic.Uint64
+	// dispatchMu serialises the routing of incoming packets with everything
+	// else that changes the routing tables: registering a new connection and
+	// serving an Accept. The reader holds it for each datagram it routes. See
+	// dispatch.
+	dispatchMu sync.Mutex
+	// writeMu keeps an ordinary write from landing while an MTU probe has the
+	// don't-fragment bit set on the socket. See writeDatagram.
+	writeMu sync.RWMutex
+	// inlineConns maps a connection's event channel to the connection, so
+	// the reader can hand it a packet directly. Guarded by connsMutex.
+	inlineConns map[chan *streamEvent]*connection
 	ctx         context.Context
 	cancel      context.CancelFunc
 	logger      log.Logger
@@ -257,9 +288,7 @@ type UtpSocket struct {
 	closeOnce         sync.Once
 	// lingering holds the streams the application has closed whose
 	// connections are still delivering. Close waits for them. See linger.
-	lingering   sync.Map // *UtpStream -> struct{}
-	readNextCh  chan struct{}
-	incomingBuf chan *IncomingPacketRaw
+	lingering sync.Map // *UtpStream -> struct{}
 	// firewall, when set, is asked about every SYN for a connection this
 	// socket does not already have, before any state is created for it.
 	// Reporting true refuses the connection. Set once at construction and
@@ -454,6 +483,7 @@ func WithSocket(ctx context.Context, socket Conn, logger log.Logger, opts ...Soc
 		rstInfoExpirations:       rstExpirations,
 		logger:                   logger,
 		conns:                    make(map[string]chan *streamEvent),
+		inlineConns:              make(map[chan *streamEvent]*connection),
 		accepts:                  make(chan *Accept, 1000),
 		acceptsWithCidCh:         make(chan *Accept, 1000),
 		socketEvents:             make(chan *socketEvent, 1000000),
@@ -462,8 +492,6 @@ func WithSocket(ctx context.Context, socket Conn, logger log.Logger, opts ...Soc
 		incomingConns:            incomingConns,
 		incomingConnsExpirations: incomingExpirations,
 		socket:                   socket,
-		readNextCh:               make(chan struct{}, 1000000),
-		incomingBuf:              make(chan *IncomingPacketRaw, 1000000),
 		maxConns:                 DefaultMaxConnections,
 	}
 
@@ -474,7 +502,6 @@ func WithSocket(ctx context.Context, socket Conn, logger log.Logger, opts ...Soc
 	}
 
 	go utp.readLoop()
-	go utp.writeLoop()
 	go utp.eventLoop()
 
 	return utp
@@ -495,22 +522,29 @@ func (s *UtpSocket) readLoop() {
 		}()
 	}
 
-	// Each read is a batch, numbered, its last datagram marked. A connection
-	// holds an acknowledgement owed for a packet until that packet's batch has
-	// been handed out, so a run of datagrams that were already waiting in the
-	// kernel draws one acknowledgement, not one each -- libutp's embedder loop
-	// of recvfrom until EWOULDBLOCK, then utp_issue_deferred_acks
-	// (utp.h:512-517). A Conn that cannot read in batches makes every datagram
-	// its own batch, which holds nothing back.
+	// Each read is a batch. A connection holds the acknowledgement owed for
+	// a packet until the batch has been dispatched, so a run of datagrams that
+	// were already waiting in the kernel draws one acknowledgement, not one
+	// each -- libutp's embedder loop of recvfrom until EWOULDBLOCK, then
+	// utp_issue_deferred_acks (utp.h:512-517). A Conn that cannot read in
+	// batches but is a QueuedReader has its batch end when nothing more is
+	// waiting; any other Conn makes every datagram its own batch, which holds
+	// nothing back.
 	br, _ := s.socket.(batchReader)
-	var batch uint64
-	var failures int
+	qr, _ := s.socket.(QueuedReader)
+	touched := make(map[*connection]struct{})
+	// run counts the datagrams read since the last batch ended, while a
+	// QueuedReader says more are waiting.
+	var failures, run int
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
 		default:
-			if barrier != nil {
+			// Part way through a run the read cannot block, so this loop is
+			// not idle -- and must not be seen to be, with acknowledgements
+			// still owed for the run. See IdleBarrier.
+			if barrier != nil && run == 0 {
 				barrier.MarkIdle()
 			}
 			if br != nil {
@@ -522,29 +556,25 @@ func (s *UtpSocket) readLoop() {
 					br = nil
 					continue
 				}
-				if len(dgs) > 0 {
-					batch++
-					for i, d := range dgs {
-						if barrier != nil {
-							barrier.NoteHandoff()
-						}
-						s.incomingBuf <- &IncomingPacketRaw{peer: d.peer, payload: d.payload,
-							batch: batch, batchEnd: i == len(dgs)-1}
-					}
+				for _, d := range dgs {
+					s.dispatch(&IncomingPacketRaw{peer: d.peer, payload: d.payload}, touched)
 				}
+				s.endBatch(touched)
 				if s.readFailed(err, &failures) {
 					return
 				}
 				continue
 			}
 			n, from, err := s.socket.ReadFrom(buf)
-			if barrier != nil {
+			if barrier != nil && run == 0 {
 				barrier.MarkBusy()
 			}
 			if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
 				s.logger.Debug("read data from base socket", "n", n, "from", from)
 			}
 			if err != nil {
+				s.endBatch(touched)
+				run = 0
 				if s.readFailed(err, &failures) {
 					return
 				}
@@ -553,13 +583,43 @@ func (s *UtpSocket) readLoop() {
 			failures = 0
 			dstBuf := make([]byte, n)
 			copy(dstBuf, buf[:n])
-			if barrier != nil {
-				barrier.NoteHandoff()
+			s.dispatch(&IncomingPacketRaw{peer: from, payload: dstBuf}, touched)
+			if run++; qr == nil || run >= maxQueuedRun || qr.Queued() == 0 {
+				s.endBatch(touched)
+				run = 0
 			}
-			batch++
-			s.incomingBuf <- &IncomingPacketRaw{peer: from, payload: dstBuf, batch: batch, batchEnd: true}
 		}
 
+	}
+}
+
+// dispatch routes one datagram, on the reader's goroutine. A packet for an
+// established connection is handled there and then, under that
+// connection's lock (connection.receiveInline), and the connection is
+// recorded in touched, to be acknowledged at the end of the batch.
+//
+// This handed every datagram to a socket event loop, which handed it on to
+// the connection's own event loop: two goroutine hand-offs before the packet
+// was looked at, and a third, to a write loop, before its acknowledgement
+// left. libutp's embedder calls utp_process_udp from its read loop and the
+// acknowledgement is sent from the same call stack.
+func (s *UtpSocket) dispatch(raw *IncomingPacketRaw, touched map[*connection]struct{}) {
+	s.dispatchMu.Lock()
+	c := s.handleIncomingBuf(raw)
+	s.dispatchMu.Unlock()
+	if c != nil {
+		touched[c] = struct{}{}
+	}
+}
+
+// endBatch acknowledges, for each connection a read batch delivered to, what
+// the batch brought it, and empties touched. libutp's
+// utp_issue_deferred_acks, which its embedder calls once the socket would
+// block (utp.h:512-517).
+func (s *UtpSocket) endBatch(touched map[*connection]struct{}) {
+	for c := range touched {
+		c.endBatch()
+		delete(touched, c)
 	}
 }
 
@@ -603,80 +663,59 @@ func (s *UtpSocket) readFailed(err error, failures *int) bool {
 	return true
 }
 
-func (s *UtpSocket) writeLoop() {
-	// A packet leaves a connection by being queued here, so this loop is on
-	// the path between "the connection decided to send" and "the bytes
-	// reached the wire". A virtual clock that did not wait for it would
-	// attribute an emission to whatever instant it happened to be advanced to
-	// next. See IdleBarrier.
-	barrier, _ := s.clock().(IdleBarrier)
-	if barrier != nil {
-		barrier.Register()
+// sendEvent carries out what a connection or the socket wants done on the
+// wire, on the caller's goroutine: a packet written, or a finished
+// connection's entry removed.
+//
+// This was a write loop on its own goroutine, fed by socketEvents, which put
+// a hand-off between every decision to send and the send itself -- on an
+// acknowledgement's path, the last of three. libutp's send callback writes
+// from inside the call that decided to send (utp_call_sendto,
+// utp_internal.cpp:713). Conn.WriteTo is called concurrently from here, as
+// net.PacketConn allows.
+func (s *UtpSocket) sendEvent(event *socketEvent) {
+	if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		s.logger.Trace("a socket event should be sent to target", "event.type", event.Type, "event.cid", event.ConnectionId)
 	}
-	for {
-		if barrier != nil {
-			barrier.MarkIdle()
-		}
-		event, ok := <-s.socketEvents
-		if barrier != nil {
-			barrier.MarkBusy()
-			if ok {
-				// The handoff a connection noted when it queued this packet.
-				barrier.TakeHandoff()
-			}
-		}
-		if !ok {
-			if barrier != nil {
-				if u, okU := barrier.(interface{ Unregister() }); okU {
-					u.Unregister()
-				}
-			}
-			return
-		}
+	switch event.Type {
+	case outgoing:
+		encoded := event.Packet.Encode()
 		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-			s.logger.Trace("a socket event should be sent to target", "socketEvents.len", len(s.socketEvents), "event.type", event.Type, "event.cid", event.ConnectionId)
+			s.logger.Trace("Send a packet out",
+				"target.cid", event.ConnectionId,
+				"packet.type", event.Packet.Header.PacketType.String(),
+				"packet.seqNum", event.Packet.Header.SeqNum,
+				"packet.ackNum", event.Packet.Header.AckNum,
+				"packet.body.len", len(event.Packet.Body),
+				"encoded.len", len(encoded))
 		}
-		switch event.Type {
-		case outgoing:
-			encoded := event.Packet.Encode()
+		var peer ConnectionPeer
+		if cid, ok := event.ConnectionId.(*ConnectionId); ok {
+			peer = cid.Peer
+		} else {
+			peer = event.ConnectionId
+		}
+		if _, err := s.writeDatagram(encoded, peer, event.DontFragment); err != nil {
+			var eackEncodeLen int
+			if event.Packet.Eack != nil {
+				eackEncodeLen = event.Packet.Eack.EncodedLen()
+			}
 			if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-				s.logger.Trace("Send a packet out",
-					"s.socketEvents.len", len(s.socketEvents),
-					"target.cid", event.ConnectionId,
-					"packet.type", event.Packet.Header.PacketType.String(),
-					"packet.seqNum", event.Packet.Header.SeqNum,
-					"packet.ackNum", event.Packet.Header.AckNum,
-					"packet.body.len", len(event.Packet.Body),
+				s.logger.Trace("Failed to send uTP packet",
+					"error", err,
+					"cid", event.Packet.Header.ConnectionId,
+					"type", event.Packet.Header.PacketType,
+					"encoded.eack.len", eackEncodeLen,
 					"encoded.len", len(encoded))
 			}
-			var peer ConnectionPeer
-			if cid, ok := event.ConnectionId.(*ConnectionId); ok {
-				peer = cid.Peer
-			} else {
-				peer = event.ConnectionId
-			}
-			if _, err := s.writeDatagram(encoded, peer, event.DontFragment); err != nil {
-				var eackEncodeLen int
-				if event.Packet.Eack != nil {
-					eackEncodeLen = event.Packet.Eack.EncodedLen()
-				}
-				if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-					s.logger.Trace("Failed to send uTP packet",
-						"error", err,
-						"cid", event.Packet.Header.ConnectionId,
-						"type", event.Packet.Header.PacketType,
-						"encoded.eack.len", eackEncodeLen,
-						"encoded.len", len(encoded))
-				}
-			}
-
-		case socketShutdown:
-			if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-				s.logger.Trace("uTP conn shutdown", "cid.Hash", event.ConnectionId.Hash())
-			}
-			s.rememberLingerAck(event.ConnectionId.Hash(), event.Packet)
-			s.removeConnStream(event.ConnectionId.Hash())
 		}
+
+	case socketShutdown:
+		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+			s.logger.Trace("uTP conn shutdown", "cid.Hash", event.ConnectionId.Hash())
+		}
+		s.rememberLingerAck(event.ConnectionId.Hash(), event.Packet)
+		s.removeConnStream(event.ConnectionId.Hash())
 	}
 }
 
@@ -688,26 +727,36 @@ func (s *UtpSocket) writeLoop() {
 // before -- the search still runs, it just cannot tell a dropped probe from a
 // fragmented one on IPv4. Failing the send instead would turn a missing
 // socket option into a stalled connection.
+//
+// Datagrams are written from several goroutines -- the reader, each
+// connection's event loop -- so a Conn that sets the bit as a socket option
+// around one send has that send to itself: writeMu is held exclusively for it
+// and shared by every other write. A Conn that cannot set the bit takes no
+// lock at all.
 func (s *UtpSocket) writeDatagram(b []byte, peer ConnectionPeer, dontFragment bool) (int, error) {
-	if dontFragment {
-		if w, ok := s.socket.(DontFragmentWriter); ok {
-			n, err := w.WriteToDontFragment(b, peer)
-			if !errors.Is(err, ErrDontFragmentUnsupported) {
-				return n, err
-			}
-			if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
-				s.logger.Debug("MTU probe sent without the don't-fragment bit; "+
-					"this platform has no per-packet setting for it", "len", len(b))
-			}
-		}
+	w, dfw := s.socket.(DontFragmentWriter)
+	if !dfw {
+		return s.socket.WriteTo(b, peer)
+	}
+	if !dontFragment {
+		s.writeMu.RLock()
+		defer s.writeMu.RUnlock()
+		return s.socket.WriteTo(b, peer)
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	n, err := w.WriteToDontFragment(b, peer)
+	if !errors.Is(err, ErrDontFragmentUnsupported) {
+		return n, err
+	}
+	if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+		s.logger.Debug("MTU probe sent without the don't-fragment bit; "+
+			"this platform has no per-packet setting for it", "len", len(b))
 	}
 	return s.socket.WriteTo(b, peer)
 }
 
 func (s *UtpSocket) eventLoop() {
-	// batchTouched is the connections handed a datagram of the current read
-	// batch before its last one.
-	var batchTouched []chan *streamEvent
 	barrier, _ := s.clock().(IdleBarrier)
 	if barrier != nil {
 		barrier.Register()
@@ -718,100 +767,38 @@ func (s *UtpSocket) eventLoop() {
 		}()
 	}
 	for {
-		// Serve pending accept requests before incoming packets.
-		//
-		// This priority used to be the other way round: the loop drained
-		// incomingBuf first and only looked at the accept channels when no
-		// packet was queued. Under load incomingBuf is never empty, so accepts
-		// starved completely and expired after AWAITING_CONNECTION_TIMEOUT --
-		// with hundreds of concurrent connections, AcceptWithCid failed on
-		// connections whose SYN had already arrived and was sitting in the
-		// incoming-conns map.
-		//
-		// Accepts are safe to prefer: they are driven by the application, at
-		// most one per connection, and handling one is a map lookup. Packets
-		// are the high-volume side and cannot be starved by them.
-		select {
-		case acceptWithCid := <-s.acceptsWithCidCh:
-			s.handleNewAcceptWithCidEvent(acceptWithCid)
-			continue
-		case accept := <-s.accepts:
-			s.handleNewAcceptEvent(accept)
-			continue
-		default:
-		}
-		// Receive without acting, exactly as the connection's event loop
-		// does, so that a virtual clock can be told the loop is running again
-		// before any case body can dispatch a packet onwards. See
-		// IdleBarrier.
-		var (
-			gotAcceptCid *Accept
-			gotAccept    *Accept
-			gotIncoming  *IncomingPacketRaw
-			done         bool
-		)
+		// Receive without acting, so that a virtual clock can be told the
+		// loop is running again before any case body can create a
+		// connection. See IdleBarrier.
+		var gotAcceptCid, gotAccept *Accept
 		if barrier != nil {
 			barrier.MarkIdle()
 		}
 		select {
 		case gotAcceptCid = <-s.acceptsWithCidCh:
 		case gotAccept = <-s.accepts:
-		case gotIncoming = <-s.incomingBuf:
 		case <-s.ctx.Done():
-			done = true
+			return
 		}
 		if barrier != nil {
 			barrier.MarkBusy()
 		}
-		switch {
-		case gotAcceptCid != nil:
+		// An Accept changes the routing tables the reader consults, so it is
+		// served under the same lock. Incoming packets no longer pass through
+		// this loop: the reader routes them itself (dispatch).
+		s.dispatchMu.Lock()
+		if gotAcceptCid != nil {
 			s.handleNewAcceptWithCidEvent(gotAcceptCid)
-		case gotAccept != nil:
+		} else {
 			s.handleNewAcceptEvent(gotAccept)
-		case gotIncoming != nil:
-			// The handoff the read loop noted when it queued this packet.
-			if barrier != nil {
-				barrier.TakeHandoff()
-			}
-			if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-				s.logger.Trace("will handle a packet from remote", "s.incomingBuf.len", len(s.incomingBuf))
-			}
-			// The batch is complete once its last datagram is handed out, so
-			// say so first: a connection that receives that datagram must not
-			// wait for a wake that its own packet already is.
-			if gotIncoming.batchEnd {
-				s.batchesDone.Store(gotIncoming.batch)
-			}
-			if to := s.handleIncomingBuf(gotIncoming); to != nil && !gotIncoming.batchEnd {
-				batchTouched = append(batchTouched, to)
-			}
-			if gotIncoming.batchEnd {
-				// Wake every connection given an earlier datagram of this
-				// batch. A wake that does not fit is not needed: a full queue
-				// is a connection that is busy and will look again.
-				for _, to := range batchTouched {
-					if barrier != nil {
-						barrier.NoteHandoff()
-					}
-					select {
-					case to <- &streamEvent{Type: streamBatchEnd}:
-					default:
-						if barrier != nil {
-							barrier.TakeHandoff()
-						}
-					}
-				}
-				batchTouched = batchTouched[:0]
-			}
-		case done:
-			return
 		}
+		s.dispatchMu.Unlock()
 	}
 }
 
-// handleIncomingBuf routes one datagram, and returns the connection queue it
-// handed it to, or nil.
-func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) chan *streamEvent {
+// handleIncomingBuf routes one datagram, and returns the connection that
+// took it inline, or nil. Called with dispatchMu held.
+func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connection {
 	// Handle incoming packets
 	packetPtr, err := DecodePacket(incomingRaw.payload)
 	if err != nil {
@@ -825,7 +812,6 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) chan *stre
 
 	if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 		s.logger.Trace("receive incoming packet",
-			"s.incomingBuf.len", len(s.incomingBuf),
 			"src.peer", incomingRaw.peer,
 			"packet.type", packetPtr.Header.PacketType.String(),
 			"packet.cid", packetPtr.Header.ConnectionId,
@@ -865,6 +851,9 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) chan *stre
 		}
 		// Look for existing connection
 		if connStream := s.getConnStreamWithCids(cid, cidType); connStream != nil {
+			if c := s.inlineConn(connStream); c != nil && c.receiveInline(packetPtr) {
+				return c
+			}
 			// The last hop of the inbound path: a virtual clock must not
 			// consider the system quiet while this packet is queued for a
 			// connection that has not woken to take it.
@@ -882,12 +871,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) chan *stre
 				barrier.NoteHandoff()
 			}
 			select {
-			case connStream <- &streamEvent{
-				Type:        streamIncoming,
-				Packet:      packetPtr,
-				Batch:       incomingRaw.batch,
-				BatchesDone: &s.batchesDone,
-			}:
+			case connStream <- &streamEvent{Type: streamIncoming, Packet: packetPtr}:
 			default:
 				if barrier != nil {
 					barrier.TakeHandoff()
@@ -902,7 +886,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) chan *stre
 			if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 				s.logger.Trace("recieve a packet for a exist conn stream", "connStream.len", len(connStream))
 			}
-			return connStream
+			return nil
 		}
 	}
 
@@ -983,7 +967,8 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) chan *stre
 		connected := make(chan error, 1)
 		newConnStream := make(chan *streamEvent, 1000)
 		s.putConnStream(cidHash, newConnStream)
-		stream := NewUtpStream(s.ctx, s.logger, cid, s.configForPeer(accept.config, cid.Peer), packetPtr, s.socketEvents, newConnStream, connected, s.retransmitTimers)
+		stream := NewUtpStream(s.ctx, s.logger, cid, s.configForPeer(accept.config, cid.Peer), packetPtr, s.socketEvents, s.sendEvent, newConnStream, connected, s.retransmitTimers)
+		s.attachInline(cidHash, newConnStream, stream.conn)
 		stream.linger = s.linger
 		go s.awaitConnected(stream, accept, connected)
 	} else if accept := s.takePendingAccept(); accept != nil {
@@ -1086,10 +1071,7 @@ func (s *UtpSocket) reAckLingering(pkt *packet, peer ConnectionPeer) bool {
 		}
 		// Refresh the entry: a peer still retransmitting is still waiting.
 		s.lingerExpirations.put(cid.Hash(), cid.Hash(), lingerAckTimeout)
-		select {
-		case s.socketEvents <- newOutgoingSocketEvent(ack, cid.Peer):
-		default:
-		}
+		s.sendEvent(newOutgoingSocketEvent(ack, cid.Peer))
 		return true
 	}
 	return false
@@ -1135,7 +1117,7 @@ func (s *UtpSocket) maybeSendReset(pkt *packet, peer ConnectionPeer) {
 	resetPacket := NewPacketBuilder(st_reset, pkt.Header.ConnectionId, 0, 0, randSeqNum).
 		WithAckNum(pkt.Header.SeqNum).
 		Build()
-	s.socketEvents <- newOutgoingSocketEvent(resetPacket, peer)
+	s.sendEvent(newOutgoingSocketEvent(resetPacket, peer))
 }
 
 func (s *UtpSocket) handleNewAcceptWithCidEvent(acceptWithCid *Accept) {
@@ -1445,6 +1427,9 @@ func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *Co
 	connectedCh := make(chan error, 1)
 	streamEvents := make(chan *streamEvent, 1000)
 
+	// Registration and setup under the reader's lock, so the answer to the
+	// SYN finds a connection ready to take it inline. See dispatch.
+	s.dispatchMu.Lock()
 	// Generate connection ID
 	cid := s.GenerateCid(peer, true, streamEvents)
 	s.logger.Info("connecting", "dst.peer.hash", peer.Hash(), "dst.send", cid.Send, "dst.recv", cid.Recv, "dst.hash", cid.Hash(), "dst.peer", peer)
@@ -1471,10 +1456,13 @@ func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *Co
 		s.configForPeer(config, cid.Peer),
 		nil,
 		s.socketEvents,
+		s.sendEvent,
 		streamEvents,
 		connectedCh,
 		s.retransmitTimers,
 	)
+	s.attachInline(cid.Hash(), streamEvents, stream.conn)
+	s.dispatchMu.Unlock()
 	stream.linger = s.linger
 
 	// Wait for connection result
@@ -1511,8 +1499,11 @@ func (s *UtpSocket) ConnectWithCid(
 		s.logger.Trace("connecting with cid", "dst.peer.hash", cid.Peer.Hash(),
 			"dst.send", cid.Send, "dst.recv", cid.Recv, "dst.hash", cid.Hash(), "dst.peer", cid.Peer)
 	}
+	// See the note in Connect.
+	s.dispatchMu.Lock()
 	_, exists := s.getConnStream(cid.Hash())
 	if exists {
+		s.dispatchMu.Unlock()
 		return nil, fmt.Errorf("connection ID unavailable")
 	}
 
@@ -1528,10 +1519,13 @@ func (s *UtpSocket) ConnectWithCid(
 		s.configForPeer(config, cid.Peer),
 		nil,
 		s.socketEvents,
+		s.sendEvent,
 		streamEvents,
 		connected,
 		s.retransmitTimers,
 	)
+	s.attachInline(cid.Hash(), streamEvents, stream.conn)
+	s.dispatchMu.Unlock()
 	stream.linger = s.linger
 	// Honour the caller's context, as Connect does. A bare receive here meant
 	// that cancelling the context during connection setup never returned: the
@@ -1620,10 +1614,12 @@ func (s *UtpSocket) selectAcceptHelper(
 		s.configForPeer(accept.config, cid.Peer),
 		syn,
 		socketEvents,
+		s.sendEvent,
 		streamEvents,
 		connected,
 		s.retransmitTimers,
 	)
+	s.attachInline(cid.Hash(), streamEvents, stream.conn)
 	stream.linger = s.linger
 
 	go s.awaitConnected(stream, accept, connected)
@@ -1635,7 +1631,28 @@ func (s *UtpSocket) removeConnStream(key string) {
 	if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 		s.logger.Trace("remove conn stream", "key", key)
 	}
+	if ch, ok := s.conns[key]; ok {
+		delete(s.inlineConns, ch)
+	}
 	delete(s.conns, key)
+}
+
+// attachInline lets the reader hand packets on ch straight to c. Called
+// with dispatchMu held, after c is set up.
+func (s *UtpSocket) attachInline(key string, ch chan *streamEvent, c *connection) {
+	s.connsMutex.Lock()
+	defer s.connsMutex.Unlock()
+	// A connection that has already gone, its entry removed, stays gone.
+	if s.conns[key] == ch {
+		s.inlineConns[ch] = c
+	}
+}
+
+// inlineConn returns the connection that takes packets on ch inline, if any.
+func (s *UtpSocket) inlineConn(ch chan *streamEvent) *connection {
+	s.connsMutex.RLock()
+	defer s.connsMutex.RUnlock()
+	return s.inlineConns[ch]
 }
 
 func (s *UtpSocket) getConnStream(key string) (chan *streamEvent, bool) {
