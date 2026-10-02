@@ -173,3 +173,31 @@ func TestOutstandingPacketsAreCappedAt1023(t *testing.T) {
 		}
 	}
 }
+
+// A closed connection answers each queued write once, however many passes
+// look at it. It used to leave the queue as it was, so the second pass sent
+// every writer a second result; a result channel holds one, and that send
+// blocked for ever -- with the connection's lock held, and the socket's
+// reader, which serves every connection, waiting behind it.
+func TestClosedConnectionAnswersEachWriteOnce(t *testing.T) {
+	conn, now := incomingWindowConn(t)
+	resultCh := make(chan *readOrWriteResult, 1)
+	conn.pendingWrites = []*queuedWrite{{data: []byte("unsent"), resultCh: resultCh}}
+	conn.state.stateType = ConnClosed
+	conn.state.Err = ErrReset
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn.processWrites(now)
+		conn.processWrites(now)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a second pass over a closed connection blocked answering a write already answered")
+	}
+	if res := <-resultCh; res.Err != ErrReset {
+		t.Fatalf("the write was answered with %v, want %v", res.Err, ErrReset)
+	}
+}

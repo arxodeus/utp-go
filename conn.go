@@ -1651,9 +1651,15 @@ func (c *connection) processWrites(now time.Time) {
 		result := &readOrWriteResult{
 			Err: c.state.Err,
 		}
+		// Each writer is answered once. The queue used to be left as it was,
+		// so the next call sent to every writer again, and a result channel
+		// holds one: the second send blocked for ever, with the connection's
+		// lock held -- and the socket's reader, which serves every connection,
+		// waiting behind it.
 		for _, w := range c.pendingWrites {
 			w.resultCh <- result
 		}
+		c.pendingWrites = nil
 		return
 	default:
 	}
