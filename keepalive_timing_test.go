@@ -211,3 +211,87 @@ func TestKeepAliveSelectiveAckMatchesItsAckNumber(t *testing.T) {
 			"as received; only %d arrived", pkt.Header.AckNum, named, peerSeq+2)
 	}
 }
+
+// The idle timeout runs from the last packet heard, to the instant.
+//
+// Activity used to reset the idle timer on every packet. It now only records
+// the time, and the timer, when it fires, arms again for what is left
+// (connection.lastActivity). So the timer set at the handshake fires at 10
+// seconds, finds a packet heard at 6, and must neither close the connection
+// then nor let it outlive 16.
+func TestIdleTimeoutRunsFromTheLastPacketHeard(t *testing.T) {
+	const (
+		ourSeq      = 0x4321
+		peerID      = 6000
+		peerSeq     = 900
+		idleTimeout = 10 * time.Second
+		heardAt     = 6 * time.Second
+		slack       = time.Millisecond
+	)
+
+	start := time.Unix(0, 0).Add(time.Hour)
+	clk := newVirtualClock(start)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer pinRandom(ourSeq)()
+
+	conn := newScriptedConn()
+	sock := WithSocket(ctx, conn, conformanceLogger(), WithClock(clk))
+	defer sock.Close()
+
+	cfg := NewConnectionConfig()
+	cfg.Clock = clk
+	cfg.NowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
+	cfg.MaxIdleTimeout = idleTimeout
+
+	cid := NewConnectionId(conn.peer, peerID+1, peerID)
+	accepted := make(chan *UtpStream, 1)
+	go func() {
+		s, err := sock.AcceptWithCid(ctx, cid, cfg)
+		if err != nil {
+			t.Errorf("accept: %v", err)
+		}
+		accepted <- s
+	}()
+
+	clk.AwaitParticipants(3)
+	clk.AwaitQuiet()
+	clk.AwaitReactionTo(func() {
+		conn.inject(NewPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+	})
+	var stream *UtpStream
+	select {
+	case stream = <-accepted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the accept did not complete within 10s of the SYN")
+	}
+	if stream == nil {
+		t.FailNow()
+	}
+	clk.AwaitParticipants(4)
+	clk.AwaitQuiet()
+	setUp := clk.Now()
+
+	clk.Advance(heardAt)
+	clk.AwaitReactionTo(func() {
+		conn.inject(NewPacketBuilder(st_data, peerID+1, 190000, 1<<20, peerSeq+1).
+			WithAckNum(ourSeq - 1).WithPayload([]byte("still here")).Build().Encode())
+	})
+
+	timedOut := func() bool {
+		boxed := stream.conn.terminalErr.Load()
+		return boxed != nil && boxed.err == ErrTimedOut
+	}
+	clk.Advance(idleTimeout - slack)
+	if timedOut() {
+		t.Fatalf("the connection timed out %v after the handshake, %v after the last "+
+			"packet it heard; the timeout is %v", clk.Now().Sub(setUp),
+			clk.Now().Sub(setUp)-heardAt, idleTimeout)
+	}
+	clk.Advance(slack)
+	if !timedOut() {
+		t.Fatalf("the connection was still open %v after the last packet it heard; "+
+			"the timeout is %v", clk.Now().Sub(setUp)-heardAt, idleTimeout)
+	}
+}

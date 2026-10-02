@@ -281,15 +281,31 @@ func newRelay(t *testing.T, libPort, goPort uint16, toGo, toLib pathConfig, seed
 	if onNewRelay != nil {
 		onNewRelay(r)
 	}
+	// A datagram is taken as arriving when the kernel received it, not when
+	// this goroutine woke to read it. On loopback that is the instant the
+	// sender's sendto put it there -- when an acknowledgement left the
+	// receiver, which is what TestAckTurnaround means to time. This
+	// goroutine's own wake-up was in it before, and it is not the same for
+	// both receivers: it shares the Go runtime with this library's receiver,
+	// still busy finishing the pass that sent the acknowledgement, and not
+	// with libutp's thread. Measured at the receivers themselves, kernel
+	// arrival to the acknowledgement's sendto, the gap between the two was
+	// 12-15us at the median where this relay reported 30.
 	pump := func(in *net.UDPConn, p *relayPath) {
 		defer r.wg.Done()
+		enableRxTimestamps(in)
 		buf := make([]byte, 65536)
+		oob := make([]byte, 128)
 		for {
-			n, _, err := in.ReadFromUDP(buf)
+			n, oobn, _, _, err := in.ReadMsgUDP(buf, oob)
 			if err != nil {
 				return
 			}
-			p.offer(buf[:n], time.Now())
+			at, ok := rxTimestamp(oob[:oobn])
+			if !ok {
+				at = time.Now()
+			}
+			p.offer(buf[:n], at)
 		}
 	}
 	r.wg.Add(4)

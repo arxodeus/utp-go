@@ -51,13 +51,13 @@ func (c *UdpConn) drain(rc syscall.RawConn, out *[]datagram, block bool) error {
 				readErr = err
 				return true
 			}
-			addr := sockaddrToUDPAddr(from)
-			if addr == nil {
+			peer := c.peerFor(from)
+			if peer == nil {
 				continue
 			}
 			payload := make([]byte, n)
 			copy(payload, scratch[:n])
-			*out = append(*out, datagram{payload: payload, peer: &UdpPeer{addr: addr}})
+			*out = append(*out, datagram{payload: payload, peer: peer})
 		}
 		return true
 	})
@@ -65,6 +65,38 @@ func (c *UdpConn) drain(rc syscall.RawConn, out *[]datagram, block bool) error {
 		return err
 	}
 	return readErr
+}
+
+// peerFor returns the peer a datagram came from, reusing the one made for
+// the last datagram from the same address. Making one per datagram converted
+// the address and formatted it as text -- the key every packet is routed by
+// -- for every packet: the largest single cost of routing one, measured on a
+// reader just woken. Only the read loop calls this, so the cache needs no
+// lock.
+func (c *UdpConn) peerFor(sa syscall.Sockaddr) *UdpPeer {
+	var k peerKey
+	switch a := sa.(type) {
+	case *syscall.SockaddrInet4:
+		copy(k.ip[:], a.Addr[:])
+		k.port = a.Port
+	case *syscall.SockaddrInet6:
+		k.ip, k.port, k.zone, k.v6 = a.Addr, a.Port, a.ZoneId, true
+	default:
+		return nil
+	}
+	if p, ok := c.peers[k]; ok {
+		return p
+	}
+	addr := sockaddrToUDPAddr(sa)
+	if addr == nil {
+		return nil
+	}
+	if c.peers == nil || len(c.peers) >= maxCachedPeers {
+		c.peers = make(map[peerKey]*UdpPeer)
+	}
+	p := NewUdpPeer(addr)
+	c.peers[k] = p
+	return p
 }
 
 // sockaddrToUDPAddr converts what recvfrom reports into the address

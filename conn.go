@@ -282,6 +282,10 @@ type connection struct {
 	// readsTruncated records that teardown dropped received bytes the reader
 	// had not been given. See readEndErr.
 	readsTruncated bool
+	// drainCredit is what the pass under way will hand the reader once its
+	// acknowledgement has gone, counted into the window that acknowledgement
+	// advertises. See afterPass and recvWindow.
+	drainCredit int
 
 	// abandoned is closed when the consumer closes the stream. It is the one
 	// thing that distinguishes "the reader is behind" from "there is no reader
@@ -426,9 +430,13 @@ type connection struct {
 	// stream is the stream this connection belongs to, for passes run off
 	// the event loop. Set at setup.
 	stream *UtpStream
-	// resetIdle restarts the idle timeout. Set by the event loop, which owns
-	// the timer, at setup.
-	resetIdle func()
+	// lastActivity is when the connection last heard from the peer or the
+	// application. The idle timer is not moved for each: when it fires, it
+	// re-arms for what is left, and the connection closes only once a whole
+	// MaxIdleTimeout has passed since this. Resetting it on every packet cost
+	// a timer operation per packet on the reader's path, which libutp, with
+	// no timer of its own per connection, does not pay.
+	lastActivity time.Time
 	// out sends what this connection emits. The socket sets it to write
 	// straight to the wire; when it is nil, as in unit tests that build a
 	// connection by hand, emissions are queued on socketEvents instead.
@@ -754,9 +762,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	}
 
 	idleTimer := c.timeSource().NewTimer(c.config.MaxIdleTimeout)
-	resetIdleTimer := func() {
-		idleTimer.Reset(c.config.MaxIdleTimeout)
-	}
+	c.lastActivity = c.now()
 	defer idleTimer.Stop()
 
 	// The zero-window probe needs a wake-up of its own.
@@ -895,9 +901,9 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 					"packet.ackNum", event.Packet.Header.AckNum,
 					"buf.len", len(event.Packet.Body))
 			}
-			// reset idle timeout
-			resetIdleTimer()
-			c.onPacket(event.Packet, c.now())
+			now := c.now()
+			c.lastActivity = now
+			c.onPacket(event.Packet, now)
 		} else if event.Type == streamShutdown {
 			stream.shutdown.Store(true)
 		} else if event.Type == streamICMP {
@@ -914,7 +920,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			c.logger.Trace("get queued write from writes", "dst.peer", c.cid.Peer, "content", len(write.data))
 		}
-		resetIdleTimer()
+		c.lastActivity = c.now()
 		c.onWrite(write)
 	}
 
@@ -984,7 +990,6 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		wokeTimer  *packet
 	)
 	c.stream = stream
-	c.resetIdle = resetIdleTimer
 	c.ready = true
 	for {
 		maxStreamEventLen = max(maxStreamEventLen, len(stream.streamEvents))
@@ -1122,7 +1127,13 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		case wakeLossProbe:
 			c.onLossProbe(c.now())
 		case wakeIdleTimeout:
-			handleIdleTimeout()
+			// Activity since the timer was set moves the deadline on: arm
+			// for what is left of it. See lastActivity.
+			if left := c.config.MaxIdleTimeout - c.now().Sub(c.lastActivity); left > 0 {
+				idleTimer.Reset(left)
+			} else {
+				handleIdleTimeout()
+			}
 		case wakeCtxDone:
 			handleCtxDone()
 			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
@@ -1189,18 +1200,31 @@ func (c *connection) afterPass() (moreToWrite bool) {
 	//
 	// ackPending is a bool and flushAck runs once per pass, so the drain
 	// and the data that prompted it now share one acknowledgement.
-	c.processReads()
+	//
+	// What the drain will take is counted first (drainable) and advertised
+	// as if already taken (drainCredit, recvWindow); the drain itself runs
+	// once the acknowledgement has gone. The packets are the same either
+	// way. What moves is the work: copying the bytes out, allocating what
+	// the reader is handed, and waking the reader -- measured at 4-5us of
+	// a cold reader's path from datagram to acknowledgement, which libutp,
+	// handing its bytes up through a callback, does not spend there.
+	c.drainCredit = c.drainable()
+	// One reading of the clock for the whole pass, as libutp reads
+	// ctx->current_ms once per call into it.
+	now := c.now()
 	// Send before acknowledging, as libutp does: an acknowledgement that
 	// opened the window is followed by the data it lets out within
 	// utp_process_incoming, and the deferred acknowledgement after it is
 	// dropped if a data packet already carried it (send_data, :768).
 	for i := 0; c.wantWrite && i < maxWritesPerPass; i++ {
 		c.wantWrite = false
-		c.processWrites(c.now())
+		c.processWrites(now)
 	}
 	c.flushAck()
-	c.scheduleIdleRto(c.now())
-	c.sampleMetrics(c.now(), false)
+	c.drainCredit = 0
+	c.processReads()
+	c.scheduleIdleRto(now)
+	c.sampleMetrics(now, false)
 	// shutdown() sends the local FIN once everything queued has drained.
 	// Both flags reach it: Close means finished entirely, CloseWrite means
 	// finished sending. The difference is not here -- it is that a
@@ -1213,7 +1237,7 @@ func (c *connection) afterPass() (moreToWrite bool) {
 		c.state.stateType != ConnClosed {
 		if !c.writeShut {
 			c.writeShut = true
-			c.processWrites(c.now())
+			c.processWrites(now)
 		}
 		c.shutdown()
 		// And re-check: shutdown may have just sent the FIN that finishes
@@ -1247,8 +1271,9 @@ func (c *connection) receiveInline(pkt *packet) bool {
 		return false
 	}
 	c.inBatch = true
-	c.resetIdle()
-	c.onPacket(pkt, c.now())
+	now := c.now()
+	c.lastActivity = now
+	c.onPacket(pkt, now)
 	return true
 }
 
@@ -1505,7 +1530,7 @@ func (c *connection) shutdown() {
 			// If we have not sent our FIN, and there are no pending writes, and there is no
 			// pending data in the send buffer, then send our FIN
 			if localFin == nil && len(c.pendingWrites) == 0 && c.state.SendBuf.IsEmpty() && c.finFits(c.now()) {
-				recvWindow := uint32(c.state.RecvBuf.Window())
+				recvWindow := c.recvWindow()
 				seqNum := c.state.SentPackets.NextSeqNum()
 				ackNum := c.state.RecvBuf.AckNum()
 
@@ -1528,7 +1553,7 @@ func (c *connection) shutdown() {
 		} else {
 			var localFin *uint16
 			if len(c.pendingWrites) == 0 && c.state.SendBuf.IsEmpty() && c.finFits(c.now()) {
-				recvWindow := uint32(c.state.RecvBuf.Window())
+				recvWindow := c.recvWindow()
 				seqNum := c.state.SentPackets.NextSeqNum()
 				ackNum := c.state.RecvBuf.AckNum()
 
@@ -1819,7 +1844,7 @@ func (c *connection) processWrites(now time.Time) {
 
 	// transmit data packets
 	seqNum := c.state.SentPackets.NextSeqNum()
-	recvWindow := uint32(c.state.RecvBuf.Window())
+	recvWindow := c.recvWindow()
 	ackNum := c.state.RecvBuf.AckNum()
 
 	for _, payload := range payloads {
@@ -1877,7 +1902,6 @@ func (c *connection) processReads() {
 	}
 	recvBuf := c.state.RecvBuf
 
-	currentTime := c.now()
 	if recvBuf != nil && c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 		c.logger.Trace("read data saving in the recvBuf, start...", "available", recvBuf.Available(), "isEmpty", recvBuf.IsEmpty())
 	}
@@ -1924,7 +1948,7 @@ func (c *connection) processReads() {
 		}
 	}
 	if recvBuf != nil && c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-		c.logger.Trace("read data saving in the recvBuf, end...", "duration", c.now().Sub(currentTime), "available", recvBuf.Available(), "isEmpty", recvBuf.IsEmpty())
+		c.logger.Trace("read data saving in the recvBuf, end...", "available", recvBuf.Available(), "isEmpty", recvBuf.IsEmpty())
 	}
 
 	// If we have reached eof, hand the reader the end-of-stream marker -- but
@@ -1942,6 +1966,28 @@ func (c *connection) processReads() {
 	}
 
 	c.onReadDrained()
+}
+
+// drainable is how many bytes processReads would hand the reader now: what is
+// contiguous in the receive buffer, up to a chunk of at most MaxPacketSize for
+// each free slot in the reader's queue -- processReads' own loop, counted.
+func (c *connection) drainable() int {
+	if c.state.stateType == ConnConnecting || c.state.RecvBuf == nil {
+		return 0
+	}
+	free := cap(c.reads) - len(c.reads)
+	if free <= 0 {
+		return 0
+	}
+	return min(c.state.RecvBuf.Readable(), free*int(c.config.MaxPacketSize))
+}
+
+// recvWindow is the receive window an outgoing packet advertises: the
+// buffer's, plus what this pass will hand the reader after the packet goes
+// (drainCredit). It never exceeds the buffer: the credit is bytes the buffer
+// holds.
+func (c *connection) recvWindow() uint32 {
+	return uint32(c.state.RecvBuf.Window() + c.drainCredit)
 }
 
 // onReadDrained tells the peer when handing bytes up has reopened a receive
@@ -2543,7 +2589,7 @@ func (c *connection) retransmit(originPacket *packet, now time.Time) {
 			Extension:     0,
 			ConnectionId:  originPacket.Header.ConnectionId,
 			SeqNum:        originPacket.Header.SeqNum,
-			WndSize:       uint32(c.state.RecvBuf.Window()),
+			WndSize:       c.recvWindow(),
 			Timestamp:     int64(c.nowMicros()),
 			TimestampDiff: uint32(c.peerTsDiff.Microseconds()),
 			AckNum:        c.state.RecvBuf.AckNum(),
@@ -2560,7 +2606,7 @@ func (c *connection) retransmit(originPacket *packet, now time.Time) {
 // packet as sent.
 func (c *connection) resendSentPacket(pkt *sentPacket, now time.Time) *packet {
 	builder := NewPacketBuilder(pkt.packetType, c.cid.Send, c.nowMicros(),
-		uint32(c.state.RecvBuf.Window()), pkt.seqNum)
+		c.recvWindow(), pkt.seqNum)
 	if pkt.data != nil {
 		builder.WithPayload(pkt.data)
 	}
@@ -2987,10 +3033,13 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	// p)` (:2000), and a zero is neither echoed as a delay nor sampled
 	// (:2002). This used to echo the whole of our clock back.
 	peerStamp := uint32(packet.Header.Timestamp)
+	// One reading of the microsecond clock for both uses below.
+	var nowMicros uint32
 	if peerStamp == 0 {
 		c.peerTsDiff = 0
 	} else {
-		c.peerTsDiff = timestampDiffMicros(c.nowMicros(), peerStamp)
+		nowMicros = c.nowMicros()
+		c.peerTsDiff = timestampDiffMicros(nowMicros, peerStamp)
 	}
 	// The delay in the peer's direction is not a congestion signal for this
 	// sender -- it describes the other half of the path -- but it is how
@@ -3008,7 +3057,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	// peerDelayHist.
 	if c.state != nil && c.state.SentPackets != nil && peerStamp != 0 {
 		c.state.SentPackets.OnPeerDelay(
-			wrappingSubUint32(c.nowMicros(), peerStamp), now)
+			wrappingSubUint32(nowMicros, peerStamp), now)
 	}
 
 	// Handle different packet types
@@ -3152,7 +3201,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 		if !c.dropUnacked {
 			c.ackPending = true
 			c.dataSinceAck++
-			if now := c.now(); !c.lastDataAt.IsZero() {
+			if !c.lastDataAt.IsZero() {
 				gap := now.Sub(c.lastDataAt)
 				c.lastDataGap = gap
 				if c.dataGap == 0 {
@@ -4030,7 +4079,7 @@ func (c *connection) statePacket() *packet {
 		// implementation, STATE packets always include the next sequence number.
 		seqNum := c.state.SentPackets.NextSeqNum()
 		ackNum := c.state.RecvBuf.AckNum()
-		recvWindow := uint32(c.state.RecvBuf.Window())
+		recvWindow := c.recvWindow()
 
 		// No selective ack once the peer's FIN has been reached in order.
 		//
@@ -4072,7 +4121,7 @@ func (c *connection) retransmitLostPackets(now time.Time) {
 	}
 	connID := c.cid.Send
 	nowMicros := int64(c.nowMicros())
-	recvWindow := uint32(c.state.RecvBuf.Window())
+	recvWindow := c.recvWindow()
 	tsDiffMicros := uint32(c.peerTsDiff.Microseconds())
 
 	for _, lostPacket := range c.state.SentPackets.TakeLostPackets() {

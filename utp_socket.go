@@ -90,6 +90,9 @@ type UdpConn struct {
 	// readScratch is readBatch's receive buffer. Only the socket's read loop
 	// reads, so one is enough.
 	readScratch []byte
+	// peers caches the peer for each source address the read loop has seen.
+	// See peerFor.
+	peers map[peerKey]*UdpPeer
 	// dfUnsupported records that this platform has no per-packet
 	// don't-fragment option, so the MTU search stops asking. See
 	// WriteToDontFragment.
@@ -171,6 +174,19 @@ func (c *UdpConn) Close() error {
 	return c.base.Close()
 }
 
+// peerKey is a source address as recvfrom reports it, comparable so it can
+// key the reader's peer cache (UdpConn.peerFor).
+type peerKey struct {
+	ip   [16]byte
+	port int
+	zone uint32
+	v6   bool
+}
+
+// maxCachedPeers bounds UdpConn.peers. Past it the cache starts again, which
+// costs one address formatting per peer that sends again.
+const maxCachedPeers = 4096
+
 // LocalAddr returns the address this connection is bound to.
 func (c *UdpConn) LocalAddr() net.Addr {
 	return c.base.LocalAddr()
@@ -224,6 +240,9 @@ type UtpSocket struct {
 	// serving an Accept. The reader holds it for each datagram it routes. See
 	// dispatch.
 	dispatchMu sync.Mutex
+	// keyScratch is where the reader builds the keys it routes by. Used only
+	// under dispatchMu.
+	keyScratch []byte
 	// writeMu keeps an ordinary write from landing while an MTU probe has the
 	// don't-fragment bit set on the socket. See writeDatagram.
 	writeMu sync.RWMutex
@@ -820,74 +839,51 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 			"packet.Data.len", len(packetPtr.Body))
 	}
 
-	// used by syn_pkt init
-	cids := make([]*ConnectionId, 3)
-	for i, cidType := range cidTypes {
-		cid := CidFromPacket(packetPtr, incomingRaw.peer, cidType)
-		cids[i] = cid
-
-		// A SYN is matched only by the SYN derivation.
-		//
-		// The other two derive a connection id as if the packet's id were a
-		// *send* id, which is right for an established connection and wrong
-		// for a SYN: a SYN carries the sender's own receive id, so those
-		// derivations alias it onto whatever local connection happens to
-		// hold that number. Concretely, a SYN whose id equals an outgoing
-		// connection's receive id was delivered into that connection, where
-		// onSyn answered it with a RESET.
-		//
-		// libutp cannot do this. It has exactly one lookup per case: a SYN
-		// is looked up as `UTPSocketKey(addr, id + 1)` and rejected outright
-		// if something is already there -- "rejected incoming connection,
-		// connection already exists" (utp_internal.cpp:2957-2965) -- while
-		// everything else is looked up on the receive id alone (:2884-2892).
-		// It never delivers a SYN into an established connection.
-		//
-		// Found by FuzzDifferentialInitiator. It matters beyond the spurious
-		// RESET: an off-path attacker who guesses a connection id could
-		// otherwise inject a SYN into an established connection.
-		if packetPtr.Header.PacketType == st_syn && cidType != IdTypeRecvId {
-			continue
+	// Each derivation is looked up by its key alone, built into a reused
+	// buffer: no ConnectionId and no string per attempt. This ran three
+	// CidFromPacket calls for every datagram -- for an accepted connection the
+	// match is the third -- each formatting the peer's address and the key
+	// anew: 9 of the 23 allocations a data packet cost, and most of the time
+	// routing took. A ConnectionId is built below only for a SYN.
+	peerKey := incomingRaw.peer.Hash()
+	send, recv, connStream, c := s.route(packetPtr, peerKey)
+	if connStream != nil {
+		if c != nil && c.receiveInline(packetPtr) {
+			return c
 		}
-		// Look for existing connection
-		if connStream := s.getConnStreamWithCids(cid, cidType); connStream != nil {
-			if c := s.inlineConn(connStream); c != nil && c.receiveInline(packetPtr) {
-				return c
-			}
-			// The last hop of the inbound path: a virtual clock must not
-			// consider the system quiet while this packet is queued for a
-			// connection that has not woken to take it.
-			//
-			// Noted and taken on streamIncoming only, and that is what keeps
-			// the accounting honest rather than approximately right. A
-			// connection's event channel has several writers -- this loop,
-			// the ICMP entry points, and the application's own CloseWrite,
-			// CloseRead and Close -- and only this one is a clock
-			// participant. Keying both halves on the event type makes the
-			// pairing structural: nothing else notes, and the connection
-			// takes for nothing else. See IdleBarrier.
-			barrier, _ := s.clock().(IdleBarrier)
+		// The last hop of the inbound path: a virtual clock must not
+		// consider the system quiet while this packet is queued for a
+		// connection that has not woken to take it.
+		//
+		// Noted and taken on streamIncoming only, and that is what keeps
+		// the accounting honest rather than approximately right. A
+		// connection's event channel has several writers -- this loop,
+		// the ICMP entry points, and the application's own CloseWrite,
+		// CloseRead and Close -- and only this one is a clock
+		// participant. Keying both halves on the event type makes the
+		// pairing structural: nothing else notes, and the connection
+		// takes for nothing else. See IdleBarrier.
+		barrier, _ := s.clock().(IdleBarrier)
+		if barrier != nil {
+			barrier.NoteHandoff()
+		}
+		select {
+		case connStream <- &streamEvent{Type: streamIncoming, Packet: packetPtr}:
+		default:
 			if barrier != nil {
-				barrier.NoteHandoff()
+				barrier.TakeHandoff()
 			}
-			select {
-			case connStream <- &streamEvent{Type: streamIncoming, Packet: packetPtr}:
-			default:
-				if barrier != nil {
-					barrier.TakeHandoff()
-				}
-				// See droppedFullConnQueue. This is a real packet loss that the
-				// peer has to recover from, and it is ours, not the network's.
-				s.droppedFullConnQueue.Add(1)
-				s.logger.Warn("connection stream channel is full, dropping packet",
-					"connStream.len", len(connStream), "cid.send", cid.Send, "cid.recv", cid.Recv, "cid.peer", cid.Peer.Hash())
-				return nil
-			}
-			if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-				s.logger.Trace("recieve a packet for a exist conn stream", "connStream.len", len(connStream))
-			}
+			// See droppedFullConnQueue. This is a real packet loss that the
+			// peer has to recover from, and it is ours, not the network's.
+			s.droppedFullConnQueue.Add(1)
+			s.logger.Warn("connection stream channel is full, dropping packet",
+				"connStream.len", len(connStream), "cid.send", send, "cid.recv", recv, "cid.peer", peerKey)
 			return nil
 		}
+		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+			s.logger.Trace("recieve a packet for a exist conn stream", "connStream.len", len(connStream))
+		}
+		return nil
 	}
 
 	if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
@@ -896,9 +892,9 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 			"packetType", packetPtr.Header.PacketType,
 			"seq", packetPtr.Header.SeqNum,
 			"ack", packetPtr.Header.AckNum,
-			"peerInitCID", cids[0],
-			"weInitCid", cids[1],
-			"accCID", cids[2])
+			"peerInitCID", CidFromPacket(packetPtr, incomingRaw.peer, cidTypes[0]),
+			"weInitCid", CidFromPacket(packetPtr, incomingRaw.peer, cidTypes[1]),
+			"accCID", CidFromPacket(packetPtr, incomingRaw.peer, cidTypes[2]))
 	}
 	if packetPtr.Header.PacketType != st_syn {
 		// An unmatched RESET is dropped, never answered: replying to a reset
@@ -918,7 +914,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 		return nil
 	}
 
-	cid := cids[2]
+	cid := CidFromPacket(packetPtr, incomingRaw.peer, cidTypes[2])
 	cidHash := cid.Hash()
 
 	// The connection cap is checked here, where libutp checks it: after the
@@ -1650,6 +1646,47 @@ func (s *UtpSocket) attachInline(key string, ch chan *streamEvent, c *connection
 	}
 }
 
+// route finds the connection a packet is for: the first of the derivations
+// in cidTypes whose key the socket has, and its inline connection. Called by
+// the reader, with dispatchMu held. The keys are built into a reused buffer
+// and looked up under one hold of connsMutex; the conversion in the map index
+// does not allocate.
+func (s *UtpSocket) route(packetPtr *packet, peerKey string) (send, recv uint16, ch chan *streamEvent, c *connection) {
+	s.connsMutex.RLock()
+	defer s.connsMutex.RUnlock()
+	for _, cidType := range cidTypes {
+		// A SYN is matched only by the SYN derivation.
+		//
+		// The other two derive a connection id as if the packet's id were a
+		// *send* id, which is right for an established connection and wrong
+		// for a SYN: a SYN carries the sender's own receive id, so those
+		// derivations alias it onto whatever local connection happens to
+		// hold that number. Concretely, a SYN whose id equals an outgoing
+		// connection's receive id was delivered into that connection, where
+		// onSyn answered it with a RESET.
+		//
+		// libutp cannot do this. It has exactly one lookup per case: a SYN
+		// is looked up as `UTPSocketKey(addr, id + 1)` and rejected outright
+		// if something is already there -- "rejected incoming connection,
+		// connection already exists" (utp_internal.cpp:2957-2965) -- while
+		// everything else is looked up on the receive id alone (:2884-2892).
+		// It never delivers a SYN into an established connection.
+		//
+		// Found by FuzzDifferentialInitiator. It matters beyond the spurious
+		// RESET: an off-path attacker who guesses a connection id could
+		// otherwise inject a SYN into an established connection.
+		if packetPtr.Header.PacketType == st_syn && cidType != IdTypeRecvId {
+			continue
+		}
+		send, recv = cidIds(packetPtr, cidType)
+		s.keyScratch = appendConnKey(s.keyScratch[:0], send, recv, peerKey)
+		if ch = s.conns[string(s.keyScratch)]; ch != nil {
+			return send, recv, ch, s.inlineConns[ch]
+		}
+	}
+	return 0, 0, nil, nil
+}
+
 // inlineConn returns the connection that takes packets on ch inline, if any.
 func (s *UtpSocket) inlineConn(ch chan *streamEvent) *connection {
 	s.connsMutex.RLock()
@@ -1897,8 +1934,12 @@ func CidFromPacket(
 	src ConnectionPeer,
 	idType IdType,
 ) *ConnectionId {
-	var send, recv uint16
+	send, recv := cidIds(packet, idType)
+	return NewConnectionId(src, recv, send)
+}
 
+// cidIds is CidFromPacket's send and receive ids, without the ConnectionId.
+func cidIds(packet *packet, idType IdType) (send, recv uint16) {
 	switch idType {
 	case IdTypeRecvId:
 		switch packet.Header.PacketType {
@@ -1918,6 +1959,5 @@ func CidFromPacket(
 		send = packet.Header.ConnectionId
 		recv = packet.Header.ConnectionId - 1 // wrapping sub
 	}
-
-	return NewConnectionId(src, recv, send)
+	return send, recv
 }

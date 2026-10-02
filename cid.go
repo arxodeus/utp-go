@@ -14,13 +14,19 @@ type ConnectionPeer interface {
 // SocketAddr is a simple implementation of the ConnectionPeer interface using net.UDPAddr.
 type UdpPeer struct {
 	addr *net.UDPAddr
+	// hash is addr.String(), computed when the peer is made, so a peer the
+	// socket's reader routes many datagrams for formats its address once.
+	hash string
 }
 
 func NewUdpPeer(addr *net.UDPAddr) *UdpPeer {
-	return &UdpPeer{addr: addr}
+	return &UdpPeer{addr: addr, hash: addr.String()}
 }
 
 func (p *UdpPeer) Hash() string {
+	if p.hash != "" {
+		return p.hash
+	}
 	return p.addr.String()
 }
 
@@ -77,13 +83,18 @@ func NewConnectionId(peer ConnectionPeer, recvId uint16, sendId uint16) *Connect
 // acknowledgement (10 Mb/s from libutp, TestAckTurnaround).
 func genHash(connId *ConnectionId) string {
 	peer := connId.Peer.Hash()
-	b := make([]byte, 0, len(peer)+12)
-	b = strconv.AppendUint(b, uint64(connId.Send), 10)
+	return string(appendConnKey(make([]byte, 0, len(peer)+12), connId.Send, connId.Recv, peer))
+}
+
+// appendConnKey appends the key genHash makes for these ids and peer key. The
+// socket's reader builds keys with it into a reused buffer, so a lookup
+// allocates nothing.
+func appendConnKey(b []byte, send, recv uint16, peer string) []byte {
+	b = strconv.AppendUint(b, uint64(send), 10)
 	b = append(b, ':')
-	b = strconv.AppendUint(b, uint64(connId.Recv), 10)
+	b = strconv.AppendUint(b, uint64(recv), 10)
 	b = append(b, ':')
-	b = append(b, peer...)
-	return string(b)
+	return append(b, peer...)
 }
 
 // Hash returns the key this connection is tracked under.

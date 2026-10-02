@@ -30,6 +30,9 @@ type receiveBuffer struct {
 	// largestPacket is the biggest payload this peer has sent, and so the
 	// most the gap-filling retransmission can be. See gapReserve.
 	largestPacket int
+	// pendingBytes is the total held out of order in pending, kept as it
+	// changes so Available and Pending need not walk the tree for it.
+	pendingBytes int
 }
 
 type pendingItem struct {
@@ -134,25 +137,13 @@ func (rb *receiveBuffer) Window() int {
 // nothing wrong, and admitting on Window's figure would let offset plus
 // pending exceed the capacity and panic the collapse loop in Write.
 func (rb *receiveBuffer) Available() int {
-	available := len(rb.buf) - rb.offset
-
-	rb.pending.Ascend(func(i btree.Item) bool {
-		item := i.(*pendingItem)
-		available -= len(item.data)
-		return true
-	})
-	return available
+	return len(rb.buf) - rb.offset - rb.pendingBytes
 }
 
 // Pending reports how many bytes have been received -- contiguous or held
 // out of order -- but not yet read by the application.
 func (rb *receiveBuffer) Pending() int {
-	pending := rb.offset
-	rb.pending.Ascend(func(i btree.Item) bool {
-		pending += len(i.(*pendingItem).data)
-		return true
-	})
-	return pending
+	return rb.offset + rb.pendingBytes
 }
 
 func (rb *receiveBuffer) IsEmpty() bool {
@@ -164,10 +155,6 @@ func (rb *receiveBuffer) InitSeqNum() uint16 {
 }
 
 func (rb *receiveBuffer) WasWritten(seqNum uint16) bool {
-	exists := rb.pending.Has(&pendingItem{seqNum: seqNum})
-	if rb.logger != nil && rb.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-		rb.logger.Trace("checking written", "seqNum", seqNum, "initSeqNum", rb.initSeqNum, "consumed", rb.consumed, "exists", exists)
-	}
 	// At or before the acknowledgement number, in wrapping order: delivered.
 	//
 	// This was the range from the initial sequence number to the
@@ -176,7 +163,17 @@ func (rb *receiveBuffer) WasWritten(seqNum uint16) bool {
 	// on every new packet was taken for one already delivered and dropped,
 	// and the connection stalled. libutp decides it from ack_nr alone:
 	// `(pk_seq_nr - conn->ack_nr - 1) & SEQ_NR_MASK` (utp_internal.cpp:1887).
-	return exists || !wrappingLessThan(rb.AckNum(), seqNum)
+	//
+	// Checked first, and the reorder set only when it holds anything, so an
+	// in-order packet never touches the tree.
+	if !wrappingLessThan(rb.AckNum(), seqNum) {
+		return true
+	}
+	exists := rb.pending.Len() > 0 && rb.pending.Has(&pendingItem{seqNum: seqNum})
+	if rb.logger != nil && rb.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		rb.logger.Trace("checking written", "seqNum", seqNum, "initSeqNum", rb.initSeqNum, "consumed", rb.consumed, "exists", exists)
+	}
+	return exists
 }
 
 // HoldsOutOfOrder reports whether seqNum is held past a gap, waiting for it
@@ -234,7 +231,22 @@ func (rb *receiveBuffer) Write(data []byte, seqNum uint16) error {
 		rb.largestPacket = len(data)
 	}
 
-	rb.pending.ReplaceOrInsert(&pendingItem{seqNum: seqNum, data: data})
+	// The next packet in order, with nothing held behind a gap: straight into
+	// the buffer. The tree is for packets that arrive ahead of a gap; an
+	// in-order one went in and came straight back out of it, allocating each
+	// way.
+	if seqNum == next && rb.pending.Len() == 0 {
+		end := rb.offset + len(data)
+		copy(rb.buf[rb.offset:end], data)
+		rb.offset = end
+		rb.consumed++
+		return nil
+	}
+
+	if old := rb.pending.ReplaceOrInsert(&pendingItem{seqNum: seqNum, data: data}); old != nil {
+		rb.pendingBytes -= len(old.(*pendingItem).data)
+	}
+	rb.pendingBytes += len(data)
 
 	if rb.logger != nil && rb.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 		rb.logger.Trace("will handle pending data in recv buffer", "startSeq", next)
@@ -253,6 +265,7 @@ func (rb *receiveBuffer) Write(data []byte, seqNum uint16) error {
 		rb.offset = end
 		rb.consumed += 1
 		rb.pending.Delete(pending)
+		rb.pendingBytes -= len(pending.data)
 		if rb.logger != nil && rb.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			rb.logger.Trace("will delete a pending data in recv buffer", "seq", next, "pending.len", rb.pending.Len())
 		}
