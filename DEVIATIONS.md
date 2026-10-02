@@ -188,8 +188,8 @@ consequence, or equivalent on the wire.
   against 7.3 s over 64 kb/s, level with about half the acknowledgements at
   320 kb/s and 20 Mb/s,
   and 1.43 s against libutp's best of 1.51 s for 16 MB at 100 Mb/s. The cost:
-  at 100 Mb/s the median acknowledgement leaves 290-320 us after its packet
-  arrives against libutp's 160-210 us.
+  at 100 Mb/s the median acknowledgement leaves 250-280 us after its packet
+  arrives against libutp's 100-170 us.
 - *The base delay is the lowest over two minutes, not about thirteen.* A
   clock drift's phantom queue grows with the window, measured linear, so
   libutp's is 6.5 times ours. The cost -- a queue that stands for two
@@ -199,18 +199,23 @@ consequence, or equivalent on the wire.
 
 **Worse than libutp, accepted.** Each has a stated reason for being carried.
 
-- *An acknowledgement leaves 30-60 us later than libutp's:* at 10 Mb/s, where
-  both acknowledge every packet, the median from a data packet reaching the
-  receiver's socket to its acknowledgement leaving is 110-140 us here and
-  70-80 us in libutp, in the same runs. The packet is now handled on the
-  socket's reader goroutine, which sends the acknowledgement itself, as
-  libutp's embedder does -- and that did not narrow the gap, which was 40-60
-  us when the packet crossed three goroutines first. Inside the receiver, read
-  to the acknowledgement's sendto returning is 35-45 us, about 20 us of it the
-  sendto; the rest of the difference is the kernel and Go's network poller
-  waking the reader, which libutp's thread does not pay. No throughput cost
-  has been measured. See KNOWN-LIMITATIONS.md, "Packets are handled on the
-  socket's reader".
+- *An acknowledgement leaves about 30 us later than libutp's at the median,
+  and much sooner at the 90th percentile:* at 10 Mb/s, where both
+  acknowledge every packet, the time from a data packet reaching the
+  receiver's socket to its acknowledgement reaching the relay is 80 us here
+  and 50 us in libutp at the median, 240 us against 870-1,110 us at the 90th
+  percentile, in the same runs (`TestAckTurnaround`, 45 runs each, libutp
+  sending; the relay timestamps each acknowledgement in the kernel). Our
+  sender is not in it: libutp's receiver answers ours as fast as its own.
+  What is left is the receiver: Go's network poller waking the socket's
+  reader, and the handling itself, run with cold caches because the reader
+  wakes once a millisecond -- 11 us to the acknowledgement's write with 4 MB
+  evicted (`BenchmarkReceivePathCold`). The relay that measures it spins in
+  the same process to deliver packets on time, and that costs the Go
+  receiver more than libutp's thread: with it delivering on timers instead,
+  everything is slower and the gap is 20 us (90 against 70, 15 runs each).
+  No throughput cost has been measured. See KNOWN-LIMITATIONS.md, "Packets
+  are handled on the socket's reader".
 
 ## Intentional deviations
 
@@ -586,11 +591,13 @@ The rate term is what makes this work. The return-path term alone waits only
 once a queue has formed, and that queue is itself the delay: 2.13 s over 160
 kb/s, 3.3 s over 64 kb/s, and 1.55-1.66 s at 100 Mb/s.
 
-The cost is the wait. At 100 Mb/s the median acknowledgement leaves 310-320 us
-after its packet reaches our socket against libutp's 170-210 us, with the 90th
-percentile level (0.83-1.02 ms against 1.12-1.26 ms) (`TestAckTurnaround`).
+The cost is the wait. At 100 Mb/s the median acknowledgement leaves 250-280 us
+after its packet reaches our socket against libutp's 100-170 us, with the 90th
+percentile lower (0.60-1.24 ms against 1.14-1.54 ms) (`TestAckTurnaround`, 15
+runs each, the relay timestamping acknowledgements in the kernel; 310-320 us
+against 170-210 us when it timestamped them on waking).
 At 10 Mb/s, where packets are 1.1 ms apart and nothing waits, both acknowledge
-every packet, and the 30-60 us between the medians is listed under "Worse than
+every packet, and the 30 us between the medians is listed under "Worse than
 libutp, accepted".
 
 *An earlier version of this entry* reported libutp at 0.22-0.33

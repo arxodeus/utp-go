@@ -4459,15 +4459,13 @@ application writes, teardown -- and, below, sending.
 
 ### What it changed, measured
 
-- **Acknowledgement latency: not measurably.** At 10 Mb/s from libutp the
-  median turnaround is 110-140 us, as it was (100-120 us), against libutp's
-  70-80 us in the same runs (`TestAckTurnaround`). The hand-offs were not
-  where the time went. Timed inside the receiver, read to the
-  acknowledgement's sendto returning is 35-45 us, about 20 us of it the
-  sendto itself, which on loopback delivers into the peer; the rest is the
-  kernel and Go's network poller waking the reader. Routing a packet cost 27
-  us of it until the connection key stopped being a SHA3 hash (`genHash`); it
-  is 15-17 us now, mostly cold code on a reader that wakes every 1.1 ms.
+- **Acknowledgement latency: closer, not equal.** The hand-offs were not
+  where the time went; the move alone left the median where it was. What
+  followed, measured with the relay timestamping acknowledgements in the
+  kernel (below), at 10 Mb/s from libutp: our receiver's median went from
+  90 us to 80 against libutp's 50, and its 90th percentile is 240 us
+  against libutp's 870-1,110. See "Acknowledgement latency: what is left",
+  below.
 - **Acknowledgements per batch: libutp's exactly.** A run of datagrams the
   reader takes together draws one acknowledgement, from a batched read on a
   real socket or from a Conn that says what it has queued
@@ -4485,6 +4483,61 @@ application writes, teardown -- and, below, sending.
   of 8 runs past the two-minute budget, against 2 of 8 on the commit before;
   largest RTT sample 1.0-3.0 s in seven runs and 14.5 s in one, against
   3.7-18 s.
+
+### Acknowledgement latency: what is left
+
+`TestAckTurnaround` times each data packet from its delivery by the relay to
+the first acknowledgement covering it. The relay used to timestamp an
+acknowledgement when its own goroutine woke to read it, which put the relay's
+wake-up into every figure, and not equally: it shares the Go runtime with this
+library's receiver, not with libutp's thread. It now takes the kernel's
+receive timestamp (`SO_TIMESTAMPNS`; `relay_rxts_linux_test.go`). With that,
+at 10 Mb/s, 45 runs each, interleaved:
+
+| pair | median | 90th percentile |
+|---|---|---|
+| libutp -> libutp | 50 us | 870 us |
+| go -> libutp | 50 us | 1,110 us |
+| libutp -> go, before | 90 us | 240 us |
+| libutp -> go, now | 80 us | 240 us |
+| go -> go | 70 us | 180 us |
+
+Our sender adds nothing: libutp's receiver answers it as fast as its own. The
+30 us is our receiver, and it was taken apart inside the receiver:
+
+- **Handling, cold.** The reader wakes once every 1.1 ms with the rest of
+  the process run in between, so it handles each packet with cold caches,
+  and what costs then is how much code and memory a packet touches, not how
+  many instructions it runs. `BenchmarkReceivePathCold` evicts 4 MB before
+  each packet and spaces them as at 10 Mb/s: 11.4 us to the
+  acknowledgement's write, from 13.6-16.0 before the cuts below. Warm, it is
+  1.9 us (`BenchmarkReceivePath`).
+- **The wake.** Go's network poller wakes the reader; libutp's embedder is
+  a thread blocked in `select`. In a quiet process the poller wakes it in
+  13-15 us. A blocking read on a locked thread was tried and was slower
+  (67-95 us), and so was `ppoll`.
+- **The harness.** The relay spins in the same process so that it delivers
+  on time, and that costs the Go receiver more than libutp's thread. With
+  the relay delivering on timers instead, every pair is slower, and our
+  receiver's median is 90 us against libutp's 70 (15 runs each): 20 us
+  apart rather than 30.
+
+The cuts, each with no effect on what is sent: an acknowledgement that names
+nothing new and carries no selective ack takes only the delay sample libutp
+takes from every packet (`our_hist`, `utp_internal.cpp:2116-2127`) and the
+MTU checks; the reader remembers the last datagram's route until the routing
+tables change; decoding and building a packet allocate once instead of
+twice, and an outgoing packet's event is reused; the acknowledgement rule
+reads the queueing delay instead of the controller's whole snapshot; a read
+batch lists the connections it reached instead of mapping them. One
+candidate measured as no gain and was dropped: asking the logger for its
+level once per read batch instead of once per datagram.
+
+Throughput did not move: the netem benchmark suite, 5 repeats of its 16
+profiles against the commit before, and the four more than 1.5% apart run 20
+times each -- LEDBAT LAN 86.91 against 86.44 Mbps, LEDBAT at 5% loss 2.54
+against 2.48, LEDBAT++ at 5% loss 0.56 against 0.55, LEDBAT++ with
+reordering 2.34 against 2.35, medians.
 
 ### Three things it took to get there
 
