@@ -128,6 +128,8 @@ func smallWrites(t *testing.T, libutpSends bool, path pathConfig, count, size in
 	case <-time.After(60 * time.Second):
 		t.Fatal("not delivered")
 	}
+	// dataEv is the relay's to append to until it has stopped.
+	r.Close()
 	var lat []time.Duration
 	for i := range sentAt {
 		lat = append(lat, gotAt[i].Sub(sentAt[i]))

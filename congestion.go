@@ -582,6 +582,15 @@ func (c *defaultController) filteredDelayMicros() uint32 {
 	return v
 }
 
+// QueueingDelay is Stats().FilteredQueueingDelay without the rest of the
+// snapshot, for the receiver's acknowledgement rule, which reads it for every
+// data packet.
+func (c *defaultController) QueueingDelay() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return time.Duration(c.filteredDelayMicros()) * time.Microsecond
+}
+
 // ApplyAck is the once-per-acknowledgement end of classic LEDBAT. See the
 // Controller interface.
 func (c *defaultController) ApplyAck() {

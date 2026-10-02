@@ -432,6 +432,21 @@ func (rr *recoveryRun) growWindows(want int) grown {
 		payload[i] = byte(i)
 	}
 	rr.writeBoth(payload)
+	// Ours is written from a goroutine that is not on the virtual clock, and
+	// on a loaded machine it can start late. Each round below moves libutp's
+	// clock 50 ms and acknowledges only the side still short, so rounds spent
+	// waiting for our writer left libutp unacknowledged until its
+	// retransmission timeout fired -- it resent its oldest packet, and the
+	// scenario compared a timeout with a fast retransmit. Under six busy
+	// loops on four cores that failed TestConformanceFastRetransmitDecisions
+	// about one run in two. No virtual time passes until ours has started.
+	for deadline := time.Now().Add(10 * time.Second); rr.oursHigh == initiatorConnSeed; {
+		if time.Now().After(deadline) {
+			rr.t.Fatal("our side sent no data within 10s of the write")
+		}
+		rr.takeOurs()
+		time.Sleep(time.Millisecond)
+	}
 	libutpAcked, oursAcked := uint16(initiatorConnSeed), uint16(initiatorConnSeed)
 	ts := uint32(300000)
 	for round := 0; round < 80; round++ {

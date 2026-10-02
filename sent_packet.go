@@ -174,6 +174,15 @@ func (s *sentPackets) ControllerStats() ControllerStats {
 	return s.congestionCtrl.Stats()
 }
 
+// QueueingDelay is ControllerStats().FilteredQueueingDelay, from the
+// controller directly when it offers it.
+func (s *sentPackets) QueueingDelay() time.Duration {
+	if q, ok := s.congestionCtrl.(interface{ QueueingDelay() time.Duration }); ok {
+		return q.QueueingDelay()
+	}
+	return s.congestionCtrl.Stats().FilteredQueueingDelay
+}
+
 func (s *sentPackets) Window() uint32 {
 	return s.congestionCtrl.BytesAvailableInWindow()
 }
@@ -349,6 +358,13 @@ func (s *sentPackets) OnTransmit(
 	if err := s.congestionCtrl.OnTransmit(seqNum, transmit, dataLen); err != nil {
 		panic(err)
 	}
+}
+
+// onAckOfNothingNew is onAck for an acknowledgement of the number just before
+// the window with no selective ack: the delay sample, and nothing to retire.
+func (s *sentPackets) onAckOfNothingNew(delay time.Duration, now time.Time) {
+	s.congestionCtrl.OnAckDelay(delay, now)
+	s.congestionCtrl.ApplyAck()
 }
 
 func (s *sentPackets) onAck(

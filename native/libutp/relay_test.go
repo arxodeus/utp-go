@@ -257,6 +257,7 @@ type relay struct {
 	toGo, toLib  *relayPath
 	done         chan struct{}
 	wg           sync.WaitGroup
+	closeOnce    sync.Once
 }
 
 // newRelay starts a relay between libutp at libPort and our socket at goPort.
@@ -326,7 +327,29 @@ func (r *relay) LibutpFacingPort() uint16 { return uint16(r.sideA.LocalAddr().(*
 // GoFacingAddr is where our socket should send.
 func (r *relay) GoFacingAddr() *net.UDPAddr { return r.sideB.LocalAddr().(*net.UDPAddr) }
 
-func (r *relay) Close() {
+// Close stops the relay once everything in flight has been read, and returns
+// when its goroutines have: what they recorded (relayPath.delivered, trace)
+// may be read after it. Closing again does nothing.
+func (r *relay) Close() { r.closeOnce.Do(r.close) }
+
+func (r *relay) close() {
+	// Let what is already on its way in be read first. A test ends the
+	// moment its receiver sees the end of the stream, and closing the
+	// sockets then discards whatever they hold unread: an acknowledgement
+	// the receiver sent microseconds before was lost from the trace, and
+	// TestAckTurnaround counted its packets as never acknowledged -- in
+	// go->go about one run in fifteen, every time the last data packet and
+	// the FIN, read together, whose acknowledgement was the last thing sent.
+	// Closing waits for 20 ms with nothing offered, a second at most.
+	offered := func() uint64 { return r.toGo.Stats().Offered + r.toLib.Stats().Offered }
+	for deadline, last := time.Now().Add(time.Second), offered(); time.Now().Before(deadline); {
+		time.Sleep(20 * time.Millisecond)
+		now := offered()
+		if now == last {
+			break
+		}
+		last = now
+	}
 	close(r.done)
 	_ = r.sideA.Close()
 	_ = r.sideB.Close()

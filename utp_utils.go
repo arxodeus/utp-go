@@ -1,6 +1,7 @@
 package utp_go
 
 import (
+	"sync/atomic"
 	"time"
 
 	"github.com/valyala/fastrand"
@@ -90,14 +91,21 @@ func DurationBetween(earlier uint32, later uint32) time.Duration {
 	return time.Duration(wrappingSubUint32(later, earlier)) * time.Microsecond
 }
 
-// randomUint16Source is where random sequence numbers and connection ids come
-// from. It is a variable so the conformance corpus can pin it and compare
-// emitted packets against libutp byte for byte; nothing outside tests
-// reassigns it.
-var randomUint16Source = func() uint16 { return uint16(fastrand.Uint32n(65535)) }
+// randomUint16Source, when set, is where random sequence numbers and
+// connection ids come from instead of fastrand. The conformance corpus pins it
+// to compare emitted packets against libutp byte for byte; nothing outside
+// tests sets it.
+//
+// Atomic because a socket's reader can still be finishing a datagram after
+// Close has returned -- answering it with a reset draws a random number -- and
+// a test that pins the source next would otherwise race it.
+var randomUint16Source atomic.Pointer[func() uint16]
 
 func RandomUint16() uint16 {
-	return randomUint16Source()
+	if f := randomUint16Source.Load(); f != nil {
+		return (*f)()
+	}
+	return uint16(fastrand.Uint32n(65535))
 }
 
 func maxUint32(a, b uint32) uint32 {

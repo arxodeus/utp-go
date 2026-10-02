@@ -243,6 +243,11 @@ type UtpSocket struct {
 	// keyScratch is where the reader builds the keys it routes by. Used only
 	// under dispatchMu.
 	keyScratch []byte
+	// connsGen counts changes to conns and inlineConns, each made with
+	// connsMutex held for writing. lastRoute, used only under dispatchMu, is
+	// the route the last datagram took, good while connsGen has not moved.
+	connsGen  atomic.Uint64
+	lastRoute cachedRoute
 	// writeMu keeps an ordinary write from landing while an MTU probe has the
 	// don't-fragment bit set on the socket. See writeDatagram.
 	writeMu sync.RWMutex
@@ -551,7 +556,7 @@ func (s *UtpSocket) readLoop() {
 	// nothing back.
 	br, _ := s.socket.(batchReader)
 	qr, _ := s.socket.(QueuedReader)
-	touched := make(map[*connection]struct{})
+	touched := &readBatch{}
 	// run counts the datagrams read since the last batch ended, while a
 	// QueuedReader says more are waiting.
 	var failures, run int
@@ -622,24 +627,35 @@ func (s *UtpSocket) readLoop() {
 // was looked at, and a third, to a write loop, before its acknowledgement
 // left. libutp's embedder calls utp_process_udp from its read loop and the
 // acknowledgement is sent from the same call stack.
-func (s *UtpSocket) dispatch(raw *IncomingPacketRaw, touched map[*connection]struct{}) {
+func (s *UtpSocket) dispatch(raw *IncomingPacketRaw, touched *readBatch) {
 	s.dispatchMu.Lock()
 	c := s.handleIncomingBuf(raw)
 	s.dispatchMu.Unlock()
-	if c != nil {
-		touched[c] = struct{}{}
+	if c != nil && !c.inReadBatch {
+		c.inReadBatch = true
+		touched.conns = append(touched.conns, c)
 	}
+}
+
+// readBatch is the connections one read batch delivered to, each once, in the
+// order the batch first reached them. A list rather than a set: a batch
+// usually reaches one connection, and a map's iteration and deletion were a
+// tenth of a packet's cost on a reader woken with its caches cold.
+type readBatch struct {
+	conns []*connection
 }
 
 // endBatch acknowledges, for each connection a read batch delivered to, what
 // the batch brought it, and empties touched. libutp's
 // utp_issue_deferred_acks, which its embedder calls once the socket would
 // block (utp.h:512-517).
-func (s *UtpSocket) endBatch(touched map[*connection]struct{}) {
-	for c := range touched {
+func (s *UtpSocket) endBatch(touched *readBatch) {
+	for i, c := range touched.conns {
+		c.inReadBatch = false
 		c.endBatch()
-		delete(touched, c)
+		touched.conns[i] = nil
 	}
+	touched.conns = touched.conns[:0]
 }
 
 // maxConsecutiveReadErrors is how many read errors in a row the socket
@@ -1633,6 +1649,7 @@ func (s *UtpSocket) removeConnStream(key string) {
 		delete(s.inlineConns, ch)
 	}
 	delete(s.conns, key)
+	s.connsGen.Add(1)
 }
 
 // attachInline lets the reader hand packets on ch straight to c. Called
@@ -1643,6 +1660,7 @@ func (s *UtpSocket) attachInline(key string, ch chan *streamEvent, c *connection
 	// A connection that has already gone, its entry removed, stays gone.
 	if s.conns[key] == ch {
 		s.inlineConns[ch] = c
+		s.connsGen.Add(1)
 	}
 }
 
@@ -1652,6 +1670,39 @@ func (s *UtpSocket) attachInline(key string, ch chan *streamEvent, c *connection
 // and looked up under one hold of connsMutex; the conversion in the map index
 // does not allocate.
 func (s *UtpSocket) route(packetPtr *packet, peerKey string) (send, recv uint16, ch chan *streamEvent, c *connection) {
+	// The datagrams of one flow arrive one after another, and the routing
+	// tables rarely change: the last route stands while nothing has been
+	// added or removed. A SYN always takes the full path, which has its own
+	// rule for it.
+	gen := s.connsGen.Load()
+	r := &s.lastRoute
+	isSyn := packetPtr.Header.PacketType == st_syn
+	if !isSyn && r.ch != nil && r.gen == gen &&
+		r.connID == packetPtr.Header.ConnectionId && r.peerKey == peerKey {
+		return r.send, r.recv, r.ch, r.conn
+	}
+	send, recv, ch, c = s.routeLocked(packetPtr, peerKey)
+	if !isSyn && ch != nil {
+		*r = cachedRoute{gen: gen, connID: packetPtr.Header.ConnectionId, peerKey: peerKey,
+			send: send, recv: recv, ch: ch, conn: c}
+	}
+	return send, recv, ch, c
+}
+
+// cachedRoute is the route one datagram took: its connection id and peer,
+// what they led to, and the routing tables' generation at the time. See
+// UtpSocket.route.
+type cachedRoute struct {
+	gen        uint64
+	connID     uint16
+	peerKey    string
+	send, recv uint16
+	ch         chan *streamEvent
+	conn       *connection
+}
+
+// routeLocked is route's lookup proper, through every derivation in order.
+func (s *UtpSocket) routeLocked(packetPtr *packet, peerKey string) (send, recv uint16, ch chan *streamEvent, c *connection) {
 	s.connsMutex.RLock()
 	defer s.connsMutex.RUnlock()
 	for _, cidType := range cidTypes {
@@ -1708,6 +1759,7 @@ func (s *UtpSocket) putConnStream(key string, streamCh chan *streamEvent) {
 		s.logger.Trace("put conn stream", "key", key)
 	}
 	s.conns[key] = streamCh
+	s.connsGen.Add(1)
 }
 
 func (s *UtpSocket) sendShutdownEventToConns() {

@@ -441,6 +441,12 @@ type connection struct {
 	// straight to the wire; when it is nil, as in unit tests that build a
 	// connection by hand, emissions are queued on socketEvents instead.
 	out func(*socketEvent)
+	// outEvent is what emitPacket hands out, reused: out finishes with it
+	// before returning. Guarded by mu, as every emission is.
+	outEvent socketEvent
+	// inReadBatch is set while the socket's reader holds this connection in
+	// its list for the read batch it is dispatching. The reader's alone.
+	inReadBatch bool
 	// dropUnacked is set while a packet is being handled when libutp would
 	// discard it without scheduling an acknowledgement -- its early `return
 	// 0`s in utp_process_incoming (utp_internal.cpp:2381-2386, :2425-2431).
@@ -640,6 +646,12 @@ func (c *connection) armRetransmit(pkt *packet, delay time.Duration) {
 		&retransmitTimer{packet: pkt, deliver: c.unackTimeoutCh, ctx: c.ctx},
 		delay,
 	)
+}
+
+// isArmed reports whether seq has a retransmission timer.
+func (c *connection) isArmed(seq uint16) bool {
+	_, ok := c.armed[seq]
+	return ok
 }
 
 // disarmRetransmit cancels one packet's retransmission timer.
@@ -1609,16 +1621,19 @@ func (c *connection) emitPacket(pkt *packet, dontFragment bool) {
 		// Kept for the socket to repeat after this connection is gone.
 		c.lastStateSent = pkt
 	}
-	ev := newOutgoingSocketEvent(pkt, c.cid)
-	if dontFragment {
-		ev = newOutgoingProbeSocketEvent(pkt, c.cid)
-	}
 	if c.out != nil {
 		// Straight to the wire, on this goroutine: nothing is in flight
 		// between deciding to send and sending, so a virtual clock has
-		// nothing to wait for.
-		c.out(ev)
+		// nothing to wait for. The event is done with when out returns, so
+		// one serves every packet.
+		c.outEvent = socketEvent{Type: outgoing, Packet: pkt, ConnectionId: c.cid, DontFragment: dontFragment}
+		c.out(&c.outEvent)
+		c.outEvent = socketEvent{}
 		return
+	}
+	ev := newOutgoingSocketEvent(pkt, c.cid)
+	if dontFragment {
+		ev = newOutgoingProbeSocketEvent(pkt, c.cid)
 	}
 	// A virtual clock must not consider the system quiet while this packet is
 	// queued but not yet taken by whoever reads socketEvents. See
@@ -2523,7 +2538,7 @@ func (c *connection) ackEvery() int {
 	if c.state.RecvBuf.SelectiveAck() != nil {
 		return 1
 	}
-	q := c.state.SentPackets.ControllerStats().FilteredQueueingDelay
+	q := c.state.SentPackets.QueueingDelay()
 	k := min(1+int(q/ackQueueStep), maxAckQueueRun)
 	gap := c.dataGap
 	if c.lastDataGap > 0 {
@@ -3468,6 +3483,26 @@ func (c *connection) processAck(
 	now time.Time,
 ) error {
 	if c.state.stateType != ConnConnected {
+		return nil
+	}
+
+	// An acknowledgement that names nothing new and carries no selective
+	// ack -- every data packet a receiver with nothing in flight is sent --
+	// still gives the delay sample libutp takes from every packet
+	// (our_hist, utp_internal.cpp:2116-2127), and the MTU search still
+	// checks whether it is due. Nothing else below has work to do, and on a
+	// reader just woken, walking it was 3.5-4us of each packet's path to its
+	// acknowledgement.
+	//
+	// Except a timer still armed for that number: an initiator's SYN, whose
+	// timer the first acknowledgement after the handshake retires. That one
+	// takes the full path.
+	if sp := c.state.SentPackets; selectiveAck == nil && ackNum == sp.base-1 && !c.isArmed(ackNum) {
+		sp.onAckOfNothingNew(delay, now)
+		c.mtu.onAck(ackNum, now)
+		if c.mtu.dueForSearch(now) {
+			c.mtu.research(uint32(c.config.MaxPacketSize), now)
+		}
 		return nil
 	}
 

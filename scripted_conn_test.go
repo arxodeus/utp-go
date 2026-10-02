@@ -10,8 +10,11 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
@@ -213,9 +216,10 @@ func (c *scriptedConn) settle() {
 // be compared against libutp's scripted ones. It restores the real source on
 // cleanup.
 func pinRandom(v uint16) func() {
-	prev := randomUint16Source
-	randomUint16Source = func() uint16 { return v }
-	return func() { randomUint16Source = prev }
+	prev := randomUint16Source.Load()
+	pinned := func() uint16 { return v }
+	randomUint16Source.Store(&pinned)
+	return func() { randomUint16Source.Store(prev) }
 }
 
 func describePackets(pkts [][]byte) string {
@@ -243,4 +247,36 @@ func describePackets(pkts [][]byte) string {
 // never touches a socket, so it only has to be stable.
 func loopbackAddr() *net.UDPAddr {
 	return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 23456}
+}
+
+// Pinning the random source while something draws from it is safe. A socket's
+// reader can still be answering a datagram with a reset after Close has
+// returned, and the next test pinning the source raced it -- the race
+// detector caught it in 2 of 15 runs of this package. For the race
+// detector; without it this passes either way.
+func TestRandomSourcePinnedWhileInUse(t *testing.T) {
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	var drawing atomic.Bool
+	go func() {
+		defer close(stopped)
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				RandomUint16()
+				drawing.Store(true)
+			}
+		}
+	}()
+	for !drawing.Load() {
+		runtime.Gosched()
+	}
+	for start := time.Now(); time.Since(start) < 20*time.Millisecond; {
+		restore := pinRandom(1)
+		restore()
+	}
+	close(done)
+	<-stopped
 }

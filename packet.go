@@ -86,7 +86,11 @@ func (h *PacketHeaderV1) encodeTypeVer() byte {
 }
 
 func (h *PacketHeaderV1) EncodeToBytes() []byte {
-	var b []byte
+	return h.appendTo(make([]byte, 0, MINIMAL_HEADER_SIZE))
+}
+
+// appendTo appends the header's 20 bytes to b.
+func (h *PacketHeaderV1) appendTo(b []byte) []byte {
 	b = append(b, h.encodeTypeVer(), h.Extension)             // 2
 	b = binary.BigEndian.AppendUint16(b, h.ConnectionId)      // 2
 	b = binary.BigEndian.AppendUint32(b, uint32(h.Timestamp)) // 4
@@ -98,14 +102,24 @@ func (h *PacketHeaderV1) EncodeToBytes() []byte {
 }
 
 func DecodePacketHeader(value []byte) (*PacketHeaderV1, error) {
+	h := new(PacketHeaderV1)
+	if err := decodePacketHeaderInto(h, value); err != nil {
+		return nil, err
+	}
+	return h, nil
+}
+
+// decodePacketHeaderInto is DecodePacketHeader into a header the caller
+// provides.
+func decodePacketHeaderInto(h *PacketHeaderV1, value []byte) error {
 	if len(value) < MINIMAL_HEADER_SIZE {
-		return nil, ErrInvalidHeaderSize
+		return ErrInvalidHeaderSize
 	}
 
 	packetType := value[0] >> 4
 	packetTypeVal := PacketType(packetType)
 	if err := packetTypeVal.Check(); err != nil {
-		return nil, err
+		return err
 	}
 
 	// Version 1 is the only version either this implementation or libutp
@@ -115,7 +129,7 @@ func DecodePacketHeader(value []byte) (*PacketHeaderV1, error) {
 	// packet no real implementation would have sent.
 	version := value[0] & 0x0F
 	if version != PROTOCOL_VERSION_ONE {
-		return nil, ErrUnsupportedVersion
+		return ErrUnsupportedVersion
 	}
 	versionVal := version
 
@@ -138,7 +152,7 @@ func DecodePacketHeader(value []byte) (*PacketHeaderV1, error) {
 	// attack surface, so this rejects too.
 	extension := value[1]
 	if extension > MAX_KNOWN_EXTENSION {
-		return nil, ErrUnknownExtension
+		return ErrUnknownExtension
 	}
 
 	connID := binary.BigEndian.Uint16(value[2:4])
@@ -148,7 +162,7 @@ func DecodePacketHeader(value []byte) (*PacketHeaderV1, error) {
 	seqNum := binary.BigEndian.Uint16(value[16:18])
 	ackNum := binary.BigEndian.Uint16(value[18:20])
 
-	return &PacketHeaderV1{
+	*h = PacketHeaderV1{
 		PacketType:    packetTypeVal,
 		Version:       versionVal,
 		Extension:     extension,
@@ -158,7 +172,15 @@ func DecodePacketHeader(value []byte) (*PacketHeaderV1, error) {
 		WndSize:       windowSize,
 		SeqNum:        seqNum,
 		AckNum:        ackNum,
-	}, nil
+	}
+	return nil
+}
+
+// packetWithHeader is a packet and its header in one allocation, for the
+// decoder and the builder, which make one of each for every packet.
+type packetWithHeader struct {
+	p packet
+	h PacketHeaderV1
 }
 
 // SelectiveAck represents a selective acknowledgment
@@ -374,7 +396,7 @@ func (p *packet) Encode() []byte {
 	if len(exts) > 0 {
 		header.Extension = exts[0].extension
 	}
-	bytes = append(bytes, header.EncodeToBytes()...)
+	bytes = header.appendTo(bytes)
 
 	// Each extension is introduced by the one before it: the header names
 	// the first, and each carries the type of the next.
@@ -403,14 +425,15 @@ func (p *packet) extensionByte() byte {
 }
 
 func DecodePacket(b []byte) (*packet, error) {
-	var p packet
 	receivedBytesLength := len(b)
 	if receivedBytesLength < MINIMAL_HEADER_SIZE {
 		return nil, ErrInvalidHeaderSize
 	}
 
-	header, err := DecodePacketHeader(b[:MINIMAL_HEADER_SIZE])
-	if err != nil {
+	ph := &packetWithHeader{}
+	p := &ph.p
+	header := &ph.h
+	if err := decodePacketHeaderInto(header, b[:MINIMAL_HEADER_SIZE]); err != nil {
 		return nil, err
 	}
 
@@ -454,7 +477,7 @@ func DecodePacket(b []byte) (*packet, error) {
 	p.Eack = ack
 	p.Body = payload
 	p.chain = extensions
-	return &p, nil
+	return p, nil
 	//var body []byte
 	//if header.Extension == 0 {
 	//	if receivedBytesLength == MINIMAL_HEADER_SIZE {
@@ -612,8 +635,8 @@ func (b *PacketBuilder) Build() *packet {
 		payload = b.payload
 	}
 
-	return &packet{
-		Header: &PacketHeaderV1{
+	ph := &packetWithHeader{
+		h: PacketHeaderV1{
 			PacketType:    b.packetType,
 			Version:       PROTOCOL_VERSION_ONE,
 			Extension:     headerExtension,
@@ -624,7 +647,8 @@ func (b *PacketBuilder) Build() *packet {
 			SeqNum:        b.seqNum,
 			AckNum:        b.ackNum,
 		},
-		Eack: b.selectiveAck,
-		Body: payload,
+		p: packet{Eack: b.selectiveAck, Body: payload},
 	}
+	ph.p.Header = &ph.h
+	return &ph.p
 }
