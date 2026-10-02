@@ -1,20 +1,10 @@
 package utp_go
 
 import (
-	"encoding/hex"
 	"fmt"
-	"hash"
 	"net"
-	"sync"
-
-	"golang.org/x/crypto/sha3"
+	"strconv"
 )
-
-var hasherPool = sync.Pool{
-	New: func() interface{} {
-		return sha3.New256()
-	},
-}
 
 // ConnectionPeer is an interface representing a remote peer.
 type ConnectionPeer interface {
@@ -75,16 +65,25 @@ func NewConnectionId(peer ConnectionPeer, recvId uint16, sendId uint16) *Connect
 	return connId
 }
 
+// genHash is the connection's key: its two ids and its peer's key, as text.
+// Two connections share a key exactly when all three match -- the ids come
+// first and hold no colon, so the peer's key, whatever it contains, cannot
+// make two different triples spell the same string.
+//
+// It was a SHA3-256 of that same text, cut to 20 bytes and hex-encoded, which
+// bought nothing a map needs and cost most of the time a packet took: the
+// socket's reader builds up to three candidate ids for every datagram it
+// routes, and with the hash that was 27us of a 37us path from read to
+// acknowledgement (10 Mb/s from libutp, TestAckTurnaround).
 func genHash(connId *ConnectionId) string {
-	str := fmt.Sprintf("%d:%d:%v", connId.Send, connId.Recv, connId.Peer.Hash())
-	hasher := hasherPool.Get().(hash.Hash)
-	defer func() {
-		hasher.Reset()
-		hasherPool.Put(hasher)
-	}()
-	hasher.Write([]byte(str))
-	bytes := hasher.Sum(nil)[:20]
-	return hex.EncodeToString(bytes)
+	peer := connId.Peer.Hash()
+	b := make([]byte, 0, len(peer)+12)
+	b = strconv.AppendUint(b, uint64(connId.Send), 10)
+	b = append(b, ':')
+	b = strconv.AppendUint(b, uint64(connId.Recv), 10)
+	b = append(b, ':')
+	b = append(b, peer...)
+	return string(b)
 }
 
 // Hash returns the key this connection is tracked under.

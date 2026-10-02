@@ -9,7 +9,6 @@ require (
 	github.com/stretchr/testify v1.9.0
 	github.com/valyala/fastrand v1.1.0
 	go.uber.org/mock v0.5.0
-	golang.org/x/crypto v0.31.0
 )
 
 require (
