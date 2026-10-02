@@ -1251,7 +1251,19 @@ func (c *connection) receiveInline(pkt *packet) bool {
 // libutp's utp_issue_deferred_acks, which its embedder calls once the socket
 // would block (utp.h:512-517).
 //
-// The event loop is woken only for what it alone can do: tear the
+// Except when the batch has left data to send. Then the whole pass is the
+// event loop's: one goroutine per connection does the sending, and the reader,
+// which serves every connection on the socket, does not. libutp sends from
+// inside utp_process_incoming, on its one thread; done here, the reader's
+// write system calls for every sender on the socket left it no time to read.
+// Measured with 1000 transfers on one socket pair: the sending side's reader
+// was busy 90-100% of the time handling 5,000 acknowledgements a second, they
+// waited in the kernel for seconds, RTT samples reached 17 s, and a transfer
+// whose last packets were lost waited out a retransmission timeout grown from
+// them past the test's two minutes. The acknowledgement this pass owes goes
+// out with the data, as it would have here.
+//
+// Otherwise the event loop is woken only for what it alone can do: tear the
 // connection down, or go on sending past one pass's worth.
 func (c *connection) endBatch() {
 	c.mu.Lock()
@@ -1260,10 +1272,32 @@ func (c *connection) endBatch() {
 		return
 	}
 	c.inBatch = false
+	if c.wantWrite && c.hasSendWork() {
+		c.kickLoop()
+		return
+	}
 	more := c.afterPass()
 	if more || c.state.stateType == ConnClosed {
 		c.kickLoop()
 	}
+}
+
+// hasSendWork reports whether processWrites has anything it might send: bytes
+// buffered or queued by the application, or packets a timeout marked for
+// resending.
+func (c *connection) hasSendWork() bool {
+	if c.state.stateType != ConnConnected {
+		return false
+	}
+	if len(c.pendingWrites) > 0 ||
+		(c.state.SendBuf != nil && c.state.SendBuf.Pending() > 0) {
+		return true
+	}
+	if c.state.SentPackets == nil {
+		return false
+	}
+	_, resend := c.state.SentPackets.NextNeedingResend()
+	return resend
 }
 
 // kickLoop wakes the event loop from another goroutine, accounting for the
