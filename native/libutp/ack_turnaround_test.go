@@ -42,10 +42,19 @@ import (
 // delivered a 100 Mb/s path's packets in clumps of about ten, and libutp's
 // loop, draining each clump at once, appeared to send 0.22-0.33
 // acknowledgements per data packet; paced, it sends 0.58-0.62.
+//
+// The relay runs in a process of its own (relay_process_test.go). Spinning in
+// this one, it kept the Go runtime awake, and a runtime with a goroutine
+// running wakes the socket's reader sooner than an idle one: our receiver's
+// median was 80 us with the relay here and is 90 us without it, against
+// libutp's 50 either way, and our 90th percentile, 240 us here, is libutp's
+// 1.1 ms without it. An application's runtime is not kept awake for it.
 func TestAckTurnaround(t *testing.T) {
 	if testing.Short() {
 		t.Skip("not a -short test")
 	}
+	defer func(was bool) { relayInOwnProcess = was }(relayInOwnProcess)
+	relayInOwnProcess = true
 	paths := []struct {
 		name string
 		cfg  pathConfig
@@ -130,10 +139,10 @@ func bestP50(runs []turnaroundStats) time.Duration {
 }
 
 // ackTurnaroundSlack is how much slower than libutp's our receiver's median
-// may be. Measured alone, ours is 40-60 us slower at 10 Mb/s, where both
-// acknowledge every packet, and 100-150 us slower at 100 Mb/s, where ours lets
-// an acknowledgement wait for up to four packets (connection.ackEvery) and
-// sends 0.25 per data packet to libutp's 0.60.
+// may be. With the relay in its own process, ours is about 40 us slower at
+// 10 Mb/s, where both acknowledge every packet, and about 90 us slower at 100
+// Mb/s, where ours lets an acknowledgement wait for up to four packets
+// (connection.ackEvery) and sends 0.22 per data packet to libutp's 0.47.
 const ackTurnaroundSlack = 500 * time.Microsecond
 
 type turnaroundStats struct {

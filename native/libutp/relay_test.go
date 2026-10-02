@@ -93,6 +93,11 @@ type relayPath struct {
 	// delivered, when non-nil, records every datagram as it is written to
 	// its destination.
 	delivered *[]relayEvent
+
+	// child and name, for a relay in its own process: whom to ask for this
+	// path's counts, and which path this is.
+	child *relayChild
+	name  string
 }
 
 // parseRelayEvent reads the uTP header fields, and the selective ack if there
@@ -246,6 +251,9 @@ func (p *relayPath) deliver(done <-chan struct{}) {
 }
 
 func (p *relayPath) Stats() pathStats {
+	if p.child != nil {
+		return p.child.stats(p.name)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.stats
@@ -258,29 +266,58 @@ type relay struct {
 	done         chan struct{}
 	wg           sync.WaitGroup
 	closeOnce    sync.Once
+	// child, when not nil, is the process this relay runs in: see
+	// relayInOwnProcess. sideA, sideB and the paths' sockets are then the
+	// child's, and the paths here only receive what it recorded.
+	child *relayChild
 }
 
 // newRelay starts a relay between libutp at libPort and our socket at goPort.
 // toGo impairs what libutp sends; toLib what we send.
 func newRelay(t *testing.T, libPort, goPort uint16, toGo, toLib pathConfig, seed int64) *relay {
 	t.Helper()
-	listen := func() *net.UDPConn {
+	var r *relay
+	var err error
+	if relayInOwnProcess {
+		r, err = startRelayProcess(libPort, goPort, toGo, toLib, seed)
+	} else {
+		r, err = startRelay(libPort, goPort, toGo, toLib, seed, onNewRelay)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// startRelay is newRelay in this process. hook, if not nil, sees the relay
+// before it starts forwarding.
+func startRelay(libPort, goPort uint16, toGo, toLib pathConfig, seed int64, hook func(*relay)) (*relay, error) {
+	listen := func() (*net.UDPConn, error) {
 		c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 		if err != nil {
-			t.Fatal(err)
+			return nil, err
 		}
 		_ = c.SetReadBuffer(4 << 20)
 		_ = c.SetWriteBuffer(4 << 20)
-		return c
+		return c, nil
 	}
-	r := &relay{sideA: listen(), sideB: listen(), done: make(chan struct{})}
+	sideA, err := listen()
+	if err != nil {
+		return nil, err
+	}
+	sideB, err := listen()
+	if err != nil {
+		_ = sideA.Close()
+		return nil, err
+	}
+	r := &relay{sideA: sideA, sideB: sideB, done: make(chan struct{})}
 	r.toGo = &relayPath{cfg: toGo, out: r.sideB, dst: loopback(goPort),
 		rng: rand.New(rand.NewSource(seed)), wake: make(chan struct{}, 1)}
 	r.toLib = &relayPath{cfg: toLib, out: r.sideA, dst: loopback(libPort),
 		rng: rand.New(rand.NewSource(seed + 1)), wake: make(chan struct{}, 1)}
 
-	if onNewRelay != nil {
-		onNewRelay(r)
+	if hook != nil {
+		hook(r)
 	}
 	// A datagram is taken as arriving when the kernel received it, not when
 	// this goroutine woke to read it. On loopback that is the instant the
@@ -314,7 +351,7 @@ func newRelay(t *testing.T, libPort, goPort uint16, toGo, toLib pathConfig, seed
 	go pump(r.sideB, r.toLib)
 	go func() { defer r.wg.Done(); r.toGo.deliver(r.done) }()
 	go func() { defer r.wg.Done(); r.toLib.deliver(r.done) }()
-	return r
+	return r, nil
 }
 
 // onNewRelay, when set, sees every relay before it starts forwarding: a
@@ -322,15 +359,31 @@ func newRelay(t *testing.T, libPort, goPort uint16, toGo, toLib pathConfig, seed
 var onNewRelay func(*relay)
 
 // LibutpFacingPort is where libutp should send: the relay's side facing it.
-func (r *relay) LibutpFacingPort() uint16 { return uint16(r.sideA.LocalAddr().(*net.UDPAddr).Port) }
+func (r *relay) LibutpFacingPort() uint16 {
+	if r.child != nil {
+		return r.child.portA
+	}
+	return uint16(r.sideA.LocalAddr().(*net.UDPAddr).Port)
+}
 
 // GoFacingAddr is where our socket should send.
-func (r *relay) GoFacingAddr() *net.UDPAddr { return r.sideB.LocalAddr().(*net.UDPAddr) }
+func (r *relay) GoFacingAddr() *net.UDPAddr {
+	if r.child != nil {
+		return loopback(r.child.portB)
+	}
+	return r.sideB.LocalAddr().(*net.UDPAddr)
+}
 
 // Close stops the relay once everything in flight has been read, and returns
 // when its goroutines have: what they recorded (relayPath.delivered, trace)
 // may be read after it. Closing again does nothing.
-func (r *relay) Close() { r.closeOnce.Do(r.close) }
+func (r *relay) Close() {
+	if r.child != nil {
+		r.closeOnce.Do(r.child.close)
+		return
+	}
+	r.closeOnce.Do(r.close)
+}
 
 func (r *relay) close() {
 	// Let what is already on its way in be read first. A test ends the

@@ -4460,12 +4460,11 @@ application writes, teardown -- and, below, sending.
 ### What it changed, measured
 
 - **Acknowledgement latency: closer, not equal.** The hand-offs were not
-  where the time went; the move alone left the median where it was. What
-  followed, measured with the relay timestamping acknowledgements in the
-  kernel (below), at 10 Mb/s from libutp: our receiver's median went from
-  90 us to 80 against libutp's 50, and its 90th percentile is 240 us
-  against libutp's 870-1,110. See "Acknowledgement latency: what is left",
-  below.
+  where the time went; the move alone left the median where it was. With
+  what followed, and measured with the relay in its own process (below),
+  at 10 Mb/s from libutp: our receiver's median is 90 us against libutp's
+  50, and the 90th percentile is 1.1 ms for both. See "Acknowledgement
+  latency: what is left", below.
 - **Acknowledgements per batch: libutp's exactly.** A run of datagrams the
   reader takes together draws one acknowledgement, from a batched read on a
   real socket or from a Conn that says what it has queued
@@ -4487,40 +4486,52 @@ application writes, teardown -- and, below, sending.
 ### Acknowledgement latency: what is left
 
 `TestAckTurnaround` times each data packet from its delivery by the relay to
-the first acknowledgement covering it. The relay used to timestamp an
-acknowledgement when its own goroutine woke to read it, which put the relay's
-wake-up into every figure, and not equally: it shares the Go runtime with this
-library's receiver, not with libutp's thread. It now takes the kernel's
-receive timestamp (`SO_TIMESTAMPNS`; `relay_rxts_linux_test.go`). With that,
-at 10 Mb/s, 45 runs each, interleaved:
+the first acknowledgement covering it. Two things about the relay used to
+favour one receiver over the other, and both are gone:
 
-| pair | median | 90th percentile |
-|---|---|---|
-| libutp -> libutp | 50 us | 870 us |
-| go -> libutp | 50 us | 1,110 us |
-| libutp -> go, before | 90 us | 240 us |
-| libutp -> go, now | 80 us | 240 us |
-| go -> go | 70 us | 180 us |
+- It timestamped an acknowledgement when its own goroutine woke to read it,
+  which put the relay's wake-up into every figure. It now takes the kernel's
+  receive timestamp (`SO_TIMESTAMPNS`; `relay_rxts_linux_test.go`).
+- It ran in the test's process, spinning before each datagram was due, in
+  the same Go runtime as this library's receiver -- and a runtime with a
+  goroutine running wakes the socket's reader sooner than an idle one. That
+  flattered our receiver: its median was 80 us and its 90th percentile 240
+  us with the relay there, against 90 us and 1.1 ms with the relay in a
+  process of its own (`relay_process_test.go`), where it now runs. libutp's
+  receiver, a thread of its own, measured the same either way.
 
-Our sender adds nothing: libutp's receiver answers it as fast as its own. The
-30 us is our receiver, and it was taken apart inside the receiver:
+At 10 Mb/s, both acknowledging every packet, 45 runs each, the medians of
+the runs' medians and 90th percentiles:
 
-- **Handling, cold.** The reader wakes once every 1.1 ms with the rest of
-  the process run in between, so it handles each packet with cold caches,
-  and what costs then is how much code and memory a packet touches, not how
-  many instructions it runs. `BenchmarkReceivePathCold` evicts 4 MB before
-  each packet and spaces them as at 10 Mb/s: 11.4 us to the
-  acknowledgement's write, from 13.6-16.0 before the cuts below. Warm, it is
-  1.9 us (`BenchmarkReceivePath`).
-- **The wake.** Go's network poller wakes the reader; libutp's embedder is
-  a thread blocked in `select`. In a quiet process the poller wakes it in
-  13-15 us. A blocking read on a locked thread was tried and was slower
-  (67-95 us), and so was `ppoll`.
-- **The harness.** The relay spins in the same process so that it delivers
-  on time, and that costs the Go receiver more than libutp's thread. With
-  the relay delivering on timers instead, every pair is slower, and our
-  receiver's median is 90 us against libutp's 70 (15 runs each): 20 us
-  apart rather than 30.
+| pair | median | 90th percentile | median, before the cuts below |
+|---|---|---|---|
+| libutp -> libutp | 50 us | 1.16 ms | 50 us |
+| go -> libutp | 50 us | 1.11 ms | 50 us |
+| libutp -> go | 90 us | 1.12 ms | 100 us |
+| go -> go | 90 us | 0.88 ms | 100 us |
+
+The cuts' runs were interleaved with the commit before them, the relay in
+its own process for both: libutp -> go averaged 91.1 us against 98.2, go ->
+go 90.2 against 97.3, and libutp's rows did not move.
+
+Our sender adds nothing: libutp's receiver answers it as fast as its own.
+The 40 us is our receiver, taken apart inside it -- from the kernel's
+arrival timestamp to just before the acknowledgement's sendto, 45-55 us in
+libutp's thread and 79-94 us here:
+
+- **The wake, most of it.** Go's network poller wakes the socket's reader;
+  libutp's embedder is a thread blocked in `select`. Isolated on this
+  machine, with only a sender in another process, the C thread sees a
+  datagram 72-79 us after the kernel stamped it and a goroutine on the
+  network poller 89-98 us. A reader blocked in `poll` on its own thread was
+  tried, twice now -- with the relay in the process and without -- and was
+  no faster; neither was a different GOMAXPROCS.
+- **Handling, cold, about 10 us.** The reader wakes once every 1.1 ms with
+  its caches cold, and what costs then is how much code and memory a packet
+  touches. `BenchmarkReceivePathCold` evicts 4 MB before each packet and
+  spaces them as at 10 Mb/s: 11.4 us to the acknowledgement's write, from
+  13.6-16.0 before the cuts below. Warm, it is 1.9 us
+  (`BenchmarkReceivePath`).
 
 The cuts, each with no effect on what is sent: an acknowledgement that names
 nothing new and carries no selective ack takes only the delay sample libutp
