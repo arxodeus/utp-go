@@ -279,6 +279,9 @@ type connection struct {
 	// readsTerminated records that the single end-of-stream marker has been
 	// handed to the reader. Readers block on c.reads until they see it.
 	readsTerminated bool
+	// readsTruncated records that teardown dropped received bytes the reader
+	// had not been given. See readEndErr.
+	readsTruncated bool
 
 	// abandoned is closed when the consumer closes the stream. It is the one
 	// thing that distinguishes "the reader is behind" from "there is no reader
@@ -685,7 +688,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	// would wait for a marker that no one was left to send.
 	defer func() {
 		if c.terminalErr.Load() == nil {
-			c.terminalErr.Store(&terminalError{err: c.state.Err})
+			c.terminalErr.Store(&terminalError{err: c.readEndErr()})
 		}
 		close(c.reads)
 	}()
@@ -2006,10 +2009,12 @@ func (c *connection) drainReadsForTeardown() {
 		select {
 		case c.reads <- &readOrWriteResult{Data: buf, Len: n}:
 		case <-c.ctx.Done():
+			c.readsTruncated = true
 			return
 		case <-c.abandoned:
 			c.logger.Debug("stream closed by its consumer; dropping undelivered received bytes",
 				"bytes", n)
+			c.readsTruncated = true
 			return
 		}
 	}
@@ -2103,8 +2108,8 @@ func (c *connection) deliverTerminalRead() {
 	c.readsTerminated = true
 	// A clean end-of-stream reports no error, matching io.ReadAll: ReadToEOF
 	// reads to EOF by definition, so reaching it is success. Only an abnormal
-	// close (RESET, idle timeout) carries an error.
-	err := c.state.Err
+	// close (RESET, idle timeout) carries an error. See readEndErr.
+	err := c.readEndErr()
 	c.logger.Debug("read eof...", "err", err)
 
 	// Published before delivery is attempted, so the reason the stream ended
@@ -2127,6 +2132,36 @@ func (c *connection) deliverTerminalRead() {
 		c.readsTerminated = false // let a later pass deliver it if room appears
 		c.logger.Debug("read queue full at end of stream; deferring the marker", "err", err)
 	}
+}
+
+// readEndErr is what the reader is told when the stream ends: the error that
+// ended the connection, or nil for a clean end -- and a clean end means the
+// reader has been given everything the peer sent, up to its FIN.
+//
+// A connection that ended without error but short of that reported nil too.
+// The case that showed it: the consumer closes the stream while bytes are
+// still on their way to its reader, teardown drops them (they are owed to
+// nobody), and a ReadToEOF still running returned the bytes it had so far
+// with a nil error -- a truncated transfer reported as a complete one.
+// TestDataValidWhenResendingSynStateResponse saw it about once in 20 runs
+// under -race, before this change as after. It is ErrReadClosed now: this end
+// closed before it had read everything.
+func (c *connection) readEndErr() error {
+	if c.state.Err != nil {
+		return c.state.Err
+	}
+	if c.readsTruncated || !c.receivedThroughFin() {
+		return ErrReadClosed
+	}
+	return nil
+}
+
+// receivedThroughFin reports whether every byte the peer sent before its FIN
+// has arrived. eof() asks the same of a connection still open.
+func (c *connection) receivedThroughFin() bool {
+	st := c.state
+	return st.closing != nil && st.closing.RemoteFin != nil && st.RecvBuf != nil &&
+		st.RecvBuf.AckNum() == *st.closing.RemoteFin
 }
 
 // terminalError boxes the end-of-stream error so it can be stored atomically,

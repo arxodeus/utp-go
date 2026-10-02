@@ -334,6 +334,14 @@ func TestCloseSucceedsIfOnlyFinAckDropped(t *testing.T) {
 		t.Error("The send stream timeout on close(), not fast enough")
 	}
 
+	// The reader has to finish before its stream is closed: closing it first
+	// drops whatever has not reached it yet, which is not what this checks.
+	select {
+	case <-recvComplete:
+	case <-time.After(expectedIdleTimeout * 2):
+		t.Error("the receiver did not finish reading")
+	}
+
 	// Try to close receive stream
 	recvCloseDone := make(chan struct{})
 	go func() {
@@ -434,6 +442,14 @@ func TestDataValidWhenResendingSynStateResponse(t *testing.T) {
 	case <-acceptorCloseDone:
 	case <-time.After(expectedIdleTimeout * 2):
 		t.Error("The send stream timeout on close(), not fast enough")
+	}
+
+	// The reader has to finish before its stream is closed: closing it first
+	// drops whatever has not reached it yet, which is not what this checks.
+	select {
+	case <-recvComplete:
+	case <-time.After(expectedIdleTimeout * 2):
+		t.Error("the receiver did not finish reading")
 	}
 
 	// Try to close receive stream

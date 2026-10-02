@@ -456,3 +456,61 @@ func TestCloseReturnsPromptly(t *testing.T) {
 	}
 	<-readDone
 }
+
+// A read that ends without error has everything the peer sent.
+//
+// The consumer here closes its stream part way through a transfer and then
+// reads what reached it. Teardown drops the bytes still on their way, since
+// they are owed to nobody, and ReadToEOF used to report the end of that
+// truncated stream as a clean one: a nil error and short data. It reports
+// ErrReadClosed now.
+func TestReadAfterLocalCloseIsNotACleanEnd(t *testing.T) {
+	aLink, aCid, bLink, bCid := buildConnectedPair()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	sender := utp.WithSocket(ctx, aLink, quietLogger())
+	defer sender.Close()
+	receiver := utp.WithSocket(ctx, bLink, quietLogger())
+	defer receiver.Close()
+
+	cfg := utp.NewConnectionConfig()
+	accepted := make(chan *utp.UtpStream, 1)
+	go func() {
+		s, err := receiver.AcceptWithCid(ctx, bCid, cfg)
+		if err != nil {
+			t.Errorf("accept: %v", err)
+		}
+		accepted <- s
+	}()
+	send, err := sender.ConnectWithCid(ctx, aCid, cfg)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	recv := <-accepted
+	if recv == nil {
+		t.FailNow()
+	}
+
+	data := bytes.Repeat([]byte("0123456789abcdef"), 4<<20/16)
+	go func() { _, _ = send.Write(ctx, data) }()
+
+	first := make([]byte, 64*1024)
+	n, err := recv.Read(ctx, first)
+	if err != nil {
+		t.Fatalf("first read: %v", err)
+	}
+	recv.Close()
+	// Long enough for the connection to tear down with the transfer unfinished.
+	time.Sleep(2 * time.Second)
+
+	var rest []byte
+	m, err := recv.ReadToEOF(ctx, &rest)
+	got := n + m
+	t.Logf("read %d of %d bytes; the read ended with %v", got, len(data), err)
+	if err == nil && got != len(data) {
+		t.Fatalf("the read ended cleanly with %d of %d bytes", got, len(data))
+	}
+	if got == len(data) {
+		t.Skip("everything arrived before the close; this run did not test a truncated end")
+	}
+}
