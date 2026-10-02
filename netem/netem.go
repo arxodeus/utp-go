@@ -267,12 +267,15 @@ func (e *Endpoint) ReadFrom(b []byte) (int, utp.ConnectionPeer, error) {
 	}
 }
 
-// Queued reports how many datagrams ReadFrom would return without waiting,
-// and satisfies utp_go.QueuedReader: a socket reads them all before it
-// acknowledges, as it does from a real socket's batched read.
-func (e *Endpoint) Queued() int {
-	return len(e.inbox)
-}
+// Endpoint does not implement utp_go.QueuedReader, so a socket on it treats
+// each datagram as a read batch of its own and acknowledges it alone (unless
+// the acknowledgement-rate hold defers it). It did, briefly, and the
+// acknowledgements it then merged starved the MTU search of the duplicate
+// acknowledgements it infers a refused probe from:
+// TestDontFragmentBringsTheSearchWithinThePath failed 9 runs in 10. That is a
+// limit of libutp's inference, which a real socket's batched reads meet too
+// (KNOWN-LIMITATIONS.md); this emulator keeps the behaviour its measurements
+// were taken with.
 
 // WriteTo sends a packet towards dst, and satisfies utp_go.Conn.
 //

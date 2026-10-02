@@ -1185,9 +1185,12 @@ before any of it is delivered, which is the starting position libutp's embedder
 gives it. Under `-race` the numbers improved and still failed — 9 to 14 acks
 for a batch of 16.
 
-The bound was wrong, not the harness. Our packets cross three goroutines
-between the socket and the connection's event loop, so how many land in one
-pass depends on whether they arrive faster than the connection drains them.
+The bound was wrong, not the harness. Our packets crossed three goroutines
+between the socket and the connection's event loop, so how many landed in one
+pass depended on whether they arrived faster than the connection drained them.
+(They no longer cross any: the socket's reader handles them, and the test now
+asserts libutp's exact count -- one acknowledgement per batch, in 20 runs out
+of 20 under -race. See "Packets are handled on the socket's reader".)
 When they do not, each is acknowledged alone — which is correct, and is what
 libutp does too when its embedder reads one datagram per batch. There is no
 fixed ratio to assert, and asserting one meant asserting a property of the Go
@@ -4441,4 +4444,92 @@ Checked and found not to apply:
   7.62-7.68 Mbps with no retransmission
   (`TestDuplicatedPacketsCauseNoRetransmission`), against libutp's
   6.65-7.48.
+
+## Packets are handled on the socket's reader
+
+A datagram used to cross three goroutines before its acknowledgement left:
+the read loop, the socket's event loop, the connection's event loop, and a
+write loop. libutp's embedder calls `utp_process_udp` from its read loop and
+the acknowledgement leaves from the same call stack. The socket's reader now
+routes each datagram and hands it to its connection under the connection's
+lock; once the read batch is dispatched, each connection it touched
+acknowledges what it brought (`connection.endBatch`, libutp's
+`utp_issue_deferred_acks`). The connection's goroutine stays for timers,
+application writes, teardown -- and, below, sending.
+
+### What it changed, measured
+
+- **Acknowledgement latency: not measurably.** At 10 Mb/s from libutp the
+  median turnaround is 110-140 us, as it was (100-120 us), against libutp's
+  70-80 us in the same runs (`TestAckTurnaround`). The hand-offs were not
+  where the time went. Timed inside the receiver, read to the
+  acknowledgement's sendto returning is 35-45 us, about 20 us of it the
+  sendto itself, which on loopback delivers into the peer; the rest is the
+  kernel and Go's network poller waking the reader. Routing a packet cost 27
+  us of it until the connection key stopped being a SHA3 hash (`genHash`); it
+  is 15-17 us now, mostly cold code on a reader that wakes every 1.1 ms.
+- **Acknowledgements per batch: libutp's exactly.** A run of datagrams the
+  reader takes together draws one acknowledgement, from a batched read on a
+  real socket or from a Conn that says what it has queued
+  (`QueuedReader`). The conformance test that could only assert "at most one
+  per packet" now asserts libutp's count. Over real sockets the asymmetric
+  path carries fewer acknowledgements for the same time: 1,335-1,439 against
+  1,456-1,461 at 160 kb/s, 2,323-2,392 against 2,564-2,612 at 100 Mb/s.
+- **1000 transfers on one socket pair** (`TestManyConcurrentTransfers`): 0
+  of 8 runs past the two-minute budget, against 2 of 8 on the commit before;
+  largest RTT sample 1.0-3.0 s in seven runs and 14.5 s in one, against
+  3.7-18 s.
+
+### Three things it took to get there
+
+- **The reader must not send bulk data.** It did at first, as libutp does
+  from inside `utp_process_incoming`: with 1000 senders on the socket, its
+  write system calls kept it 90-100% busy handling 5,000 acknowledgements a
+  second, they waited in the kernel for seconds, RTT samples reached 17 s and
+  a transfer waited out a retransmission timeout grown from them. A batch
+  that leaves data to send now wakes the connection's goroutine, which sends
+  it and the acknowledgement together.
+- **Nothing may wait under the dispatch lock.** A new connection's setup
+  used to be awaited with it held -- once per connection, a goroutine
+  scheduling latency in front of every packet on the socket. The
+  connection's own lock is now taken at creation and released by its
+  goroutine after setup.
+- **Conn.WriteTo must not wait for the peer.** The reader writes, so two
+  sockets whose transports block until the other side reads deadlock. UDP
+  does not, and libutp's sendto callback has the same requirement; it is
+  documented on `Conn`, and the integration tests' mock link now drops when
+  full instead of blocking.
+
+### Open: retransmission timeouts under overload
+
+The two stalls on the commit before were the same as the one this work
+first found: a few packets before the FIN were lost, and the sender's
+retransmission timeout, grown from RTT samples inflated while 1000
+connections started at once, had not fired by the time the test gave up --
+the largest timeouts in those runs were 1 min 34 s and 1 min 59 s. libutp's timeout has no upper bound and
+neither, by default, has this one (DEVIATIONS.md). `ConnectionConfig.MaxTimeout`
+bounds it. Whether the default should is a decision, not a fix, and is not
+made here.
+
+### Open: the MTU search and batched acknowledgements
+
+libutp concludes that an MTU probe was refused on the third duplicate
+acknowledgement of the packet before it, and sets the duplicate count from
+the selective ack (`duplicate_ack = count`, `utp_internal.cpp:1612`); the test
+is equality with three. An acknowledgement that covers a batch can name more
+than three later packets at once, so the count passes three without equalling
+it, and the conclusion never comes. This library does the same. netem
+briefly implemented `QueuedReader`, and `TestDontFragmentBringsTheSearchWithinThePath`
+then failed 9 runs in 10 (5 probes inferred lost without it, none with it);
+netem no longer batches, so its measurements stay comparable. A real socket's
+batched reads meet the same limit, as they did before this work.
+
+### API changes
+
+- `ConnectionId.Hash()` returns `send:recv:peer` as text, not 40 hex
+  characters of a SHA3 hash. Equality is all a key needs, and this form is
+  exactly injective.
+- `QueuedReader` is new and optional.
+- `MetricsObserver` runs with the connection's lock held, from whichever
+  goroutine is running the connection; it must not block.
 

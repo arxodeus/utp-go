@@ -183,8 +183,8 @@ consequence, or equivalent on the wire.
   against 7.3 s over 64 kb/s, level with about half the acknowledgements at
   320 kb/s and 20 Mb/s,
   and 1.43 s against libutp's best of 1.51 s for 16 MB at 100 Mb/s. The cost:
-  at 100 Mb/s the median acknowledgement leaves 310-320 us after its packet
-  arrives against libutp's 170-210 us.
+  at 100 Mb/s the median acknowledgement leaves 290-320 us after its packet
+  arrives against libutp's 160-210 us.
 - *The base delay is the lowest over two minutes, not about thirteen.* A
   clock drift's phantom queue grows with the window, measured linear, so
   libutp's is 6.5 times ours. The cost -- a queue that stands for two
@@ -194,11 +194,18 @@ consequence, or equivalent on the wire.
 
 **Worse than libutp, accepted.** Each has a stated reason for being carried.
 
-- *An acknowledgement leaves 40-60 us later than libutp's:* at 10 Mb/s, where
+- *An acknowledgement leaves 30-60 us later than libutp's:* at 10 Mb/s, where
   both acknowledge every packet, the median from a data packet reaching the
-  receiver's socket to its acknowledgement leaving is 110-120 us here and
-  60-70 us in libutp. The packet crosses three goroutines on the way in; libutp
-  handles it on the thread that read it. No throughput cost has been measured.
+  receiver's socket to its acknowledgement leaving is 110-140 us here and
+  70-80 us in libutp, in the same runs. The packet is now handled on the
+  socket's reader goroutine, which sends the acknowledgement itself, as
+  libutp's embedder does -- and that did not narrow the gap, which was 40-60
+  us when the packet crossed three goroutines first. Inside the receiver, read
+  to the acknowledgement's sendto returning is 35-45 us, about 20 us of it the
+  sendto; the rest of the difference is the kernel and Go's network poller
+  waking the reader, which libutp's thread does not pay. No throughput cost
+  has been measured. See KNOWN-LIMITATIONS.md, "Packets are handled on the
+  socket's reader".
 
 ## Intentional deviations
 
@@ -578,8 +585,8 @@ The cost is the wait. At 100 Mb/s the median acknowledgement leaves 310-320 us
 after its packet reaches our socket against libutp's 170-210 us, with the 90th
 percentile level (0.83-1.02 ms against 1.12-1.26 ms) (`TestAckTurnaround`).
 At 10 Mb/s, where packets are 1.1 ms apart and nothing waits, both acknowledge
-every packet, and the 40-60 us between the medians is the goroutine hand-offs
-listed under "Worse than libutp, accepted".
+every packet, and the 30-60 us between the medians is listed under "Worse than
+libutp, accepted".
 
 *An earlier version of this entry* reported libutp at 0.22-0.33
 acknowledgements per data packet at 100 Mb/s and 0.57 at 20 Mb/s. Those were
