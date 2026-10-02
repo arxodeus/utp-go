@@ -267,7 +267,7 @@ type connection struct {
 	// armed tracks which sequence numbers this connection currently has
 	// scheduled. It exists so acking a range can disarm only this
 	// connection's timers instead of scanning a wheel shared by every
-	// connection on the socket. Touched only from the event-loop goroutine.
+	// connection on the socket. Guarded by mu.
 	armed          map[uint16]struct{}
 	unackTimeoutCh chan *packet
 	reads          chan *readOrWriteResult
@@ -294,7 +294,7 @@ type connection struct {
 	// peerActivity counts packets received from the peer. It exists for
 	// UtpStream.Close, which needs to tell a connection that is still
 	// flushing from one whose peer has stopped answering, and is read from
-	// outside this goroutine -- hence the atomic.
+	// without mu -- hence the atomic.
 	peerActivity atomic.Uint64
 
 	// closeRequested records that the application asked to close the
@@ -343,11 +343,11 @@ type connection struct {
 	finAck *packet
 
 	// terminalErr carries the error that ended the stream to a reader that was
-	// not handed the marker directly. Written by the event-loop goroutine and
-	// read by the stream's reader, so it is atomic.
+	// not handed the marker directly. Written under mu and read by the
+	// stream's reader without it, so it is atomic.
 	terminalErr atomic.Pointer[terminalError]
 
-	// Counters, read and written only from the event-loop goroutine.
+	// Counters, guarded by mu.
 	packetsSent          uint64
 	bytesSent            uint64
 	packetsRetransmitted uint64
@@ -1985,9 +1985,9 @@ func (c *connection) drainReadsForTeardown() {
 // sampleMetrics hands a snapshot to the configured observer, throttled to
 // MetricsInterval.
 //
-// It runs on the event-loop goroutine, which is the whole point: the
-// connection's state is owned by that goroutine, so reading it from anywhere
-// else would be a race.
+// It runs with mu held -- on the event loop, or on the socket's reader in
+// endBatch -- which is the whole point: reading the connection's state
+// without it would be a race.
 func (c *connection) sampleMetrics(now time.Time, force bool) {
 	if c.config.Metrics == nil {
 		return
