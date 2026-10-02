@@ -4475,6 +4475,12 @@ application writes, teardown -- and, below, sending.
   per packet" now asserts libutp's count. Over real sockets the asymmetric
   path carries fewer acknowledgements for the same time: 1,335-1,439 against
   1,456-1,461 at 160 kb/s, 2,323-2,392 against 2,564-2,612 at 100 Mb/s.
+- **Throughput: unchanged.** The netem benchmark suite, 5 repeats of each
+  of 16 profiles, against the commit before: within noise everywhere. The
+  three profiles more than 1.5% apart were run again 20 times each: LEDBAT
+  LAN 88.03 against 88.29 Mbps, LEDBAT at 5% loss 2.52 against 2.49, LEDBAT++
+  LAN 73.15 against 72.19 -- medians, with the slowest runs now 83.96 and
+  70.45 against 79.78 and 61.88.
 - **1000 transfers on one socket pair** (`TestManyConcurrentTransfers`): 0
   of 8 runs past the two-minute budget, against 2 of 8 on the commit before;
   largest RTT sample 1.0-3.0 s in seven runs and 14.5 s in one, against
