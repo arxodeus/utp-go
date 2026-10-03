@@ -40,6 +40,7 @@ Two things to be aware of before depending on this:
 go test ./...                                  # full suite
 go test ./netem/                               # the network harness gate
 go test ./native/libutp/                       # interop against real libutp (needs cgo)
+(cd integration/goutp && go test ./...)        # interop against go-utp's pure Go engine
 go test -race ./...                            # race detector
 scripts/check-libutp-reference.sh              # verify the pinned libutp reference
 ```
