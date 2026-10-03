@@ -4481,9 +4481,10 @@ application writes, teardown -- and, below, sending.
 - **1000 transfers on one socket pair** (`TestManyConcurrentTransfers`): 0
   of 8 runs past the two-minute budget, against 2 of 8 on the commit before;
   largest RTT sample 1.0-3.0 s in seven runs and 14.5 s in one, against
-  3.7-18 s. *Since then* the same code has run past the budget in 4 of 15
-  runs on this machine, as has the code with batched reads (below); not
-  yet explained.
+  3.7-18 s. *Since then* the same code ran past the budget in 4 of 15
+  runs on this machine, as did the code with batched reads (below). The
+  cause was the loss probe: see "Retransmission timeouts under overload",
+  below. With it fixed, 15 runs of 15 finished, in 6.4-15.2 s.
 
 ### Acknowledgement latency: what is left
 
@@ -4586,6 +4587,21 @@ is the rule here, so there is still no default cap;
 `ConnectionConfig.MaxTimeout` sets one. What this work changed is the cause
 it can control: the RTT tail inflated by the library's own processing, now
 1.0-3.0 s at worst in seven runs of eight against 3.7-18 s.
+
+*That was not the whole cause.* When the test later ran past its budget in 4
+runs of 15, each transfer still going at 90 seconds was traced packet by
+packet. None was waiting on a timeout. Each had lost a burst at the tail of
+its window -- 13 and 24 consecutive packets, with one packet after them,
+too few selective acks for fast retransmission -- and was repairing it with
+the loss probe, one packet per probe timeout: one every 4.3 seconds with a
+smoothed round trip of 2.1 seconds. Each probe's acknowledgement retired the
+packet it resent, which restarted the retransmission timeout, so the timeout
+that would have marked the whole burst lost never came. libutp, which has no
+probe, would have recovered after its timeout. Now the probe's
+acknowledgement starts that recovery itself (DEVIATIONS.md, "A loss probe
+resends before the retransmission timeout"): 15 runs of 15 in 6.4-15.2 s,
+median 7.8 s, where before the fix an instrumented copy of the test took
+6.6 s to 3 min 20 s, typically 30-40 s.
 
 ### ~~The MTU search and batched acknowledgements~~ -- fixed, better than libutp
 

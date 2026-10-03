@@ -1205,9 +1205,10 @@ for a probe timeout, max(2 x SRTT, 10 ms), it resends the *oldest*
 outstanding packet, the one known to be missing, rather than the newest. One
 probe per episode, as RFC 8985 allows: another only after the cumulative
 acknowledgement moves, none once a retransmission timeout has fired, and none
-when the timeout is already due. It does not move the timeout's deadline or
-touch the congestion window. `onLossProbe` in `conn.go`;
-`ConnectionMetrics.LossProbes` counts them.
+when the timeout is already due. Sending it does not move the timeout's
+deadline or touch the congestion window; what its acknowledgement shows is
+below. `onLossProbe` in `conn.go`; `ConnectionMetrics.LossProbes` counts
+them.
 
 **Why.** On a 1 ms LAN path with a 64 KB queue, about 7% of 4 MB transfers
 took 1.4 s instead of 0.4 s, in every pairing of this library and libutp.
@@ -1243,6 +1244,30 @@ blackholed connection, one extra retransmission before the first timeout
 (`TestLossProbeSendsOnePacketBeforeTheTimeout`). The conformance tests that
 pin libutp's timeout schedule switch it off, since that schedule is what they
 measure.
+
+**After the probe is answered.** The acknowledgement that retires the packet
+the probe resent arrives a round trip after it; any packet sent before the
+probe and still unacknowledged then is lost -- RFC 8985's other half, RACK.
+It is charged as one detected loss (the window decays; it does not
+collapse), and those packets are resent one per acknowledgement, libutp's
+fast-timeout retry, up to the first packet sent after the probe. That
+acknowledgement does not restart the timeout. As first written, the probe
+did none of this: after a burst lost at the tail of a window, with too few
+packets past it for fast retransmission, each probe repaired one packet and
+its acknowledgement restarted the timeout, so the burst came back one packet
+per probe timeout and the timeout that would have ended it never fired.
+Measured on the virtual clock, 24 packets lost at a 50 ms round trip:
+5.3 s, where libutp, through its driver in the same scenario, takes 1.75 s;
+now 1.3 s (`TestTailBurstLossAgainstLibutp`). It was what made
+`TestManyConcurrentTransfers` run past its budget in about one run in four
+(KNOWN-LIMITATIONS.md, "Retransmission timeouts under overload"). The
+emulated-network benchmarks, five runs of every profile against the commit
+before: within 1.5% everywhere but four profiles, and at twenty runs those
+four are classic LEDBAT at 5% loss at 2.52 Mbps median before and after, and
+three LEDBAT++ profiles, where the change cannot run (no probe is sent under
+LEDBAT++), at -0.4%, -0.3% and -5.2%. The last, at 5% loss, is not
+distinguishable from noise (Mann-Whitney z = 1.89, ranges 0.48-0.64 and
+0.49-0.64 Mbps).
 
 ## An initiator can fast-retransmit from its first packet
 

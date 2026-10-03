@@ -343,6 +343,12 @@ type connection struct {
 	lossProbeSent   bool
 	lossProbeAckNum uint16
 	lossProbes      uint64
+	// lossProbeSeq and lossProbeAt are the packet the probe resent and when.
+	// probeRecovery is set while the packets the probe's acknowledgement
+	// showed lost are being resent: see probeAnswered.
+	lossProbeSeq  uint16
+	lossProbeAt   time.Time
+	probeRecovery bool
 
 	// finAck is the acknowledgement sent for the peer's FIN, kept so the
 	// socket can send it again if the peer retransmits that FIN after this
@@ -2394,7 +2400,7 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 				return
 			}
 			c.retransmitCount++
-			c.fastTimeout = true
+			c.fastTimeout, c.probeRecovery = true, false
 			c.mtu.onProbeLost(now)
 			c.logger.Debug("MTU probe timed out",
 				"floor", c.mtu.floor, "ceiling", c.mtu.ceiling, "current", c.mtu.current)
@@ -2448,7 +2454,7 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 		// "every packet should be considered lost" (:1230-1237), and the
 		// oldest resent (:1249-1251).
 		c.state.SentPackets.MarkAllForResend()
-		c.fastTimeout = true
+		c.fastTimeout, c.probeRecovery = true, false
 		oldest, ok := c.state.SentPackets.OldestOutstanding()
 		if !ok {
 			return
@@ -2723,6 +2729,7 @@ func (c *connection) onLossProbe(now time.Time) {
 	}
 	c.lossProbeSent = true
 	c.lossProbes++
+	c.lossProbeSeq, c.lossProbeAt = oldest.seqNum, now
 	resent := c.resendSentPacket(oldest, now)
 	// transmit armed the packet's timer a whole timeout from now; the
 	// timeout itself is due where it was, and the probe must not move it.
@@ -2756,12 +2763,65 @@ func (c *connection) onFastTimeout(now time.Time) {
 	if !c.fastTimeout || c.state.stateType != ConnConnected || c.state.SentPackets == nil {
 		return
 	}
+	if c.probeRecovery {
+		c.resendProbedLosses(now)
+		return
+	}
 	oldest, ok := c.state.SentPackets.OldestOutstanding()
 	if !ok || oldest.seqNum != c.state.SentPackets.fastResendSeqNum {
 		c.fastTimeout = false
 		return
 	}
 	c.state.SentPackets.fastResendSeqNum++
+	c.resendSentPacket(oldest, now)
+}
+
+// probeAnswered reports whether this acknowledgement answered the loss probe
+// by showing packets lost, and if so starts resending them.
+//
+// The probe resends the oldest outstanding packet. When the acknowledgement
+// that retires it arrives, a round trip later, every packet sent before the
+// probe and still unacknowledged has had a probe timeout and a round trip to
+// be acknowledged and has not been: it is lost. RFC 8985 pairs the probe with
+// that rule (RACK: a packet sent before one that has been delivered is lost
+// once the reordering allowance has passed); without it the probe repaired one
+// hole per probe timeout. In the 1000-transfer stress test a burst of 13
+// consecutive packets lost at the tail of a window, with one packet after them
+// to raise a selective ack -- fast retransmission needs three -- came back one
+// every 4.3 seconds, and each repair restarted the retransmission timeout, so
+// libutp's recovery never began either.
+//
+// The packets are resent the way libutp resends them after its timeout: one
+// per acknowledgement, the fast-timeout retry (onFastTimeout), here stopping
+// at the first packet sent after the probe, whose fate is not yet known. The
+// loss is charged once, as a detected loss rather than a timeout: the window
+// decays and does not collapse.
+func (c *connection) probeAnswered(fullAcked *circularRangeInclusive, now time.Time) bool {
+	if !c.lossProbeSent || c.fastTimeout || fullAcked == nil || !fullAcked.Contains(c.lossProbeSeq) {
+		return false
+	}
+	sp := c.state.SentPackets
+	oldest, ok := sp.OldestOutstanding()
+	if !ok || !oldest.retransmission.Before(c.lossProbeAt) {
+		return false
+	}
+	_ = sp.OnLost(oldest.seqNum, true, now)
+	c.fastTimeout, c.probeRecovery = true, true
+	return true
+}
+
+// resendProbedLosses is onFastTimeout for losses the probe showed: resend the
+// oldest outstanding packet if it was last sent before the probe.
+func (c *connection) resendProbedLosses(now time.Time) {
+	sp := c.state.SentPackets
+	oldest, ok := sp.OldestOutstanding()
+	if !ok || !oldest.retransmission.Before(c.lossProbeAt) {
+		c.fastTimeout, c.probeRecovery = false, false
+		return
+	}
+	if wrappingLessThan(sp.fastResendSeqNum, oldest.seqNum+1) {
+		sp.fastResendSeqNum = oldest.seqNum + 1
+	}
 	c.resendSentPacket(oldest, now)
 }
 
@@ -3594,6 +3654,7 @@ func (c *connection) processAck(
 	}
 
 	retired := c.disarmAcked(fullAcked)
+	recovering := c.probeAnswered(fullAcked, now)
 
 	// Restart the retransmission timeout, but only when this ack actually
 	// retired something.
@@ -3616,7 +3677,14 @@ func (c *connection) processAck(
 	// too. Here only the cumulative acknowledgement does. Adopting libutp's
 	// rule was measured and was slower -- see DEVIATIONS.md, "A selective
 	// ack does not restart the retransmission timeout".
-	if retired > 0 {
+	//
+	// Not when this is the loss probe's acknowledgement and it has shown
+	// other packets lost: probeAnswered has started resending them, and the
+	// timeout stays where it was, so the probe never makes recovery wait
+	// longer than libutp's timeout would. Restarted here, each probe that
+	// repaired one hole pushed the timeout back, and a burst came back one
+	// packet per probe timeout.
+	if retired > 0 && !recovering {
 		c.rtoDeadline = now.Add(c.state.SentPackets.Timeout())
 	}
 	for _, selectedAck := range selectedAcks {
