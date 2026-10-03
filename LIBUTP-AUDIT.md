@@ -126,7 +126,7 @@ libutp it was, and the tests named are what stands behind each verdict.
 | `send_keep_alive` | `keepAlivePacket` | Fixed (N2) |
 | `send_rst` | `utp_socket.go`, and a defensive branch in `conn.go` | Matched; the defensive branch is N3 |
 | `send_packet`: window accounting, ack refresh, probe eligibility, don't-fragment | `transmit`, `mtuSearch.eligibleProbe` | Matched, measured (MTU rows). The `seq_nr != 1` guard is libutp's "no probe" sentinel; ours is a flag: N/A |
-| data packets carry no extension (`:1080`) | ours carry a selective ack | Open (N13) |
+| data packets carry no extension (`:1080`) | `transmit`, `retransmit`, `resendSentPacket` | Fixed (N13): ours carried a selective ack on data, FIN and resent packets; now only `ST_STATE` does (`TestConformanceDataPacketCarriesNoSelectiveAck`) |
 
 ### 931-1328: `is_full`, `flush_packets`, `check_timeouts`, the MTU search
 
@@ -135,7 +135,7 @@ libutp it was, and the tests named are what stands behind each verdict.
 | `is_full` | window checks in `processWrites`, `finFits` | Matched; the packet cap was N1 |
 | `flush_packets`: the Nagle check (`:974-982`) | the hold in `processWrites` | Was absent (recorded as "No Nagle"); now matched for data, with `NoDelay` to turn it off. Our FIN is not held by it (DEVIATIONS.md, "Nagle: libutp's rule, with an opt-out") |
 | `check_timeouts`: MTU probe branch | `onTimeout` | Fixed (N4) |
-| `check_timeouts`: `CS_SYN_RECV` destroyed at the first timeout | acceptor ignores it | Open (N5) |
+| `check_timeouts`: `CS_SYN_RECV` destroyed at the first timeout | acceptor ignores it | No difference (N5): the branch cannot run in libutp, as nothing arms `rto_timeout` in `CS_SYN_RECV` |
 | `check_timeouts`: give up at the fifth timeout, two for a SYN | `maxConsecutiveTimeouts`, `MaxConnAttempts` | Matched; the SYN count is a deviation ("`MaxConnAttempts` counts transmissions") |
 | `check_timeouts`: timeout doubling, `fast_timeout`, `need_resend` | `onTimeout` | Matched, measured (`TestConformanceRetransmissionTimeoutComputation`); no cap by default (N11) |
 | `check_timeouts`: keep-alive only before our FIN | `keepAlive` | Matched |
@@ -185,7 +185,7 @@ libutp it was, and the tests named are what stands behind each verdict.
 | libutp | Ours | Verdict |
 | --- | --- | --- |
 | `utp_register_recv_packet` | none | N/A (statistics) |
-| `get_packet_size`: MTU less the 20-byte header | `mtuSearch.payloadSize`: less 26, room for a selective ack | Open (N13) |
+| `get_packet_size`: MTU less the 20-byte header | `mtuSearch.payloadSize`: less the same 20 (`mtuHeaderOverhead`) | Fixed (N13): ours reserved 26, room for a selective ack data packets no longer carry |
 
 ### 1767-2478: `utp_process_incoming`
 

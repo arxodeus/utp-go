@@ -27,10 +27,12 @@ do. See:
 
 Two things to be aware of before depending on this:
 
-- **Interoperability with real libutp is tested** -- see `native/libutp/`,
-  which vendors libutp at the pinned commit and transfers verified payloads
-  in both directions over real UDP sockets. What is *not* tested is a real
-  torrent transfer through `anacrolix/torrent`.
+- **Interoperability is tested against three other implementations** --
+  real libutp (`native/libutp/`, vendored at the pinned commit), go-utp's
+  pure Go port of it (`integration/goutp/`), and `anacrolix/torrent`
+  (`integration/anacrolix/`, a hash-verified torrent transfer) -- with
+  verified payloads in both directions, over real UDP sockets and over links
+  that lose, reorder and duplicate packets.
 - Every measurement in these documents is **on one machine**, over loopback or
   the in-process emulated network. Nothing has run over a real wide-area path.
 
