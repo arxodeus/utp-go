@@ -34,7 +34,9 @@ const (
 // open indefinitely while our data goes unacked.
 const maxConsecutiveTimeouts = 4
 
-const DefaultMaxIdleTimeout = 60 * time.Second
+// DefaultMaxIdleTimeout is zero: no idle timeout, as in libutp, which never
+// closes a connection for silence. See ConnectionConfig.MaxIdleTimeout.
+const DefaultMaxIdleTimeout = time.Duration(0)
 const DefaultWindowSize = 1024 * 1024
 const DefaultBufferSize = 1024 * 1024
 
@@ -98,9 +100,17 @@ func NewConnState(connected chan error) *ConnState {
 type ConnectionConfig struct {
 	MaxPacketSize   uint16
 	MaxConnAttempts int
-	MaxIdleTimeout  time.Duration
-	InitialTimeout  time.Duration
-	MinTimeout      time.Duration
+	// MaxIdleTimeout closes the connection with ErrTimedOut once nothing has
+	// arrived from the peer and nothing has been written for this long. Zero,
+	// the default, is no idle timeout, as in libutp: a connection whose peer
+	// vanished while nothing was in flight stays open until its application
+	// closes it, and one that a long outage interrupted resumes when the path
+	// comes back. Set it to reclaim connections to vanished peers without a
+	// timer of the application's own; a live peer sends a keep-alive every
+	// 29 seconds, so anything well above that never closes a live one.
+	MaxIdleTimeout time.Duration
+	InitialTimeout time.Duration
+	MinTimeout     time.Duration
 	// MaxTimeout caps the retransmission timeout and its backoff. Zero, the
 	// default, is no cap, as in libutp.
 	MaxTimeout  time.Duration
@@ -779,7 +789,14 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		c.state.SentPackets = sentPacketsHolder
 	}
 
-	idleTimer := c.timeSource().NewTimer(c.config.MaxIdleTimeout)
+	// No idle timeout unless one is configured: the timer is made stopped,
+	// as the probe timer below is, and never re-armed.
+	var idleTimer Timer
+	if c.config.MaxIdleTimeout > 0 {
+		idleTimer = c.timeSource().NewTimer(c.config.MaxIdleTimeout)
+	} else if idleTimer = c.timeSource().NewTimer(time.Hour); !idleTimer.Stop() {
+		<-idleTimer.C()
+	}
 	c.lastActivity = c.now()
 	defer idleTimer.Stop()
 

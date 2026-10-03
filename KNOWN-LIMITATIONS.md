@@ -4236,8 +4236,8 @@ risks making things worse.
   `TestTeardownRace` exists for this. It drives the four ways a connection can
   end — clean close, idle timeout, abandoned without reading, context cancelled
   mid-transfer — concurrently, with the sockets closed underneath while
-  connections are still winding down, and with `MaxIdleTimeout` cut to 400 ms
-  because at the 60 s default nothing reaches that path in bulk. It asserts
+  connections are still winding down, and with `MaxIdleTimeout` set to 400 ms
+  because by default there is no idle timeout and nothing reaches that path. It asserts
   that all four modes were actually taken, so it cannot quietly stop testing
   what it claims to.
 

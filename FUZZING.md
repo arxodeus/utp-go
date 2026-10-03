@@ -158,8 +158,8 @@ silently.
 - `TestTeardownRace` — the four ways a connection can end, concurrently: clean
   close, idle timeout, abandoned without reading, and context cancelled
   mid-transfer, with the sockets closed underneath while connections are still
-  winding down. `MaxIdleTimeout` is cut to 400 ms, because at the 60 s default
-  nothing reaches that path in bulk, and the test asserts every mode was
+  winding down. `MaxIdleTimeout` is set to 400 ms, because by default there is
+  no idle timeout and nothing would reach that path, and the test asserts every mode was
   actually taken so it cannot quietly stop testing what it claims to.
 
   It exists for one recorded observation: a data race seen once under

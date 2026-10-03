@@ -13,7 +13,9 @@ import (
 	utp "github.com/zen-eth/utp-go"
 )
 
-const expectedIdleTimeout = utp.DefaultMaxIdleTimeout
+// expectedIdleTimeout is what the tests that wait out an idle timeout set:
+// there is none by default, as in libutp.
+const expectedIdleTimeout = 60 * time.Second
 
 func TestCloseWhenWriteCompletes(t *testing.T) {
 	// Initialize logging
@@ -137,6 +139,7 @@ func TestCloseErrorsIfAllPacketsDropped(t *testing.T) {
 	handler := log.NewTerminalHandler(os.Stdout, true)
 	log.SetDefault(log.NewLogger(handler))
 	connConfig := utp.NewConnectionConfig()
+	connConfig.MaxIdleTimeout = expectedIdleTimeout
 
 	// Create connected socket pair
 	aLink, aCid, bLink, bCid := buildConnectedPair()
@@ -243,6 +246,7 @@ func TestCloseSucceedsIfOnlyFinAckDropped(t *testing.T) {
 	handler := log.NewTerminalHandler(os.Stdout, true)
 	log.SetDefault(log.NewLogger(handler))
 	connConfig := utp.NewConnectionConfig()
+	connConfig.MaxIdleTimeout = expectedIdleTimeout
 
 	// Build connected pair
 	sendLink, sendCid, recvLink, recvCid := buildConnectedPair()

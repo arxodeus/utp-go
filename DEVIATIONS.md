@@ -167,14 +167,6 @@ consequence, or equivalent on the wire.
 
 **A trade-off.** Better on one measure, worse on another.
 
-- *A connection whose peer falls silent is closed after `MaxIdleTimeout`:*
-  60 seconds by default. libutp never closes one: measured, a libutp
-  connection whose peer vanished was still open after 600 seconds, sending a
-  keep-alive into the silence every 29.
-  That is the gain. The cost: an outage longer than the timeout -- a laptop
-  asleep, a route down for minutes -- ends a connection that libutp would
-  resume when the path came back (reasoned from the code, not measured).
-  `MaxIdleTimeout` sets the figure.
 - *LEDBAT++* (opt-in): takes about a third of a link from a loss-based flow
   where classic LEDBAT takes two thirds; twice the throughput on a
   high-BDP path, 60-75% less on lossy ones. (It used to be credited with 7
@@ -927,32 +919,33 @@ payload too large for its 32-bit byte offsets and found, instead, a defect of
 this library's own: KNOWN-LIMITATIONS.md, "A connection stopped after 65,535
 packets".)
 
-## A connection whose peer falls silent is closed after `MaxIdleTimeout`
+## ~~A connection whose peer falls silent is closed after `MaxIdleTimeout`~~ — closed
 
 libutp has no idle timeout. A connection with nothing in flight is only ever
 ended by its application, by a reset from the peer, or by the retransmission
 timeout giving up -- and that last one counts only while something is
 outstanding (`retransmit_count++` under `cur_window_packets > 0`,
 `utp_internal.cpp:1239-1240`). The keep-alive it sends every 29 seconds is a
-bare ST_STATE that nothing retransmits (`:834-844`). So if the peer vanishes
-while the connection is idle, libutp keeps the socket for good.
+bare ST_STATE that nothing retransmits (`:834-844`). Measured against
+libutp's driver: a connection whose peer sent one data packet and then
+nothing was still open after 600 seconds, having sent 20 keep-alives.
 
-This library closes a connection with `ErrTimedOut` when nothing has arrived
-from the peer and nothing has been written for `ConnectionConfig.
-MaxIdleTimeout`, 60 seconds by default.
+This library closed such a connection with `ErrTimedOut` after
+`ConnectionConfig.MaxIdleTimeout`, 60 seconds by default. That was a
+trade-off, better on one measure and worse on another: an embedder that
+never closed connections to vanished peers no longer leaked them, but an
+outage longer than a minute -- a laptop asleep, a route down -- ended a
+connection that libutp would have resumed when the path came back.
 
-The reason is the vanished peer. A socket held for good is memory and a
-connection id that an embedder has to reclaim with a timer of its own, and an
-embedder that does not -- the usual case -- leaks one per peer that went
-away. A live peer is unaffected: both implementations send a keep-alive after
-29 seconds of silence, so a live but quiet connection hears from its peer at
-least twice a minute (`netem.TestQuietConnectionDoesNotTimeOut`).
-
-**Measured** against libutp's driver: a connection whose peer sent one data
-packet and then nothing was still open after 600 seconds, having sent 20
-keep-alives. Ours ends at 60 (`integrated.TestCloseErrorsIfAllPacketsDropped`
-waits for exactly that error). Setting `MaxIdleTimeout` very high recovers
-libutp's behaviour.
+The default is now no idle timeout, as libutp's, and
+`TestSilentPeerDoesNotCloseAnIdleConnectionByDefault` holds it there: ten
+minutes of silence, 20 keep-alives, and data from the peer afterwards is
+acknowledged and read. It fails on the 60-second default, with two
+keep-alives and the connection closed. `MaxIdleTimeout` sets one for an
+embedder that wants vanished peers reclaimed without a timer of its own; a
+live peer sends a keep-alive every 29 seconds, so a timeout well above that
+never closes a live connection (`netem.TestQuietConnectionDoesNotTimeOut`).
+What it costs is what it cost before, and the embedder now chooses it.
 
 Not previously listed here; found by the line-by-line audit while settling
 the half-open acceptor (LIBUTP-AUDIT.md, N5 and N26).

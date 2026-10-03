@@ -49,7 +49,7 @@ libutp it was, and the tests named are what stands behind each verdict.
 | N29 | `utp_utils.cpp:158-205` | libutp stamps the wire from CLOCK_MONOTONIC, guarded against running backwards; ours used the wall clock, which an NTP step moves, and the peer reads as delay | Fixed: `TestWireClockIsMonotonic` (structural: a test cannot step the host clock) |
 | N30 | `utp_packedsockaddr.cpp:63-81` | libutp's peer key drops the IPv6 zone; ours keeps it | Deviation: "An IPv6 zone is part of the peer's address" |
 | N31 | `utp_utils.cpp:228` | libutp's default IPv4 MTU is `UDP_IPV4_MTU`, 1402; ours was 1400 | Fixed: the ceiling is 1402 |
-| N26 | `check_timeouts`, `:1239-1240`; `send_keep_alive` | libutp never closes an idle connection whose peer vanished; ours closes after `MaxIdleTimeout`. Measured: libutp still open after 600 s | Deviation: "A connection whose peer falls silent is closed after `MaxIdleTimeout`" |
+| N26 | `check_timeouts`, `:1239-1240`; `send_keep_alive` | libutp never closes an idle connection whose peer vanished; ours closed after `MaxIdleTimeout`, 60 s by default. Measured: libutp still open after 600 s | Fixed: no idle timeout by default; `MaxIdleTimeout` sets one (`TestSilentPeerDoesNotCloseAnIdleConnectionByDefault`) |
 | N27 | `utp_process_udp`, `:2955-2958` | libutp ignores a SYN for a connection it already has, so a lost SYN-ACK ends its handshake; ours repeats the SYN-ACK. Earlier notes claimed libutp did too | Deviation: "A retransmitted SYN is answered" (`TestConformanceDuplicateSynBeforeData`) |
 | N6 | `mtu_search_update`/`mtu_reset`, `:1289-1327` | A search redone after 30 minutes keeps sending at the size found (`mtu_last` is untouched); ours dropped to the midpoint | Fixed: `TestMtuSearchIsRedoneAfterTheInterval` |
 | N7 | `DelayHist::get_value`, `:383-391`; `apply_ccontrol`, `:1621` | The delay the window rule works from is the least of the last three samples, not the latest | Fixed: `TestConformanceDelayFilter`, differential against libutp's own log |
@@ -246,7 +246,7 @@ libutp it was, and the tests named are what stands behind each verdict.
 | `parse_icmp_payload`: version gate, lookup as for RESET | `utp_socket.go` ICMP routing | Matched |
 | `utp_process_icmp_fragmentation` | `mtuSearch.icmpFragmentationNeeded` | Matched, except the unit conversion and a report below the floor (N28), both recorded |
 | `utp_process_icmp_error` | `onICMP` | Matched; the states are a recorded deviation ("ICMP: no CS_IDLE state") |
-| idle connection with a vanished peer | `MaxIdleTimeout` | Deviation (N26) |
+| idle connection with a vanished peer | `MaxIdleTimeout`, off by default | Matched by default (N26) |
 
 ### 3154-3489: the public API
 

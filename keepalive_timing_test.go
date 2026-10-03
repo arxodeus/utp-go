@@ -113,10 +113,7 @@ func TestKeepAliveLeavesOneIntervalAfterTheLastPacket(t *testing.T) {
 		// interval after it.
 		lastSent = clk.Now()
 
-		// Answer it, as a live peer does. A peer that never speaks is dead,
-		// and the idle timeout closes the connection 60 seconds after it last
-		// heard anything -- which, left alone, is between the second
-		// keep-alive and the third. The answer must not itself draw a
+		// Answer it, as a live peer does. The answer must not itself draw a
 		// packet, or it would move lastSent.
 		clk.AwaitReactionTo(func() {
 			conn.inject(NewPacketBuilder(st_state, peerID+1, 200000, 1<<20, peerSeq+2).

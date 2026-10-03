@@ -331,11 +331,13 @@ func TestConnectionGivesUpWhenPeerGoesSilent(t *testing.T) {
 
 	cfg := utp.NewConnectionConfig()
 	// Shorten the RTO so the four retransmissions do not take ten seconds.
-	// The idle timeout stays at its 60s default: the point is that the
-	// give-up rule fires long before it.
+	// An idle timeout of 60 s, which was the default, is set as well: the
+	// point is that the give-up rule fires long before it. (By default there
+	// is none, as in libutp, and then the give-up rule is all there is.)
 	cfg.InitialTimeout = 200 * time.Millisecond
 	cfg.MinTimeout = 100 * time.Millisecond
-	idleTimeout := cfg.MaxIdleTimeout
+	const idleTimeout = 60 * time.Second
+	cfg.MaxIdleTimeout = idleTimeout
 
 	accCid := utp.NewConnectionId(a.Addr(), 801, 800)
 	iniCid := utp.NewConnectionId(b.Addr(), 800, 801)

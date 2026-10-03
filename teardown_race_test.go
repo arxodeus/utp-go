@@ -24,8 +24,8 @@ import (
 //
 //   - many connections ending at once, not one at a time
 //   - the *idle timeout* path specifically, which no other test drives in
-//     bulk: MaxIdleTimeout is 60s by default, so reaching it requires either
-//     a minute of waiting or the short timeout set here
+//     bulk: there is no idle timeout by default, and the ones tests set are
+//     long, so reaching it in bulk takes the short timeout set here
 //   - teardown overlapping teardown -- a close racing an idle expiry racing a
 //     cancelled context racing the socket going away underneath all of them
 //
