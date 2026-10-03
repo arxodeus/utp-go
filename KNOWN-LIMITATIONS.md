@@ -469,6 +469,14 @@ Gates that pass:
 - `go test -race .` — green.
 - `go test -race ./...` — green, whole suite, no data races, at
   `UTP_TEST_TRANSFERS=150 REPRO_N=120` (283 s for the integrated package).
+  The two gates in `native/libutp` that compare our receiver's timing with
+  libutp's (`TestAckTurnaround`, `TestAsymmetricAckPath`) report rather than
+  fail under `-race`: the detector instruments this library and not
+  libutp's C, and at 100 Mb/s it put our median acknowledgement at 570-760 us
+  against libutp's 40-100 us, on code that passes the gate without it, and
+  our 100 Mb/s transfer's best of three at 2.88 s against 1.51 s in one run
+  and within the gate in another. The first had been failing there
+  unnoticed.
 - `go test -race ./integrated/ -run 'TestUdpTransfer|TestManyConcurrentTransfers' -count=3` — green, **but at `UTP_TEST_TRANSFERS=150`, not the default 1000.** See "Memory" below: the full 1000 does not fit under the race detector on a 16 GB machine.
 - `go test ./netem/ -count=3` — green. The M1 gate; figures in [HARNESS.md](HARNESS.md).
 - `go test -race ./netem/` — green, no data races.

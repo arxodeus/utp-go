@@ -111,13 +111,17 @@ func TestAckTurnaround(t *testing.T) {
 				})
 			}
 		}
+		gate := t.Errorf
+		if raceEnabled {
+			gate = t.Logf // timing under the race detector; see raceEnabled
+		}
 		for _, sender := range []string{"libutp", "go"} {
 			ours, ref := results[sender+"->go"], results[sender+"->libutp"]
 			if len(ours) == 0 || len(ref) == 0 {
 				continue // a subtest failed and said why
 			}
 			if o, r := bestP50(ours), bestP50(ref); o > r+ackTurnaroundSlack {
-				t.Errorf("%s, %s sending: our receiver's median acknowledgement takes %v, libutp's %v (best of %d and %d runs)",
+				gate("%s, %s sending: our receiver's median acknowledgement takes %v, libutp's %v (best of %d and %d runs)",
 					p.name, sender, o, r, len(ours), len(ref))
 			}
 		}

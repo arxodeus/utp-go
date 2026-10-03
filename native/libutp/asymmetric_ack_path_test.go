@@ -88,16 +88,20 @@ func TestAsymmetricAckPath(t *testing.T) {
 		if c.best {
 			pick = best
 		}
+		gate := t.Errorf
+		if raceEnabled {
+			gate = t.Logf // timing under the race detector; see raceEnabled
+		}
 		ours, ref := pick(times[true]), pick(times[false])
 		switch {
 		case c.thin && float64(ours) > asymmetricThinGain*float64(ref):
-			t.Errorf("%s: our receiver took %v, libutp's %v; want under %.2f of it", c.name, ours, ref, asymmetricThinGain)
+			gate("%s: our receiver took %v, libutp's %v; want under %.2f of it", c.name, ours, ref, asymmetricThinGain)
 		case !c.thin && float64(ours) > (1+asymmetricSlack)*float64(ref):
-			t.Errorf("%s: our receiver took %v, libutp's %v", c.name, ours, ref)
+			gate("%s: our receiver took %v, libutp's %v", c.name, ours, ref)
 		}
 		if !c.thin && !c.best {
 			if o, r := medianCount(acks[true]), medianCount(acks[false]); float64(o) > asymmetricAckShare*float64(r) {
-				t.Errorf("%s: our receiver sent %d packets back, libutp's %d; want under %.2f of it", c.name, o, r, asymmetricAckShare)
+				gate("%s: our receiver sent %d packets back, libutp's %d; want under %.2f of it", c.name, o, r, asymmetricAckShare)
 			}
 		}
 	}
