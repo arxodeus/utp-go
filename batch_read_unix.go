@@ -3,7 +3,6 @@
 package utp_go
 
 import (
-	"errors"
 	"net"
 	"sync"
 	"syscall"
@@ -18,53 +17,17 @@ const maxReadBatch = 4096
 // readBatch returns every datagram the kernel already has queued, waiting only
 // for the first one: libutp's embedder loop of recvfrom until EWOULDBLOCK,
 // after which it calls utp_issue_deferred_acks once (utp.h:512-517;
-// native/libutp/bridge.cpp). See UtpSocket.readLoop.
+// native/libutp/bridge.cpp). See UtpSocket.readLoop. drain does the reading:
+// recvmmsg on Linux (batch_drain_linux.go), recvfrom elsewhere
+// (batch_drain_recvfrom.go).
 func (c *UdpConn) readBatch() ([]datagram, error) {
 	rc, err := c.base.SyscallConn()
 	if err != nil {
 		return nil, err
 	}
-	if c.readScratch == nil {
-		c.readScratch = make([]byte, 65536)
-	}
 	var out []datagram
-	err = c.drain(rc, &out, true)
+	err = c.drain(rc, &out)
 	return out, err
-}
-
-// drain appends what the socket holds to out. Blocking, it waits for the
-// first datagram if there is none; otherwise it returns at once.
-func (c *UdpConn) drain(rc syscall.RawConn, out *[]datagram, block bool) error {
-	scratch := c.readScratch
-	var readErr error
-	err := rc.Read(func(fd uintptr) bool {
-		for len(*out) < maxReadBatch {
-			n, from, err := syscall.Recvfrom(int(fd), scratch, 0)
-			if err != nil {
-				if errors.Is(err, syscall.EINTR) {
-					continue
-				}
-				if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
-					// Nothing yet: wait if asked to and nothing has come.
-					return !block || len(*out) > 0
-				}
-				readErr = err
-				return true
-			}
-			peer := c.peerFor(from)
-			if peer == nil {
-				continue
-			}
-			payload := make([]byte, n)
-			copy(payload, scratch[:n])
-			*out = append(*out, datagram{payload: payload, peer: peer})
-		}
-		return true
-	})
-	if err != nil {
-		return err
-	}
-	return readErr
 }
 
 // peerFor returns the peer a datagram came from, reusing the one made for
@@ -84,36 +47,34 @@ func (c *UdpConn) peerFor(sa syscall.Sockaddr) *UdpPeer {
 	default:
 		return nil
 	}
+	return c.peerForKey(k)
+}
+
+// peerForKey is peerFor from the address's key.
+func (c *UdpConn) peerForKey(k peerKey) *UdpPeer {
 	if p, ok := c.peers[k]; ok {
 		return p
-	}
-	addr := sockaddrToUDPAddr(sa)
-	if addr == nil {
-		return nil
 	}
 	if c.peers == nil || len(c.peers) >= maxCachedPeers {
 		c.peers = make(map[peerKey]*UdpPeer)
 	}
-	p := NewUdpPeer(addr)
+	p := NewUdpPeer(k.udpAddr())
 	c.peers[k] = p
 	return p
 }
 
-// sockaddrToUDPAddr converts what recvfrom reports into the address
-// net.UDPConn.ReadFrom would have returned, so a peer read in a batch hashes
-// exactly as one read singly does.
-func sockaddrToUDPAddr(sa syscall.Sockaddr) *net.UDPAddr {
-	switch a := sa.(type) {
-	case *syscall.SockaddrInet4:
-		ip := make(net.IP, net.IPv4len)
-		copy(ip, a.Addr[:])
-		return &net.UDPAddr{IP: ip, Port: a.Port}
-	case *syscall.SockaddrInet6:
+// udpAddr is the address net.UDPConn.ReadFrom would have returned for the
+// datagram this key was made from, so a peer read in a batch hashes exactly as
+// one read singly does.
+func (k peerKey) udpAddr() *net.UDPAddr {
+	if k.v6 {
 		ip := make(net.IP, net.IPv6len)
-		copy(ip, a.Addr[:])
-		return &net.UDPAddr{IP: ip, Port: a.Port, Zone: zoneName(a.ZoneId)}
+		copy(ip, k.ip[:])
+		return &net.UDPAddr{IP: ip, Port: k.port, Zone: zoneName(k.zone)}
 	}
-	return nil
+	ip := make(net.IP, net.IPv4len)
+	copy(ip, k.ip[:net.IPv4len])
+	return &net.UDPAddr{IP: ip, Port: k.port}
 }
 
 var zoneNames sync.Map // uint32 -> string

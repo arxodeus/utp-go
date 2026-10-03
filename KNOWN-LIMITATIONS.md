@@ -4481,7 +4481,9 @@ application writes, teardown -- and, below, sending.
 - **1000 transfers on one socket pair** (`TestManyConcurrentTransfers`): 0
   of 8 runs past the two-minute budget, against 2 of 8 on the commit before;
   largest RTT sample 1.0-3.0 s in seven runs and 14.5 s in one, against
-  3.7-18 s.
+  3.7-18 s. *Since then* the same code has run past the budget in 4 of 15
+  runs on this machine, as has the code with batched reads (below); not
+  yet explained.
 
 ### Acknowledgement latency: what is left
 
@@ -4600,6 +4602,37 @@ search narrowed to 999 bytes on a 1000-byte path in 5 runs of 5; under
 libutp's rule it stayed at 1402 in 3 runs of 3. netem's own endpoints still
 acknowledge each datagram, so its other measurements stay comparable; the
 test runs both ways.
+
+### Batched reads: recvmmsg on Linux
+
+The reader took one recvfrom per datagram and a last one to learn there was
+nothing left. On Linux it now takes up to sixteen datagrams a system call
+(`batch_drain_linux.go`), into slots of 64 KB each -- any datagram whole, as
+MaxPacketSize may be set to loopback's 65,488 -- which the kernel touches
+only as far as it writes. Elsewhere it reads as before
+(`batch_drain_recvfrom.go`). It still reads until the socket would block,
+as libutp's embedder does. Stopping at the first read that comes back short
+saves the last, empty call, but leaves what arrives meanwhile to the next
+batch: under load batches were smaller than libutp's, 18.7-24.5 datagrams
+against 22.9-29.6.
+
+Measured:
+
+- **Per datagram** (`BenchmarkReadBatch`, five runs each, interleaved): one
+  queued, 2,123 ns against 2,190 -- the same two calls; eight queued, 1,071
+  against 1,201; sixty-four, 857 against 1,080.
+- **Read calls under load** (`TestManyConcurrentTransfers`, counted in the
+  reader): 0.14-0.21 per datagram against 1.04-1.06, batches of 15.9-28.8
+  datagrams against 20.2-32.3. CPU time and elapsed time did not move
+  measurably: 12 interleaved runs each, user CPU 16-18 s for both, system
+  10-18 s for both, 2 runs of 12 past the budget against 3 of 12.
+- **On a paced path**, where each wake finds one datagram (1.00-1.03 at 10
+  Mb/s, 1.26-1.40 at 100 Mb/s), there is nothing to batch: the same two
+  calls a wake as before. The version that stopped at a short read, and so
+  saved the empty call, changed neither acknowledgement turnaround (45 runs
+  each) nor CPU per 100 Mb/s transfer (15 each) measurably; timed inside
+  the receiver, the call it saved was 0.3-0.8 us of each datagram's way to
+  its acknowledgement, under the relay's 10 us resolution.
 
 ### API changes
 

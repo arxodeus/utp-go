@@ -7,3 +7,6 @@ package utp_go
 func (c *UdpConn) readBatch() ([]datagram, error) {
 	return nil, errBatchReadUnsupported
 }
+
+// recvmmsgSlots is what Linux's drain uses; here there is none.
+type recvmmsgSlots struct{}

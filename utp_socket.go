@@ -93,6 +93,8 @@ type UdpConn struct {
 	// peers caches the peer for each source address the read loop has seen.
 	// See peerFor.
 	peers map[peerKey]*UdpPeer
+	// mmsg is what readBatch receives into where recvmmsg exists.
+	mmsg *recvmmsgSlots
 	// dfUnsupported records that this platform has no per-packet
 	// don't-fragment option, so the MTU search stops asking. See
 	// WriteToDontFragment.

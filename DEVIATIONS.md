@@ -539,7 +539,8 @@ embedder flushes it once per read batch via `utp_issue_deferred_acks()`
 would block, then acknowledges.
 
 The socket here does the same. `UdpConn.readBatch` reads every datagram the
-kernel already holds, waiting only for the first (`batch_read_unix.go`), and
+kernel already holds, waiting only for the first (`batch_read_unix.go`; on
+Linux with recvmmsg, up to sixteen a system call, `batch_drain_linux.go`), and
 each connection that received data in the batch acknowledges once the whole
 batch has been handed out (`UtpSocket.eventLoop`, `streamBatchEnd`,
 `connection.flushAck`). With only that, a libutp sender at 100 Mb/s gets
