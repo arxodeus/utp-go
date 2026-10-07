@@ -22,25 +22,25 @@ import (
 // libutp acknowledges once per pass of its embedder's loop, which on a link,
 // where packets arrive spaced, is once per packet: 1,750 acknowledgements a
 // second for a 20 Mb/s flow, whatever the return path can carry. This
-// receiver lets an acknowledgement cover several packets when they arrive
-// closely spaced or when its acknowledgements queue on the way back
-// (connection.ackEvery). The gates hold that to its measured effect:
+// receiver does the same until its acknowledgements queue on the way back,
+// and then lets one cover several packets (connection.ackEvery). The gates
+// hold that to its measured effect, 20 runs each:
 //
 //   - over a 160 kb/s return path, which carries 1,000 acknowledgements a
 //     second, our receiver's median time is under asymmetricThinGain of
-//     libutp's (measured 1.99-2.00 s against 2.96-2.97 s);
+//     libutp's (measured 2.03 s against 2.99 s);
 //   - over a 20 Mb/s return path it is no slower, beyond asymmetricSlack, and
-//     sends under asymmetricAckShare of libutp's acknowledgements (measured
-//     1,480 against 2,700);
-//   - at 100 Mb/s and 1 ms both ways, where acknowledgements are least able to
-//     hide behind the path's delay, our receiver's best time is no slower
-//     than libutp's best beyond asymmetricSlack (measured 1.43-1.46 s against
-//     1.50-1.52 s). Best, not median: a run at this rate sometimes overruns
-//     the 256 KB queue and takes 2.6-3.0 s, for either receiver.
+//     sends no more acknowledgements than libutp's, beyond asymmetricAckShare
+//     (measured 1.96 s and 2,744 against 1.96 s and 2,769);
+//   - at 100 Mb/s and 1 ms both ways, our receiver's best time is no slower
+//     than libutp's best beyond asymmetricSlack (measured 1.387 s against
+//     1.388 s). Best, not median: libutp's sender fills the relay's 256 KB
+//     queue near the end of the transfer -- its delay target is longer than
+//     the queue -- and in 6-7 runs of 20, for either receiver, waits out a
+//     timeout for the two packets it lost, taking about 2.7 s.
 //
-// An acknowledgement for every packet (ackEvery returning 1) fails all three:
-// 3.04 s against libutp's 2.96 s over 160 kb/s, 2,840 acknowledgements against
-// its 2,710 over 20 Mb/s, and at 100 Mb/s a best of 3.91 s against 1.52 s.
+// An acknowledgement for every read (ackEvery returning 1) fails the first:
+// 3.01 s against libutp's 3.00 s.
 func TestAsymmetricAckPath(t *testing.T) {
 	if testing.Short() {
 		t.Skip("not a -short test")
@@ -111,7 +111,7 @@ const (
 	asymmetricRuns     = 3
 	asymmetricThinGain = 0.85
 	asymmetricSlack    = 0.02
-	asymmetricAckShare = 0.80
+	asymmetricAckShare = 1.05
 )
 
 // libutpSendsTo times libutp sending payload to a receiver -- this library's

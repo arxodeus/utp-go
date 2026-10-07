@@ -1305,6 +1305,11 @@ either receiver, are libutp's sender losing two packets at the tail when the
 relay's 256 KB queue fills -- its delay target, 100 ms, is longer than the
 queue -- and waiting out a timeout for them.
 
+That took away the case for letting an acknowledgement cover four packets on
+every path: at 100 Mb/s it gained nothing and cost 190 us an acknowledgement.
+It now applies only once ours are seen to queue on the way back, which keeps
+the gain on slow return paths (DEVIATIONS.md).
+
 The virtual-clock driver (`driver.cpp`) consumes its buffer the same way; its
 time is virtual, so the copying changes nothing it measures, and it is left.
 
@@ -4223,6 +4228,20 @@ eight transfers and failed at 36 s without the fix.
 These are real and unresolved. Each needs a measurement harness (M1) or a
 conformance corpus (M2) to change safely, and guessing at them without one
 risks making things worse.
+
+- **Our sender ramps about 2% slower when each acknowledgement covers one
+  packet rather than two.** Found when acknowledgements stopped coalescing on
+  paths whose return keeps up (DEVIATIONS.md, "Acknowledgements: one per
+  read"): on the emulated high-BDP link (100 ms, 20 Mb/s, 2 MB) classic
+  LEDBAT went from 8.04 s to 8.20 s, every run of twenty. The window grows at
+  the same rate either way but falls about 1 KB behind in the first second
+  and stays there, and in that phase less of it is in flight (about 1 KB
+  unused against 0.3-0.7 KB). Not the whole-byte truncation of the window
+  after each update, which libutp also does: carrying the fraction changed
+  nothing. libutp's sender on the same link takes 1.95 Mbps to either
+  receiver, whatever ours does, so this is not a loss against libutp -- ours
+  takes 2.05 -- but the window update is linear in the bytes acknowledged in
+  both, and the dependence on acknowledgement count is unexplained.
 
 - **The per-connection event loop drains incoming packets ahead of everything
   else**, in a non-blocking select, before considering writes, reads or

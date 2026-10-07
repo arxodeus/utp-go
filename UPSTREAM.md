@@ -526,16 +526,16 @@ and each connection that received data acknowledges once the whole read has
 been handed out.
 
 On a link that is one acknowledgement per packet, for libutp too, whatever the
-return path can carry, so `connection.ackEvery` goes further than libutp: an
-acknowledgement may cover up to four packets arriving under 1 ms apart, and
-more while ours queue on the way back. Measured on a 512 KB transfer over the
-emulated network, acks per data packet: upstream 1.000 at every rate; this
-0.63-0.70 at 20 Mbps, 0.22 at 100 Mbps, 0.10-0.12 at 1 Gbps. Against libutp
-over real sockets, 4 MB over a 160 kb/s return path took 2.0 s against libutp's
-3.0 s (DEVIATIONS.md, "Acknowledgements: one per read, fewer when they would
-crowd the way back"). Three tests pin it: one against real libutp for the
-structural bound, one under load for the ratio, one against libutp on
-asymmetric paths for the effect.
+return path can carry, so `connection.ackEvery` goes further than libutp once
+ours are seen to queue on the way back: an acknowledgement may then cover
+several packets. Against libutp over real sockets, 4 MB over a 160 kb/s return
+path took 2.03 s against libutp's 2.99 s, and over 64 kb/s 2.43 s against
+7.33 s; where the return path keeps up, the same as libutp (DEVIATIONS.md,
+"Acknowledgements: one per read, fewer when they would crowd the way back").
+Over the emulated network with a 160 kb/s return path, 0.51 acks per data
+packet against 1.00 for one per read. Three tests pin it: one against real
+libutp for the structural bound, one on an emulated asymmetric path for the
+ratio, one against libutp on asymmetric paths for the effect.
 
 A FIN is excluded and acked immediately — libutp acks it directly at
 `:2369-2370`, and deferring it emits nothing at all, because the connection is

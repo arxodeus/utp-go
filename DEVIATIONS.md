@@ -89,6 +89,13 @@ worse.
   A lost fast retransmission no longer waits a second: no LAN stalls in 120
   runs against about 7% without, 15-30% more throughput at 1-5% loss, and no
   change in deference. Not applied to LEDBAT++, whose deference it cost.
+- *Acknowledgements cover several packets once they queue on the way back:*
+  libutp sends one per read, which on a link is one per packet, whatever the
+  return path can carry; ours does the same until its acknowledgements are
+  seen queueing on the way back. Measured against libutp, 20 runs each: 2.03 s
+  against 2.99 s for 4 MB over a 160 kb/s return path, 2.43 s against 7.33 s
+  over 64 kb/s; libutp's rule, built here, took 3.01 s and 7.33 s. Elsewhere
+  the same times and as many acknowledgements as libutp's.
 - *A refused MTU probe is judged at three duplicates or more, not exactly
   three.* With a receiver that batches its reads, libutp's rule judged no
   probe in 3 runs of 3 and the search stayed at 1402 bytes on a 1000-byte
@@ -172,16 +179,6 @@ consequence, or equivalent on the wire.
   high-BDP path, 60-75% less on lossy ones. (It used to be credited with 7
   times less standing queue; that was the one-way-delay version, and a lone
   LEDBAT++ flow now leaves as much as classic LEDBAT.)
-- *Acknowledgements wait for a few closely spaced packets:* libutp sends one
-  per read, which on a link is one per packet, whatever the return path can
-  carry; ours lets one cover up to four packets that arrive under 1 ms apart,
-  and more while its acknowledgements queue on the way back. Measured against
-  libutp: 2.0 s against 3.0 s for 4 MB over a 160 kb/s return path, 2.5 s
-  against 7.3 s over 64 kb/s, level with about half the acknowledgements at
-  320 kb/s and 20 Mb/s,
-  and 1.43 s against libutp's best of 1.51 s for 16 MB at 100 Mb/s. The cost:
-  at 100 Mb/s the median acknowledgement leaves 210-240 us after its packet
-  arrives against libutp's 100-160 us.
 - *The base delay is the lowest over two minutes, not about thirteen.* A
   clock drift's phantom queue grows with the window, measured linear, so
   libutp's is 6.5 times ours. The cost -- a queue that stands for two
@@ -535,28 +532,33 @@ kernel already holds, waiting only for the first (`batch_read_unix.go`; on
 Linux with recvmmsg, up to sixteen a system call, `batch_drain_linux.go`), and
 each connection that received data in the batch acknowledges once the whole
 batch has been handed out (`UtpSocket.eventLoop`, `streamBatchEnd`,
-`connection.flushAck`). With only that, a libutp sender at 100 Mb/s gets
-0.57-0.68 acknowledgements per data packet from this receiver and 0.58-0.62
-from libutp's.
+`connection.flushAck`).
 
 What libutp's rule means on a link: packets arrive spaced, its loop has
-finished with each before the next comes, and it acknowledges every one --
-0.99 per data packet at 10 Mb/s and 0.98 at 20 Mb/s, measured over real
-sockets. A 20 Mb/s flow draws 1,750 acknowledgements a second whatever the
-return path can carry. On an asymmetric line that is the bottleneck: over a
-160 kb/s return path, which carries 1,000 twenty-byte acknowledgements a
-second, libutp receiving from libutp took 2.96-2.99 s for 4 MB where the data
-path allows 2.0 s, and over 64 kb/s 7.3 s.
+finished with each before the next comes, and it acknowledges nearly every
+one -- 0.99 per data packet at 10 Mb/s and 20 Mb/s, 0.84 at 100 Mb/s,
+measured over real sockets. A 20 Mb/s flow draws 1,750 acknowledgements a
+second whatever the return path can carry. On an asymmetric line that is the
+bottleneck: over a 160 kb/s return path, which carries 1,000 twenty-byte
+acknowledgements a second, libutp receiving from libutp took 2.99 s for 4 MB
+where the data path allows 2.0 s, and over 64 kb/s 7.33 s.
 
 So `connection.ackEvery` lets an acknowledgement wait to cover more than one
-packet, by two terms, the larger winning:
+packet once ours are seen to queue on the way back. The peer reports on every
+packet how long ours took to reach it (`timestamp_difference`), and for a
+connection that only receives, ours are its acknowledgements:
 
-- *The rate:* while data packets arrive less than 1 ms apart, `round(1 ms /
-  gap)` of them share one acknowledgement, at most four.
-- *The return path:* the peer reports on every packet how long ours took to
-  reach it (`timestamp_difference`), and for a connection that only receives,
-  ours are its acknowledgements. Each 0.5 ms of filtered queueing delay on that
-  path adds one packet to the run, up to sixteen.
+- *The return path:* each 0.5 ms of filtered queueing delay on that path adds
+  one packet to the run, up to sixteen.
+- *The rate:* for 10 s after that delay last reached 10 ms, while data packets
+  arrive less than 1 ms apart, `round(1 ms / gap)` of them share one
+  acknowledgement, at most four. Without it the queue the first term answers
+  to stands: 2.13 s over 160 kb/s and 3.38 s over 64 kb/s.
+
+The 10 ms is above what a path with nothing queued shows: the sender stamps
+an acknowledgement's delay when it reads it, and a sender busy sending reads
+late, so on symmetric paths the filtered delay peaked at 2-6 ms. Over 64 kb/s
+it reaches 60 ms within the transfer.
 
 An acknowledgement waits at most two of the latest inter-packet gaps per packet
 it is still waiting for, and never more than 5 ms, so the end of a burst is
@@ -564,43 +566,67 @@ acknowledged once its packets stop coming. It never waits while a selective
 ack is owed: that is how the sender learns of a loss.
 
 Measured against libutp receiving from libutp, a libutp sender, over real
-sockets through the relay, the data path 20 Mb/s, 10 ms, a 128 KB queue, 4 MB
-(`native/libutp.TestAsymmetricAckPath` gates the 20 Mb/s and 160 kb/s rows;
-three runs each, eight at 320 kb/s):
+sockets through the relay, the data path 20 Mb/s, 10 ms, a 128 KB queue, 4 MB,
+and 16 MB at 100 Mb/s and 1 ms both ways; 20 runs each, interleaved
+(`native/libutp.TestAsymmetricAckPath` gates the 160 kb/s, 20 Mb/s and 100
+Mb/s rows):
 
-| Return path | libutp receiving | this library receiving |
-| --- | --- | --- |
-| 20 Mb/s | 1.97-1.99 s, 2,670-2,770 acks | 1.97-1.98 s, 1,450-1,480 acks |
-| 320 kb/s | 1.98-1.99 s (median 1.987), 2,640-2,720 acks | 1.98-2.01 s (median 1.986), 1,460-1,490 acks |
-| 160 kb/s | 2.96-2.99 s | 2.00-2.01 s |
-| 64 kb/s | 7.28-7.33 s | 2.45-2.49 s |
+| Return path | libutp receiving | this library receiving | this library, libutp's rule |
+| --- | --- | --- | --- |
+| 64 kb/s | 7.33 s, 2,883 acks | 2.43 s, 818 acks | 7.33 s |
+| 160 kb/s | 2.99 s, 2,795 acks | 2.03 s, 1,456 acks | 3.01 s |
+| 320 kb/s | 1.97 s, 2,750 acks | 1.97 s, 2,750 acks | 1.97 s |
+| 20 Mb/s | 1.96 s, 2,769 acks | 1.96 s, 2,744 acks | 1.96 s |
+| 100 Mb/s both ways | 1.39 s, 9,967 acks | 1.40 s, 9,093 acks | 1.40 s |
 
-At 100 Mb/s and 1 ms both ways, 16 MB took 1.43-1.44 s with this receiver in
-every run, and 1.51 s, 3.08 s and 4.11 s with libutp's: at that rate libutp's
-sender sometimes overruns the 256 KB queue and takes two to three times as
-long, and with libutp's acknowledgement count it did so more often. Our
-receiver with every acknowledgement at one packet took a best of 3.91 s.
+Times are medians. At 100 Mb/s 6-7 runs in 20 took about 2.7 s for either
+receiver: libutp's sender fills the relay's 256 KB queue near the end -- its
+100 ms delay target is longer than the queue -- loses two packets, and waits
+out a timeout for them.
 
-The rate term is what makes this work. The return-path term alone waits only
-once a queue has formed, and that queue is itself the delay: 2.13 s over 160
-kb/s, 3.3 s over 64 kb/s, and 1.55-1.66 s at 100 Mb/s.
+The acknowledgement leaves when libutp's would, but for the runtime's wake:
+the median from a data packet reaching our socket to its acknowledgement
+reaching the relay is 70 us against libutp's 40 at 10 Mb/s and 50 against 30
+at 100 Mb/s (`TestAckTurnaround`, 20 runs each); see "An acknowledgement
+leaves about 40 us later than libutp's" above.
 
-The cost is the wait. At 100 Mb/s the median acknowledgement leaves 210-240 us
-after its packet reaches our socket against libutp's 100-160 us, with the 90th
-percentile lower (0.55-0.83 ms against 1.12-1.58 ms) (`TestAckTurnaround`, 15
-runs each, the relay in its own process and timestamping acknowledgements in
-the kernel; 310-320 us against 170-210 us when it shared our process and
-timestamped them on waking).
-At 10 Mb/s, where packets are 1.1 ms apart and nothing waits, both acknowledge
-every packet, and the 40 us between the medians is listed under "Worse than
-libutp, accepted".
+Over the emulated network, where this receiver now acknowledges about every
+packet on a symmetric path, the benchmark suite against the previous rule
+(five runs each, then twenty where a profile moved more than 1.5%): LAN at
+100 Mb/s +1.5% under classic LEDBAT and +2.9% under LEDBAT++, the 5% loss
+profiles +0.8% and +2.8% (within noise), and one cost, classic LEDBAT on the
+high-BDP link (100 ms, 20 Mb/s): 2.05 Mbps against 2.09, every run, 8.20 s
+against 8.04 s for 2 MB. There our sender's window, which never reaches the
+path's 500 KB in the transfer, ends about 1 KB behind after the first second
+when acknowledgements cover one packet rather than two, and stays behind.
+libutp's sender is not affected the same way: on that link it takes 1.95
+Mbps to libutp's receiver and to ours under either rule, and ours, at 2.05,
+is still ahead of it. Why our sender's ramp depends on how many packets an
+acknowledgement covers, when its window update, like libutp's, is linear in
+the bytes acknowledged, is not yet known (KNOWN-LIMITATIONS.md, "Things found
+but deliberately not fixed"). The emulated network hands this receiver each
+datagram on its own, so it sends 0.78 acknowledgements per data packet there
+where libutp's receiver, driven over the same network, sends 0.63; over real
+sockets the two send the same number.
 
-*An earlier version of this entry* reported libutp at 0.22-0.33
-acknowledgements per data packet at 100 Mb/s and 0.57 at 20 Mb/s. Those were
-the relay's: it slept between deliveries on Go timers, which wake about 1.1 ms
-late when the runtime is idle, and so delivered packets in clumps that
-libutp's loop drained at once. The relay now spins for the last 1.5 ms before
-each delivery (`relaySpin`), and the figures above are on that relay.
+*Earlier versions of this entry* applied the rate term on every path. It
+measured as a trade-off -- 1.43 s against libutp's best of 1.51 s at 100
+Mb/s, half libutp's acknowledgements at 320 kb/s and 20 Mb/s, for a median
+acknowledgement 210-240 us after its packet instead of libutp's 100-160 --
+and both halves of the gain were the harness's. The bridge that runs libutp
+over a socket moved its whole send queue after each packet, so every
+acknowledgement cost libutp's sender about a millisecond of copying
+(KNOWN-LIMITATIONS.md, "the libutp bridge moved its whole send queue for every
+packet"): libutp's rule from our receiver took 3.3-3.9 s at 100 Mb/s, libutp's
+own receiver 2.6-4.0 s in half its runs, and fewer acknowledgements read as
+faster. With the bridge fixed, libutp's rule from our receiver matches libutp's
+own everywhere, and the rate term gains nothing where the return path keeps
+up and costs 190 us an acknowledgement at 100 Mb/s. Before that, the relay
+slept between deliveries on Go timers, which wake about 1.1 ms late when the
+runtime is idle, and delivered packets in clumps that libutp's loop drained
+at once, which made libutp look like it sent 0.22-0.33 acknowledgements per
+data packet at 100 Mb/s; it now spins for the last 1.5 ms before each delivery
+(`relaySpin`).
 
 A FIN is acked immediately rather than deferred, matching libutp's direct
 `send_ack()` at `:2369-2370`.

@@ -500,6 +500,9 @@ type connection struct {
 	lastDataAt  time.Time
 	lastDataGap time.Duration
 	dataGap     time.Duration
+	// ackPathQueuedAt is when the way back last showed a queue; the rate
+	// term in ackEvery applies for ackRateMemory after it.
+	ackPathQueuedAt time.Time
 	// armProbeTimer wakes the event loop when a closed window has gone
 	// unprobed for long enough. Installed by the event loop, which owns the
 	// timer.
@@ -2513,6 +2516,16 @@ const (
 	// floor, held each slow-start burst's acknowledgement for packets that
 	// could not come until it was sent.
 	maxAckWait = 5 * time.Millisecond
+	// ackRateGate is how much queueing delay the way back must show before
+	// the rate term applies, and ackRateMemory how long it goes on applying
+	// after the last time it did. On paths where nothing queues, the delay
+	// this receiver reads for its acknowledgements still reaches 2-6 ms: the
+	// sender stamps an acknowledgement when it reads it, and a sender busy
+	// sending reads late. A return path that cannot carry the
+	// acknowledgements queues them by tens of milliseconds within a round
+	// trip or two.
+	ackRateGate   = 10 * time.Millisecond
+	ackRateMemory = 10 * time.Second
 )
 
 // ackEvery is how many data packets an acknowledgement may wait to cover.
@@ -2528,29 +2541,30 @@ const (
 // which carries 1,000 a second, it took 2.97 s to receive 4 MB where 2.0 s
 // was the data path's limit, and over 64 kb/s 7.3 s.
 //
-// This receiver lets an acknowledgement wait for more packets, by two terms,
-// the larger winning:
+// This receiver acknowledges as libutp does until its acknowledgements are
+// seen to queue on the way back, and then lets one wait for more packets, by
+// two terms, the larger winning:
 //
-//   - The rate: while packets arrive closer together than ackRatePeriod,
-//     round(1 ms / gap) of them share one, at most maxAckRateRun. The gap is
-//     the smaller of the latest and a smoothed one, so a burst after a pause
-//     is coalesced from its second packet.
 //   - The return path: the peer reports on every packet how long ours take to
 //     reach it, and for a connection that only receives, ours are its
 //     acknowledgements. Each ackQueueStep of filtered queueing delay on that
 //     path (libutp's our_hist.get_value()) adds one packet to the run.
+//   - The rate, for ackRateMemory after that delay last reached ackRateGate:
+//     while packets arrive closer together than ackRatePeriod, round(1 ms /
+//     gap) of them share one, at most maxAckRateRun. The gap is the smaller
+//     of the latest and a smoothed one, so a burst after a pause is coalesced
+//     from its second packet. Without it the queue the first term answers to
+//     stands: 2.13 s over 160 kb/s and 3.38 s over 64 kb/s.
 //
-// Measured against libutp receiving from libutp, a libutp sender, over real
-// sockets (native/libutp TestAsymmetricAckPath): 2.00-2.01 s against
-// 2.96-2.99 s over 160 kb/s, 2.45-2.49 s against 7.28-7.33 s over 64 kb/s,
-// level over 320 kb/s and 20 Mb/s with about half libutp's acknowledgements,
-// and at 100 Mb/s and 1 ms 1.43-1.44 s against libutp's best of 1.51 s. The
-// cost is the wait itself: at 100 Mb/s the median acknowledgement leaves
-// 310-320 us after its packet arrives against libutp's 170-210 us
-// (TestAckTurnaround). The return path alone, without the rate, waits only
-// once a queue has formed, and that queue is the delay: 2.13 s over 160 kb/s
-// and 1.55-1.66 s at 100 Mb/s. DEVIATIONS.md, "Acknowledgements: one per read,
-// fewer when they would crowd the way back".
+// Measured against libutp receiving, a libutp sender, over real sockets
+// (native/libutp TestAsymmetricAckPath), 20 runs each: 2.03 s against 2.99 s
+// over 160 kb/s and 2.43 s against 7.33 s over 64 kb/s; over 320 kb/s, 20
+// Mb/s and 100 Mb/s the same times and as many acknowledgements as libutp's.
+// The rate term used to apply on every path, and cost the wait it imposes: at
+// 100 Mb/s the median acknowledgement left 240 us after its packet arrived,
+// against libutp's 30 us and 50 us now (TestAckTurnaround), for no gain in
+// throughput there. DEVIATIONS.md, "Acknowledgements: one per read, fewer
+// when they would crowd the way back".
 //
 // Never while a gap is open: the selective ack is how the peer learns of a
 // loss, and holding it back would delay recovery.
@@ -2563,6 +2577,13 @@ func (c *connection) ackEvery() int {
 	}
 	q := c.state.SentPackets.QueueingDelay()
 	k := min(1+int(q/ackQueueStep), maxAckQueueRun)
+	now := c.now()
+	if q >= ackRateGate {
+		c.ackPathQueuedAt = now
+	}
+	if c.ackPathQueuedAt.IsZero() || now.Sub(c.ackPathQueuedAt) >= ackRateMemory {
+		return k
+	}
 	gap := c.dataGap
 	if c.lastDataGap > 0 {
 		gap = min(gap, c.lastDataGap)
