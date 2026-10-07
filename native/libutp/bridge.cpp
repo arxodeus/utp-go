@@ -39,17 +39,24 @@
 		pthread_mutex_unlock(&(p)->mu);  \
 	} while (0)
 
+// byte_buf holds len bytes at data + head. Consuming moves head on; the bytes
+// are moved to the front only when an append needs the room, so taking a
+// packet's worth off a 16 MB send queue does not move the other 16 MB.
 struct byte_buf {
 	unsigned char *data;
+	size_t head;
 	size_t len;
 	size_t cap;
 };
 
 static void buf_init(byte_buf *b) {
 	b->data = NULL;
+	b->head = 0;
 	b->len = 0;
 	b->cap = 0;
 }
+
+static unsigned char *buf_ptr(byte_buf *b) { return b->data + b->head; }
 
 static void buf_free(byte_buf *b) {
 	free(b->data);
@@ -58,6 +65,10 @@ static void buf_free(byte_buf *b) {
 
 static int buf_append(byte_buf *b, const void *src, size_t n) {
 	if (n == 0) return 0;
+	if (b->head + b->len + n > b->cap && b->head > 0) {
+		memmove(b->data, b->data + b->head, b->len);
+		b->head = 0;
+	}
 	if (b->len + n > b->cap) {
 		size_t cap = b->cap ? b->cap : 4096;
 		while (cap < b->len + n) cap *= 2;
@@ -66,17 +77,18 @@ static int buf_append(byte_buf *b, const void *src, size_t n) {
 		b->data = grown;
 		b->cap = cap;
 	}
-	memcpy(b->data + b->len, src, n);
+	memcpy(b->data + b->head + b->len, src, n);
 	b->len += n;
 	return 0;
 }
 
 static void buf_consume(byte_buf *b, size_t n) {
 	if (n >= b->len) {
+		b->head = 0;
 		b->len = 0;
 		return;
 	}
-	memmove(b->data, b->data + n, b->len - n);
+	b->head += n;
 	b->len -= n;
 }
 
@@ -124,7 +136,7 @@ static void wake(libutp_peer *p) {
 // Must be called with mu held.
 static void pump_writes(libutp_peer *p) {
 	while (p->sock && p->tx.len > 0) {
-		ssize_t n = utp_write(p->sock, p->tx.data, p->tx.len);
+		ssize_t n = utp_write(p->sock, buf_ptr(&p->tx), p->tx.len);
 		if (n <= 0) break;   // window full; UTP_STATE_WRITABLE will call back
 		buf_consume(&p->tx, (size_t)n);
 	}
@@ -265,6 +277,17 @@ libutp_peer *libutp_peer_create(uint16_t port) {
 
 	p->fd = socket(AF_INET, SOCK_DGRAM, 0);
 	if (p->fd < 0) goto fail;
+
+	// The same socket buffers this library gives its own socket
+	// (DefaultSocketBufferSize, utp_socket.go). libutp leaves the socket to its
+	// embedder, and an embedder that kept the kernel's default (208 KB here)
+	// lost acknowledgements at 100 Mb/s whenever this thread was busy: the
+	// comparison is of the two protocols, not of the two embeddings.
+	{
+		int sz = 4 * 1024 * 1024;
+		setsockopt(p->fd, SOL_SOCKET, SO_RCVBUF, &sz, sizeof(sz));
+		setsockopt(p->fd, SOL_SOCKET, SO_SNDBUF, &sz, sizeof(sz));
+	}
 
 	{
 		struct sockaddr_in addr;
@@ -473,7 +496,7 @@ long libutp_peer_read(libutp_peer *p, void *buf, size_t len) {
 	PEER_LOCK(p);
 	size_t n = p->rx.len < len ? p->rx.len : len;
 	if (n > 0) {
-		memcpy(buf, p->rx.data, n);
+		memcpy(buf, buf_ptr(&p->rx), n);
 		buf_consume(&p->rx, n);
 	}
 	PEER_UNLOCK(p);

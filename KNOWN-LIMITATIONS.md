@@ -1264,6 +1264,50 @@ libutp's receiver took 3.0 s for 4 MB where ours takes 2.0 s. DEVIATIONS.md,
 "Acknowledgements: one per read, fewer when they would crowd the way back",
 has the measurements and the cost.
 
+### Later still: the libutp bridge moved its whole send queue for every packet
+
+The bridge that runs libutp over a real socket (`native/libutp/bridge.cpp`)
+kept the bytes waiting to be sent in a flat buffer, and after each
+`utp_write` moved everything left to the front of it. A 16 MB transfer queues
+16 MB at once, and libutp's sender takes about a packet per write once its
+window is open -- each acknowledgement makes it writable, it sends one
+packet, and the bridge moves the other 16 MB. On the order of a millisecond of
+copying per acknowledgement, on the thread that also reads the socket.
+
+So the more acknowledgements a receiver sent, the slower libutp sent to it, and
+nothing in the protocol was the cause. Found tracing why libutp's sender did
+so much worse against our receiver acknowledging one per read, as libutp's
+does, than against libutp's own: its window was 100-280 KB on a path with no
+queue, and its round-trip estimate 36-72 ms where the wire's was 3 ms (its
+congestion log, enabled in the bridge for the purpose). What it had been
+distorting, at 100 Mb/s with libutp sending 16 MB:
+
+- our receiver acknowledging one per read took 3.3-3.9 s in every run,
+  which read as libutp's rule costing throughput, and was what justified
+  letting acknowledgements cover four packets there;
+- libutp's own receiver took 2.6-4.0 s in about half its runs. Its sender's
+  thread, copying, did not drain its socket, which overflowed: 4-42
+  `RcvbufErrors` a run, acknowledgements lost before libutp saw them, and a
+  retransmission timeout. DEVIATIONS.md called this the sender overrunning
+  the relay's queue; the relay had dropped nothing.
+
+The buffer now keeps an offset and moves its bytes only when an append needs
+the room. The bridge's socket also gets the same 4 MB buffers this library
+gives its own (`DefaultSocketBufferSize`): libutp leaves the socket to its
+embedder, and an embedder with the kernel's default lost acknowledgements
+whenever its thread was busy, which compares embeddings rather than
+protocols. With both changes, 20 runs each, libutp's sender to libutp's
+receiver at 100 Mb/s: 1.39 s median, no socket overflows; to ours
+acknowledging one per read: 1.40 s, and 3.01 s against libutp's 3.00 s over a
+160 kb/s return path -- the same rule giving the same result, which is what a
+fair harness should show. The runs that still take about 2.7 s, 6-7 in 20 for
+either receiver, are libutp's sender losing two packets at the tail when the
+relay's 256 KB queue fills -- its delay target, 100 ms, is longer than the
+queue -- and waiting out a timeout for them.
+
+The virtual-clock driver (`driver.cpp`) consumes its buffer the same way; its
+time is virtual, so the copying changes nothing it measures, and it is left.
+
 ## libutp was wired up wrongly, three times, and each time it looked like a result
 
 The largest gap COMPATIBILITY.md named was that libutp had never been run over
