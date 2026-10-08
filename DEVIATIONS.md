@@ -96,6 +96,13 @@ worse.
   against 2.99 s for 4 MB over a 160 kb/s return path, 2.43 s against 7.33 s
   over 64 kb/s; libutp's rule, built here, took 3.01 s and 7.33 s. Elsewhere
   the same times and as many acknowledgements as libutp's.
+- *The window grows by a round trip's worth per round trip, however the
+  acknowledgements are split.* libutp's growth falls short the more
+  acknowledgements a round trip is split into; ours credits each against the
+  window it was sent in, never growing slower than libutp's. Classic LEDBAT,
+  20 runs each: +4.9% to +7.6% on the profiles where the window has room to
+  grow, +3.5% at 5% loss, +1.3% on the 100 Mb/s LAN; deference to a
+  loss-based flow unchanged.
 - *A refused MTU probe is judged at three duplicates or more, not exactly
   three.* With a receiver that batches its reads, libutp's rule judged no
   probe in 3 runs of 3 and the search stayed at 1402 bytes on a 1000-byte
@@ -601,10 +608,10 @@ path's 500 KB in the transfer, ends about 1 KB behind after the first second
 when acknowledgements cover one packet rather than two, and stays behind.
 libutp's sender is not affected the same way: on that link it takes 1.95
 Mbps to libutp's receiver and to ours under either rule, and ours, at 2.05,
-is still ahead of it. Why our sender's ramp depends on how many packets an
-acknowledgement covers, when its window update, like libutp's, is linear in
-the bytes acknowledged, is not yet known (KNOWN-LIMITATIONS.md, "Things found
-but deliberately not fixed"). The emulated network hands this receiver each
+is still ahead of it. The cause was the window update, not linear in the
+acknowledgements after all: each one divided by a window its predecessor had
+just grown. It no longer does, and the link now takes 2.15 Mbps (see "The
+window grows by a round trip's worth per round trip"). The emulated network hands this receiver each
 datagram on its own, so it sends 0.78 acknowledgements per data packet there
 where libutp's receiver, driven over the same network, sends 0.63; over real
 sockets the two send the same number.
@@ -1216,6 +1223,70 @@ where matching libutp would have brought us to libutp.
 The likely reason, not separately measured: at 5% loss the holes that fast
 retransmit cannot fill are recovered only by the timeout, and a deadline that
 every selective ack pushes back fires later for them.
+
+## The window grows by a round trip's worth per round trip
+
+libutp grows the window once per acknowledgement by `MAX_CWND_INCREASE_BYTES_PER_RTT`
+(3,000 bytes) times the delay factor times a window factor,
+`min(bytes_acked, max_window) / max(max_window, bytes_acked)`
+(`utp_internal.cpp:1668`). The factor is meant to share one round trip's
+growth among that round trip's acknowledgements, so that a full window of
+them adds the gain once. But each update grows `max_window`, and the next
+acknowledgement of the same round trip divides by the grown window. A round
+trip in one acknowledgement adds G; split into one per packet it adds about
+G - G^2/2W, a quarter of G short at a 6 KB window and 6% short at 20 KB
+(`TestWindowGrowthDoesNotDependOnHowAcksAreSplit`: 2,700 bytes against
+2,538, twenty acknowledgements of a 20 KB window, delay 10 ms under target).
+In slow start the same factor scales the step.
+
+It showed when this library's receiver stopped coalescing acknowledgements
+where the return path keeps up ("Acknowledgements: one per read"): classic
+LEDBAT on the emulated 100 ms, 20 Mb/s link took 8.20 s for 2 MB against
+8.04 s, every run of twenty. The window, which never reaches that path's
+500 KB in the transfer, fell about 70 bytes behind in the first second; at
+1.0 s that left 1,380 bytes of room where a packet needed 1,382, so one
+packet fewer went out every round trip for the rest of the transfer --
+growth is proportional to what is acknowledged, so it never caught up.
+
+This library also credits each acknowledged packet with its size over the
+window when it was sent (`packetRecord.SentWindow`, summed per
+acknowledgement in `ackBatch.credit`), and takes the larger of that and
+libutp's factor. The send-window figure alone was measured first and was not
+an improvement everywhere: after a loss halves the window, libutp's factor
+divides the next round trip's acknowledgements, for packets sent from the old
+window, by the new one, and that round trip grows about twice as fast;
+without it classic LEDBAT at 5% loss ran 9% slower (2.30 Mbps against 2.53,
+five runs). Taking the larger, the window never grows slower than libutp's
+would, and above target the factor scales the decrease the same way, so it
+never shrinks slower either. LEDBAT++, whose update is per packet, is not
+affected.
+
+**Measured**, against the commit before, over the emulated network; five runs
+of each classic LEDBAT profile, then twenty a side of the five that moved:
+
+| Profile | Before | After | Mann-Whitney z |
+| --- | --- | --- | --- |
+| Shallow queue (20 ms, 10 Mb/s, 16 KB) | 4.59 Mbps | 4.95 | 5.41 (every run) |
+| Broadband (20 ms, 10 Mb/s) | 6.25 | 6.58 | 5.41 |
+| High BDP (100 ms, 20 Mb/s) | 2.05 | 2.15 | 5.41 |
+| Broadband, 5% loss | 2.45 | 2.54 | 2.71 |
+| LAN (1 ms, 100 Mb/s) | 87.5 | 88.7 | 2.06 |
+
+1% loss, the 8 MB transfer and reordering moved +1.0% to +1.5% in five runs.
+Deference to a loss-based flow sharing the bottleneck
+(`TestDeferenceToLossBasedFlow`, ten runs each): the competitor keeps a median
+64% of what it gets alone either way (z = 0.08), and uTP's share while both
+run is 69.3% against 66.5% (z = 1.29, not significant). Two classic LEDBAT
+flows (`TestLatecomerShare`, ten each): the latecomer's share while both run
+22.4% against 21.4% (z = 2.91), Jain fairness 0.98 either way. Against libutp
+over the same network (`TestLibutpOverEmulatedNetwork`, five runs), our
+sender to our receiver went from 2.05 to 2.15 Mbps on the high-BDP link,
+libutp's own pair taking 1.95; 6.24 to 6.55 on Broadband (libutp 5.51), 4.04
+to 4.28 at 1% loss (3.33).
+
+`TestConformanceLedbatRules` still replays libutp's own trace through the
+update with libutp's factor and matches it to the byte: the replay supplies
+no send windows, and with none the factor is libutp's.
 
 ## A loss probe resends before the retransmission timeout
 

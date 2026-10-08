@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -59,6 +60,10 @@ const (
 type Transmit int
 
 type packetRecord struct {
+	// SentWindow is the congestion window when the packet was last
+	// transmitted: what its acknowledgement's share of a round trip's growth
+	// is reckoned against. See ackBatch.credit.
+	SentWindow       uint32
 	SizeBytes        uint32
 	NumTransmissions uint32
 	Acked            bool
@@ -503,6 +508,7 @@ func (c *defaultController) OnTransmit(seqNum uint16, transmission Transmit, dat
 		}
 		c.transmissions[seqNum] = packetInst
 		packetInst.SentAt = c.now()
+		packetInst.SentWindow = c.maxWindowSizeBytes
 	} else {
 		var exists bool
 		packetInst, exists = c.transmissions[seqNum]
@@ -511,6 +517,7 @@ func (c *defaultController) OnTransmit(seqNum uint16, transmission Transmit, dat
 		}
 		packetInst.NumTransmissions++
 		packetInst.SentAt = c.now()
+		packetInst.SentWindow = c.maxWindowSizeBytes
 		// A packet given up as lost counts in flight again once it is
 		// resent: `if (pkt->transmissions == 0 || pkt->need_resend)
 		// cur_window += pkt->payload` (utp_internal.cpp:877-881). Not
@@ -534,6 +541,10 @@ func (c *defaultController) OnTransmit(seqNum uint16, transmission Transmit, dat
 // ackBatch is libutp's acked_bytes and min_rtt for one incoming packet
 // (utp_internal.cpp:1956-1987, :1403-1436).
 type ackBatch struct {
+	// credit is each acknowledged packet's bytes over the window it was
+	// sent in, summed: the share of a round trip's growth this
+	// acknowledgement is owed. See applyCongestionControl.
+	credit  float64
 	packets int
 	bytes   uint32
 	minRTT  time.Duration
@@ -621,9 +632,23 @@ func (c *defaultController) ApplyAck() {
 	// "if we don't have a delay measurement, there's no point in invoking
 	// the congestion control" (:2136-2140).
 	if b.delay > 0 && b.bytes >= 1 {
-		c.applyCongestionControl(0, filtered, b.bytes, b.minRTT, b.at)
+		credit := 0.0
+		if sendWindowCredit.Load() {
+			credit = b.credit
+		}
+		c.applyCongestionControl(0, filtered, b.bytes, b.minRTT, b.at, credit)
 	}
 }
+
+// sendWindowCredit switches the window factor between libutp's, reckoned
+// against the window as it stands, and the one reckoned against the window
+// each packet was sent in. See applyCongestionControl. A switch so the two
+// can be measured against each other.
+var sendWindowCredit = func() *atomic.Bool {
+	b := new(atomic.Bool)
+	b.Store(true)
+	return b
+}()
 
 func (c *defaultController) OnAck(seqNum uint16, ack Ack) error {
 	c.mu.Lock()
@@ -664,6 +689,9 @@ func (c *defaultController) OnAck(seqNum uint16, ack Ack) error {
 		}
 		b.packets++
 		b.bytes += packetInst.SizeBytes
+		if packetInst.SentWindow > 0 {
+			b.credit += float64(packetInst.SizeBytes) / float64(packetInst.SentWindow)
+		}
 		b.delay, b.at = ack.Delay, ack.ReceivedAt
 	}
 
@@ -894,6 +922,7 @@ func (c *defaultController) applyCongestionControl(
 	bytesAcked uint32,
 	rtt time.Duration,
 	now time.Time,
+	credit float64,
 ) {
 	// The queueing delay this ack reports: how far above the lowest delay
 	// seen on this path the packet ran.
@@ -949,6 +978,32 @@ func (c *defaultController) applyCongestionControl(
 	maxWindow := float64(c.maxWindowSizeBytes)
 	acked := float64(bytesAcked)
 	windowFactor := math.Min(acked, maxWindow) / math.Max(maxWindow, acked)
+
+	// Deviation: each acknowledged packet counts against the window it was
+	// sent in, not the window as it stands now, when the caller knows it
+	// (credit > 0). libutp's factor is meant to share one round trip's
+	// growth among that round trip's acknowledgements -- a full window of
+	// them adding MAX_CWND_INCREASE_BYTES_PER_RTT -- but each update grows
+	// the window the next one divides by, so the more acknowledgements a
+	// round trip is split into, the less it grows: by about G^2/2W, a
+	// quarter of G at a 6 KB window. Measured over the emulated network,
+	// classic LEDBAT on a 100 ms, 20 Mb/s path took 8.20 s for 2 MB when
+	// each acknowledgement covered one packet and 8.04 s when it covered
+	// two, the window a packet behind for the whole transfer; reckoned
+	// against the window at sending, 7.80 s either way. DEVIATIONS.md, "The
+	// window grows by a round trip's worth per round trip".
+	//
+	// The larger of the two, though, not the send-window figure alone. After
+	// a loss halves the window, libutp divides the next round trip's
+	// acknowledgements -- for packets sent from the old window -- by the new
+	// one, and that round trip grows about twice as fast. Reckoned against
+	// the window they were sent in, it lost that, and classic LEDBAT at 5%
+	// loss ran 9% slower. Taking the larger, the window never grows slower
+	// than libutp's would; above target it shrinks no slower either, the
+	// factor scaling the decrease the same way.
+	if credit > 0 {
+		windowFactor = math.Max(windowFactor, math.Min(credit, 1))
+	}
 
 	scaledGain := float64(c.gain) * float64(c.maxWindowSizeIncBytes) * windowFactor * delayFactor
 

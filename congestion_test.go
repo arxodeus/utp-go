@@ -503,7 +503,7 @@ func TestOneWindowUpdatePerAcknowledgement(t *testing.T) {
 
 		want := fresh()
 		want.slowStart = slowStart
-		want.applyCongestionControl(0, uint32(queueDelay.Microseconds()), packets*size, rtt, now)
+		want.applyCongestionControl(0, uint32(queueDelay.Microseconds()), packets*size, rtt, now, 0)
 		require.Equal(t, want.maxWindowSizeBytes, c.maxWindowSizeBytes,
 			"slow start %v: one acknowledgement of %d packets should be one update of %d bytes",
 			slowStart, packets, packets*size)

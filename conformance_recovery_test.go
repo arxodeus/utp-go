@@ -757,7 +757,7 @@ func replayCC(t *testing.T, entries []ccEntry, from int) ccReplay {
 		}
 		before := c.maxWindowSizeBytes
 		wasSlow := c.slowStart
-		c.applyCongestionControl(0, uint32(e.ourDelayMs*1000), e.acked, time.Hour, time.UnixMilli(e.nowMs))
+		c.applyCongestionControl(0, uint32(e.ourDelayMs*1000), e.acked, time.Hour, time.UnixMilli(e.nowMs), 0)
 		if wasSlow && !c.slowStart {
 			r.slowStartEnd = i
 		}

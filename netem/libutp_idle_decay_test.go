@@ -48,6 +48,13 @@ import (
 // peer would see it: idle for a while, then write a burst, and count what
 // comes out before anything is acknowledged. That first flight is the window.
 func TestLibutpIdleWindowDecay(t *testing.T) {
+	if raceEnabled {
+		// Under the detector libutp's first flight measured one packet
+		// whether idle or not -- 1452 of 1452 bytes, on this commit and on
+		// the one before it -- and the check below rightly refuses to draw
+		// anything from that.
+		t.Skip("libutp's first flight over the emulated network is not measurable under -race")
+	}
 	const idle = 8 * time.Second
 
 	busy := libutpFirstFlightAfterIdle(t, 0)
