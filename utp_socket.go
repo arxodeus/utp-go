@@ -66,6 +66,11 @@ type PeerInfo interface {
 // utp_internal.cpp:713) -- so a WriteTo that waited for the other side to
 // read would let two sockets each wait on the other for ever. A transport
 // that cannot keep up drops, as UDP does. WriteTo is called concurrently.
+//
+// WriteTo must not keep b once it returns: the socket encodes each packet into
+// a buffer it reuses, as libutp's send callback is handed one it reuses
+// (utp_call_sendto, utp_internal.cpp:713). net.PacketConn already works this
+// way; a transport that queues a datagram must copy it.
 type Conn interface {
 	ReadFrom(b []byte) (int, ConnectionPeer, error)
 	WriteTo(b []byte, dst ConnectionPeer) (int, error)
@@ -95,6 +100,10 @@ type UdpConn struct {
 	peers map[peerKey]*UdpPeer
 	// mmsg is what readBatch receives into where recvmmsg exists.
 	mmsg *recvmmsgSlots
+	// arena holds the datagrams of the last batch read, and batch the list of
+	// them: both are reused by the next. See lend.
+	arena []byte
+	batch []datagram
 	// dfUnsupported records that this platform has no per-packet
 	// don't-fragment option, so the MTU search stops asking. See
 	// WriteToDontFragment.
@@ -197,12 +206,18 @@ func (c *UdpConn) LocalAddr() net.Addr {
 type IncomingPacketRaw struct {
 	peer    ConnectionPeer
 	payload []byte
+	// borrowed says payload is the reader's buffer, which it reuses once the
+	// datagram has been dispatched: the decoded packet copies its body out.
+	borrowed bool
 }
 
 // datagram is one datagram from a batched read.
 type datagram struct {
 	payload []byte
 	peer    ConnectionPeer
+	// borrowed says payload is reused by the next batch. See
+	// IncomingPacketRaw.borrowed.
+	borrowed bool
 }
 
 // batchReader is a Conn that can hand over everything already queued in one
@@ -268,9 +283,9 @@ type UtpSocket struct {
 	acceptsWithCidCh         chan *Accept
 	socketEvents             chan *socketEvent
 	awaiting                 *syncMap[*Accept]
-	awaitingExpirations      *timeWheel[*Accept]
+	awaitingExpirations      *timeWheel[any, *Accept]
 	incomingConns            *syncMap[*IncomingPacket]
-	incomingConnsExpirations *timeWheel[*IncomingPacket]
+	incomingConnsExpirations *timeWheel[any, *IncomingPacket]
 	socket                   Conn
 	// retransmitTimers is one timer wheel for every connection on this
 	// socket. Per-connection wheels cost a ticker each; see
@@ -282,7 +297,7 @@ type UtpSocket struct {
 	pendingAccepts []*Accept
 	// rstInfo remembers RESETs recently sent for connections we do not have.
 	rstInfo            *syncMap[struct{}]
-	rstInfoExpirations *timeWheel[rstInfoKey]
+	rstInfoExpirations *timeWheel[any, rstInfoKey]
 	// ownsSocket is true when this UtpSocket created the underlying Conn
 	// (via Bind) and is therefore responsible for closing it. A Conn handed
 	// in through WithSocket belongs to the caller.
@@ -303,7 +318,7 @@ type UtpSocket struct {
 	// its peer's FIN, the acknowledgement to re-send if that FIN arrives
 	// again. See connection.lingerAck.
 	lingerAcks        *syncMap[*packet]
-	lingerExpirations *timeWheel[string]
+	lingerExpirations *timeWheel[any, string]
 	// resetsSent counts RESETs answered to packets for connections this
 	// socket does not have. A RESET tells the peer to give up, so a healthy
 	// connection that draws one has been killed by us.
@@ -481,21 +496,21 @@ func WithSocket(ctx context.Context, socket Conn, logger log.Logger, opts ...Soc
 		default:
 		}
 	}
-	awaitExpirations := newTimeWheel[*Accept](2*time.Second, 20, handleAwaitExpirations)
+	awaitExpirations := newTimeWheel[any, *Accept](2*time.Second, 20, handleAwaitExpirations)
 
 	incomingConns := newSyncMap[*IncomingPacket]()
 	handleIncomingExpirations := func(key any, incomingPacket *IncomingPacket) {
 		incomingConns.remove(key.(string))
 	}
-	incomingExpirations := newTimeWheel[*IncomingPacket](2*time.Second, 20, handleIncomingExpirations)
+	incomingExpirations := newTimeWheel[any, *IncomingPacket](2*time.Second, 20, handleIncomingExpirations)
 
 	rstInfo := newSyncMap[struct{}]()
-	rstExpirations := newTimeWheel[rstInfoKey](time.Second, 16, func(key any, _ rstInfoKey) {
+	rstExpirations := newTimeWheel[any, rstInfoKey](time.Second, 16, func(key any, _ rstInfoKey) {
 		rstInfo.remove(key)
 	})
 
 	lingerAcks := newSyncMap[*packet]()
-	lingerExpirations := newTimeWheel[string](time.Second, 16, func(key any, _ string) {
+	lingerExpirations := newTimeWheel[any, string](time.Second, 16, func(key any, _ string) {
 		lingerAcks.remove(key)
 	})
 
@@ -583,7 +598,7 @@ func (s *UtpSocket) readLoop() {
 					continue
 				}
 				for _, d := range dgs {
-					s.dispatch(&IncomingPacketRaw{peer: d.peer, payload: d.payload}, touched)
+					s.dispatch(&IncomingPacketRaw{peer: d.peer, payload: d.payload, borrowed: d.borrowed}, touched)
 				}
 				s.endBatch(touched)
 				if s.readFailed(err, &failures) {
@@ -607,9 +622,11 @@ func (s *UtpSocket) readLoop() {
 				continue
 			}
 			failures = 0
-			dstBuf := make([]byte, n)
-			copy(dstBuf, buf[:n])
-			s.dispatch(&IncomingPacketRaw{peer: from, payload: dstBuf}, touched)
+			// Decoded from buf, which the next read reuses, with only the
+			// body copied out: an acknowledgement, half of what arrives,
+			// costs no copy at all. The whole datagram was copied, an
+			// allocation for every packet received.
+			s.dispatch(&IncomingPacketRaw{peer: from, payload: buf[:n], borrowed: true}, touched)
 			if run++; qr == nil || run >= maxQueuedRun || qr.Queued() == 0 {
 				s.endBatch(touched)
 				run = 0
@@ -719,6 +736,16 @@ const connEventQueueLen = 64
 // queues to. It was a million, allocated whole: 8 MB per socket, unread.
 const socketEventQueueLen = 64
 
+// encodeBufs holds the buffers outgoing packets are encoded into. A packet is
+// written the moment it is encoded and the Conn may not keep it, so a buffer
+// is free again once WriteTo returns. Encoding into a fresh slice was one
+// allocation per packet sent, about a twelfth of all the allocations of a LAN
+// transfer.
+var encodeBufs = sync.Pool{New: func() any {
+	b := make([]byte, 0, 1500)
+	return &b
+}}
+
 // sendEvent carries out what a connection or the socket wants done on the
 // wire, on the caller's goroutine: a packet written, or a finished
 // connection's entry removed.
@@ -735,7 +762,8 @@ func (s *UtpSocket) sendEvent(event *socketEvent) {
 	}
 	switch event.Type {
 	case outgoing:
-		encoded := event.Packet.Encode()
+		bufp := encodeBufs.Get().(*[]byte)
+		encoded := event.Packet.appendEncoded((*bufp)[:0])
 		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			s.logger.Trace("Send a packet out",
 				"target.cid", event.ConnectionId,
@@ -751,7 +779,10 @@ func (s *UtpSocket) sendEvent(event *socketEvent) {
 		} else {
 			peer = event.ConnectionId
 		}
-		if _, err := s.writeDatagram(encoded, peer, event.DontFragment); err != nil {
+		_, err := s.writeDatagram(encoded, peer, event.DontFragment)
+		*bufp = encoded[:0]
+		encodeBufs.Put(bufp)
+		if err != nil {
 			var eackEncodeLen int
 			if event.Packet.Eack != nil {
 				eackEncodeLen = event.Packet.Eack.EncodedLen()
@@ -856,7 +887,7 @@ func (s *UtpSocket) eventLoop() {
 // took it inline, or nil. Called with dispatchMu held.
 func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connection {
 	// Handle incoming packets
-	packetPtr, err := DecodePacket(incomingRaw.payload)
+	packetPtr, err := decodePacket(incomingRaw.payload, incomingRaw.borrowed)
 	if err != nil {
 		// Not uTP, or not well formed. Ordinary on a port shared with
 		// another protocol -- go-libutp, go-utp and rust-utp all hand such

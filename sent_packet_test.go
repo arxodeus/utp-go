@@ -38,8 +38,8 @@ func TestOnTransmitInitial(t *testing.T) {
 	if !packetInst.transmission.Equal(now) {
 		t.Errorf("expected transmission time %v, got %v", now, packetInst.transmission)
 	}
-	if len(packetInst.acks) != 0 {
-		t.Errorf("expected empty acks, got %d", len(packetInst.acks))
+	if packetInst.acked {
+		t.Errorf("expected the packet not acknowledged")
 	}
 	if packetInst.retransmission != packetInst.transmission {
 		t.Errorf("expected initial retransmission, got %v", packetInst.retransmission)
@@ -71,8 +71,8 @@ func TestOnTransmitRetransmit(t *testing.T) {
 	if !packetInst.transmission.Equal(first) {
 		t.Errorf("expected transmission time %v, got %v", first, packetInst.transmission)
 	}
-	if len(packetInst.acks) != 0 {
-		t.Errorf("expected empty acks, got %d", len(packetInst.acks))
+	if packetInst.acked {
+		t.Errorf("expected the packet not acknowledged")
 	}
 	if packetInst.retransmission == packetInst.transmission {
 		t.Errorf("expected retransmission was updated, got %v", packetInst.retransmission)
@@ -142,15 +142,15 @@ func TestOnSelectiveAck(t *testing.T) {
 	}
 
 	// Verify ACKs
-	if len(sentPackets.packets[0].acks) != 1 {
-		t.Errorf("expected 1 ack for first packet, got %d", len(sentPackets.packets[0].acks))
+	if !sentPackets.packets[0].acked {
+		t.Errorf("expected the first packet acknowledged")
 	}
-	if len(sentPackets.packets[1].acks) != 0 {
-		t.Errorf("expected no acks for second packet, got %d", len(sentPackets.packets[1].acks))
+	if sentPackets.packets[1].acked {
+		t.Errorf("expected the second packet not acknowledged")
 	}
 	for i := 2; i < COUNT; i++ {
 		isEmpty := i%2 != 0
-		require.Equal(t, isEmpty, len(sentPackets.packets[i].acks) == 0, fmt.Sprintf("packet %d: expected acks empty=%v, got %v", i, isEmpty, len(sentPackets.packets[i].acks)))
+		require.Equal(t, isEmpty, !sentPackets.packets[i].acked, fmt.Sprintf("packet %d: expected unacknowledged=%v", i, isEmpty))
 	}
 }
 
@@ -224,11 +224,8 @@ func TestAck(t *testing.T) {
 	index := sentPackets.SeqNumIndex(seqNum)
 	packetInst := sentPackets.packets[index]
 
-	if len(packetInst.acks) != 1 {
-		t.Errorf("expected 1 ack, got %d", len(packetInst.acks))
-	}
-	if !packetInst.acks[0].Equal(now) {
-		t.Errorf("expected ack time %v, got %v", now, packetInst.acks[0])
+	if !packetInst.acked {
+		t.Errorf("expected the packet acknowledged")
 	}
 
 	sentPackets.lostPackets.Ascend(func(lostSeq uint16) bool {
@@ -279,8 +276,8 @@ func TestAckPriorUnacked(t *testing.T) {
 
 	// Verify acknowledgments
 	for i := 0; i < int(ACK_NUM); i++ {
-		if len(sentPackets.packets[i].acks) != 1 {
-			t.Errorf("packet %d: expected 1 ack, got %d", i, len(sentPackets.packets[i].acks))
+		if !sentPackets.packets[i].acked {
+			t.Errorf("packet %d: expected it acknowledged", i)
 		}
 	}
 }

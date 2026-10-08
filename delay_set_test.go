@@ -45,7 +45,7 @@ func (f *firing) count() int {
 func TestTimeWheelNeverFiresEarly(t *testing.T) {
 	const interval = 20 * time.Millisecond
 	f := newFiring()
-	tw := newTimeWheel[int](interval, 8, f.record)
+	tw := newTimeWheel[any, int](interval, 8, f.record)
 	defer tw.stop()
 
 	// Delays deliberately not multiples of the interval, including one
@@ -84,7 +84,7 @@ func TestTimeWheelNeverFiresEarly(t *testing.T) {
 func TestTimeWheelSubIntervalDelayWaitsATick(t *testing.T) {
 	const interval = 50 * time.Millisecond
 	f := newFiring()
-	tw := newTimeWheel[int](interval, 8, f.record)
+	tw := newTimeWheel[any, int](interval, 8, f.record)
 	defer tw.stop()
 
 	tw.put("tiny", 1, time.Microsecond)
@@ -105,7 +105,7 @@ func TestTimeWheelHandlesDelaysBeyondOneRevolution(t *testing.T) {
 	const interval = 20 * time.Millisecond
 	const slots = 4 // one revolution is 80ms
 	f := newFiring()
-	tw := newTimeWheel[int](interval, slots, f.record)
+	tw := newTimeWheel[any, int](interval, slots, f.record)
 	defer tw.stop()
 
 	revolution := interval * slots
@@ -134,7 +134,7 @@ func TestTimeWheelHandlesDelaysBeyondOneRevolution(t *testing.T) {
 func TestTimeWheelRemoveCancels(t *testing.T) {
 	const interval = 20 * time.Millisecond
 	f := newFiring()
-	tw := newTimeWheel[int](interval, 8, f.record)
+	tw := newTimeWheel[any, int](interval, 8, f.record)
 	defer tw.stop()
 
 	tw.put("keep", 1, 2*interval)
@@ -164,7 +164,7 @@ func TestTimeWheelRemoveCancels(t *testing.T) {
 func TestTimeWheelPutReschedules(t *testing.T) {
 	const interval = 20 * time.Millisecond
 	f := newFiring()
-	tw := newTimeWheel[int](interval, 8, f.record)
+	tw := newTimeWheel[any, int](interval, 8, f.record)
 	defer tw.stop()
 
 	tw.put("k", 1, interval)
@@ -187,7 +187,7 @@ func TestTimeWheelPutReschedules(t *testing.T) {
 }
 
 func TestTimeWheelRemoveIsIdempotent(t *testing.T) {
-	tw := newTimeWheel[int](20*time.Millisecond, 8, func(any, int) {})
+	tw := newTimeWheel[any, int](20*time.Millisecond, 8, func(any, int) {})
 	defer tw.stop()
 	tw.put("k", 1, time.Second)
 	tw.remove("k")
@@ -199,7 +199,7 @@ func TestTimeWheelRemoveIsIdempotent(t *testing.T) {
 }
 
 func TestTimeWheelStopIsIdempotent(t *testing.T) {
-	tw := newTimeWheel[int](20*time.Millisecond, 8, func(any, int) {})
+	tw := newTimeWheel[any, int](20*time.Millisecond, 8, func(any, int) {})
 	tw.stop()
 	tw.stop()
 }
@@ -221,8 +221,8 @@ func TestRetransmitKeysAreScoped(t *testing.T) {
 	pktA := &packet{Header: &PacketHeaderV1{SeqNum: 7}}
 	pktB := &packet{Header: &PacketHeaderV1{SeqNum: 7}}
 
-	timers.arm(retransmitKey{scope: a, seq: 7}, &retransmitTimer{packet: pktA, deliver: chA, ctx: BASE_CONTEXT}, time.Second)
-	timers.arm(retransmitKey{scope: b, seq: 7}, &retransmitTimer{packet: pktB, deliver: chB, ctx: BASE_CONTEXT}, time.Second)
+	timers.arm(retransmitKey{scope: a, seq: 7}, retransmitTimer{packet: pktA, deliver: chA, ctx: BASE_CONTEXT}, time.Second)
+	timers.arm(retransmitKey{scope: b, seq: 7}, retransmitTimer{packet: pktB, deliver: chB, ctx: BASE_CONTEXT}, time.Second)
 
 	if got := timers.Len(); got != 2 {
 		t.Fatalf("same seq num in two scopes gave Len() = %d, want 2 -- the scopes collided", got)
@@ -252,7 +252,7 @@ func TestTimeWheelNeverFiresEarlyWhenArmedMidCycle(t *testing.T) {
 		offset := interval * time.Duration(offsetNum) / 4
 		t.Run(offset.String()+"-into-the-tick", func(t *testing.T) {
 			f := newFiring()
-			tw := newTimeWheel[int](interval, 8, f.record)
+			tw := newTimeWheel[any, int](interval, 8, f.record)
 			defer tw.stop()
 
 			// Let the wheel get part-way through a tick before arming.

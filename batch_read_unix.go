@@ -25,9 +25,25 @@ func (c *UdpConn) readBatch() ([]datagram, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []datagram
+	// The socket dispatches every datagram of a batch before it reads the
+	// next, so the list and the bytes are both free again by then.
+	c.arena = c.arena[:0]
+	out := c.batch[:0]
 	err = c.drain(rc, &out)
+	c.batch = out
 	return out, err
+}
+
+// lend copies a datagram into the batch's arena and returns it there.
+//
+// Each datagram was copied into a slice of its own, which the decoded packet
+// then kept as its body: an allocation for every datagram received, for an
+// acknowledgement as much as for data. The decoder copies a body out of a
+// borrowed buffer, so an acknowledgement now costs none.
+func (c *UdpConn) lend(b []byte) []byte {
+	start := len(c.arena)
+	c.arena = append(c.arena, b...)
+	return c.arena[start:len(c.arena):len(c.arena)]
 }
 
 // peerFor returns the peer a datagram came from, reusing the one made for

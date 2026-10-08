@@ -1,7 +1,6 @@
 package utp_go
 
 import (
-	"container/heap"
 	"errors"
 	"math"
 	"sync"
@@ -269,6 +268,9 @@ type defaultController struct {
 	rtt                   time.Duration
 	rttVarianceMicros     int64
 	transmissions         map[uint16]*packetRecord
+	// freeRecords are records forgotten and ready for reuse. See
+	// forgetTransmission.
+	freeRecords []*packetRecord
 	fineRTT               time.Duration // see ControllerStats.FineRTT
 	minFineRTT            time.Duration // see ControllerStats.MinFineRTT
 	delayAcc              *delayAccumulator
@@ -488,6 +490,29 @@ func (c *defaultController) MarkForResend(seqNum uint16) {
 	c.windowSizeBytes -= packetInst.SizeBytes
 }
 
+// forgetTransmission drops the record of an acknowledged packet that the
+// sender no longer holds, keeping it for the next packet sent.
+//
+// Records were only ever replaced, when the sequence number came round again,
+// so the map grew to one per sequence number: 65,536 records, 5.5 MB
+// measured, on every connection that had sent that many packets. libutp's
+// records are its outgoing packets, freed when acknowledged (the free(pkt) in
+// ack_packet, utp_internal.cpp:1397), so it holds only the window.
+//
+// A record still unacknowledged is kept: the sender drops only packets it has
+// seen acknowledged, so this cannot happen from it, and a caller driving the
+// controller directly keeps what it has not finished with.
+func (c *defaultController) forgetTransmission(seqNum uint16) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	rec, exists := c.transmissions[seqNum]
+	if !exists || !rec.Acked {
+		return
+	}
+	delete(c.transmissions, seqNum)
+	c.freeRecords = append(c.freeRecords, rec)
+}
+
 func (c *defaultController) OnTransmit(seqNum uint16, transmission Transmit, dataLen uint32) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -498,10 +523,20 @@ func (c *defaultController) OnTransmit(seqNum uint16, transmission Transmit, dat
 		// numbers wrap, and the new packet takes its place. Only one still
 		// outstanding is a real duplicate. (This map is never otherwise
 		// pruned, so it holds at most one record per sequence number.)
-		if old, exists := c.transmissions[seqNum]; exists && !old.Acked {
+		old, exists := c.transmissions[seqNum]
+		if exists && !old.Acked {
 			return ErrDuplicateTransmission
 		}
-		packetInst = &packetRecord{
+		switch {
+		case exists:
+			packetInst = old
+		case len(c.freeRecords) > 0:
+			packetInst = c.freeRecords[len(c.freeRecords)-1]
+			c.freeRecords = c.freeRecords[:len(c.freeRecords)-1]
+		default:
+			packetInst = new(packetRecord)
+		}
+		*packetInst = packetRecord{
 			SizeBytes:        dataLen,
 			NumTransmissions: 1,
 			Acked:            false,
@@ -1320,7 +1355,7 @@ type delay struct {
 }
 
 type delayAccumulator struct {
-	delays *delayHeap
+	delays *delayWindow
 	window time.Duration
 	// clk decides when a sample has aged out of the window. Nil means the
 	// real clock; read it through now().
@@ -1338,14 +1373,14 @@ type delayAccumulator struct {
 
 func newDelayAccumulator(window time.Duration) *delayAccumulator {
 	return &delayAccumulator{
-		delays: &delayHeap{},
+		delays: &delayWindow{},
 		window: window,
 	}
 }
 
 func newDelayAccumulatorWithClock(window time.Duration, clk Clock) *delayAccumulator {
 	return &delayAccumulator{
-		delays: &delayHeap{},
+		delays: &delayWindow{},
 		window: window,
 		clk:    clk,
 	}
@@ -1360,7 +1395,7 @@ func (da *delayAccumulator) now() time.Time {
 }
 
 func (da *delayAccumulator) Push(delayTime time.Duration, receivedAt time.Time) {
-	heap.Push(da.delays, delay{
+	da.delays.push(delay{
 		Value:    delayTime - da.skew,
 		Deadline: receivedAt.Add(da.window),
 	})
@@ -1421,10 +1456,10 @@ func (da *delayAccumulator) shift(offset time.Duration) {
 
 func (da *delayAccumulator) BaseDelay() time.Duration {
 	now := da.now()
-	for da.delays.Len() > 0 {
-		min := (*da.delays)[0]
+	for da.delays.len() > 0 {
+		min := da.delays.front()
 		if now.After(min.Deadline) {
-			heap.Pop(da.delays)
+			da.delays.popFront()
 			continue
 		}
 		// Each stored sample carries the correction that stood when it was
@@ -1443,22 +1478,50 @@ func (da *delayAccumulator) BaseDelay() time.Duration {
 	return time.Duration(0)
 }
 
-type delayHeap []delay
-
-func (h delayHeap) Len() int           { return len(h) }
-func (h delayHeap) Less(i, j int) bool { return h[i].Value < h[j].Value }
-func (h delayHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-
-func (h *delayHeap) Push(x interface{}) {
-	*h = append(*h, x.(delay))
+// delayWindow is the minimum of the samples within the window: a sliding
+// window minimum. Samples are kept in the order they arrived, and a new one
+// first drops every sample before it that is no smaller -- that one leaves the
+// window first and can never be the least while the new one is in it -- so
+// the front is always the minimum, and the oldest, and expires first.
+//
+// It was a heap of every sample, popped only when its least had expired:
+// every acknowledgement of the last two minutes held, 32 bytes each, which at
+// a few thousand acknowledgements a second is megabytes per connection, and a
+// boxed allocation for each push through container/heap. With samples
+// arriving in time order, the minimum it gives is the same.
+type delayWindow struct {
+	items []delay
+	head  int
 }
 
-func (h *delayHeap) Pop() interface{} {
-	old := *h
-	n := len(old) - 1
-	x := old[n]
-	*h = old[:n]
-	return x
+func (w *delayWindow) len() int     { return len(w.items) - w.head }
+func (w *delayWindow) front() delay { return w.items[w.head] }
+
+// push adds a sample. Callers pass the time an acknowledgement arrived, which
+// only moves forward; a deadline earlier than the last is taken as the last,
+// so the front stays the first to expire whatever the caller does.
+func (w *delayWindow) push(d delay) {
+	if w.len() > 0 && d.Deadline.Before(w.items[len(w.items)-1].Deadline) {
+		d.Deadline = w.items[len(w.items)-1].Deadline
+	}
+	for w.len() > 0 && w.items[len(w.items)-1].Value >= d.Value {
+		w.items = w.items[:len(w.items)-1]
+	}
+	if w.len() == 0 {
+		w.items, w.head = w.items[:0], 0
+	} else if w.head > 0 && len(w.items) == cap(w.items) {
+		// Reclaim what has expired off the front before growing.
+		n := copy(w.items, w.items[w.head:])
+		w.items, w.head = w.items[:n], 0
+	}
+	w.items = append(w.items, d)
+}
+
+func (w *delayWindow) popFront() {
+	w.head++
+	if w.head == len(w.items) {
+		w.items, w.head = w.items[:0], 0
+	}
 }
 
 // capTimeout bounds a timeout by max, where max is positive; zero or less is

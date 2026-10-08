@@ -4,6 +4,10 @@ type sendBuffer struct {
 	pending [][]byte
 	offset  int
 	size    int
+	// used is the length of everything in pending, the consumed front
+	// included. Available and Pending are asked on every packet composed, and
+	// summed the chunks each time: quadratic in a run of small writes.
+	used int
 }
 
 func newSendBuffer(size int) *sendBuffer {
@@ -15,21 +19,13 @@ func newSendBuffer(size int) *sendBuffer {
 }
 
 func (sb *sendBuffer) Available() int {
-	used := 0
-	for _, data := range sb.pending {
-		used += len(data)
-	}
-	return sb.size + sb.offset - used
+	return sb.size + sb.offset - sb.used
 }
 
 // Pending reports how many bytes of application data are buffered but not
 // yet handed to the connection for transmission.
 func (sb *sendBuffer) Pending() int {
-	used := 0
-	for _, data := range sb.pending {
-		used += len(data)
-	}
-	return used - sb.offset
+	return sb.used - sb.offset
 }
 
 func (sb *sendBuffer) IsEmpty() bool {
@@ -63,6 +59,7 @@ func (sb *sendBuffer) Write(data []byte) int {
 	owned := make([]byte, n)
 	copy(owned, data[:n])
 	sb.pending = append(sb.pending, owned)
+	sb.used += n
 	return n
 }
 
@@ -82,11 +79,48 @@ func (sb *sendBuffer) Read(buf []byte) int {
 		k := copy(buf[n:], data[sb.offset:])
 		n += k
 		if sb.offset+k == len(data) {
-			sb.offset = 0
-			sb.pending = sb.pending[1:]
+			sb.dropFront()
 		} else {
 			sb.offset += k
 		}
 	}
 	return n
+}
+
+// Take removes the next n bytes, or as many as there are, and returns them as
+// a packet's payload.
+//
+// A payload that lies within one write is that write's own bytes, not a copy
+// of them: the write was already copied in, by Write, and nothing changes it
+// after. libutp copies the application's bytes once, into the packet
+// (write_outgoing_packet, utp_internal.cpp:1061); copying again here made
+// it twice, and one allocation for every packet sent. The slice is capped, so
+// appending to it cannot reach the bytes after it.
+//
+// The write stays in memory until the last packet taken from it is
+// acknowledged, rather than shrinking packet by packet. That holds at most a
+// write's worth more than the window, and a write is at most the buffer.
+func (sb *sendBuffer) Take(n int) []byte {
+	if len(sb.pending) == 0 || n <= 0 {
+		return nil
+	}
+	front := sb.pending[0]
+	if rest := len(front) - sb.offset; rest >= n {
+		out := front[sb.offset : sb.offset+n : sb.offset+n]
+		if rest == n {
+			sb.dropFront()
+		} else {
+			sb.offset += n
+		}
+		return out
+	}
+	out := make([]byte, min(n, sb.Pending()))
+	return out[:sb.Read(out)]
+}
+
+func (sb *sendBuffer) dropFront() {
+	sb.used -= len(sb.pending[0])
+	sb.pending[0] = nil
+	sb.pending = sb.pending[1:]
+	sb.offset = 0
 }

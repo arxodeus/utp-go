@@ -388,7 +388,12 @@ func (p *packet) wireExtensions() []ExtensionData {
 // so an external caller could reach it, and a proxy or relay built on this
 // library would have emitted unparseable packets.
 func (p *packet) Encode() []byte {
-	bytes := make([]byte, 0, p.EncodedLen())
+	return p.appendEncoded(make([]byte, 0, p.EncodedLen()))
+}
+
+// appendEncoded appends the packet's wire form to bytes, so that the send
+// path can encode into a buffer it reuses.
+func (p *packet) appendEncoded(bytes []byte) []byte {
 
 	exts := p.wireExtensions()
 	header := *p.Header
@@ -424,7 +429,15 @@ func (p *packet) extensionByte() byte {
 	return 0
 }
 
+// DecodePacket decodes one datagram. The packet's body is a slice of b.
 func DecodePacket(b []byte) (*packet, error) {
+	return decodePacket(b, false)
+}
+
+// decodePacket decodes one datagram, copying its body out of b if ownBody is
+// set, so that b can be reused once this returns. Nothing else in the packet
+// refers to b: the header is decoded into fields and each extension copied.
+func decodePacket(b []byte, ownBody bool) (*packet, error) {
 	receivedBytesLength := len(b)
 	if receivedBytesLength < MINIMAL_HEADER_SIZE {
 		return nil, ErrInvalidHeaderSize
@@ -459,6 +472,8 @@ func DecodePacket(b []byte) (*packet, error) {
 	var payload []byte
 	if len(b) == payloadStartIndex {
 		payload = make([]byte, 0)
+	} else if ownBody {
+		payload = append([]byte(nil), b[payloadStartIndex:]...)
 	} else {
 		payload = b[payloadStartIndex:]
 	}

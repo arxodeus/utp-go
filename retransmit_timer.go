@@ -51,7 +51,7 @@ type retransmitTimer struct {
 // Shared, the tick rate is constant regardless of connection count and the
 // per-tick work is proportional to the number of timers actually expiring.
 type retransmitTimers struct {
-	wheel     *timeWheel[*retransmitTimer]
+	wheel     *timeWheel[retransmitKey, retransmitTimer]
 	nextScope atomic.Uint64
 }
 
@@ -64,7 +64,7 @@ func newRetransmitTimers(interval time.Duration, slots int) *retransmitTimers {
 func newRetransmitTimersWithClock(interval time.Duration, slots int, clk Clock) *retransmitTimers {
 	r := &retransmitTimers{}
 	barrier, _ := clk.(IdleBarrier)
-	r.wheel = newTimeWheelWithClock[*retransmitTimer](interval, slots, clk, func(key any, t *retransmitTimer) {
+	r.wheel = newTimeWheelWithClock(interval, slots, clk, func(key retransmitKey, t retransmitTimer) {
 		// The connection has not taken this yet. See IdleBarrier.NoteHandoff.
 		if barrier != nil {
 			barrier.NoteHandoff()
@@ -92,7 +92,7 @@ func newRetransmitTimersWithClock(interval time.Duration, slots int, clk Clock) 
 // newScope returns an identifier unique to one connection on this socket.
 func (r *retransmitTimers) newScope() uint64 { return r.nextScope.Add(1) }
 
-func (r *retransmitTimers) arm(key retransmitKey, t *retransmitTimer, delay time.Duration) {
+func (r *retransmitTimers) arm(key retransmitKey, t retransmitTimer, delay time.Duration) {
 	r.wheel.put(key, t, delay)
 }
 

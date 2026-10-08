@@ -282,9 +282,9 @@ func TestPush(t *testing.T) {
 	delayReceivedAt := time.Now()
 	acc.Push(delay, delayReceivedAt)
 
-	require.Equal(t, 1, acc.delays.Len(), "delay not pushed onto accumulator")
+	require.Equal(t, 1, acc.delays.len(), "delay not pushed onto accumulator")
 
-	item := (*acc.delays)[0]
+	item := acc.delays.front()
 	require.Equal(t, delay, item.Value,
 		"expected delay %v, got %v", delay, item.Value)
 	expectedDeadline := delayReceivedAt.Add(window)
@@ -296,31 +296,30 @@ func TestBaseDelay(t *testing.T) {
 	window := 100 * time.Millisecond
 	acc := newDelayAccumulator(window)
 
-	// Push delays in descending order
-	delaySmall := 50 * time.Millisecond
-	delaySmallReceivedAt := time.Now()
-	acc.Push(delaySmall, delaySmallReceivedAt)
-
-	delaySmaller := 25 * time.Millisecond
-	delaySmallerReceivedAt := time.Now()
-	acc.Push(delaySmaller, delaySmallerReceivedAt)
-
-	delaySmallest := 5 * time.Millisecond
-	delaySmallestReceivedAt := time.Now()
-	acc.Push(delaySmallest, delaySmallestReceivedAt)
-
+	// The smallest sample first, received a window ago and so expired;
+	// then three newer ones, in the order acknowledgements arrive.
 	delayExpired := 1 * time.Millisecond
 	delayExpiredReceivedAt := time.Now().Add(-window)
 	acc.Push(delayExpired, delayExpiredReceivedAt)
 
-	// Check that all delays are present
-	require.Equal(t, 4, acc.delays.Len(), "expected 4 delays, got %d", acc.delays.Len())
+	delaySmallest := 5 * time.Millisecond
+	acc.Push(delaySmallest, time.Now())
+
+	delaySmall := 50 * time.Millisecond
+	acc.Push(delaySmall, time.Now())
+
+	delaySmaller := 25 * time.Millisecond
+	acc.Push(delaySmaller, time.Now())
+
+	// The 50 ms sample is gone already: it can never be the least while the
+	// 25 ms one, newer and smaller, is in the window.
+	require.Equal(t, 3, acc.delays.len(), "expected 3 delays, got %d", acc.delays.len())
 
 	// Get base delay
 	baseDelay := acc.BaseDelay()
 	require.Equal(t, delaySmallest, baseDelay, "expected base delay %v, got %v", delaySmallest, baseDelay)
 	// Check that expired delay was removed
-	require.Equal(t, 3, acc.delays.Len(), "expected 3 delays, got %d", acc.delays.Len())
+	require.Equal(t, 2, acc.delays.len(), "expected 2 delays, got %d", acc.delays.len())
 }
 
 func TestBaseDelayEmpty(t *testing.T) {

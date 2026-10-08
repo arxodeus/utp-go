@@ -31,7 +31,10 @@ type sentPacket struct {
 	data           []byte
 	transmission   time.Time
 	retransmission time.Time
-	acks           []time.Time
+	// acked is whether the packet has been acknowledged. It was a slice of
+	// the times it was, appended to on the first and only ever asked
+	// whether it was empty: an allocation per packet for a boolean.
+	acked bool
 	// needResend is libutp's need_resend: given up as lost by a
 	// retransmission timeout and waiting to be sent again. See
 	// MarkAllForResend.
@@ -77,6 +80,12 @@ type sentPackets struct {
 	// the full rate of its event loop, measured at 22,000 packets a second
 	// into a 10 Mbps link. Nothing acknowledged was ever freed either.
 	packets []*sentPacket
+	// fullAcked is what onAck last returned as cumulatively acknowledged.
+	fullAcked circularRangeInclusive
+	// spare holds records of acknowledged packets, for the next sent. A
+	// record is looked at only while its packet is in the window, so one
+	// trimmed from the front is free.
+	spare []*sentPacket
 	// base is the sequence number of packets[0], or the next to be sent
 	// when packets is empty.
 	base uint16
@@ -137,17 +146,31 @@ func (s *sentPackets) NextSeqNum() uint16 {
 	return s.base + uint16(len(s.packets))
 }
 
-// trimAcked drops the acknowledged packets at the front of the window.
+// transmissionForgetter is a controller that can drop its record of a packet
+// once the sender is done with it. See defaultController.forgetTransmission.
+type transmissionForgetter interface {
+	forgetTransmission(seqNum uint16)
+}
+
+// trimAcked drops the acknowledged packets at the front of the window, and
+// the controller's records of them: nothing asks about a packet behind the
+// window (Ack, OnLost and MarkAllForResend all stop at it).
 func (s *sentPackets) trimAcked() {
 	n := 0
-	for n < len(s.packets) && len(s.packets[n].acks) != 0 {
+	for n < len(s.packets) && s.packets[n].acked {
 		n++
 	}
 	if n == 0 {
 		return
 	}
 	s.lastAck, s.hasAck = s.packets[n-1].seqNum, true
+	forget, _ := s.congestionCtrl.(transmissionForgetter)
 	for i := 0; i < n; i++ {
+		if forget != nil {
+			forget.forgetTransmission(s.packets[i].seqNum)
+		}
+		*s.packets[i] = sentPacket{}
+		s.spare = append(s.spare, s.packets[i])
 		s.packets[i] = nil
 	}
 	s.packets = s.packets[n:]
@@ -341,13 +364,18 @@ func (s *sentPackets) OnTransmit(
 		s.packets[index].needResend = false
 	} else {
 		// Create new packet
-		sent := &sentPacket{
+		var sent *sentPacket
+		if k := len(s.spare); k > 0 {
+			sent, s.spare = s.spare[k-1], s.spare[:k-1]
+		} else {
+			sent = new(sentPacket)
+		}
+		*sent = sentPacket{
 			seqNum:         seqNum,
 			packetType:     packetType,
 			data:           data,
 			transmission:   now,
 			retransmission: now,
-			acks:           make([]time.Time, 0),
 		}
 		s.packets = append(s.packets, sent)
 	}
@@ -424,7 +452,10 @@ func (s *sentPackets) onAck(
 	}
 
 	// Mark all packets up to ackNum as acknowledged
-	fullAcked := newCircularRangeInclusive(seqRange.Start(), ackNum)
+	// Valid until the next acknowledgement, which is as long as anyone uses
+	// it: a new one for each was an allocation per acknowledgement.
+	s.fullAcked = circularRangeInclusive{start: seqRange.Start(), end: ackNum}
+	fullAcked := &s.fullAcked
 
 	if selectiveAck != nil {
 		selectedAcks := make([]uint16, 0)
@@ -561,7 +592,7 @@ func (s *sentPackets) DetectLostPackets(firstUnacked uint16) []uint16 {
 	for i := len(packets) - 1; i >= 0; i-- {
 		packetInst := packets[i]
 
-		if len(packetInst.acks) == 0 && acked >= LossThreshold &&
+		if !packetInst.acked && acked >= LossThreshold &&
 			!wrappingLessThan(packetInst.seqNum, s.fastResendSeqNum) {
 			// The fastResendSeqNum test is libutp's, at
 			// utp_internal.cpp:1537: a packet already fast retransmitted once
@@ -569,7 +600,7 @@ func (s *sentPackets) DetectLostPackets(firstUnacked uint16) []uint16 {
 			// for the same loss.
 			lost = append(lost, packetInst.seqNum)
 		}
-		if len(packetInst.acks) > 0 {
+		if packetInst.acked {
 			acked++
 		}
 	}
@@ -594,10 +625,10 @@ func (s *sentPackets) Ack(seqNum uint16, delay time.Duration, now time.Time) err
 		return err
 	}
 	if s.logger != nil && s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-		log.Trace("record Acks", "seqNum", packetInst.seqNum, "acks.len", len(packetInst.acks)+1)
+		log.Trace("record Acks", "seqNum", packetInst.seqNum, "acked", packetInst.acked)
 	}
-	if len(packetInst.acks) == 0 {
-		packetInst.acks = append(packetInst.acks, now)
+	if !packetInst.acked {
+		packetInst.acked = true
 		s.lostPackets.Delete(packetInst.seqNum)
 	}
 	return nil
@@ -629,7 +660,7 @@ func (s *sentPackets) LastAckNum() (uint16, bool) {
 		num = 0
 	}
 	for _, packetInst := range s.packets {
-		if len(packetInst.acks) != 0 {
+		if packetInst.acked {
 			num = packetInst.seqNum
 			none = false
 		} else {
@@ -676,7 +707,7 @@ func (s *sentPackets) Outstanding(seqNum uint16) bool {
 	if i < 0 || i >= len(s.packets) {
 		return false
 	}
-	return len(s.packets[i].acks) == 0
+	return !s.packets[i].acked
 }
 
 // MarkAllForResend gives up every packet still outstanding as lost, as libutp
@@ -692,7 +723,7 @@ func (s *sentPackets) MarkAllForResend() {
 	}
 	for i := s.SeqNumIndex(first); i >= 0 && i < len(s.packets); i++ {
 		pkt := s.packets[i]
-		if len(pkt.acks) != 0 || pkt.needResend {
+		if pkt.acked || pkt.needResend {
 			continue
 		}
 		pkt.needResend = true
@@ -710,7 +741,7 @@ func (s *sentPackets) NextNeedingResend() (*sentPacket, bool) {
 	}
 	for i := s.SeqNumIndex(first); i >= 0 && i < len(s.packets); i++ {
 		pkt := s.packets[i]
-		if pkt.needResend && len(pkt.acks) == 0 {
+		if pkt.needResend && !pkt.acked {
 			return pkt, true
 		}
 	}

@@ -5,11 +5,11 @@ import (
 	"time"
 )
 
-type expireFunc[P any] func(key any, value P)
+type expireFunc[K comparable, P any] func(key K, value P)
 
-type timeWheelItem[P any] struct {
+type timeWheelItem[K comparable, P any] struct {
 	value P
-	key   any
+	key   K
 	// rounds is how many further full revolutions of the wheel must pass
 	// before this item expires. It is what lets the wheel schedule delays
 	// longer than one revolution instead of silently clamping them.
@@ -35,11 +35,15 @@ type timeWheelItem[P any] struct {
 // Removal is O(1): an index maps each key to the slot holding it. Scanning
 // every slot was acceptable for a per-connection wheel but not for one shared
 // across a whole socket.
-type timeWheel[P any] struct {
+// It is generic in its key as well as its value, and keeps items by value,
+// so that scheduling one costs no allocation: with an interface key and a
+// pointer per item, the retransmission wheel allocated three objects for every
+// packet sent.
+type timeWheel[K comparable, P any] struct {
 	stopped  chan struct{}
 	interval time.Duration
-	slots    []map[any]*timeWheelItem[P]
-	index    map[any]int
+	slots    []map[K]timeWheelItem[K, P]
+	index    map[K]int
 	ticker   Ticker
 	clk      Clock
 	// nextTick is when the tick that processes slots[current] is due: the
@@ -49,13 +53,13 @@ type timeWheel[P any] struct {
 	nextTick         time.Time
 	current          int
 	slotNum          int
-	handleExpireFunc expireFunc[P]
+	handleExpireFunc expireFunc[K, P]
 	barrier          IdleBarrier
 	mu               sync.RWMutex
 	stopOnce         sync.Once
 }
 
-func newTimeWheel[P any](interval time.Duration, slotNum int, handleExpireFunc expireFunc[P]) *timeWheel[P] {
+func newTimeWheel[K comparable, P any](interval time.Duration, slotNum int, handleExpireFunc expireFunc[K, P]) *timeWheel[K, P] {
 	return newTimeWheelWithClock(interval, slotNum, RealClock, handleExpireFunc)
 }
 
@@ -63,19 +67,19 @@ func newTimeWheel[P any](interval time.Duration, slotNum int, handleExpireFunc e
 // socket rather than per connection, so every connection on a socket shares
 // this one's notion of time -- which is what makes a virtual clock for a
 // socket coherent rather than per-connection and contradictory.
-func newTimeWheelWithClock[P any](interval time.Duration, slotNum int, clk Clock, handleExpireFunc expireFunc[P]) *timeWheel[P] {
-	tw := &timeWheel[P]{
+func newTimeWheelWithClock[K comparable, P any](interval time.Duration, slotNum int, clk Clock, handleExpireFunc expireFunc[K, P]) *timeWheel[K, P] {
+	tw := &timeWheel[K, P]{
 		stopped:          make(chan struct{}),
 		interval:         interval,
-		slots:            make([]map[any]*timeWheelItem[P], slotNum),
-		index:            make(map[any]int),
+		slots:            make([]map[K]timeWheelItem[K, P], slotNum),
+		index:            make(map[K]int),
 		current:          0,
 		slotNum:          slotNum,
 		handleExpireFunc: handleExpireFunc,
 	}
 
 	for i := 0; i < slotNum; i++ {
-		tw.slots[i] = make(map[any]*timeWheelItem[P])
+		tw.slots[i] = make(map[K]timeWheelItem[K, P])
 	}
 
 	if clk == nil {
@@ -125,7 +129,7 @@ func newTimeWheelWithClock[P any](interval time.Duration, slotNum int, clk Clock
 // millisecond. See put.
 const wheelResolution = time.Millisecond
 
-func (tw *timeWheel[P]) put(key any, value P, delay time.Duration) {
+func (tw *timeWheel[K, P]) put(key K, value P, delay time.Duration) {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
 
@@ -144,7 +148,7 @@ func (tw *timeWheel[P]) put(key any, value P, delay time.Duration) {
 		}
 	}
 	idx := (tw.current + ticks) % tw.slotNum
-	tw.slots[idx][key] = &timeWheelItem[P]{
+	tw.slots[idx][key] = timeWheelItem[K, P]{
 		key:    key,
 		value:  value,
 		rounds: ticks / tw.slotNum,
@@ -152,7 +156,7 @@ func (tw *timeWheel[P]) put(key any, value P, delay time.Duration) {
 	tw.index[key] = idx
 }
 
-func (tw *timeWheel[P]) remove(key any) {
+func (tw *timeWheel[K, P]) remove(key K) {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
 	if idx, exists := tw.index[key]; exists {
@@ -162,15 +166,15 @@ func (tw *timeWheel[P]) remove(key any) {
 }
 
 // contains reports whether key is currently scheduled.
-func (tw *timeWheel[P]) contains(key any) bool {
+func (tw *timeWheel[K, P]) contains(key K) bool {
 	tw.mu.RLock()
 	defer tw.mu.RUnlock()
 	_, exists := tw.index[key]
 	return exists
 }
 
-func (tw *timeWheel[P]) run() {
-	var expired []*timeWheelItem[P]
+func (tw *timeWheel[K, P]) run() {
+	var expired []timeWheelItem[K, P]
 	for {
 		if tw.barrier != nil {
 			tw.barrier.MarkIdle()
@@ -192,6 +196,7 @@ func (tw *timeWheel[P]) run() {
 			for key, item := range currentSlot {
 				if item.rounds > 0 {
 					item.rounds--
+					currentSlot[key] = item
 					continue
 				}
 				delete(currentSlot, key)
@@ -219,7 +224,7 @@ func (tw *timeWheel[P]) run() {
 	}
 }
 
-func (tw *timeWheel[P]) Len() int {
+func (tw *timeWheel[K, P]) Len() int {
 	tw.mu.RLock()
 	defer tw.mu.RUnlock()
 	return len(tw.index)
@@ -228,7 +233,7 @@ func (tw *timeWheel[P]) Len() int {
 // stop halts the wheel. It is safe to call more than once: Close on the
 // owning socket is expected to be idempotent, and a second close of the
 // stopped channel would panic.
-func (tw *timeWheel[P]) stop() {
+func (tw *timeWheel[K, P]) stop() {
 	tw.stopOnce.Do(func() {
 		tw.ticker.Stop()
 		close(tw.stopped)

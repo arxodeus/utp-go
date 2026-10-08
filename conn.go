@@ -258,6 +258,44 @@ type readOrWriteResult struct {
 	Err  error
 	Len  int
 	Data []byte
+	// pooled marks a chunk of received data from readChunks, which the
+	// reader returns once it has copied it out. See newReadChunk.
+	pooled bool
+}
+
+// readChunks holds the chunks received data is handed to the reader in.
+//
+// Each chunk was a new buffer and a new result: two allocations for every
+// packet's worth of data read. The reader copies a chunk out and is done with
+// it, so it comes back here.
+var readChunks sync.Pool
+
+// pooledReadChunkMin is the least a chunk must hold to come from readChunks.
+// A pooled buffer is as large as the largest packet, and a reader that falls
+// behind leaves up to a read queue's worth of chunks waiting: small ones are
+// sized to their data, so that a trickle of a few bytes at a time does not
+// hold a full packet's memory for each.
+const pooledReadChunkMin = 512
+
+// newReadChunk is a result holding n bytes of received data, for the reader.
+// size is the most any chunk on this connection holds.
+func newReadChunk(n, size int) *readOrWriteResult {
+	if n >= pooledReadChunkMin {
+		if r, _ := readChunks.Get().(*readOrWriteResult); r != nil && cap(r.Data) >= n {
+			r.Data, r.Len = r.Data[:n], n
+			return r
+		}
+		return &readOrWriteResult{Data: make([]byte, n, max(n, size)), Len: n, pooled: true}
+	}
+	return &readOrWriteResult{Data: make([]byte, n), Len: n}
+}
+
+// release returns a chunk the reader has finished with to readChunks.
+func (r *readOrWriteResult) release() {
+	if r.pooled {
+		r.Data, r.Len, r.Err = r.Data[:0], 0, nil
+		readChunks.Put(r)
+	}
 }
 
 type connection struct {
@@ -280,6 +318,10 @@ type connection struct {
 	// connection on the socket. Guarded by mu.
 	armed          map[uint16]struct{}
 	unackTimeoutCh chan *packet
+	// payloadScratch is processWrites' list of payloads composed in a pass,
+	// kept between passes: growing a new one cost an allocation or two on
+	// every pass that sent anything.
+	payloadScratch [][]byte
 	reads          chan *readOrWriteResult
 	readable       chan struct{}
 	pendingWrites  []*queuedWrite
@@ -669,7 +711,7 @@ func (c *connection) armRetransmit(pkt *packet, delay time.Duration) {
 	c.armed[seq] = struct{}{}
 	c.timers.arm(
 		retransmitKey{scope: c.timerScope, seq: seq},
-		&retransmitTimer{packet: pkt, deliver: c.unackTimeoutCh, ctx: c.ctx},
+		retransmitTimer{packet: pkt, deliver: c.unackTimeoutCh, ctx: c.ctx},
 		delay,
 	)
 }
@@ -1835,7 +1877,10 @@ func (c *connection) processWrites(now time.Time) {
 		c.resendSentPacket(pkt, now)
 	}
 	inFlight := c.state.SentPackets.BytesInFlight()
-	var payloads [][]byte
+	// Taken, not shared: nothing here should come back into processWrites,
+	// but if it did it would start a slice of its own.
+	payloads := c.payloadScratch[:0]
+	c.payloadScratch = nil
 	var composed uint32
 
 	// libutp's `is_full` marks the connection application-limited or not
@@ -1861,9 +1906,9 @@ func (c *connection) processWrites(now time.Time) {
 		if n < packetSize && !c.config.NoDelay && !c.writeShut && outstanding+len(payloads) > 0 {
 			break
 		}
-		data := make([]byte, n)
-		n = uint32(c.state.SendBuf.Read(data))
-		payloads = append(payloads, data[:n])
+		data := c.state.SendBuf.Take(int(n))
+		n = uint32(len(data))
+		payloads = append(payloads, data)
 		composed += n
 	}
 	if windowFull {
@@ -1915,6 +1960,8 @@ func (c *connection) processWrites(now time.Time) {
 		c.transmit(packetInst, now, true)
 		seqNum = seqNum + 1 // wrapping add in uint16
 	}
+	clear(payloads)
+	c.payloadScratch = payloads[:0]
 }
 
 func (c *connection) onWrite(writeReq *queuedWrite) {
@@ -2001,12 +2048,14 @@ func (c *connection) processReads() {
 		if maxSize := int(c.config.MaxPacketSize); readable > maxSize {
 			readable = maxSize
 		}
-		buf := make([]byte, readable)
-		n := recvBuf.Read(buf)
+		chunk := newReadChunk(readable, int(c.config.MaxPacketSize))
+		n := recvBuf.Read(chunk.Data)
 		if n == 0 {
+			chunk.release()
 			break
 		}
-		if !c.sendRead(&readOrWriteResult{Data: buf, Len: n}) {
+		chunk.Data, chunk.Len = chunk.Data[:n], n
+		if !c.sendRead(chunk) {
 			return
 		}
 	}

@@ -189,6 +189,12 @@ func (s *UtpStream) start() {
 	}
 }
 
+// ReadToEOF reads until the peer ends the stream, leaving everything read in
+// *buf, which it reuses: what is read replaces its contents, in the room it
+// already has, so a caller that knows how much is coming can size it once.
+//
+// It used to collect into a slice of its own, grown from nothing, and ignore
+// the caller's: 4 MB read this way allocated about 20 MB.
 func (s *UtpStream) ReadToEOF(ctx context.Context, buf *[]byte) (int, error) {
 	if s.readClosed.Load() {
 		return 0, ErrReadClosed
@@ -196,7 +202,7 @@ func (s *UtpStream) ReadToEOF(ctx context.Context, buf *[]byte) (int, error) {
 	s.readLocker.Lock()
 	defer s.readLocker.Unlock()
 	n := 0
-	data := make([]byte, 0)
+	data := (*buf)[:0]
 	for {
 		select {
 		case <-ctx.Done():
@@ -223,6 +229,7 @@ func (s *UtpStream) ReadToEOF(ctx context.Context, buf *[]byte) (int, error) {
 			}
 			n += res.Len
 			data = append(data, res.Data[:res.Len]...)
+			res.release()
 			*buf = data
 		}
 	}
@@ -299,6 +306,7 @@ func (s *UtpStream) Read(ctx context.Context, buf []byte) (int, error) {
 		if n < res.Len {
 			s.readRemainder = append([]byte(nil), res.Data[n:res.Len]...)
 		}
+		res.release()
 		return n, nil
 	}
 }

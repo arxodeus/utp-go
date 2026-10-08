@@ -55,7 +55,7 @@ func (c *recordingConn) ReadFrom(b []byte) (int, ConnectionPeer, error) {
 }
 
 func (c *recordingConn) WriteTo(b []byte, _ ConnectionPeer) (int, error) {
-	pkt, err := DecodePacket(b)
+	pkt, err := DecodePacket(append([]byte(nil), b...))
 	if err == nil {
 		c.mu.Lock()
 		c.sent = append(c.sent, pkt)

@@ -178,3 +178,41 @@ func TestSendBufferReadSpansWrites(t *testing.T) {
 		t.Errorf("third read %d bytes, empty %v, pending %d", n, sb.IsEmpty(), sb.Pending())
 	}
 }
+
+// Take hands out a payload lying within one write as that write's own bytes,
+// and copies only one that spans two. The shared slice is capped at its end,
+// so appending to one payload cannot overwrite the next.
+func TestSendBufferTakeSharesAWrite(t *testing.T) {
+	sb := newSendBuffer(1 << 16)
+	first := bytes.Repeat([]byte{1}, 1000)
+	second := bytes.Repeat([]byte{2}, 1000)
+	sb.Write(first)
+	sb.Write(second)
+
+	a := sb.Take(600)
+	if &a[0] != &sb.pending[0][0] {
+		t.Fatalf("a payload within one write was copied")
+	}
+	b := sb.Take(600) // 400 from the first write, 200 from the second
+	c := sb.Take(800)
+	if len(a) != 600 || len(b) != 600 || len(c) != 800 || sb.Pending() != 0 {
+		t.Fatalf("took %d, %d, %d with %d left; expected 600, 600, 800 and none",
+			len(a), len(b), len(c), sb.Pending())
+	}
+	if want := append(bytes.Repeat([]byte{1}, 400), bytes.Repeat([]byte{2}, 200)...); !bytes.Equal(b, want) {
+		t.Fatalf("the payload across two writes is wrong")
+	}
+	if cap(a) != len(a) {
+		t.Fatalf("a shared payload has capacity %d past its length %d", cap(a), len(a))
+	}
+	_ = append(a, 9)
+	if b[0] != 1 {
+		t.Fatalf("appending to one payload overwrote the next")
+	}
+	if !bytes.Equal(c, bytes.Repeat([]byte{2}, 800)) {
+		t.Fatalf("the last payload is wrong")
+	}
+	if got := sb.Available(); got != 1<<16 {
+		t.Fatalf("%d bytes available once everything was taken, expected %d", got, 1<<16)
+	}
+}

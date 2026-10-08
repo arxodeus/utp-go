@@ -36,9 +36,8 @@ func (c *UdpConn) drain(rc syscall.RawConn, out *[]datagram) error {
 			if peer == nil {
 				continue
 			}
-			payload := make([]byte, n)
-			copy(payload, scratch[:n])
-			*out = append(*out, datagram{payload: payload, peer: peer})
+			payload := c.lend(scratch[:n])
+			*out = append(*out, datagram{payload: payload, peer: peer, borrowed: true})
 		}
 		return true
 	})

@@ -94,6 +94,8 @@ func (s *MockUdpSocket) WriteTo(b []byte, dst utp.ConnectionPeer) (int, error) {
 	// link's queue full is lost. The socket writes from its reader, as
 	// libutp's embedder does, so a WriteTo that waited for the other side to
 	// read would let two sockets each wait on the other for ever.
+	// Copied, as a UDP socket copies: the caller reuses b once this returns.
+	b = append([]byte(nil), b...)
 	select {
 	case s.sendCh <- b:
 	default:
