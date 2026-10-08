@@ -356,9 +356,16 @@ type connection struct {
 	// lossProbeSeq and lossProbeAt are the packet the probe resent and when.
 	// probeRecovery is set while the packets the probe's acknowledgement
 	// showed lost are being resent: see probeAnswered.
-	lossProbeSeq  uint16
-	lossProbeAt   time.Time
-	probeRecovery bool
+	lossProbeSeq uint16
+	lossProbeAt  time.Time
+	// lossProbeStamp is the timestamp the probe carried on the wire, and
+	// ackEcho the send timestamp of the packet that drew the acknowledgement
+	// now being processed, when its sender reported a delay: see
+	// probeAnswered.
+	lossProbeStamp uint32
+	ackEcho        uint32
+	ackEchoKnown   bool
+	probeRecovery  bool
 
 	// finAck is the acknowledgement sent for the peer's FIN, kept so the
 	// socket can send it again if the peer retransmits that FIN after this
@@ -2784,6 +2791,7 @@ func (c *connection) onLossProbe(now time.Time) {
 	c.lossProbes++
 	c.lossProbeSeq, c.lossProbeAt = oldest.seqNum, now
 	resent := c.resendSentPacket(oldest, now)
+	c.lossProbeStamp = uint32(resent.Header.Timestamp)
 	// transmit armed the packet's timer a whole timeout from now; the
 	// timeout itself is due where it was, and the probe must not move it.
 	// The wheel places a timer by its deadline, so this keeps its tick.
@@ -2854,6 +2862,31 @@ func (c *connection) probeAnswered(fullAcked *circularRangeInclusive, now time.T
 		return false
 	}
 	sp := c.state.SentPackets
+	// The acknowledgement must be the probe's, not the original's. If the
+	// original was never lost, the packets behind it are in flight, not
+	// missing, and taking its acknowledgement for the answer resends them
+	// all: 86-101 needless retransmissions on a lossless 100 Mb/s link, each
+	// time a probe had fired early.
+	//
+	// It fired early two ways. The process stalled and woke to the probe and
+	// the acknowledgements together: the answer came 11 us to 1.4 ms after
+	// the probe, under the 2.2 ms the path had ever taken for a round trip.
+	// RFC 8985 makes that call (section 6.2: an ACK arriving within min_RTT
+	// of a retransmission is ambiguous and is not taken as evidence). Or a
+	// queue filling in slow start took the round trip from 10 ms to 33 ms
+	// faster than the smoothed estimate the probe's timer runs on: then the
+	// original's acknowledgement came 2.8-10 ms after the probe, past the
+	// minimum, and only the timestamps tell them apart. The peer reports, on
+	// every packet, how long ours took to reach it; from that and its own
+	// timestamp comes the timestamp of the packet that drew the
+	// acknowledgement, and the original's is older than the probe's.
+	if c.ackEchoKnown {
+		if int32(c.ackEcho-c.lossProbeStamp) < 0 {
+			return false
+		}
+	} else if minRTT := sp.ControllerStats().MinFineRTT; minRTT == 0 || now.Sub(c.lossProbeAt) < minRTT {
+		return false
+	}
 	oldest, ok := sp.OldestOutstanding()
 	if !ok || !oldest.retransmission.Before(c.lossProbeAt) {
 		return false
@@ -3223,6 +3256,12 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 			replyMicros = 0
 		}
 		delay := time.Duration(replyMicros) * time.Microsecond
+		// The peer's timestamp less the delay it measured is the timestamp of
+		// the packet of ours it last received, in our own clock: the two
+		// clocks' offset cancels, and holding the acknowledgement back only
+		// makes it later. See probeAnswered.
+		c.ackEchoKnown = replyMicros != 0
+		c.ackEcho = uint32(packet.Header.Timestamp) - replyMicros
 		// Before the acknowledgement retires anything: libutp counts
 		// duplicates against the window as it stood when the packet arrived
 		// (utp_internal.cpp:1921, with ack_packet not reached until :2194).

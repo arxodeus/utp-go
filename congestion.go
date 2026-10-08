@@ -188,6 +188,10 @@ type ControllerStats struct {
 	// not have and needs a round trip below a millisecond to be nonzero: the
 	// loss probe's timeout.
 	FineRTT time.Duration
+	// MinFineRTT is the lowest round-trip sample, in microseconds, from a
+	// packet sent once. The loss probe reads it to tell an acknowledgement of
+	// the packet it resent from one of the original (see probeAnswered).
+	MinFineRTT time.Duration
 	// RTTVarianceMicros is the RTT variance estimate, in microseconds.
 	RTTVarianceMicros int64
 	// Timeout is the current retransmission timeout.
@@ -261,6 +265,7 @@ type defaultController struct {
 	rttVarianceMicros     int64
 	transmissions         map[uint16]*packetRecord
 	fineRTT               time.Duration // see ControllerStats.FineRTT
+	minFineRTT            time.Duration // see ControllerStats.MinFineRTT
 	delayAcc              *delayAccumulator
 	// curDelayHist is libutp's cur_delay_hist: the last curDelaySize
 	// queueing-delay samples, each taken against the base as it stood when
@@ -425,6 +430,7 @@ func (c *defaultController) Stats() ControllerStats {
 		MinWindowSizeBytes:    c.minWindowSizeBytes,
 		RTT:                   c.rtt,
 		FineRTT:               c.fineRTT,
+		MinFineRTT:            c.minFineRTT,
 		RTTVarianceMicros:     c.rttVarianceMicros,
 		Timeout:               c.timeout,
 		BaseDelay:             c.delayAcc.BaseDelay(),
@@ -696,6 +702,10 @@ func (c *defaultController) OnRTTSample(rtt time.Duration) {
 // large enough to lift it off its 1000ms floor.
 func (c *defaultController) updateRTT(erttMicros int64) {
 	// The microsecond estimate, for the loss probe; see FineRTT.
+	if sample := time.Duration(erttMicros) * time.Microsecond; sample > 0 &&
+		(c.minFineRTT == 0 || sample < c.minFineRTT) {
+		c.minFineRTT = sample
+	}
 	if c.fineRTT == 0 {
 		c.fineRTT = time.Duration(erttMicros) * time.Microsecond
 	} else {

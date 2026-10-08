@@ -1297,6 +1297,26 @@ LEDBAT++), at -0.4%, -0.3% and -5.2%. The last, at 5% loss, is not
 distinguishable from noise (Mann-Whitney z = 1.89, ranges 0.48-0.64 and
 0.49-0.64 Mbps).
 
+Which acknowledgement answers the probe is not always plain: the probe
+resends a packet that may never have been lost, and the original's
+acknowledgement names the same sequence number. Taken for the answer, it
+declared everything behind it lost while it was merely queued -- 86-101
+needless retransmissions on the lossless 100 Mb/s benchmark link in about one
+run in three, once a probe had fired early: a stall of the process that woke
+to the probe and the acknowledgements together, or a queue filling in slow
+start that took the round trip from 10 ms to 33 ms faster than the smoothed
+estimate the probe waits on. The peer's acknowledgement carries its own
+timestamp and the delay it measured for the last packet of ours it received;
+their difference is that packet's send timestamp in our clock, and an
+acknowledgement drawn by the original carries one older than the probe's. A
+peer that reports no delay leaves RFC 8985's rule (section 6.2): an
+acknowledgement within the minimum round trip of the probe is the
+original's. `TestSpuriousLossProbeResendsOnlyItself` holds one round four
+round trips in a queue, and, without delays, lets it through just after the
+probe: 1 packet resent in each, the probe, against 21 and 20 without the
+checks; the minimum-round-trip rule alone catches the second and not the
+first.
+
 ## An initiator can fast-retransmit from its first packet
 
 **libutp's initiator often cannot.** `utp_create_socket` sets `seq_nr = 1` and
