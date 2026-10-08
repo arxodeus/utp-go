@@ -397,6 +397,18 @@ network's own. What went:
 What remains in the library is one object per packet built and, on receipt,
 the decoded header and a data packet's body.
 
+The benchmark suite against the commit before, five runs a side and then
+twenty of each profile that moved more than 1.5%: the 100 Mb/s LAN link
+gained, 90.59 Mbps median against 85.94 (z = 2.81, twenty interleaved runs a
+side on an otherwise idle machine), and nothing else moved. Classic LEDBAT
+at 5% loss measured +1.0% (z = 0.32) and LEDBAT++ on the shallow queue 0.0%
+(z = -0.30). LEDBAT++ at 5% loss, the noisiest profile, has a lower median,
+0.50 against 0.54 Mbps over twenty-five runs a side, but its means are 0.524
+and 0.539 and the two spreads, 0.42-0.61 and 0.44-0.60, all but coincide
+(z = -1.11 over the twenty): no evidence of a change, and none of this work
+touches its window. Deference is unchanged: uTP took 60-62% of a link shared
+with a loss-based flow on both, the latecomer 22.0-22.7% against 22.1-22.4%.
+
 ## A write to a dead connection waited out its own deadline
 
 **Fixed.** Found measuring the idle timeout over the emulated network: after a
