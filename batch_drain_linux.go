@@ -100,7 +100,7 @@ func (c *UdpConn) drain(rc syscall.RawConn, out *[]datagram) error {
 				}
 				peer := c.peerForKey(k)
 				n := int(h.n)
-				payload := c.lend(s.bufs[i*recvmmsgSlotSize:i*recvmmsgSlotSize+n])
+				payload := c.lend(s.bufs[i*recvmmsgSlotSize : i*recvmmsgSlotSize+n])
 				*out = append(*out, datagram{payload: payload, peer: peer, borrowed: true})
 			}
 		}

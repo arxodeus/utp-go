@@ -50,7 +50,9 @@ func TestDelayWindowMatchesAScan(t *testing.T) {
 
 // What a busy connection keeps: two minutes of acknowledgements at a
 // thousand a second, delays wandering as a queue's do. The heap this replaced
-// kept every sample in the window, 120,000 of them here, 32 bytes each.
+// popped a sample only once its least had expired, so it held more than the
+// window: up to 239,689 samples here, 32 bytes each, 7.7 MB. This holds at
+// most 495.
 func TestDelayWindowStaysSmall(t *testing.T) {
 	const window = 2 * time.Minute
 	rng := rand.New(rand.NewSource(7))

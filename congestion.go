@@ -271,9 +271,9 @@ type defaultController struct {
 	// freeRecords are records forgotten and ready for reuse. See
 	// forgetTransmission.
 	freeRecords []*packetRecord
-	fineRTT               time.Duration // see ControllerStats.FineRTT
-	minFineRTT            time.Duration // see ControllerStats.MinFineRTT
-	delayAcc              *delayAccumulator
+	fineRTT     time.Duration // see ControllerStats.FineRTT
+	minFineRTT  time.Duration // see ControllerStats.MinFineRTT
+	delayAcc    *delayAccumulator
 	// curDelayHist is libutp's cur_delay_hist: the last curDelaySize
 	// queueing-delay samples, each taken against the base as it stood when
 	// it arrived, zero until filled (DelayHist, utp_internal.cpp:247-248,
@@ -1467,7 +1467,7 @@ func (da *delayAccumulator) BaseDelay() time.Duration {
 		// only what has accumulated since. libutp's equivalent bound --
 		// `if (sample < delay_base) delay_base = sample`
 		// (utp_internal.cpp:351-355) -- falls out of that: the newest sample
-		// is in this heap too, so the minimum cannot sit more than one
+		// is in this window too, so the minimum cannot sit more than one
 		// packet's worth of correction above it.
 		base := min.Value + da.skew
 		if base < 0 {

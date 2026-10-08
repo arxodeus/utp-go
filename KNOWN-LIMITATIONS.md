@@ -321,6 +321,76 @@ to the per-packet allocations. An application with a heap of its own would
 see less of it -- not measured. The remedy is fewer allocations per packet,
 not the ballast back.
 
+## A busy connection grew without bound
+
+**Fixed.** Found looking for the allocations behind the cost above. Two
+structures on every connection only ever grew while it carried traffic.
+
+The delay accumulator kept its base-delay samples in a heap and removed one
+only once the least of them had expired, so a delay that kept rising held
+every sample since its lowest. Driven at a thousand acknowledgements a second
+for four minutes with delays wandering as a queue's do, it held up to 239,689
+samples, 32 bytes each, 7.7 MB. It is now a sliding-window minimum: a new
+sample drops every older one that is no smaller, since that one could never
+be the least again, and the front is the minimum. The same run holds at most
+495 (`TestDelayWindowStaysSmall`), and `TestDelayWindowMatchesAScan` checks
+the minimum against a scan of the window over thirty random runs.
+
+The congestion controller kept a record per packet sent, keyed by sequence
+number, and replaced one only when its number came round again: 65,536
+records, 5.5 MB measured, on any connection that had sent that many packets,
+about 90 MB at full-size packets. libutp frees a packet's record when it is
+acknowledged (`ack_packet`, `utp_internal.cpp:1397`). The sender now tells
+the controller when it drops an acknowledged packet from the front of its
+window, which is the last time anything asks about it, and the record is
+reused for the next packet; `TestControllerKeepsRecordsOnlyForTheWindow`
+sends 200,000 packets, eight in flight, and fails if more than eight records
+are held -- it held 65,536 before.
+
+## Allocations per packet
+
+A 4 MB transfer over the 100 Mb/s LAN profile allocated 13.0 objects per
+packet across the link, data and acknowledgements together, and 10 KB --
+everything in the process counted, the emulated network and the harness
+included. It is now 5.3 and 4.1 KB, and `netem.TestAllocationsPerPacket`
+fails above 8. Profiled, nearly half of what remains is the emulated
+network's own. What went:
+
+- Every packet was encoded into a new slice. It is encoded into a pooled
+  buffer, which `Conn.WriteTo` must not keep -- libutp's send callback is
+  handed a buffer it reuses the same way (`utp_call_sendto`,
+  `utp_internal.cpp:713`), and `net.PacketConn` already behaves so. This is
+  a contract a `Conn` that queued the slice without copying would break; the
+  repository's one such mock now copies. The root and `integrated`
+  packages' tests, where the test `Conn`s that keep what they are sent live,
+  were run with each buffer
+  overwritten the moment `WriteTo` returned, and passed.
+- Each delay sample was boxed by `container/heap`; see the section above.
+- Each packet's retransmission timer was three objects: an interface key, a
+  pointer item and the timer. The wheel is generic in its key and keeps
+  items by value.
+- The application's bytes were copied twice on the way out, into the send
+  buffer and again into each packet. A packet's payload is now a slice of
+  the buffered write when it lies within one, as libutp copies once
+  (`utp_internal.cpp:1061`). A write stays in memory until its last packet
+  is acknowledged rather than shrinking packet by packet: at most a write's
+  worth more than the window.
+- Every datagram received was copied whole before decoding. It is decoded
+  from the reader's buffer, which is reused, and only a body is copied out:
+  an acknowledgement, half of what arrives, costs no copy. Batched reads
+  copy into an arena reused from batch to batch.
+- Each chunk of received data handed to the reader was a new buffer and a
+  new result; both come from a pool and go back once read. Chunks under
+  512 bytes are sized to their data, so a slow reader of a trickle does not
+  hold a full packet's memory for each.
+- `ReadToEOF` grew a slice of its own from nothing and ignored the caller's:
+  4 MB read allocated about 20 MB. It fills the caller's buffer now.
+- The controller's and the sender's per-packet records, the acknowledged
+  range and the list of payloads composed in a pass are reused.
+
+What remains in the library is one object per packet built and, on receipt,
+the decoded header and a data packet's body.
+
 ## A write to a dead connection waited out its own deadline
 
 **Fixed.** Found measuring the idle timeout over the emulated network: after a
@@ -624,6 +694,13 @@ channels with capacity 1,000,000 each.
 This is not unbounded growth — the run completes and the memory is reclaimed —
 but it is far more than the workload needs, and the M8 gate asks specifically
 about memory behaviour. It has not been profiled properly.
+
+Every library cost named in that paragraph has since gone: `processReads`
+sizes its chunks to the data and returns them to a pool once read, the
+reader's datagrams are no longer copied whole, the two million-slot channels
+are 64 slots, and `ReadToEOF` fills the caller's buffer instead of growing
+its own (see "An idle connection held a megabyte" and "Allocations per
+packet" above). The 5 GB figure has not been re-measured since.
 
 `numTransfers` is overridable via `UTP_TEST_TRANSFERS` so the test can be run
 where the default does not fit.
