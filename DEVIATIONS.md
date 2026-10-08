@@ -973,6 +973,15 @@ live peer sends a keep-alive every 29 seconds, so a timeout well above that
 never closes a live connection (`netem.TestQuietConnectionDoesNotTimeOut`).
 What it costs is what it cost before, and the embedder now chooses it.
 
+**Measured since**, over the emulated network: an idle connection through a
+90-second outage resumes, its next write delivered 11 ms after the path came
+back, where the 60-second timeout had closed it; and a connection whose peer
+vanished holds about 23 KB of heap and one goroutine for as long as nobody
+closes it. That was 1.08 MB when this default changed -- the receive buffer
+was allocated at its full megabyte up front (KNOWN-LIMITATIONS.md, "An idle
+connection held a megabyte") -- against libutp's roughly 10 KB, which it
+likewise holds for good.
+
 Not previously listed here; found by the line-by-line audit while settling
 the half-open acceptor (LIBUTP-AUDIT.md, N5 and N26).
 

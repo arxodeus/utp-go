@@ -267,6 +267,60 @@ attempt once `retransmit_count` reaches 2 while in `CS_SYN_SENT`, which is
 three transmissions of the SYN in total (`utp_internal.cpp:1191`). This is a
 default, still overridable per connection.
 
+## An idle connection held a megabyte
+
+**Fixed.** Found measuring the cost of having no idle timeout: 500
+connections over the emulated network, each having exchanged 1 KB, held
+1.08 MB of heap and one goroutine per connection end. libutp, measured with
+`mallinfo2` around 500 of its driver's connections that had done the same,
+holds about 10 KB each, plus 67 KB per context.
+
+Nearly all of it was the receive buffer, allocated at its full capacity --
+`BufferSize`, 1 MB by default -- when the connection was set up, whether it
+ever carried data or not. libutp's buffers grow as they are used. The
+receive buffer now keeps its capacity as the figure the window is advertised
+from and admission is checked against, and allocates as in-order data
+arrives, doubling up to that capacity, from 4 KB; like libutp's, it keeps
+what it has grown to. Reading no longer moves the unread bytes to the front
+on every call -- the whole buffer, per small read -- only when an append
+needs the room. `TestReceiveBufferMatchesModel` drives it against a model
+with packets in and out of order, repeated and refused, and reads of random
+size, across a sequence-number wrap; it fails if the compaction copy is
+removed.
+
+The rest came from channels, which allocate their whole buffer: a
+connection's event queue had 1,000 slots, 8 KB, though after the connection
+is set up the socket's reader hands it packets inline and it carries only
+close and ICMP events -- 1,000 simultaneous transfers dropped nothing with
+it cut to one slot; it is 64. The socket's own event channel had a million,
+8 MB per socket, and nothing on a socket reads it. And every connection's
+two B-trees had a free list of their own; they share one per kind now.
+
+Measured the same way: about 23 KB per connection end
+(`netem.TestIdleConnectionMemory`, which fails at 1.08 MB). What remains is
+mostly the retransmission-timer channel, 8 KB: one RTO delivers one timer per
+packet in flight, the wheel re-arms rather than blocks when the channel is
+full, and shrinking it would change when those deliveries arrive -- not done
+without measuring the timeout path. The goroutine's stack is on top of the
+heap figure, at least 8 KB.
+
+**What it cost: 3% at 100 Mb/s, in a small process.** The benchmark suite
+against the commit before, five runs and then twenty of anything that moved,
+put every profile within noise but classic LEDBAT on the 100 Mb/s LAN link,
+and forty interleaved runs a side settled that: 86.8 Mbps median against
+89.9, Mann-Whitney z = 3.97. Bisected, and then each part reverted on its
+own, thirty runs each: allocating the receive buffer whole again restored
+it, and so did putting back the socket's million-slot channel -- two changes
+with nothing in common but the heap they hold. With the collector less eager
+(`GOGC=400`) the two versions measure the same, 90.44 and 90.48 Mbps (z =
+0.02), both at the old figure. So the code is not slower; the collector is
+paced off a smaller live heap. In this benchmark sender, receiver and
+emulated network share one process with little else in it, and the
+megabytes that are gone were ballast that made each cycle cheaper relative
+to the per-packet allocations. An application with a heap of its own would
+see less of it -- not measured. The remedy is fewer allocations per packet,
+not the ballast back.
+
 ## A write to a dead connection waited out its own deadline
 
 **Fixed.** Found measuring the idle timeout over the emulated network: after a

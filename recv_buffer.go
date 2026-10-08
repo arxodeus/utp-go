@@ -21,8 +21,22 @@ const (
 )
 
 type receiveBuffer struct {
-	logger     log.Logger
+	logger log.Logger
+	// capacity is the configured size: what the window is advertised from
+	// and admission is checked against. buf grows towards it as data
+	// arrives, and holds the offset bytes not yet read at buf[head:].
+	//
+	// buf was allocated at the full capacity up front -- 1 MB by default --
+	// so every connection held a megabyte from the moment it was set up,
+	// whether it ever carried data or not: 1.08 MB per connection end that
+	// exchanged 1 KB, measured, where libutp holds about 10 KB per socket,
+	// its buffers growing as they are used (SizableCircularBuffer::grow,
+	// utp_internal.cpp:185-194, behind inbuf and outbuf at :549). With no idle timeout
+	// by default, that was a megabyte held for every vanished peer an
+	// application did not close. Like libutp's, it grows and is kept.
+	capacity   int
 	buf        []byte
+	head       int
 	offset     int
 	pending    *btree.BTree
 	initSeqNum uint16
@@ -67,26 +81,47 @@ func (rb *receiveBuffer) gapReserve() int {
 }
 
 func newReceiveBuffer(size int, initSeqNum uint16) *receiveBuffer {
-	buf := make([]byte, size)
-	return &receiveBuffer{
-		buf:        buf,
-		offset:     0,
-		pending:    btree.New(2),
-		initSeqNum: initSeqNum,
-		consumed:   0,
-	}
+	return newReceiveBufferWithLogger(size, initSeqNum, nil)
 }
 
 func newReceiveBufferWithLogger(size int, initSeqNum uint16, logger log.Logger) *receiveBuffer {
-	buf := make([]byte, size)
 	return &receiveBuffer{
 		logger:     logger,
-		buf:        buf,
-		offset:     0,
-		pending:    btree.New(2),
+		capacity:   size,
+		pending:    btree.NewWithFreeList(2, pendingFreeList),
 		initSeqNum: initSeqNum,
-		consumed:   0,
 	}
+}
+
+// pendingFreeList is the node free list every receive buffer's reorder tree
+// shares: each would otherwise allocate a list of its own, per connection,
+// that sits empty while packets arrive in order. btree's free lists are safe
+// to share between trees.
+var pendingFreeList = btree.NewFreeList(btree.DefaultFreeListSize)
+
+// minRecvBufAlloc is the first allocation, enough for a few packets.
+const minRecvBufAlloc = 4 * 1024
+
+// appendInOrder puts data after what is held, making room first: the unread
+// bytes move to the front if that is enough, and otherwise the array doubles,
+// never past the capacity. Admission has already checked that offset plus
+// pending plus data fits the capacity, so the room is always there.
+func (rb *receiveBuffer) appendInOrder(data []byte) {
+	need := rb.offset + len(data)
+	if rb.head+need > len(rb.buf) {
+		if need <= len(rb.buf) {
+			copy(rb.buf, rb.buf[rb.head:rb.head+rb.offset])
+		} else {
+			size := max(len(rb.buf)*2, minRecvBufAlloc, need)
+			size = min(size, max(rb.capacity, need))
+			grown := make([]byte, size)
+			copy(grown, rb.buf[rb.head:rb.head+rb.offset])
+			rb.buf = grown
+		}
+		rb.head = 0
+	}
+	copy(rb.buf[rb.head+rb.offset:], data)
+	rb.offset = need
 }
 
 // Window is the receive window to advertise to the peer: the capacity, less
@@ -116,8 +151,8 @@ func newReceiveBufferWithLogger(size int, initSeqNum uint16, logger log.Logger) 
 //
 // Available() still charges the out-of-order bytes, and admission still uses
 // Available(), so the invariant the collapse loop in Write depends on --
-// offset plus pending never exceeding the capacity, or `rb.buf[rb.offset:end]`
-// panics -- is unchanged.
+// offset plus pending never exceeding the capacity, which appendInOrder relies
+// on to find its room -- is unchanged.
 //
 // A peer respecting this window cannot break it either: the window is the
 // capacity less what has been delivered, so everything the peer is permitted
@@ -125,7 +160,7 @@ func newReceiveBufferWithLogger(size int, initSeqNum uint16, logger log.Logger) 
 // peer ignoring the window is caught by admission, which drops rather than
 // writes. Over-advertising therefore costs a retransmission, never a panic.
 func (rb *receiveBuffer) Window() int {
-	return len(rb.buf) - rb.offset
+	return rb.capacity - rb.offset
 }
 
 // Available is the room left for bytes actually arriving, counting data held
@@ -137,7 +172,7 @@ func (rb *receiveBuffer) Window() int {
 // nothing wrong, and admitting on Window's figure would let offset plus
 // pending exceed the capacity and panic the collapse loop in Write.
 func (rb *receiveBuffer) Available() int {
-	return len(rb.buf) - rb.offset - rb.pendingBytes
+	return rb.capacity - rb.offset - rb.pendingBytes
 }
 
 // Pending reports how many bytes have been received -- contiguous or held
@@ -197,11 +232,14 @@ func (rb *receiveBuffer) Read(buf []byte) int {
 	}
 
 	n := minInt(len(buf), rb.offset)
-	copy(buf, rb.buf[:n])
-
-	remaining := rb.offset - n
-	copy(rb.buf, rb.buf[n:n+remaining])
-	rb.offset = remaining
+	copy(buf, rb.buf[rb.head:rb.head+n])
+	// The rest stays where it is: it used to be moved to the front on every
+	// read, all of it, which costs the whole buffer per small read.
+	rb.head += n
+	rb.offset -= n
+	if rb.offset == 0 {
+		rb.head = 0
+	}
 
 	return n
 }
@@ -236,9 +274,7 @@ func (rb *receiveBuffer) Write(data []byte, seqNum uint16) error {
 	// in-order one went in and came straight back out of it, allocating each
 	// way.
 	if seqNum == next && rb.pending.Len() == 0 {
-		end := rb.offset + len(data)
-		copy(rb.buf[rb.offset:end], data)
-		rb.offset = end
+		rb.appendInOrder(data)
 		rb.consumed++
 		return nil
 	}
@@ -260,9 +296,7 @@ func (rb *receiveBuffer) Write(data []byte, seqNum uint16) error {
 
 		pending := item.(*pendingItem)
 
-		end := rb.offset + len(pending.data)
-		copy(rb.buf[rb.offset:end], pending.data)
-		rb.offset = end
+		rb.appendInOrder(pending.data)
 		rb.consumed += 1
 		rb.pending.Delete(pending)
 		rb.pendingBytes -= len(pending.data)

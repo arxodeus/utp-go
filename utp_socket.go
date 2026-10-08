@@ -512,7 +512,7 @@ func WithSocket(ctx context.Context, socket Conn, logger log.Logger, opts ...Soc
 		inlineConns:              make(map[chan *streamEvent]*connection),
 		accepts:                  make(chan *Accept, 1000),
 		acceptsWithCidCh:         make(chan *Accept, 1000),
-		socketEvents:             make(chan *socketEvent, 1000000),
+		socketEvents:             make(chan *socketEvent, socketEventQueueLen),
 		awaiting:                 awaitingMap,
 		awaitingExpirations:      awaitExpirations,
 		incomingConns:            incomingConns,
@@ -699,6 +699,25 @@ func (s *UtpSocket) readFailed(err error, failures *int) bool {
 	go s.Close()
 	return true
 }
+
+// connEventQueueLen is the capacity of a connection's event queue. Packets go
+// through it only until the connection's event loop has finished setting up --
+// after that the socket's reader hands them over inline (receiveInline) -- and
+// a peer has nothing to send before then but a repeated SYN: its data waits
+// for the SYN-ACK, which that setup sends. Otherwise it carries the
+// application's close and half-close and ICMP reports, a few each. A packet
+// that finds it full is dropped and counted (PacketsDroppedFullConnQueue).
+//
+// It was 1000, and a channel's buffer is allocated whole: 8 KB per
+// connection, about a quarter of what an idle connection held once its
+// receive buffer stopped being allocated up front.
+const connEventQueueLen = 64
+
+// socketEventQueueLen is the capacity of the socket's event channel. Nothing
+// on a socket reads it: every connection the socket makes writes through
+// sendEvent instead. It is what a connection built without one, in a test,
+// queues to. It was a million, allocated whole: 8 MB per socket, unread.
+const socketEventQueueLen = 64
 
 // sendEvent carries out what a connection or the socket wants done on the
 // wire, on the caller's goroutine: a packet written, or a finished
@@ -979,7 +998,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 		}
 		s.removeAwaiting(cidHash)
 		connected := make(chan error, 1)
-		newConnStream := make(chan *streamEvent, 1000)
+		newConnStream := make(chan *streamEvent, connEventQueueLen)
 		s.putConnStream(cidHash, newConnStream)
 		stream := NewUtpStream(s.ctx, s.logger, cid, s.configForPeer(accept.config, cid.Peer), packetPtr, s.socketEvents, s.sendEvent, newConnStream, connected, s.retransmitTimers)
 		s.attachInline(cidHash, newConnStream, stream.conn)
@@ -1439,7 +1458,7 @@ func (s *UtpSocket) AcceptWithCid(ctx context.Context, cid *ConnectionId, config
 func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *ConnectionConfig) (*UtpStream, error) {
 	// Create channels for connection status and events
 	connectedCh := make(chan error, 1)
-	streamEvents := make(chan *streamEvent, 1000)
+	streamEvents := make(chan *streamEvent, connEventQueueLen)
 
 	// Registered under the reader's lock, so the reader never finds the
 	// connection's queue without the connection behind it. Nothing here
@@ -1524,7 +1543,7 @@ func (s *UtpSocket) ConnectWithCid(
 	}
 
 	connected := make(chan error, 1)
-	streamEvents := make(chan *streamEvent, 1000)
+	streamEvents := make(chan *streamEvent, connEventQueueLen)
 
 	s.putConnStream(cid.Hash(), streamEvents)
 	// The socket's context, not the dial's -- see the note in Connect.
@@ -1616,7 +1635,7 @@ func (s *UtpSocket) selectAcceptHelper(
 	}
 
 	connected := make(chan error, 1)
-	streamEvents := make(chan *streamEvent, 1000)
+	streamEvents := make(chan *streamEvent, connEventQueueLen)
 
 	if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 		s.logger.Trace("put a conn stream at selectAcceptHelper", "cid.Peer", cid.Peer, "cid", cid)

@@ -8,6 +8,10 @@ import (
 	"github.com/google/btree"
 )
 
+// lostFreeList is the node free list every connection's lost-packet tree
+// shares, as the receive buffers' reorder trees do (pendingFreeList).
+var lostFreeList = btree.NewFreeListG[uint16](btree.DefaultFreeListSize)
+
 const LossThreshold = 3
 
 var ErrInvalidAckNum = errors.New("invalid ack number")
@@ -109,7 +113,7 @@ func newSentPackets(initSeqNum uint16, congestionCtrl Controller, logger log.Log
 		base:        initSeqNum + 1,
 		lastAck:     initSeqNum,
 		initSeqNum:  initSeqNum,
-		lostPackets: btree.NewOrderedG[uint16](2),
+		lostPackets: btree.NewWithFreeListG(2, btree.Less[uint16](), lostFreeList),
 		// The number the next packet will take, in both roles. libutp's
 		// accepting side does the same (utp_internal.cpp:2988-2989); its
 		// initiator does not -- fast_resend_seq_nr stays at 1 when

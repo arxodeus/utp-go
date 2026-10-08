@@ -150,6 +150,13 @@ func TestManyConcurrentTransfers(t *testing.T) {
 
 	t.Logf("finished high concurrency load test of %d simultaneous transfers, in %v, at a rate of %.0f Mbps",
 		n, elapsed, transferRate)
+
+	// A connection's event queue carries packets only until its event loop
+	// is ready, and here a thousand set up at once. Anything it dropped would
+	// be a loss of ours, not the network's (utp.connEventQueueLen).
+	if d := recvLink.PacketsDroppedFullConnQueue() + sendLink.PacketsDroppedFullConnQueue(); d != 0 {
+		t.Errorf("%d packets dropped because a connection's event queue was full", d)
+	}
 }
 
 // TestUdpTransfer performs a single large transfer over uTP carried on real
