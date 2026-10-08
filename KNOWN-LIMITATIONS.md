@@ -360,6 +360,25 @@ its context went still reads as `io.EOF`, as before.
 `TestReadAfterIdleTimeoutReportsIt` repeats the case ten times; without the
 fix it failed on the second.
 
+Three more answers to a write broke the same contract, found reading that
+path: an `io.Writer` that takes fewer bytes than it was given must say why.
+
+- A write that reached the connection after this end's FIN had gone -- one
+  queued just before `Close` or `CloseWrite`, which refuse later writes
+  themselves -- was answered with 0 bytes and no error, so the caller took it
+  for sent. libutp refuses it (`if (conn->fin_sent) return 0`,
+  `utp_internal.cpp:3188`). It is `ErrNotConnected` now
+  (`TestWriteAfterOurFinIsRefused`).
+- A write that reached a connection which had closed cleanly was answered
+  with the connection's error, and a clean close has none: 0 bytes, nil.
+  `ErrNotConnected` (`TestWriteAfterCleanCloseIsRefused`).
+- A writer still waiting when the connection closed was told 0 bytes,
+  whatever part of its buffer had already gone into the send buffer, again
+  with the connection's error, nil for a clean close. It is told how many
+  were taken, and why the rest were not (`TestPendingWriterToldWhatWasTaken`).
+
+Each test fails without its change.
+
 ## A zero-length ST_DATA was silently dropped
 
 **Fixed.**

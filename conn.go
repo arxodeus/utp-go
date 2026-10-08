@@ -1750,8 +1750,15 @@ func (c *connection) processWrites(now time.Time) {
 			c.logger.Warn("connection is closed, will not process pending writes",
 				"c.cid.send", c.cid.Send, "c.cid.recv", c.cid.Recv)
 		}
-		result := &readOrWriteResult{
-			Err: c.state.Err,
+		// A writer still waiting has not had all its bytes taken, so it is
+		// told why -- with ErrNotConnected for a connection that closed
+		// cleanly, which has no error of its own -- and how many were taken
+		// before the end. Both used to be wrong: a nil error with nothing
+		// written, which an io.Writer may not return, and 0 for a writer
+		// part of whose bytes were already in the send buffer.
+		err := c.state.Err
+		if err == nil {
+			err = ErrNotConnected
 		}
 		// Each writer is answered once. The queue used to be left as it was,
 		// so the next call sent to every writer again, and a result channel
@@ -1759,7 +1766,7 @@ func (c *connection) processWrites(now time.Time) {
 		// lock held -- and the socket's reader, which serves every connection,
 		// waiting behind it.
 		for _, w := range c.pendingWrites {
-			w.resultCh <- result
+			w.resultCh <- &readOrWriteResult{Len: w.written, Err: err}
 		}
 		c.pendingWrites = nil
 		return
@@ -1918,7 +1925,13 @@ func (c *connection) onWrite(writeReq *queuedWrite) {
 			if c.state.closing.LocalFin == nil && c.state.closing.RemoteFin != nil {
 				c.pendingWrites = append(c.pendingWrites, writeReq)
 			} else {
-				writeReq.resultCh <- &readOrWriteResult{Len: 0}
+				// Our FIN is out: nothing more may be sent. libutp's
+				// utp_writev refuses the same (`if (conn->fin_sent)
+				// return 0`, utp_internal.cpp:3188). This answered Len 0
+				// with no error, which an io.Writer may not do: a write
+				// queued just before Close or CloseWrite reported success
+				// and its bytes were never sent.
+				writeReq.resultCh <- &readOrWriteResult{Err: ErrNotConnected}
 			}
 		} else {
 			c.logger.Debug("append a queuedWrite to pending writes")
@@ -1927,11 +1940,13 @@ func (c *connection) onWrite(writeReq *queuedWrite) {
 
 	case ConnClosed:
 		c.logger.Warn("discard a queuedWrite when closed the conn...")
-		result := &readOrWriteResult{
-			Err: c.state.Err,
-			Len: 0,
+		// A connection that closed cleanly has no error of its own, and a
+		// write that sends nothing must still report one.
+		err := c.state.Err
+		if err == nil {
+			err = ErrNotConnected
 		}
-		writeReq.resultCh <- result
+		writeReq.resultCh <- &readOrWriteResult{Err: err}
 	}
 	c.processWrites(c.now())
 	c.wantWrite = true
