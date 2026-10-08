@@ -1729,6 +1729,29 @@ replays the inputs into our controller, and compares the resulting window to
 the byte. Three traces, every update matching after the fix. The driver gained
 `EnableCCLog` / `CCLog` / `ClearCCLog` for it.
 
+## PR 60 — two unbounded growths, and fewer allocations per packet
+
+Two structures grew for as long as a connection carried traffic: the delay
+accumulator's heap, which removed a sample only once the least had expired
+(239,689 samples, 7.7 MB, after four minutes at a thousand acks a second; a
+sliding-window minimum now holds at most 495), and the controller's record
+per sequence number, never removed (65,536 records, 5.5 MB measured; now
+dropped once the sender trims the packet, as libutp frees it in
+`ack_packet`, `utp_internal.cpp:1397`).
+
+Allocations per packet on a 4 MB LAN transfer, whole process: 13.0 before,
+5.3 after (`netem.TestAllocationsPerPacket`). One change is to a contract:
+`Conn.WriteTo` must not keep the slice it is given, since packets are
+encoded into a pooled buffer -- as libutp's send callback must not, and as
+`net.PacketConn` already behaves. A `Conn` that queues the slice without
+copying would need to copy. `ReadToEOF` now fills the caller's buffer, so a
+caller holding another slice of that array sees it overwritten.
+
+Goes with the receive-buffer change in this fork (`3cd4dbb`), which cut an
+idle connection from 1.08 MB to 23 KB and cost 3% at 100 Mb/s through GC
+pacing; this pays that back: 90.28 Mbps against 86.27, forty interleaved
+runs a side, z = 3.14.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

@@ -321,6 +321,12 @@ to the per-packet allocations. An application with a heap of its own would
 see less of it -- not measured. The remedy is fewer allocations per packet,
 not the ballast back.
 
+**Paid back.** With allocations per packet cut from 13.0 to 5.3 (see
+"Allocations per packet" below), forty interleaved runs a side on the same
+profile measure 90.28 Mbps median against 86.27 for the commit before,
++4.6%, Mann-Whitney z = 3.14: above the 89.9 the link measured before the
+memory change.
+
 ## A busy connection grew without bound
 
 **Fixed.** Found looking for the allocations behind the cost above. Two
