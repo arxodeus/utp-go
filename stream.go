@@ -51,6 +51,10 @@ type UtpStream struct {
 	// readErr is the terminal read error, kept so every Read after the first
 	// one returns it rather than blocking. Guarded by readLocker.
 	readErr error
+	// ended is closed once the connection's event loop has returned, after
+	// it has published terminalErr. Nothing serves writes after that, so a
+	// writer must hear of it from here.
+	ended chan struct{}
 }
 
 func NewUtpStream(
@@ -83,6 +87,7 @@ func NewUtpStream(
 		connHandle:   connHandle,
 		shutdown:     &atomic.Bool{},
 		abandoned:    make(chan struct{}),
+		ended:        make(chan struct{}),
 	}
 
 	utpStream.conn = newConnection(streamCtx, logger, cid, config, syn, connected, socketEvents, utpStream.reads, utpStream.abandoned, timers)
@@ -145,12 +150,38 @@ func (s *UtpStream) terminalErr() error {
 	return nil
 }
 
+// endedErr reports, once the connection has ended, the error it ended with,
+// or nil if it is still running or ended without one. A reader that has not
+// had everything the peer sent is told ErrReadClosed for an otherwise clean
+// end (readEndErr); that is the reader's view, and not an error here.
+func (s *UtpStream) endedErr() error {
+	select {
+	case <-s.ended:
+	default:
+		return nil
+	}
+	if err := s.terminalErr(); err != nil && !errors.Is(err, ErrReadClosed) {
+		return err
+	}
+	return nil
+}
+
+// writeErr is what a write is told once the connection has ended: the error
+// it ended with, or ErrNotConnected if it ended without one.
+func (s *UtpStream) writeErr() error {
+	if err := s.endedErr(); err != nil {
+		return err
+	}
+	return ErrNotConnected
+}
+
 func (s *UtpStream) Cid() *ConnectionId {
 	return s.cid
 }
 
 func (s *UtpStream) start() {
 	defer s.connHandle.Done()
+	defer close(s.ended)
 
 	err := s.conn.eventLoop(s)
 	if err != nil {
@@ -172,6 +203,11 @@ func (s *UtpStream) ReadToEOF(ctx context.Context, buf *[]byte) (int, error) {
 			s.logger.Error("ctx has been canceled", "err", ctx.Err(), "readLength", n)
 			return n, ctx.Err()
 		case <-s.streamCtx.Done():
+			// A connection that had already ended reports why, whichever
+			// of the two this select happened to see first.
+			if err := s.endedErr(); err != nil {
+				return n, err
+			}
 			s.logger.Error("streamCtx has been canceled", "err", s.streamCtx.Err(), "readLength", n)
 			return 0, s.streamCtx.Err()
 		case res, ok := <-s.reads:
@@ -227,10 +263,18 @@ func (s *UtpStream) Read(ctx context.Context, buf []byte) (int, error) {
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	case <-s.streamCtx.Done():
-		// The stream is gone. Report it as end of stream rather than as a
-		// context error: a reader that has already had everything the peer
-		// sent should see io.EOF, which is what every io.Reader caller
-		// expects, not "context canceled".
+		// A connection that had already ended with an error -- a timeout,
+		// a reset -- reports it. The closed read queue says the same, and
+		// once the socket's context is cancelled too this select sees either
+		// at random: a dead connection read as a clean end half the time.
+		if err := s.endedErr(); err != nil {
+			s.readErr = err
+			return 0, err
+		}
+		// Otherwise the stream is gone. Report it as end of stream rather
+		// than as a context error: a reader that has already had everything
+		// the peer sent should see io.EOF, which is what every io.Reader
+		// caller expects, not "context canceled".
 		s.readErr = io.EOF
 		return 0, io.EOF
 	case res, ok := <-s.reads:
@@ -262,6 +306,11 @@ func (s *UtpStream) Read(ctx context.Context, buf []byte) (int, error) {
 func (s *UtpStream) Write(ctx context.Context, buf []byte) (int, error) {
 	if s.shutdown.Load() || s.writeClosed.Load() {
 		return 0, ErrNotConnected
+	}
+	select {
+	case <-s.ended:
+		return 0, s.writeErr()
+	default:
 	}
 	resCh := make(chan *readOrWriteResult, 1)
 	// The connection goroutine keeps hold of what is queued here until it has
@@ -311,6 +360,11 @@ func (s *UtpStream) WriteV(ctx context.Context, bufs [][]byte) (int, error) {
 	if s.shutdown.Load() || s.writeClosed.Load() {
 		return 0, ErrNotConnected
 	}
+	select {
+	case <-s.ended:
+		return 0, s.writeErr()
+	default:
+	}
 	total := 0
 	for _, b := range bufs {
 		total += len(b)
@@ -328,11 +382,20 @@ func (s *UtpStream) WriteV(ctx context.Context, bufs [][]byte) (int, error) {
 
 // writeQueued hands an already-copied buffer to the connection and waits for
 // it to be accepted. Shared by Write and WriteV so the two cannot drift.
+//
+// A connection that has ended answers nothing, so its end is waited on too:
+// a write to a connection the idle timeout had closed used to wait out its
+// own deadline -- 8.5 minutes in one measurement -- and then report that,
+// rather than the timeout. libutp's utp_writev returns at once on a socket
+// that is not connected (utp_internal.cpp:3181), its embedder having been
+// told why by the error callback.
 func (s *UtpStream) writeQueued(ctx context.Context, queued []byte, resCh chan *readOrWriteResult) (int, error) {
 	select {
 	case s.writes <- &queuedWrite{queued, 0, resCh}:
 	case <-ctx.Done():
 		return 0, ctx.Err()
+	case <-s.ended:
+		return 0, s.writeErr()
 	}
 	if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 		s.logger.Trace("created a new queued write to writes channel",
@@ -351,6 +414,16 @@ func (s *UtpStream) writeQueued(ctx context.Context, queued []byte, resCh chan *
 		}
 	case <-ctx.Done():
 		return 0, ctx.Err()
+	case <-s.ended:
+		// An answer sent before the end still counts.
+		select {
+		case writeRes := <-resCh:
+			if writeRes != nil {
+				return writeRes.Len, writeRes.Err
+			}
+		default:
+		}
+		return 0, s.writeErr()
 	case <-s.streamCtx.Done():
 		return 0, s.streamCtx.Err()
 	}

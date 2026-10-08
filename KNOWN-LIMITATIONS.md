@@ -267,6 +267,45 @@ attempt once `retransmit_count` reaches 2 while in `CS_SYN_SENT`, which is
 three transmissions of the SYN in total (`utp_internal.cpp:1191`). This is a
 default, still overridable per connection.
 
+## A write to a dead connection waited out its own deadline
+
+**Fixed.** Found measuring the idle timeout over the emulated network: after a
+90-second outage, a connection with `MaxIdleTimeout` at 60 seconds had
+closed, and a `Write` on it blocked for 8.5 minutes, until its context
+expired, and then reported `context deadline exceeded` rather than the
+timeout.
+
+A write is answered by the connection's event loop. One already queued when
+the loop closes the connection is answered with the connection's error, but
+one that arrives after the loop has returned went into the stream's write
+channel, which nothing reads any more, and waited for the caller's context or
+the stream's -- and the idle timeout cancels neither. Any other end that
+leaves the stream's context alone -- a reset, the give-up rule -- would do the
+same; that is read from the code, and only the idle timeout is tested.
+
+libutp's `utp_writev` returns at once on a socket that is not connected
+(`utp_internal.cpp:3181`), its embedder already told why by the error
+callback. The stream now has a channel the connection closes when its loop
+returns, after it has published the error it ended with; `Write` and `WriteV`
+check it before queueing and while they wait, and return that error, or
+`ErrNotConnected` for a connection that ended without one. An answer the loop
+sent before it returned still wins. `TestWriteAfterIdleTimeoutFails`: the
+write fails in microseconds with `ErrTimedOut`; without the fix it waits out
+its 2-second deadline.
+
+The same measurement had a `Read` on the other end return `io.EOF` -- a dead
+connection reported as a clean end of stream. Not on every read: the first
+read after the timeout reported it correctly, from the closed read queue. But
+the test's context, which was also the socket's, had expired by then, and once
+the stream's context is cancelled `Read` has two ready cases, the closed queue
+carrying `ErrTimedOut` and the cancelled context mapped to `io.EOF`, and Go
+picks one at random. `ReadToEOF` had the same race, with `context canceled`
+on the other side. Both now report the error a connection had already ended
+with whichever case they see; a stream whose connection was still running when
+its context went still reads as `io.EOF`, as before.
+`TestReadAfterIdleTimeoutReportsIt` repeats the case ten times; without the
+fix it failed on the second.
+
 ## A zero-length ST_DATA was silently dropped
 
 **Fixed.**
