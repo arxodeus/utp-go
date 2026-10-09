@@ -63,9 +63,11 @@ func deadAccepted(t *testing.T, kill func(conn *scriptedConn, clk *virtualClock,
 		t.Fatalf("first read: %q, %v", buf[:n], err)
 	}
 	kill(conn, clk, stream)
+	// The loop leaves the clock as it returns, a moment before the stream
+	// records that it has: quiet is not yet ended.
 	select {
 	case <-stream.ended:
-	default:
+	case <-time.After(5 * time.Second):
 		t.Fatal("the connection had not ended")
 	}
 	return stream, func() {
