@@ -4531,6 +4531,31 @@ risks making things worse.
 
   Revisit if an adversarial-peer scenario is ever tested (M8), with a
   measurement rig that can resolve 10%.
+
+  **Tested, and it does not happen.** The code has moved on since: the drain
+  is bounded (`maxAckCoalesce`), and an established connection's packets no
+  longer reach this loop at all -- the socket's reader processes them inline,
+  under the connection's lock. A peer was then made to flood one: a transport
+  that has another packet ready every time the socket reads, each a copy of a
+  data packet the connection already has, so each is processed and
+  acknowledged -- the most a peer can make us do per packet -- while a packet
+  of ours waits for its retransmission timeout. Three million packets in the
+  three seconds of that timeout, each answered:
+
+  | Route | Retransmitted after, no flood | With the flood | `Write` during it |
+  | --- | --- | --- | --- |
+  | Inline (as it stands) | 3.000290 s | 3.000283 s | 48 µs |
+  | Every packet through the loop's queue | 3.025447 s | 3.000436 s | 71 µs |
+  | Through the queue, drain unbounded (the original) | 3.000363 s | 3.024704 s | 28 µs |
+
+  The last two rows put the old route back by hand. Even with the unbounded
+  drain the timer was on time to a wheel tick: one reader cannot keep a
+  queue full against one consumer for long -- of 3.9 million packets the loop
+  took 1.15 million and the queue, full, refused the rest -- and the loop
+  reaches its timers every time it empties. The concern was reasonable on
+  paper and is not borne out. The test that measured it is not checked in:
+  nothing tried made it fail, the original code included, so it guards
+  against nothing anyone has seen.
 - **Packets can still be dropped when a connection's event queue is full**
   (`handleIncomingBuf` falls through to `default`), and this is now counted
   rather than only logged — `UtpSocket.PacketsDroppedFullConnQueue`. The
