@@ -713,15 +713,16 @@ Gates that pass:
   our 100 Mb/s transfer's best of three at 2.88 s against 1.51 s in one run
   and within the gate in another. The first had been failing there
   unnoticed.
-- `go test -race ./integrated/ -run 'TestUdpTransfer|TestManyConcurrentTransfers' -count=3` — green, **but at `UTP_TEST_TRANSFERS=150`, not the default 1000.** See "Memory" below: the full 1000 does not fit under the race detector on a 16 GB machine.
+- `go test -race ./integrated/ -run 'TestUdpTransfer|TestManyConcurrentTransfers' -count=3` — green, **but at `UTP_TEST_TRANSFERS=150`, not the default 1000.** See "Memory" below: the full 1000 did not fit under the race detector on a 16 GB machine. *It does now*: `TestManyConcurrentTransfers` at the full 1000 under `-race`, four runs, green, no data races, peak RSS 5.4-5.8 GB, 77-90 s each.
 - `go test ./netem/ -count=3` — green. The M1 gate; figures in [HARNESS.md](HARNESS.md).
 - `go test -race ./netem/` — green, no data races.
 - `go test -run TestConformance .` — the M2 corpus, nine cases, green.
 - `scripts/check-libutp-reference.sh` — pass.
 
-The `-race` gate is therefore met at 150 concurrent transfers and **unmet at
-1000**. That is a limit of the environment rather than a known defect, but it
-does mean the highest-concurrency path has not been proven race-free.
+The `-race` gate was therefore met at 150 concurrent transfers and **unmet at
+1000**, a limit of the environment rather than a known defect. It is met at
+1000 now that the run fits (above); four runs is a sample, not a proof that
+the highest-concurrency path is race-free.
 
 Throughput figures observed on loopback, for scale only — these are not
 congestion-control results and say nothing about behaviour on a real path:
@@ -733,9 +734,18 @@ congestion-control results and say nothing about behaviour on a real path:
 ### Memory
 
 `TestManyConcurrentTransfers` at its default 1000 concurrent 1 MB transfers
-peaks at approximately **5 GB RSS** without the race detector (sampled from
+peaked at approximately **5 GB RSS** without the race detector (sampled from
 `/proc/<pid>/status` `VmHWM`). Under `-race` the same run reached 13.9 GB and
 was OOM-killed by the container's cgroup at ~507 s.
+
+*Now:* 3.17-3.64 GB without the detector (four runs; 4.53-4.84 GB on the
+commit before the change below), and 5.4-5.8 GB with it (four runs, all
+green). Most of the drop is one copy: `Write` copies the caller's bytes into
+a slice of its own and the send buffer copied that slice again, so a 1 MB
+write was held twice; the send buffer now takes it as it is
+(`sendBuffer.Adopt`, `TestWriteCopiesOnce`). libutp copies once. What
+remains has not been broken down; it includes a 1 MB send buffer per sender
+and each receiver's `ReadToEOF` result, grown from nothing by the test.
 
 Roughly 1-2 GB of that is the test's own buffers, and `ReadToEOF` grows its
 result with `append` from zero capacity, so it transiently holds about twice
@@ -4601,6 +4611,11 @@ risks making things worse.
   runs reach 300 (the full test peaks around 5 GB RSS, which `-race` makes
   worse); and a race the detector never sees because the two accesses never
   interleave during a run is exactly the kind that survives a soak.
+
+  *Since:* the full 1000 now fits under the detector, which closes the first
+  gap -- four runs at 1000 concurrent transfers, no data races. The idle
+  timeout is off by default now, so those runs do not take the path the
+  sighting was on; `TestTeardownRace` above still covers it.
 
   What has changed is the standing of the suspicion. It was "unexplained and
   unreproduced"; it is now "unreproduced across 24,100 teardowns under the
