@@ -382,9 +382,13 @@ network's own. What went:
   is acknowledged rather than shrinking packet by packet: at most a write's
   worth more than the window.
 - Every datagram received was copied whole before decoding. It is decoded
-  from the reader's buffer, which is reused, and only a body is copied out:
-  an acknowledgement, half of what arrives, costs no copy. Batched reads
-  copy into an arena reused from batch to batch.
+  from the reader's buffer, which is reused. A packet processed before the
+  next read -- an established connection's, inline -- is not copied at all:
+  in-order data goes straight from the read buffer into the receive buffer,
+  as libutp hands its application a pointer into the packet
+  (`utp_internal.cpp:2351`). Only a packet kept for later takes its body: one
+  queued for a connection's loop, a SYN, and data held out of order. Batched
+  reads copy into an arena reused from batch to batch.
 - Each chunk of received data handed to the reader was a new buffer and a
   new result; both come from a pool and go back once read. Chunks under
   512 bytes are sized to their data, so a slow reader of a trickle does not

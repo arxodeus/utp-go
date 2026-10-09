@@ -38,8 +38,8 @@ func (c *UdpConn) readBatch() ([]datagram, error) {
 //
 // Each datagram was copied into a slice of its own, which the decoded packet
 // then kept as its body: an allocation for every datagram received, for an
-// acknowledgement as much as for data. The decoder copies a body out of a
-// borrowed buffer, so an acknowledgement now costs none.
+// acknowledgement as much as for data. A packet decoded from a borrowed
+// buffer copies its body only if it is kept (packet.own).
 func (c *UdpConn) lend(b []byte) []byte {
 	start := len(c.arena)
 	c.arena = append(c.arena, b...)

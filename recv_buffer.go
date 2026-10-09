@@ -279,6 +279,10 @@ func (rb *receiveBuffer) Write(data []byte, seqNum uint16) error {
 		return nil
 	}
 
+	// Held until the gap before it fills, so it is copied: data may be the
+	// socket reader's buffer, reused by the next read (see packet.own).
+	// In-order data is copied into the buffer as it is appended.
+	data = append([]byte(nil), data...)
 	if old := rb.pending.ReplaceOrInsert(&pendingItem{seqNum: seqNum, data: data}); old != nil {
 		rb.pendingBytes -= len(old.(*pendingItem).data)
 	}

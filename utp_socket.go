@@ -695,9 +695,9 @@ func (s *UtpSocket) readLoop() {
 				continue
 			}
 			failures = 0
-			// Decoded from buf, which the next read reuses, with only the
-			// body copied out: an acknowledgement, half of what arrives,
-			// costs no copy at all. The whole datagram was copied, an
+			// Decoded from buf, which the next read reuses: a packet
+			// processed before then needs no copy, and one kept takes its
+			// body (packet.own). The whole datagram was copied, an
 			// allocation for every packet received.
 			s.dispatch(&IncomingPacketRaw{peer: from, payload: buf[:n], borrowed: true}, touched)
 			if run++; qr == nil || run >= maxQueuedRun || qr.Queued() == 0 {
@@ -1008,6 +1008,8 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 		if barrier != nil {
 			barrier.NoteHandoff()
 		}
+		// Queued, so kept past this read. See packet.own.
+		packetPtr.own()
 		select {
 		case connStream <- &streamEvent{Type: streamIncoming, Packet: packetPtr}:
 		default:
@@ -1055,6 +1057,9 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 		return nil
 	}
 
+	// A SYN is kept, by the connection it starts or until an Accept takes
+	// it. See packet.own.
+	packetPtr.own()
 	cid := CidFromPacket(packetPtr, incomingRaw.peer, cidTypes[2])
 	cidHash := cid.Hash()
 

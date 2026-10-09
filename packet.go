@@ -286,6 +286,29 @@ type packet struct {
 	// chain is the extension chain as it arrived, in order, for a decoded
 	// packet, and nil for one built here. See wireExtensions.
 	chain []ExtensionData
+	// borrowed says Body is a slice of the socket reader's buffer, which the
+	// next read reuses. Whatever keeps the packet beyond the call that
+	// received it takes the body first. See own.
+	borrowed bool
+}
+
+// own gives the packet a body of its own, if it was borrowed.
+//
+// The socket decodes each datagram from its read buffer and processes most
+// of them before it reads again -- an established connection's, inline -- so
+// most need no copy: in-order data goes straight from the read buffer into
+// the receive buffer, as libutp hands its application a pointer into the
+// packet it received (utp_call_on_read, utp_internal.cpp:2351). Only a packet
+// kept for later -- queued for a connection's loop, or a SYN waiting for an
+// Accept -- takes its body, here. The receive buffer copies what it holds out
+// of order (receiveBuffer.Write).
+func (p *packet) own() {
+	if p.borrowed {
+		if len(p.Body) > 0 {
+			p.Body = append([]byte(nil), p.Body...)
+		}
+		p.borrowed = false
+	}
 }
 
 func (p *packet) EncodedLen() int {
@@ -434,10 +457,12 @@ func DecodePacket(b []byte) (*packet, error) {
 	return decodePacket(b, false)
 }
 
-// decodePacket decodes one datagram, copying its body out of b if ownBody is
-// set, so that b can be reused once this returns. Nothing else in the packet
-// refers to b: the header is decoded into fields and each extension copied.
-func decodePacket(b []byte, ownBody bool) (*packet, error) {
+// decodePacket decodes one datagram. If borrowed is set, b is the reader's
+// buffer, reused once the datagram has been dispatched: the packet's body
+// still refers to it, and is taken by own when the packet is kept. Nothing
+// else in the packet refers to b: the header is decoded into fields and each
+// extension copied.
+func decodePacket(b []byte, borrowed bool) (*packet, error) {
 	receivedBytesLength := len(b)
 	if receivedBytesLength < MINIMAL_HEADER_SIZE {
 		return nil, ErrInvalidHeaderSize
@@ -472,8 +497,6 @@ func decodePacket(b []byte, ownBody bool) (*packet, error) {
 	var payload []byte
 	if len(b) == payloadStartIndex {
 		payload = make([]byte, 0)
-	} else if ownBody {
-		payload = append([]byte(nil), b[payloadStartIndex:]...)
 	} else {
 		payload = b[payloadStartIndex:]
 	}
@@ -492,6 +515,7 @@ func decodePacket(b []byte, ownBody bool) (*packet, error) {
 	p.Eack = ack
 	p.Body = payload
 	p.chain = extensions
+	p.borrowed = borrowed
 	return p, nil
 	//var body []byte
 	//if header.Extension == 0 {
