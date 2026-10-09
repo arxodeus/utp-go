@@ -63,6 +63,28 @@ func (sb *sendBuffer) Write(data []byte) int {
 	return n
 }
 
+// Adopt takes data into the buffer without copying it, and reports how much
+// it took. data must be the buffer's to keep: nothing else may change it.
+//
+// The write path's data already is. UtpStream.Write and WriteV each copy the
+// caller's bytes once, into a slice of their own, before queueing them -- that
+// copy is what keeps the caller's buffer free the moment Write returns (see
+// Write above) -- and Write here then copied that private slice a second time.
+// A 1 MB write was held twice until the second copy finished. With a
+// thousand of them starting together (TestManyConcurrentTransfers) the
+// process peaked at 4.53-4.84 GB, four runs; with one copy, 3.17-3.64 GB. libutp
+// copies the application's bytes once, into its packets
+// (utp_internal.cpp:1061).
+func (sb *sendBuffer) Adopt(data []byte) int {
+	n := min(len(data), sb.Available())
+	if n <= 0 {
+		return 0
+	}
+	sb.pending = append(sb.pending, data[:n:n])
+	sb.used += n
+	return n
+}
+
 // Read fills buf from the front of the buffer, across as many writes as it
 // takes, and reports how much it copied.
 //

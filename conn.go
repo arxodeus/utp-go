@@ -1947,8 +1947,10 @@ func (c *connection) processWrites(now time.Time) {
 
 		writeReq := c.pendingWrites[0]
 
+		// The queued data is the stream's own copy of what was written
+		// (writeQueued), so the send buffer takes it as it is.
 		if len(writeReq.data) <= bufSpace {
-			c.state.SendBuf.Write(writeReq.data)
+			c.state.SendBuf.Adopt(writeReq.data)
 			result := &readOrWriteResult{
 				Len: len(writeReq.data) + writeReq.written,
 			}
@@ -1957,7 +1959,7 @@ func (c *connection) processWrites(now time.Time) {
 		} else {
 			nextWrite := writeReq.data[:bufSpace]
 			remainingData := writeReq.data[bufSpace:]
-			c.state.SendBuf.Write(nextWrite)
+			c.state.SendBuf.Adopt(nextWrite)
 
 			writeReq.data = remainingData
 			writeReq.written += bufSpace

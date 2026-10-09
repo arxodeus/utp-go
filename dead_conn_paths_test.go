@@ -18,6 +18,22 @@ import (
 // after kill has ended its connection.
 func deadAccepted(t *testing.T, kill func(conn *scriptedConn, clk *virtualClock, stream *UtpStream)) (*UtpStream, func()) {
 	t.Helper()
+	stream, conn, clk, done := liveAccepted(t)
+	kill(conn, clk, stream)
+	// The loop leaves the clock as it returns, a moment before the stream
+	// records that it has: quiet is not yet ended.
+	select {
+	case <-stream.ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the connection had not ended")
+	}
+	return stream, done
+}
+
+// liveAccepted returns an accepted stream, on a virtual clock and a scripted
+// peer, that has read one packet of data.
+func liveAccepted(t *testing.T) (*UtpStream, *scriptedConn, *virtualClock, func()) {
+	t.Helper()
 	const (
 		ourSeq  = 0x4321
 		peerID  = 6000
@@ -62,15 +78,7 @@ func deadAccepted(t *testing.T, kill func(conn *scriptedConn, clk *virtualClock,
 	if n, err := stream.Read(ctx, buf); err != nil || string(buf[:n]) != "hello" {
 		t.Fatalf("first read: %q, %v", buf[:n], err)
 	}
-	kill(conn, clk, stream)
-	// The loop leaves the clock as it returns, a moment before the stream
-	// records that it has: quiet is not yet ended.
-	select {
-	case <-stream.ended:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the connection had not ended")
-	}
-	return stream, func() {
+	return stream, conn, clk, func() {
 		sock.Close()
 		cancel()
 		restore()
