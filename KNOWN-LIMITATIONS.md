@@ -399,7 +399,38 @@ network's own. What went:
   range and the list of payloads composed in a pass are reused.
 
 What remains in the library is one object per packet built and, on receipt,
-the decoded header and a data packet's body.
+the decoded header -- and a data packet's body only when the packet is kept
+(below).
+
+**Two further copies, later.** `Write` copied the caller's bytes into a
+slice of its own, and the send buffer then copied that slice again
+(`sendBuffer.Adopt` takes it as it is; `TestWriteCopiesOnce`). And every
+received data packet's body was copied out of the reader's buffer, though
+an established connection's packets are processed before the next read:
+in-order data now goes straight from the read buffer into the receive
+buffer, as libutp hands its application a pointer into the packet
+(`utp_internal.cpp:2351`), and only a packet kept for later takes its body
+(`packet.own`: queued for a connection's loop, a SYN; the receive buffer
+copies what it holds out of order). With 1000 concurrent transfers the
+process peaked at 3.17-3.64 GB against 4.53-4.84 before the first.
+
+The first alone cost the LAN profile 3.7% (forty interleaved runs a side,
+z = -2.94), and under `GOGC=400` the two measured the same: the collector
+again, paced off a smaller heap. With the second as well, forty runs a side
+against the commit before both: 91.06 Mbps median against 89.97, means
+90.29 and 86.59, z = 2.80. The benchmark suite otherwise, five runs a side
+and twenty or forty of anything that moved, is unchanged but for one
+profile, and that one is the collector too: **LEDBAT++ on the reordering
+link, 2.34 Mbps median against 2.59** (forty runs a side, z = -2.90). The
+profile is bimodal -- a run lands near 2.35 or near 2.62 -- and the two
+versions measure the same within each mode; what differs is how often a run
+lands high, 9 times in 40 against 21. A high run is one where reordering is
+taken for loss five times, a low one six or more: one more spurious fast
+retransmission, which LEDBAT++ halves its window for. Under `GOGC=400`,
+thirty runs a side, the split is 15 against 14 (z = 0.78). Classic LEDBAT on
+the same link is unchanged (4.01 against 4.01). Left as it is: what moves
+the mode is when the collector runs in a process the sender, the receiver
+and the emulated network share, not anything the protocol does.
 
 The benchmark suite against the commit before, five runs a side and then
 twenty of each profile that moved more than 1.5%: the 100 Mb/s LAN link

@@ -1748,6 +1748,11 @@ encoded into a pooled buffer -- as libutp's send callback must not, and as
 copying would need to copy. `ReadToEOF` now fills the caller's buffer, so a
 caller holding another slice of that array sees it overwritten.
 
+Later in the same vein: `Write`'s private copy is no longer copied again by
+the send buffer, and a received body is copied only when the packet is kept
+(`packet.own`); an established connection's in-order data goes from the
+read buffer straight into the receive buffer.
+
 Goes with the receive-buffer change in this fork (`3cd4dbb`), which cut an
 idle connection from 1.08 MB to 23 KB and cost 3% at 100 Mb/s through GC
 pacing; this pays that back: 90.28 Mbps against 86.27, forty interleaved
