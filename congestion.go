@@ -196,6 +196,9 @@ type ControllerStats struct {
 	// packet sent once. The loss probe reads it to tell an acknowledgement of
 	// the packet it resent from one of the original (see probeAnswered).
 	MinFineRTT time.Duration
+	// SpuriousLossesUndone counts cuts for lost packets undone because the
+	// packet proved only late. See defaultController.undoSpuriousLoss.
+	SpuriousLossesUndone uint64
 	// RTTVarianceMicros is the RTT variance estimate, in microseconds.
 	RTTVarianceMicros int64
 	// Timeout is the current retransmission timeout.
@@ -271,9 +274,14 @@ type defaultController struct {
 	// freeRecords are records forgotten and ready for reuse. See
 	// forgetTransmission.
 	freeRecords []*packetRecord
-	fineRTT     time.Duration // see ControllerStats.FineRTT
-	minFineRTT  time.Duration // see ControllerStats.MinFineRTT
-	delayAcc    *delayAccumulator
+	// undo is what the last cut for a lost packet changed, while it can
+	// still be undone. See undoSpuriousLoss.
+	undo lossUndo
+	// spuriousLossesUndone counts undoSpuriousLoss's undos.
+	spuriousLossesUndone uint64
+	fineRTT              time.Duration // see ControllerStats.FineRTT
+	minFineRTT           time.Duration // see ControllerStats.MinFineRTT
+	delayAcc             *delayAccumulator
 	// curDelayHist is libutp's cur_delay_hist: the last curDelaySize
 	// queueing-delay samples, each taken against the base as it stood when
 	// it arrived, zero until filled (DelayHist, utp_internal.cpp:247-248,
@@ -438,6 +446,7 @@ func (c *defaultController) Stats() ControllerStats {
 		RTT:                   c.rtt,
 		FineRTT:               c.fineRTT,
 		MinFineRTT:            c.minFineRTT,
+		SpuriousLossesUndone:  c.spuriousLossesUndone,
 		RTTVarianceMicros:     c.rttVarianceMicros,
 		Timeout:               c.timeout,
 		BaseDelay:             c.delayAcc.BaseDelay(),
@@ -488,6 +497,62 @@ func (c *defaultController) MarkForResend(seqNum uint16) {
 	}
 	packetInst.NeedResend = true
 	c.windowSizeBytes -= packetInst.SizeBytes
+}
+
+// lossUndoEnabled switches undoing a cut whose loss proved spurious. It is
+// not libutp's: see DEVIATIONS.md, "A cut for a loss that was only
+// reordering is undone".
+var lossUndoEnabled = func() *atomic.Bool {
+	b := new(atomic.Bool)
+	b.Store(true)
+	return b
+}()
+
+// lossUndo is the window a cut for a lost packet replaced, kept until that
+// packet's fate is known.
+type lossUndo struct {
+	valid              bool
+	seq                uint16
+	maxWindow          uint32
+	ssthresh           uint32
+	ppSlowdownSsthresh uint32
+	lastWindowDecay    time.Time
+}
+
+// lossCause reports the packet whose loss made the last cut, while that cut
+// can still be undone.
+func (c *defaultController) lossCause() (uint16, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.undo.seq, c.undo.valid
+}
+
+// undoSpuriousLoss puts back the window that a cut for seq replaced: the
+// packet was not lost after all, only late, and the original arrived. It
+// reports whether there was such a cut to undo.
+//
+// RFC 4015's response to a spurious retransmission (RFC 3522 detects it),
+// restoring the window and the threshold to what they were. libutp has no
+// undo: a packet displaced by reordering halves its window as a loss would.
+// On a link that reorders, every displaced packet that the selective acks
+// overtake is taken for lost, and each such halving is undone here once the
+// acknowledgement shows the original arrived first. Slow start is not
+// resumed, and a newer cut, another loss, or a timeout in between leaves
+// the cut standing.
+func (c *defaultController) undoSpuriousLoss(seq uint16) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	u := c.undo
+	if !u.valid || u.seq != seq {
+		return false
+	}
+	c.undo.valid = false
+	c.maxWindowSizeBytes = maxUint32(c.maxWindowSizeBytes, u.maxWindow)
+	c.ssthreshBytes = maxUint32(c.ssthreshBytes, u.ssthresh)
+	c.ppSlowdownSsthresh = maxUint32(c.ppSlowdownSsthresh, u.ppSlowdownSsthresh)
+	c.lastWindowDecay = u.lastWindowDecay
+	c.spuriousLossesUndone++
+	return true
 }
 
 // forgetTransmission drops the record of an acknowledged packet that the
@@ -892,10 +957,24 @@ func (c *defaultController) OnLostPacket(seqNum uint16, retransmitting bool, now
 	// then crawled. libutp decays once per ack that resent anything, and not
 	// again for 100 ms however many acks arrive in between.
 	decay := c.lastWindowDecay.IsZero() || now.Sub(c.lastWindowDecay) >= maxWindowDecayInterval
+	// Another loss while one is still undoable: the cut stands for both,
+	// and one turning out spurious does not excuse the other.
+	c.undo.valid = false
+	before := lossUndo{
+		seq:                seqNum,
+		maxWindow:          c.maxWindowSizeBytes,
+		ssthresh:           c.ssthreshBytes,
+		ppSlowdownSsthresh: c.ppSlowdownSsthresh,
+		lastWindowDecay:    c.lastWindowDecay,
+	}
 	if c.algorithm == AlgorithmLEDBATPP {
 		c.onLedbatPPLoss(packetInst, decay, now)
 	} else if decay {
 		c.decayOnLoss(now)
+	}
+	if lossUndoEnabled.Load() && c.lastWindowDecay != before.lastWindowDecay {
+		before.valid = true
+		c.undo = before
 	}
 
 	if !retransmitting && !packetInst.NeedResend {
@@ -916,6 +995,9 @@ func (c *defaultController) OnLostPacket(seqNum uint16, retransmitting bool, now
 func (c *defaultController) OnTimeout(hasPacketsInFlight bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// A timeout's cut is not undone, and the loss cut before it is no longer
+	// the window's last word.
+	c.undo.valid = false
 
 	packetSize := c.minWindowSizeBytes / 2
 	if !hasPacketsInFlight && c.maxWindowSizeBytes > packetSize {

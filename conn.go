@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -318,6 +319,12 @@ type connection struct {
 	// connection on the socket. Guarded by mu.
 	armed          map[uint16]struct{}
 	unackTimeoutCh chan *packet
+	// undoSeq and undoStamp are the packet whose loss made the controller's
+	// last cut and the wire timestamp of its first resend, once undoResent
+	// is set. See checkSpuriousLoss.
+	undoSeq    uint16
+	undoStamp  uint32
+	undoResent bool
 	// payloadScratch is processWrites' list of payloads composed in a pass,
 	// kept between passes: growing a new one cost an allocation or two on
 	// every pass that sent anything.
@@ -2754,6 +2761,61 @@ func (c *connection) retransmit(originPacket *packet, now time.Time) {
 	c.transmit(retransmissionPacket, now, false)
 }
 
+// lossUndoer is a controller that can undo a cut for a loss that proved
+// spurious. See defaultController.undoSpuriousLoss.
+type lossUndoer interface {
+	lossCause() (uint16, bool)
+	undoSpuriousLoss(seq uint16) bool
+}
+
+// noteResend records the wire timestamp of the first resend of the packet
+// whose loss made the controller's last cut, so that the acknowledgement can
+// tell which copy arrived. See checkSpuriousLoss.
+func (c *connection) noteResend(pkt *packet) {
+	u, ok := c.state.SentPackets.congestionCtrl.(lossUndoer)
+	if !ok || pkt.Header.PacketType != st_data {
+		return
+	}
+	seq, pending := u.lossCause()
+	if !pending || seq != pkt.Header.SeqNum || (c.undoResent && c.undoSeq == seq) {
+		return
+	}
+	c.undoSeq, c.undoStamp, c.undoResent = seq, uint32(pkt.Header.Timestamp), true
+}
+
+// checkSpuriousLoss undoes the controller's last cut if the packet it was
+// for turns out to have arrived after all: RFC 3522's detection, by
+// timestamp. An acknowledgement echoes the timestamp of the packet that drew
+// it (ackEcho), so the first one to cover the packet says which copy filled
+// the hole. If it echoes a time before the resend was sent, the original did;
+// the packet was late, not lost. One that covers it before it was resent at
+// all says the same without a timestamp. Anything else -- the resend's echo,
+// a peer that reports no delay, an acknowledgement drawn by a later packet --
+// leaves the cut standing, so a mistake can only leave a cut that libutp
+// would also have made.
+//
+// Every resend goes through transmit, which notes it (noteResend), so "not
+// resent" is not a guess.
+func (c *connection) checkSpuriousLoss(fullAcked *circularRangeInclusive, selected []uint16) {
+	u, ok := c.state.SentPackets.congestionCtrl.(lossUndoer)
+	if !ok {
+		return
+	}
+	seq, pending := u.lossCause()
+	if !pending {
+		c.undoResent = false
+		return
+	}
+	if !(fullAcked != nil && fullAcked.Contains(seq)) && !slices.Contains(selected, seq) {
+		return
+	}
+	resent := c.undoResent && c.undoSeq == seq
+	if !resent || (c.ackEchoKnown && int32(c.ackEcho-c.undoStamp) < 0) {
+		u.undoSpuriousLoss(seq)
+	}
+	c.undoResent = false
+}
+
 // resendSentPacket sends a packet again from what was recorded when it was
 // first sent, with its acknowledgement fields brought up to date. It is the
 // resend for a packet a retransmission timeout gave up as lost, whether the
@@ -3821,6 +3883,7 @@ func (c *connection) processAck(
 
 	retired := c.disarmAcked(fullAcked)
 	recovering := c.probeAnswered(fullAcked, now)
+	c.checkSpuriousLoss(fullAcked, selectedAcks)
 
 	// Restart the retransmission timeout, but only when this ack actually
 	// retired something.
@@ -4462,6 +4525,9 @@ func (c *connection) transmit(packet *packet, now time.Time, firstTransmission b
 
 	c.packetsSent++
 	c.bytesSent += uint64(len(packet.Body))
+	if !firstTransmission {
+		c.noteResend(packet)
+	}
 
 	// Use this packet as an MTU probe if the search wants one.
 	//
