@@ -88,6 +88,79 @@ type Accept struct {
 	config *ConnectionConfig
 	cid    *ConnectionId
 	hasCid bool
+	// mu orders the handover against the caller giving up: a connection
+	// is either queued for a caller still waiting, or closed. See hand.
+	mu     sync.Mutex
+	gaveUp bool
+}
+
+func newAccept(ctx context.Context, cid *ConnectionId, config *ConnectionConfig) *Accept {
+	return &Accept{
+		ctx:    ctx,
+		stream: make(chan *StreamResult, 1),
+		config: config,
+		cid:    cid,
+		hasCid: cid != nil,
+	}
+}
+
+// hand gives the caller its result, or, if the caller has already given up,
+// closes the connection the result carries.
+//
+// An accepted connection runs on the socket's context, not the Accept call's
+// (see selectAcceptHelper), so one handed to a caller that has gone would run
+// for nobody -- with no idle timeout by default, for as long as the peer
+// stayed. libutp hands each incoming connection to its application from
+// inside the call that received the SYN (utp_call_on_accept,
+// utp_internal.cpp:3001), so it has no such gap to close.
+func (a *Accept) hand(res *StreamResult) {
+	a.mu.Lock()
+	if !a.gaveUp {
+		select {
+		case a.stream <- res:
+			a.mu.Unlock()
+			return
+		default:
+		}
+	}
+	a.mu.Unlock()
+	if res != nil && res.stream != nil {
+		res.stream.Close()
+	}
+}
+
+// giveUp records that the caller has stopped waiting, and returns a result
+// already handed over, if there is one: the caller takes it rather than
+// leaving it behind.
+func (a *Accept) giveUp() *StreamResult {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.gaveUp = true
+	select {
+	case res := <-a.stream:
+		return res
+	default:
+		return nil
+	}
+}
+
+// wait is what Accept and AcceptWithCid do once the request is queued.
+func (a *Accept) wait(ctx context.Context) (*UtpStream, error) {
+	var res *StreamResult
+	select {
+	case res = <-a.stream:
+	case <-ctx.Done():
+		if res = a.giveUp(); res == nil || res.stream == nil {
+			return nil, ctx.Err()
+		}
+	}
+	if res == nil {
+		return nil, fmt.Errorf("stream creation failed")
+	}
+	if res.err != nil {
+		return nil, res.err
+	}
+	return res.stream, nil
 }
 
 type UdpConn struct {
@@ -1043,7 +1116,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 		// The socket's context, not the Accept call's: an accepted connection
 		// outlives the Accept that produced it, exactly as a dialled one
 		// outlives its dial. The sibling branch above already used s.ctx.
-		s.selectAcceptHelper(s.ctx, cid, packetPtr, accept, s.socketEvents)
+		s.selectAcceptHelper(cid, packetPtr, accept, s.socketEvents)
 	} else {
 		s.logger.Debug("put a new syn packet to incomingConns...")
 		s.putIncomingConn(cidHash, &IncomingPacket{pkt: packetPtr, cid: cid})
@@ -1196,7 +1269,7 @@ func (s *UtpSocket) handleNewAcceptWithCidEvent(acceptWithCid *Accept) {
 		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			s.logger.Trace("conn has already accepted", "key", incomingConnsKey)
 		}
-		s.selectAcceptHelper(acceptWithCid.ctx, acceptWithCid.cid, incomingConn.pkt, acceptWithCid, s.socketEvents)
+		s.selectAcceptHelper(acceptWithCid.cid, incomingConn.pkt, acceptWithCid, s.socketEvents)
 	} else {
 		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			s.logger.Trace("wait for the syn pkt arrive", "key", incomingConnsKey)
@@ -1208,7 +1281,7 @@ func (s *UtpSocket) handleNewAcceptWithCidEvent(acceptWithCid *Accept) {
 func (s *UtpSocket) handleNewAcceptEvent(accept *Accept) {
 	// A SYN that already arrived satisfies this immediately.
 	if incomingAccept := s.nextIncomingConn(); incomingAccept != nil {
-		s.selectAcceptHelper(accept.ctx, incomingAccept.cid, incomingAccept.pkt, accept, s.socketEvents)
+		s.selectAcceptHelper(incomingAccept.cid, incomingAccept.pkt, accept, s.socketEvents)
 		return
 	}
 	// Otherwise wait for one.
@@ -1426,64 +1499,23 @@ func (s *UtpSocket) GenerateCid(peer ConnectionPeer, isInitiator bool, eventCh c
 }
 
 func (s *UtpSocket) Accept(ctx context.Context, config *ConnectionConfig) (*UtpStream, error) {
-	accept := &Accept{
-		ctx:    ctx,
-		stream: make(chan *StreamResult, 1),
-		config: config,
-		hasCid: false,
-	}
-
-	// Send accept request through channel
+	accept := newAccept(ctx, nil, config)
 	select {
 	case s.accepts <- accept:
 	case <-s.ctx.Done():
 		return nil, s.ctx.Err()
 	}
-
-	// Wait for stream or timeout
-	select {
-	case streamRes := <-accept.stream:
-		if streamRes == nil {
-			return nil, fmt.Errorf("stream creation failed")
-		}
-		if streamRes.err != nil {
-			return nil, streamRes.err
-		}
-		return streamRes.stream, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	return accept.wait(ctx)
 }
 
 func (s *UtpSocket) AcceptWithCid(ctx context.Context, cid *ConnectionId, config *ConnectionConfig) (*UtpStream, error) {
-	accept := &Accept{
-		ctx:    ctx,
-		stream: make(chan *StreamResult, 1),
-		config: config,
-		hasCid: true,
-		cid:    cid,
-	}
-
-	// Send accept request through channel
+	accept := newAccept(ctx, cid, config)
 	select {
 	case s.acceptsWithCidCh <- accept:
 	case <-s.ctx.Done():
 		return nil, s.ctx.Err()
 	}
-
-	// Wait for stream or timeout
-	select {
-	case streamRes := <-accept.stream:
-		if streamRes == nil {
-			return nil, fmt.Errorf("stream creation failed")
-		}
-		if streamRes.err != nil {
-			return nil, streamRes.err
-		}
-		return streamRes.stream, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	return accept.wait(ctx)
 }
 
 func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *ConnectionConfig) (*UtpStream, error) {
@@ -1636,32 +1668,36 @@ func (s *UtpSocket) awaitConnected(
 		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			s.logger.Trace("new connection created", "src", cid.Peer.Hash(), "src.cid.Send", cid.Send, "src.cid.Recv", cid.Recv)
 		}
-		accept.stream <- &StreamResult{stream: stream}
+		accept.hand(&StreamResult{stream: stream})
 		return
 	} else if err != nil {
 		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			s.logger.Trace("connected failed", "peer", cid.Peer.Hash(), "cid.Send", cid.Send, "cid.Recv", cid.Recv, "err", err)
 		}
-		accept.stream <- &StreamResult{err: fmt.Errorf("utp_socket: connection failed: %w", err)}
+		accept.hand(&StreamResult{err: fmt.Errorf("utp_socket: connection failed: %w", err)})
 		return
 	}
 
 	s.logger.Warn("connected failed", "peer", cid.Peer.Hash(), "cid.Send", cid.Send, "cid.Recv", cid.Recv)
-	accept.stream <- &StreamResult{err: fmt.Errorf("connection aborted")}
+	accept.hand(&StreamResult{err: fmt.Errorf("connection aborted")})
 }
 
+// selectAcceptHelper makes the connection for an incoming SYN and hands it to
+// accept, once connected.
+//
+// The connection runs on the socket's context, whichever came first, the SYN
+// or the Accept: an accepted connection outlives the Accept that produced it,
+// as a dialled one outlives its dial. Where the SYN came first this used the
+// Accept call's context, and a timeout on Accept that fired after it had
+// returned ended the connection it had returned.
 func (s *UtpSocket) selectAcceptHelper(
-	streamCtx context.Context,
 	cid *ConnectionId,
 	syn *packet,
 	accept *Accept,
 	socketEvents chan *socketEvent,
 ) {
 	if _, exists := s.getConnStream(cid.Hash()); exists {
-		accept.stream <- &StreamResult{
-			stream: nil,
-			err:    fmt.Errorf("connection ID unavailable"),
-		}
+		accept.hand(&StreamResult{err: fmt.Errorf("connection ID unavailable")})
 		return
 	}
 
@@ -1674,7 +1710,7 @@ func (s *UtpSocket) selectAcceptHelper(
 	s.putConnStream(cid.Hash(), streamEvents)
 
 	stream := NewUtpStream(
-		streamCtx,
+		s.ctx,
 		s.logger,
 		cid,
 		s.configForPeer(accept.config, cid.Peer),

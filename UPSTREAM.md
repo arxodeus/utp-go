@@ -690,7 +690,8 @@ The fix is to give the stream the socket's context and leave the caller's
 context governing only the wait for the connection to come up, plus an
 explicit teardown on the paths where the caller gives up, since cancelling no
 longer does it implicitly. The accept path had the same shape for the
-`Accept` call's context and is changed with it.
+`Accept` call's context and is changed with it -- on all three of its paths,
+not the one this entry first covered; see PR 61.
 
 `utpnet.TestDialContextCancelDoesNotCloseTheConnection` pins it and fails
 against the old code with "writing after the dial context was cancelled: not
@@ -1751,6 +1752,24 @@ Goes with the receive-buffer change in this fork (`3cd4dbb`), which cut an
 idle connection from 1.08 MB to 23 KB and cost 3% at 100 Mb/s through GC
 pacing; this pays that back: 90.28 Mbps against 86.27, forty interleaved
 runs a side, z = 3.14.
+
+## PR 61 — accepted connections outlive Accept, and a closed socket is not an end of stream
+
+Two of the three accept paths -- the ones where the SYN arrived before
+`Accept` or `AcceptWithCid` was called -- still made the connection on the
+`Accept` call's context, so a timeout on `Accept` that fired after it had
+returned killed the connection it returned. All three use the socket's
+context. An `Accept` that gives up as its connection is handed over now
+either takes it or has it closed, ordered under a lock, rather than leaving
+it running for nobody (`TestAcceptedConnectionOutlivesItsAccept`,
+`TestConnectionForAnAbandonedAcceptIsClosed`).
+
+A connection still running when its socket was closed read as `io.EOF` or
+"read side closed", at random, and on the `io.EOF` side dropped data already
+waiting for the reader; writers got `context canceled`. It now ends with
+`ErrSocketClosed` (a `net.ErrClosed`), after the reader has what had arrived
+(`TestSocketCloseIsReportedToTheConnection`). libutp reports
+`UTP_STATE_DESTROYING` (`utp_internal.cpp:2490`), not an end of stream.
 
 ## Not for upstream
 

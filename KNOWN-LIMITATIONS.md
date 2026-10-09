@@ -409,6 +409,31 @@ and 0.539 and the two spreads, 0.42-0.61 and 0.44-0.60, all but coincide
 touches its window. Deference is unchanged: uTP took 60-62% of a link shared
 with a loss-based flow on both, the latecomer 22.0-22.7% against 22.1-22.4%.
 
+## Closing the socket under a connection read as a clean end
+
+**Fixed.** A connection still running when its socket was closed told its
+reader `io.EOF` -- that the peer had finished -- or `ErrReadClosed`, "read side
+closed", depending on which of two ready channels a select took. Neither was
+true. And on the `io.EOF` side, data that had already arrived and was waiting
+for the reader was dropped: the reader was told the stream had ended instead
+of being given it. A writer was told `context canceled`. libutp tells its
+application that the socket is being destroyed (`UTP_STATE_DESTROYING`,
+`utp_internal.cpp:2490`), not that the stream ended.
+
+Such a connection now ends with `ErrSocketClosed`, which is a
+`net.ErrClosed` as a read from a closed Go socket is. A reader, once the
+stream's context has ended, waits for the connection's loop to return -- it
+does so promptly, and the caller's context still bounds the wait -- and then
+reads what had arrived before the error; writers get the error too.
+`TestSocketCloseIsReportedToTheConnection` closes the server's socket with
+data waiting, ten times: the first read must return the data and the second
+`ErrSocketClosed`. Without the error it reads "read side closed"; with the
+old read path, `io.EOF` and the data gone.
+
+Through `utpnet` the operation's own context is derived from the socket's, so
+a `net.Conn` read there can still see that context end first and report
+`context canceled`; unchanged here.
+
 ## A write to a dead connection waited out its own deadline
 
 **Fixed.** Found measuring the idle timeout over the emulated network: after a
@@ -423,7 +448,17 @@ one that arrives after the loop has returned went into the stream's write
 channel, which nothing reads any more, and waited for the caller's context or
 the stream's -- and the idle timeout cancels neither. Any other end that
 leaves the stream's context alone -- a reset, the give-up rule -- would do the
-same; that is read from the code, and only the idle timeout is tested.
+same; that was read from the code, and only the idle timeout was tested. Both
+are tested now (`TestDeadConnectionWritesFailWithTheReason` and
+`TestDeadConnectionReadsReportTheReason`, each with a reset and a sender
+giving up after consecutive retransmission timeouts), and each fails without
+the fix. Writing them found a defect in the virtual clock's accounting: a
+connection whose loop ended for a reason of its own -- here a RESET the
+socket's reader had processed inline -- left the reader's wake-up for it
+queued, counted as a handoff in flight, and a clock waiting for the system to
+go quiet waited for ever. The loop now takes every wake still queued for it
+as it ends. It touches only a clock that implements `IdleBarrier`; the real
+clock does not.
 
 libutp's `utp_writev` returns at once on a socket that is not connected
 (`utp_internal.cpp:3181`), its embedder already told why by the error
@@ -444,7 +479,8 @@ carrying `ErrTimedOut` and the cancelled context mapped to `io.EOF`, and Go
 picks one at random. `ReadToEOF` had the same race, with `context canceled`
 on the other side. Both now report the error a connection had already ended
 with whichever case they see; a stream whose connection was still running when
-its context went still reads as `io.EOF`, as before.
+its context went still read as `io.EOF` -- since fixed, see "Closing the socket
+under a connection read as a clean end" below.
 `TestReadAfterIdleTimeoutReportsIt` repeats the case ten times; without the
 fix it failed on the second.
 
@@ -2645,6 +2681,24 @@ would go on retrying with nobody waiting for the answer. The accept path had
 the same shape for the `Accept` call's context and changed with it; the
 sibling branch two lines away had already been using the socket's context,
 which is what the inconsistency should have suggested.
+
+**That last claim was wrong.** It changed one of three accept paths, the one
+where `Accept` was waiting when the SYN came. Where the SYN came first and
+waited for an `Accept` -- `Accept` and `AcceptWithCid` both -- the connection
+was still made on the `Accept` call's context, so a timeout on `Accept` that
+fired after it had returned ended the connection it had returned. All three
+use the socket's context now; `TestAcceptedConnectionOutlivesItsAccept` covers
+both SYN-first paths and fails on each without the change.
+
+Making that consistent opened the gap the caller's context had been covering:
+an `Accept` that gives up just as its connection is handed over left that
+connection running for nobody, and with no idle timeout by default it ran as
+long as its peer did. The handover and the giving up are now ordered under a
+lock: a caller that gives up takes a connection already handed over, and one
+handed over after is closed. libutp hands each connection to its application
+from inside the call that received the SYN (`utp_call_on_accept`,
+`utp_internal.cpp:3001`), so it has no such gap.
+`TestConnectionForAnAbandonedAcceptIsClosed`.
 
 `utpnet.TestDialContextCancelDoesNotCloseTheConnection` pins it: it dials,
 cancels immediately as `defer cancel()` would, and then requires a full

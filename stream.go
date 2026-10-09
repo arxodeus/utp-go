@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,9 +19,16 @@ var (
 	// still alive and still sending; this end has simply stopped taking
 	// delivery.
 	ErrReadClosed = errors.New("read side closed")
+	// ErrSocketClosed is what a connection reports once the socket it ran on
+	// has been closed under it. It is a net.ErrClosed, as a read from a
+	// closed Go socket is.
+	ErrSocketClosed = fmt.Errorf("utp: socket closed: %w", net.ErrClosed)
 )
 
 type UtpStream struct {
+	// socketCtx is the context of the socket the stream runs on; streamCtx
+	// is the stream's own, which ends with it. See endWait.
+	socketCtx    context.Context
 	streamCtx    context.Context
 	streamCancel context.CancelFunc
 	logger       log.Logger
@@ -77,6 +85,7 @@ func NewUtpStream(
 	streamCtx, cancel := context.WithCancel(ctx)
 
 	utpStream := &UtpStream{
+		socketCtx:    ctx,
 		streamCtx:    streamCtx,
 		streamCancel: cancel,
 		logger:       logger,
@@ -175,6 +184,37 @@ func (s *UtpStream) writeErr() error {
 	return ErrNotConnected
 }
 
+// endWait waits, once the stream's context has ended, for its event loop to
+// return, so that the caller can report why it ended rather than the bare
+// context error. The loop returns promptly once its context ends; ctx bounds
+// the wait regardless. It reports ctx's error if that came first.
+//
+// A connection whose socket was closed under it read as a clean end of
+// stream, io.EOF, or as ErrReadClosed, depending on which of two ready
+// channels a select took, and a write reported "context canceled". Waiting
+// here is what makes each of them ErrSocketClosed, and lets a reader have
+// what had already arrived first.
+func (s *UtpStream) endWait(ctx context.Context) error {
+	select {
+	case <-s.ended:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// shutErr is what a write is told on a stream already shut down: the reason
+// its connection ended, if it is ending, or ErrNotConnected after Close.
+func (s *UtpStream) shutErr(ctx context.Context) error {
+	if s.streamCtx.Err() == nil {
+		return ErrNotConnected
+	}
+	if err := s.endWait(ctx); err != nil {
+		return err
+	}
+	return s.writeErr()
+}
+
 func (s *UtpStream) Cid() *ConnectionId {
 	return s.cid
 }
@@ -203,19 +243,19 @@ func (s *UtpStream) ReadToEOF(ctx context.Context, buf *[]byte) (int, error) {
 	defer s.readLocker.Unlock()
 	n := 0
 	data := (*buf)[:0]
+	streamDone := s.streamCtx.Done()
 	for {
 		select {
 		case <-ctx.Done():
 			s.logger.Error("ctx has been canceled", "err", ctx.Err(), "readLength", n)
 			return n, ctx.Err()
-		case <-s.streamCtx.Done():
-			// A connection that had already ended reports why, whichever
-			// of the two this select happened to see first.
-			if err := s.endedErr(); err != nil {
+		case <-streamDone:
+			// The connection is ending. Its loop closes the read queue as it
+			// returns, behind what had arrived: read on to that.
+			if err := s.endWait(ctx); err != nil {
 				return n, err
 			}
-			s.logger.Error("streamCtx has been canceled", "err", s.streamCtx.Err(), "readLength", n)
-			return 0, s.streamCtx.Err()
+			streamDone = nil
 		case res, ok := <-s.reads:
 			if !ok {
 				return n, s.terminalErr()
@@ -266,54 +306,52 @@ func (s *UtpStream) Read(ctx context.Context, buf []byte) (int, error) {
 		return 0, s.readErr
 	}
 
+	var res *readOrWriteResult
+	var ok bool
 	select {
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	case <-s.streamCtx.Done():
-		// A connection that had already ended with an error -- a timeout,
-		// a reset -- reports it. The closed read queue says the same, and
-		// once the socket's context is cancelled too this select sees either
-		// at random: a dead connection read as a clean end half the time.
-		if err := s.endedErr(); err != nil {
+		// The connection is ending. Its loop closes the read queue as it
+		// returns, behind what had arrived, with the reason it ended in
+		// terminalErr: what had arrived comes first, then that.
+		if err := s.endWait(ctx); err != nil {
+			return 0, err
+		}
+		res, ok = <-s.reads
+	case res, ok = <-s.reads:
+	}
+	if !ok {
+		if err := s.terminalErr(); err != nil {
 			s.readErr = err
 			return 0, err
 		}
-		// Otherwise the stream is gone. Report it as end of stream rather
-		// than as a context error: a reader that has already had everything
-		// the peer sent should see io.EOF, which is what every io.Reader
-		// caller expects, not "context canceled".
 		s.readErr = io.EOF
 		return 0, io.EOF
-	case res, ok := <-s.reads:
-		if !ok {
-			if err := s.terminalErr(); err != nil {
-				s.readErr = err
-				return 0, err
-			}
-			s.readErr = io.EOF
-			return 0, io.EOF
-		}
-		s.notifyRead()
-		if res.Len == 0 || len(res.Data) == 0 {
-			if res.Err != nil {
-				s.readErr = res.Err
-				return 0, res.Err
-			}
-			s.readErr = io.EOF
-			return 0, io.EOF
-		}
-		n := copy(buf, res.Data[:res.Len])
-		if n < res.Len {
-			s.readRemainder = append([]byte(nil), res.Data[n:res.Len]...)
-		}
-		res.release()
-		return n, nil
 	}
+	s.notifyRead()
+	if res.Len == 0 || len(res.Data) == 0 {
+		if res.Err != nil {
+			s.readErr = res.Err
+			return 0, res.Err
+		}
+		s.readErr = io.EOF
+		return 0, io.EOF
+	}
+	n := copy(buf, res.Data[:res.Len])
+	if n < res.Len {
+		s.readRemainder = append([]byte(nil), res.Data[n:res.Len]...)
+	}
+	res.release()
+	return n, nil
 }
 
 func (s *UtpStream) Write(ctx context.Context, buf []byte) (int, error) {
-	if s.shutdown.Load() || s.writeClosed.Load() {
+	if s.writeClosed.Load() {
 		return 0, ErrNotConnected
+	}
+	if s.shutdown.Load() {
+		return 0, s.shutErr(ctx)
 	}
 	select {
 	case <-s.ended:
@@ -365,8 +403,11 @@ func (s *UtpStream) Write(ctx context.Context, buf []byte) (int, error) {
 // Empty and nil buffers are skipped. A call with nothing in it writes nothing
 // and returns nil, as a zero-length Write does.
 func (s *UtpStream) WriteV(ctx context.Context, bufs [][]byte) (int, error) {
-	if s.shutdown.Load() || s.writeClosed.Load() {
+	if s.writeClosed.Load() {
 		return 0, ErrNotConnected
+	}
+	if s.shutdown.Load() {
+		return 0, s.shutErr(ctx)
 	}
 	select {
 	case <-s.ended:
@@ -433,7 +474,18 @@ func (s *UtpStream) writeQueued(ctx context.Context, queued []byte, resCh chan *
 		}
 		return 0, s.writeErr()
 	case <-s.streamCtx.Done():
-		return 0, s.streamCtx.Err()
+		if err := s.endWait(ctx); err != nil {
+			return 0, err
+		}
+		// An answer sent before the end still counts.
+		select {
+		case writeRes := <-resCh:
+			if writeRes != nil {
+				return writeRes.Len, writeRes.Err
+			}
+		default:
+		}
+		return 0, s.writeErr()
 	}
 	return writtenLen, err
 }

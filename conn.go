@@ -1035,6 +1035,14 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			c.logger.Trace("ctx done, uTP conn initiating shutdown...", "err", c.ctx.Err())
 			stream.shutdown.Store(true)
 		}
+		// The socket was closed under a connection still running: that is
+		// why it ended, and what its reader and writers are told. A stream
+		// whose own context was cancelled -- an abandoned dial -- keeps
+		// whatever it had.
+		if c.state.Err == nil && c.state.stateType != ConnClosed &&
+			stream.socketCtx != nil && stream.socketCtx.Err() != nil {
+			c.state.Err = ErrSocketClosed
+		}
 	}
 
 	// A virtual clock needs to know when this loop has finished reacting, so
@@ -1048,6 +1056,21 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		// stop. Found by the initiator corpus: a peer that answers a SYN
 		// with a RESET tore the connection down and hung the clock.
 		defer func() {
+			// Wakes queued for this loop that it will never take: each was
+			// noted as a handoff, and a clock still counting one in flight
+			// never moves again. A loop ended by a RESET the reader
+			// processed inline left the reader's kick behind, and a test
+			// waiting on the clock waited for ever.
+			for queued := true; queued; {
+				select {
+				case <-c.kick:
+					barrier.TakeHandoff()
+				case <-c.unackTimeoutCh:
+					barrier.TakeHandoff()
+				default:
+					queued = false
+				}
+			}
 			if u, ok := barrier.(interface{ Unregister() }); ok {
 				u.Unregister()
 			}
