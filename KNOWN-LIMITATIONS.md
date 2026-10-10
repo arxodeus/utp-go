@@ -4291,6 +4291,19 @@ unaffected. The commit matches libutp, which has no LEDBAT++; why full-size
 packets from the first round trip unbalance two LEDBAT++ flows on a queue
 that holds about 45 of them has not been traced.
 
+**Tried: no ramp credit for the backlog.** Logged, one run's flows both lost
+packets entering their first slowdown, and the one whose repair landed in
+its ramp grew from two packets to 31 KB on a single cumulative
+acknowledgement -- the backlog sent from the saved window -- while the other's
+landed in its freeze and it ramped. Capping slow-start growth at two packets
+an acknowledgement (RFC 3465) and crediting the ramp nothing for packets
+sent before the slowdown made both ramp, and changed nothing that matters:
+fourteen runs a side, interleaved, the smaller share 44.35% either way
+(z = 0.07), and total goodput fell on both two-flow profiles (6.14 to 6.05
+Mbps and 7.76 to 7.58, z = -3.22 and -3.45). Not applied. What decides the
+split is elsewhere -- in that run's logs, which flow entered its slowdown
+first and with the larger saved window.
+
 ## LEDBAT++'s latecomer takes most of the link — open
 
 Found while re-measuring the latecomer experiment after the fixes above. A
