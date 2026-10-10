@@ -415,6 +415,9 @@ type UtpSocket struct {
 	// refusedAtCapacity counts SYNs refused because the socket was at its
 	// connection cap. It exists so a test can tell "refused" from "lost".
 	refusedAtCapacity atomic.Uint64
+	// refusedIdInUse counts SYNs refused because a connection we dialled
+	// already receives on the id the new one would. See handleIncomingBuf.
+	refusedIdInUse atomic.Uint64
 }
 
 // DefaultMaxConnections is libutp's cap on the sockets one context may hold
@@ -465,6 +468,13 @@ func WithMaxConnections(n int) SocketOption {
 // WithMaxConnections.
 func (s *UtpSocket) ConnectionsRefusedAtCapacity() uint64 {
 	return s.refusedAtCapacity.Load()
+}
+
+// ConnectionsRefusedIdInUse reports how many incoming connections were
+// refused because a connection this socket dialled to the same peer already
+// receives on the id the new one would have. libutp refuses these too.
+func (s *UtpSocket) ConnectionsRefusedIdInUse() uint64 {
+	return s.refusedIdInUse.Load()
 }
 
 // connectionCount is what the incoming-connection cap is measured against:
@@ -1063,6 +1073,23 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 	cid := CidFromPacket(packetPtr, incomingRaw.peer, cidTypes[2])
 	cidHash := cid.Hash()
 
+	// A connection we dialled may already receive on the id this one would:
+	// accepting it would leave two connections a packet could be for. libutp
+	// refuses the SYN without an answer -- "rejected incoming connection,
+	// connection already exists" (utp_internal.cpp:2957-2965) -- and the
+	// dialler, hearing nothing, gives up or retries on its own terms.
+	s.connsMutex.RLock()
+	taken := s.recvIdTakenLocked(cid.Recv, peerKey)
+	s.connsMutex.RUnlock()
+	if taken {
+		s.refusedIdInUse.Add(1)
+		if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+			s.logger.Debug("refusing an incoming connection: its receive id is in use",
+				"src.peer", incomingRaw.peer, "recv", cid.Recv)
+		}
+		return nil
+	}
+
 	// The connection cap is checked here, where libutp checks it: after the
 	// duplicate lookup above and before the firewall
 	// (utp_internal.cpp:2967-2974). A SYN for a connection already parked
@@ -1492,12 +1519,22 @@ func (s *UtpSocket) GenerateCid(peer ConnectionPeer, isInitiator bool, eventCh c
 		cid.Recv = recv
 		cid.hash = genHash(cid)
 
-		if _, exists := s.getConnStream(cid.Hash()); !exists {
+		// Free means no connection to this peer receives on the id yet,
+		// whichever side opened it: packets are routed on the receive id
+		// alone (routeCandidates). libutp draws until the (address, receive
+		// id) key is free (utp_internal.cpp:2533-2538). This checked only the
+		// exact pair, so a new connection could take the receive id an
+		// accepted one already had.
+		s.connsMutex.Lock()
+		if !s.recvIdTakenLocked(recv, peer.Hash()) {
 			if eventCh != nil {
-				s.putConnStream(cid.Hash(), eventCh)
+				s.conns[cid.Hash()] = eventCh
+				s.connsGen.Add(1)
 			}
+			s.connsMutex.Unlock()
 			break
 		}
+		s.connsMutex.Unlock()
 		generationAttemptCount++
 	}
 	return cid
@@ -1798,37 +1835,71 @@ type cachedRoute struct {
 func (s *UtpSocket) routeLocked(packetPtr *packet, peerKey string) (send, recv uint16, ch chan *streamEvent, c *connection) {
 	s.connsMutex.RLock()
 	defer s.connsMutex.RUnlock()
-	for _, cidType := range cidTypes {
-		// A SYN is matched only by the SYN derivation.
-		//
-		// The other two derive a connection id as if the packet's id were a
-		// *send* id, which is right for an established connection and wrong
-		// for a SYN: a SYN carries the sender's own receive id, so those
-		// derivations alias it onto whatever local connection happens to
-		// hold that number. Concretely, a SYN whose id equals an outgoing
-		// connection's receive id was delivered into that connection, where
-		// onSyn answered it with a RESET.
-		//
-		// libutp cannot do this. It has exactly one lookup per case: a SYN
-		// is looked up as `UTPSocketKey(addr, id + 1)` and rejected outright
-		// if something is already there -- "rejected incoming connection,
-		// connection already exists" (utp_internal.cpp:2957-2965) -- while
-		// everything else is looked up on the receive id alone (:2884-2892).
-		// It never delivers a SYN into an established connection.
-		//
-		// Found by FuzzDifferentialInitiator. It matters beyond the spurious
-		// RESET: an off-path attacker who guesses a connection id could
-		// otherwise inject a SYN into an established connection.
-		if packetPtr.Header.PacketType == st_syn && cidType != IdTypeRecvId {
-			continue
-		}
-		send, recv = cidIds(packetPtr, cidType)
-		s.keyScratch = appendConnKey(s.keyScratch[:0], send, recv, peerKey)
+	var pairs [4][2]uint16
+	for _, p := range routeCandidates(packetPtr, &pairs) {
+		s.keyScratch = appendConnKey(s.keyScratch[:0], p[0], p[1], peerKey)
 		if ch = s.conns[string(s.keyScratch)]; ch != nil {
-			return send, recv, ch, s.inlineConns[ch]
+			return p[0], p[1], ch, s.inlineConns[ch]
 		}
 	}
 	return 0, 0, nil, nil
+}
+
+// routeCandidates is the connections, as (send, recv) id pairs, that a packet
+// can be for, in the order they are tried. libutp's lookups, exactly:
+//
+//   - A SYN carries the sender's receive id, ours to send to, and is matched
+//     only as a retransmission of one already taken: receive id one above it
+//     (utp_internal.cpp:2957). The other derivations alias a SYN onto
+//     whatever local connection holds that number, and a SYN delivered into
+//     an established connection was answered with a RESET -- found by
+//     FuzzDifferentialInitiator; an off-path attacker who guessed an id could
+//     have injected one.
+//   - A RESET may carry either of our ids, so it is matched on the receive
+//     id first and then on the send id (:2856-2859).
+//   - Anything else carries our receive id and is matched on it alone
+//     (:2884-2892). Receive ids are unique per peer (GenerateCid, and the
+//     SYN check in handleIncomingBuf), so at most one connection matches:
+//     ours if we dialled (send one above), the peer's if we accepted (send
+//     one below).
+//
+// Every packet used to be tried as if its id were also our *send* id, first.
+// Two connections to one peer whose ids are adjacent -- one receiving on R
+// and sending on R+1, the next receiving on R+1 -- then share a number, and
+// a packet for the second matched the first: its SYN-ACK went into the
+// first connection as an acknowledgement outside the window, and the second
+// never connected (TestPacketReachesTheConnectionItIsFor). The long soak drew
+// such a pair once every few thousand connections.
+func routeCandidates(p *packet, pairs *[4][2]uint16) [][2]uint16 {
+	id := p.Header.ConnectionId
+	switch p.Header.PacketType {
+	case st_syn:
+		pairs[0] = [2]uint16{id, id + 1}
+		return pairs[:1]
+	case st_reset:
+		pairs[0] = [2]uint16{id + 1, id}
+		pairs[1] = [2]uint16{id - 1, id}
+		pairs[2] = [2]uint16{id, id - 1}
+		pairs[3] = [2]uint16{id, id + 1}
+		return pairs[:4]
+	default:
+		pairs[0] = [2]uint16{id + 1, id}
+		pairs[1] = [2]uint16{id - 1, id}
+		return pairs[:2]
+	}
+}
+
+// recvIdTakenLocked reports whether a connection to the peer already receives
+// on recv, whichever side opened it. Called with connsMutex held.
+func (s *UtpSocket) recvIdTakenLocked(recv uint16, peerKey string) bool {
+	var buf [96]byte
+	for _, send := range [2]uint16{recv + 1, recv - 1} {
+		key := appendConnKey(buf[:0], send, recv, peerKey)
+		if _, ok := s.conns[string(key)]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // inlineConn returns the connection that takes packets on ch inline, if any.
