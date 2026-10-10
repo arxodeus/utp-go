@@ -4890,6 +4890,20 @@ arrive in):
 | ours | 1.29 s | 2 of 20 | 2.50 s | 0 of 20 |
 | ours, loss probe off | 2.20-3.07 s | 11 of 20 | 2.27-2.59 s | 7-8 of 20 |
 
+*Re-measured on 2026-10-10,* after the bridge stopped moving its send queue
+for every packet (above), twenty seeds a profile (5000-5019, each transfer in
+a fresh process, timed from the SYN): libutp sending, 2.65 s median at 5%
+loss (0.98-23.65 s) and 3.25 s on the bad path (2.06-6.52 s); ours, 0.99 s
+(0.66-10.31 s) and 1.96 s (1.65-5.07 s). The ordering stands, the gap is
+narrower -- 2.7 times at 5% loss where the table shows 4.6 -- and with
+different seeds and a month of changes on our side the table's rows and
+these cannot be compared run for run. The long tails on both sides are
+lost SYNs: seed 5000 dropped our first two, and the handshake's 3 s and 6 s
+backoff, libutp's schedule, took 9 of its 10.3 s. Four of the forty runs
+with our end dialling failed to connect at all: libutp's SYN-ACK was lost,
+and libutp neither resends it nor answers the SYN's retransmission (see
+"A retransmitted SYN is answered" in DEVIATIONS.md, and LIBUTP-AUDIT.md N27).
+
 None of it is the receiver. libutp sending to libutp through the same relay
 stalls on the same packets, and libutp sends into our receiver as it does
 into its own. It is three things libutp's sender does:
