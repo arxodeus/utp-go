@@ -1787,6 +1787,103 @@ classic LEDBAT 4.02 to 4.43 Mbps, LEDBAT++ 2.37 to 3.37; loss profiles and
 deference unchanged. A deviation from libutp, switchable
 (`lossUndoEnabled`); see DEVIATIONS.md.
 
+## PR 63 — the receive buffer, allocated as data arrives
+
+500 connections that had exchanged 1 KB held 1.08 MB of heap per connection
+end, nearly all of it the receive buffer allocated at its full capacity
+(`BufferSize`, 1 MB by default) at setup. libutp, measured with `mallinfo2`
+around 500 of its driver's connections doing the same, holds about 10 KB each.
+The buffer keeps its capacity for the advertised window and admission,
+unchanged, and allocates as in-order data arrives, doubling from 4 KB, keeping
+what it has grown to as libutp's buffers do; `Read` no longer moves the unread
+bytes to the front on every call. A connection's event queue goes from 1,000
+slots to 64 (after setup it carries only close and ICMP events). About 23 KB
+per end, later 13.4 KB with the timer and write queues shrunk
+(`TestIdleConnectionMemory`, `TestReceiveBufferMatchesModel`). It cost 3% at
+100 Mb/s through GC pacing, which PR 60 pays back.
+
+## PR 64 — a write to a connection that has ended fails at once
+
+A write after the event loop had returned went into a channel nothing read and
+waited for the caller's context: over the emulated network, a `Write` on a
+connection the idle timeout had closed blocked 8.5 minutes. libutp's
+`utp_writev` returns at once on a socket that is not connected
+(`utp_internal.cpp:3181`). The stream now closes a channel when the loop
+returns, after publishing the error it ended with, and `Write`/`WriteV` return
+that error, or `ErrNotConnected`. `Read` and `ReadToEOF` had a race on the same
+end and read a dead connection as a clean end of stream about half the time;
+both now report the connection's error (`TestWriteAfterIdleTimeoutFails`,
+`TestReadAfterIdleTimeoutReportsIt`).
+
+## PR 65 — every short write reports an error
+
+Three answers broke `io.Writer`'s contract, which requires an error when fewer
+bytes are taken than given: a write reaching the connection after our FIN
+(libutp refuses it, `utp_internal.cpp:3188`) and one reaching a cleanly closed
+connection were answered with 0 bytes and no error; both are now
+`ErrNotConnected`. A writer still waiting when the connection closed was told
+0 bytes whatever part of it was already in the send buffer; it is told how
+many were taken, and why the rest were not (`TestWriteAfterOurFinIsRefused`,
+`TestWriteAfterCleanCloseIsRefused`, `TestPendingWriterToldWhatWasTaken`).
+
+## PR 66 — the loss probe's answer, told from the original's acknowledgement
+
+Applies with this fork's loss probe (DEVIATIONS.md, "A loss probe resends
+before the retransmission timeout"); libutp has none. The probe resends the
+oldest outstanding packet, and the original's acknowledgement names the same
+sequence number. Taken for the probe's answer, it declared every packet behind
+it lost: 86-101 needless retransmissions on the lossless 100 Mb/s benchmark
+link in about one run in three. The acknowledgement's timestamp less the delay
+the peer reports is the acknowledged packet's send time in our clock, older
+for the original than for the probe; with no delay reported, RFC 8985's rule
+(an acknowledgement within the minimum round trip of the probe is the
+original's). `TestSpuriousLossProbeResendsOnlyItself`: 1 packet resent against
+21 and 20 before.
+
+## PR 67 — the window grows by a round trip's worth per round trip
+
+libutp's factor, `min(acked, max_window) / max(max_window, acked)`
+(`utp_internal.cpp:1668`), divides each acknowledgement's share by a window
+the previous ones have grown, so a round trip split into more
+acknowledgements grows less: about G - G²/2W, 6% short at a 20 KB window.
+Each acknowledged packet is also credited with its size over the window it
+was sent in, and the larger is taken, so growth never falls behind libutp's.
+Classic LEDBAT, 20 runs a side: shallow queue +7.6%, Broadband +5.3%, high BDP
++4.9%, 5% loss +3.5%, 100 Mb/s LAN +1.3%; deference unchanged.
+`TestConformanceLedbatRules` still matches libutp's replayed trace byte for
+byte with libutp's factor. A deviation; see DEVIATIONS.md. The same credit,
+with a carry for the fractional byte, brings LEDBAT++ to the draft's per-RTT
+gain (`TestLedbatPPRoundTripGrowth`).
+
+## PR 68 — routing by receive id, a RESET acted on first, and ids not reused at once
+
+Found by a two-hour soak (`netem.TestSoakLongRunning`, 880,000 connections).
+
+- **Misrouting, inherited from the original code.** The socket tried every
+  packet first as if its id were our send id, so with two connections to one
+  peer whose ids are adjacent, a packet for the second matched the first.
+  Routing now follows libutp (`utp_internal.cpp:2856-2892`): a SYN only as a
+  retransmission, a RESET on the receive id then the send id, anything else on
+  the receive id alone. Receive ids are unique per peer: a dialled connection
+  draws around them (`:2533-2538`), and a SYN for a receive id a dialled
+  connection holds is refused without an answer (`:2957-2965`).
+- **A stray SYN killed an established connection.** libutp never lets it reach
+  one (`:2957-2965`); now it is ignored.
+- **A RESET was dropped by the acknowledgement check.** A RESET answering our
+  acknowledgement acknowledges our next, unsent sequence number. libutp acts on
+  a RESET before checking anything (`:2850-2873`); so does this.
+- **Ids reused 0.18 s after a close,** and a RESET for the old connection still
+  in flight refused the new one. A closed connection's ids are kept from new
+  connections to the same peer for 10 s, and a dialled connection avoids every
+  id in use in either direction. libutp has neither rule; a deviation (see
+  DEVIATIONS.md, "A dialled connection's ids are clear of every id in use").
+
+`TestPacketReachesTheConnectionItIsFor`, `TestSynForATakenReceiveIdIsRefused`,
+`TestResetAnsweringOurAckEndsTheConnection`,
+`TestClosedConnectionIdsAreNotReusedAtOnce` and
+`TestDialledConnectionDoesNotSendOnAnIdInUse` each fail without their change.
+The soak then ran two hours clean: 885,718 exchanges, heap flat.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it
