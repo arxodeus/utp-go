@@ -844,7 +844,12 @@ Gates that pass:
   against libutp's 40-100 us, on code that passes the gate without it, and
   our 100 Mb/s transfer's best of three at 2.88 s against 1.51 s in one run
   and within the gate in another. The first had been failing there
-  unnoticed.
+  unnoticed. `TestAsymmetricAckPath`'s acknowledgement count, which is a
+  count and not a time, fails under `-race` as it does without it, and
+  `TestLibutpIdleWindowDecay`, which cannot measure libutp under the
+  detector, runs our side there against the decay schedule libutp's rule
+  allows rather than skipping (it fails with the decay removed). Both
+  packages green under `-race` with those changes.
 - `go test -race ./integrated/ -run 'TestUdpTransfer|TestManyConcurrentTransfers' -count=3` — green, **but at `UTP_TEST_TRANSFERS=150`, not the default 1000.** See "Memory" below: the full 1000 did not fit under the race detector on a 16 GB machine. *It does now*: `TestManyConcurrentTransfers` at the full 1000 under `-race`, four runs, green, no data races, peak RSS 5.4-5.8 GB, 77-90 s each.
 - `go test ./netem/ -count=3` — green. The M1 gate; figures in [HARNESS.md](HARNESS.md).
 - `go test -race ./netem/` — green, no data races.
