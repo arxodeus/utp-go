@@ -166,6 +166,7 @@ func runDeference(t *testing.T, algo utp.CongestionAlgorithm) (utpMbps, renoMbps
 	go func() {
 		cfgConn := utp.NewConnectionConfig()
 		cfgConn.CongestionAlgorithm = algo
+		cfgConn.RACK = benchmarkRACK()
 		res, err := pair.RunTransfer(ctx, data, FlowOptions{
 			InitiatorCid:    800,
 			Config:          cfgConn,

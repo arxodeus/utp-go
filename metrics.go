@@ -157,6 +157,11 @@ type ConnectionMetrics struct {
 	// acknowledged for a probe timeout, short of the retransmission timeout.
 	// Not a libutp mechanism; see DEVIATIONS.md.
 	LossProbes uint64
+	// RackLosses counts packets ConnectionConfig.RACK's loss detection
+	// declared lost, and RackRelosts those of them that were already
+	// retransmissions. Zero with RACK off.
+	RackLosses  uint64
+	RackRelosts uint64
 
 	// --- buffers ---
 

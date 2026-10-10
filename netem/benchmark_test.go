@@ -269,6 +269,7 @@ func runProfileOnce(t *testing.T, profile linkProfile, algo utp.CongestionAlgori
 
 	cfg := utp.NewConnectionConfig()
 	cfg.CongestionAlgorithm = algo
+	cfg.RACK = benchmarkRACK()
 
 	res, err := pair.RunTransfer(ctx, data, FlowOptions{
 		InitiatorCid:    400,
@@ -373,6 +374,7 @@ func runTwoFlowBottleneck(t *testing.T, seed int64, profile twoFlowProfile, algo
 		go func(i int, cid uint16) {
 			cfg := utp.NewConnectionConfig()
 			cfg.CongestionAlgorithm = algo
+			cfg.RACK = benchmarkRACK()
 			res, err := pair.RunTransfer(ctx, data, FlowOptions{
 				InitiatorCid:    cid,
 				Config:          cfg,
@@ -427,3 +429,8 @@ func benchmarkSeed(profileSeed int64) int64 {
 	}
 	return profileSeed
 }
+
+// benchmarkRACK is whether UTP_BENCHMARK_RACK asks for ConnectionConfig.RACK,
+// so that the suite, deference and latecomer measurements can compare the
+// two loss detectors in one binary, interleaved.
+func benchmarkRACK() bool { return os.Getenv("UTP_BENCHMARK_RACK") == "1" }

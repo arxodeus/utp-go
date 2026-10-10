@@ -39,6 +39,14 @@ type sentPacket struct {
 	// retransmission timeout and waiting to be sent again. See
 	// MarkAllForResend.
 	needResend bool
+	// rackLostAt is the transmission RACK last declared lost, and
+	// rackPending whether it is waiting to be resent. See rack.go.
+	rackLostAt  time.Time
+	rackPending bool
+	// sentOrder is when this packet was last sent, as a count of the
+	// transmissions before it: its true place in the send order. See
+	// rackState.xmitOrder.
+	sentOrder uint64
 }
 
 func (s *sentPacket) rtt(now time.Time) time.Duration {
@@ -113,6 +121,12 @@ type sentPackets struct {
 	// times.
 	fastResendSeqNum uint16
 	congestionCtrl   Controller
+	// rack is RFC 8985's loss detection, used in place of the rule above
+	// when rack.active. See rack.go.
+	rack rackState
+	// transmissions counts every packet sent, first or again; see
+	// sentPacket.sentOrder.
+	transmissions uint64
 }
 
 func newSentPackets(initSeqNum uint16, congestionCtrl Controller, logger log.Logger) *sentPackets {
@@ -131,6 +145,7 @@ func newSentPackets(initSeqNum uint16, congestionCtrl Controller, logger log.Log
 		// TestFastRetransmitFromAnyInitialSequenceNumber.
 		fastResendSeqNum: initSeqNum + 1,
 		congestionCtrl:   congestionCtrl,
+		rack:             rackState{reoWndMult: 1},
 	}
 }
 
@@ -275,7 +290,7 @@ func (s *sentPackets) HasUnackedPackets() bool {
 }
 
 func (s *sentPackets) HasLostPackets() bool {
-	return s.lostPackets.Len() != 0
+	return s.lostPackets.Len() != 0 || s.rack.pending > 0
 }
 
 // maxFastResendsPerAck caps how many packets one ack may fast retransmit.
@@ -294,6 +309,9 @@ const maxFastResendsPerAck = 4
 // it taken cannot be separated without reintroducing the duplicate-resend bug
 // this exists to prevent.
 func (s *sentPackets) TakeLostPackets() []*LostPacket {
+	if s.rack.active {
+		return s.rackTakeLost()
+	}
 	var result []*LostPacket
 	var stale []uint16
 
@@ -359,6 +377,8 @@ func (s *sentPackets) OnTransmit(
 	if index < len(s.packets) {
 		// Update existing packet
 		s.packets[index].retransmission = now
+		s.transmissions++
+		s.packets[index].sentOrder = s.transmissions
 		// Sent again, so no longer waiting to be: libutp clears need_resend
 		// in send_packet (utp_internal.cpp:881).
 		s.packets[index].needResend = false
@@ -377,6 +397,8 @@ func (s *sentPackets) OnTransmit(
 			transmission:   now,
 			retransmission: now,
 		}
+		s.transmissions++
+		sent.sentOrder = s.transmissions
 		s.packets = append(s.packets, sent)
 	}
 
@@ -409,6 +431,9 @@ func (s *sentPackets) onAck(
 	// sample even from one whose ack number it discards (utp_internal.cpp:
 	// 1907, :2023-2024).
 	s.congestionCtrl.OnAckDelay(delay, now)
+	if s.rack.active {
+		s.rackOnAck(ackNum, selectiveAck)
+	}
 	// Whatever path the acknowledgement takes below, its window update
 	// happens once. detectAndRecordLosses applies it earlier, before a loss
 	// can decay the window, as libutp's order has it.
@@ -514,6 +539,9 @@ func (s *sentPackets) OnAckNum(
 	if wrappingLessThan(s.fastResendSeqNum, ackNum+1) {
 		s.fastResendSeqNum = ackNum + 1
 	}
+	if s.rack.active {
+		s.rackOnAckNum(ackNum)
+	}
 
 	return s.detectAndRecordLosses(now)
 }
@@ -525,6 +553,10 @@ func (s *sentPackets) detectAndRecordLosses(now time.Time) error {
 	// libutp's apply_ccontrol (utp_internal.cpp:2139) precedes the decay a
 	// selective ack can cause (:2289).
 	s.congestionCtrl.ApplyAck()
+	if s.rack.active {
+		s.rackDetectAndMark(now)
+		return nil
+	}
 	firstUnacked, err := s.FirstUnackedSeqNum()
 	if err != nil {
 		// Nothing outstanding, so nothing can be lost.
@@ -630,6 +662,9 @@ func (s *sentPackets) Ack(seqNum uint16, delay time.Duration, now time.Time) err
 	if !packetInst.acked {
 		packetInst.acked = true
 		s.lostPackets.Delete(packetInst.seqNum)
+		if s.rack.active {
+			s.rackOnDelivered(packetInst, now)
+		}
 	}
 	return nil
 }

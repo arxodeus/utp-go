@@ -94,6 +94,7 @@ func runLatecomer(t *testing.T, algo utp.CongestionAlgorithm) (incumbentMbps, la
 	newConfig := func() *utp.ConnectionConfig {
 		c := utp.NewConnectionConfig()
 		c.CongestionAlgorithm = algo
+		c.RACK = benchmarkRACK()
 		return c
 	}
 
@@ -190,6 +191,7 @@ func TestBaseDelayTracking(t *testing.T) {
 			data := make([]byte, 4*1024*1024)
 			cfgConn := utp.NewConnectionConfig()
 			cfgConn.CongestionAlgorithm = alg.algo
+			cfgConn.RACK = benchmarkRACK()
 
 			res, err := pair.RunTransfer(ctx, data, FlowOptions{
 				InitiatorCid:    740,

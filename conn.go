@@ -193,6 +193,12 @@ type ConnectionConfig struct {
 	// from the reference implementation -- see DEVIATIONS.md and
 	// BENCHMARKS.md for what it changes and what it measures.
 	CongestionAlgorithm CongestionAlgorithm
+	// RACK replaces libutp's loss detection -- a packet is lost once three
+	// after it have been acknowledged, and is fast-retransmitted once --
+	// with RFC 8985's time-based rule. Off by default, and off, loss
+	// detection is libutp's. Experimental; see DEVIATIONS.md, "RACK loss
+	// detection (opt-in)".
+	RACK bool
 	// NoDelay sends a partial packet as soon as the window allows, as
 	// TCP_NODELAY does. By default a connection follows libutp's Nagle rule
 	// (flush_packets, utp_internal.cpp:974-982): a packet smaller than a
@@ -396,6 +402,9 @@ type connection struct {
 	// armLossProbe schedules the loss probe; lossProbeBackoff is how many
 	// times it has fired since the last acknowledgement. See onLossProbe.
 	armLossProbe func(d time.Duration)
+	// armRack schedules RACK's reordering timer, or stops it for a zero
+	// duration. See onRackTimer.
+	armRack func(d time.Duration)
 	// lossProbeSent is set once the probe has fired, and cleared only when
 	// the cumulative acknowledgement moves past lossProbeAckNum: one probe
 	// per episode, as RFC 8985 allows.
@@ -847,6 +856,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		sendBuf := newSendBuffer(c.config.BufferSize)
 		congestionCtrl := newDefaultController(fromConnConfig(c.config))
 		sentPacketsHolder := newSentPackets(synAck-1, congestionCtrl, c.logger) // wrapping subtraction
+		sentPacketsHolder.rack.active = c.config.RACK
 
 		if c.state != nil && c.state.connectedCh != nil {
 			c.state.connectedCh <- nil
@@ -994,6 +1004,23 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			}
 		}
 		lossProbeTimer.Reset(d)
+	}
+
+	rackTimer := c.timeSource().NewTimer(time.Hour)
+	if !rackTimer.Stop() {
+		<-rackTimer.C()
+	}
+	defer rackTimer.Stop()
+	c.armRack = func(d time.Duration) {
+		if !rackTimer.Stop() {
+			select {
+			case <-rackTimer.C():
+			default:
+			}
+		}
+		if d > 0 {
+			rackTimer.Reset(d)
+		}
 	}
 
 	handleIncoming := func(event *streamEvent) {
@@ -1202,6 +1229,8 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			woke = wakeIdleRto
 		case <-lossProbeTimer.C():
 			woke = wakeLossProbe
+		case <-rackTimer.C():
+			woke = wakeRack
 		case <-idleTimer.C():
 			woke = wakeIdleTimeout
 		case <-c.kick:
@@ -1255,6 +1284,8 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			c.onIdleRto(c.now())
 		case wakeLossProbe:
 			c.onLossProbe(c.now())
+		case wakeRack:
+			c.onRackTimer(c.now())
 		case wakeIdleTimeout:
 			// Activity since the timer was set moves the deadline on: arm
 			// for what is left of it. See lastActivity.
@@ -1494,6 +1525,7 @@ const (
 	wakeProbe
 	wakeIdleRto
 	wakeLossProbe
+	wakeRack
 	wakeAckHold
 	wakeKick
 	wakeIdleTimeout
@@ -2261,6 +2293,8 @@ func (c *connection) sampleMetrics(now time.Time, force bool) {
 		Timeouts:             c.timeouts,
 		FastRetransmits:      c.fastRetransmits,
 		LossProbes:           c.lossProbes,
+		RackLosses:           sentRack(c).losses,
+		RackRelosts:          sentRack(c).relosts,
 		PendingWrites:        len(c.pendingWrites),
 		MtuCurrent:           c.mtu.current,
 		MtuFloor:             c.mtu.floor,
@@ -2824,7 +2858,9 @@ func (c *connection) checkSpuriousLoss(fullAcked *circularRangeInclusive, select
 	}
 	resent := c.undoResent && c.undoSeq == seq
 	if !resent || (c.ackEchoKnown && int32(c.ackEcho-c.undoStamp) < 0) {
-		u.undoSpuriousLoss(seq)
+		if u.undoSpuriousLoss(seq) {
+			c.state.SentPackets.rackOnSpuriousLoss()
+		}
 	}
 	c.undoResent = false
 }
@@ -3470,6 +3506,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 
 	// Handle retransmissions
 	c.retransmitLostPackets(now)
+	c.rearmRack()
 
 	// Send STATE packet if appropriate
 	switch packet.Header.PacketType {
@@ -4037,6 +4074,7 @@ func (c *connection) onState(seqNum, ackNum uint16) {
 			congestionCtrl.OnRTTSample(c.now().Sub(c.synSentAt))
 		}
 		sentPacketsHolder := newSentPackets(c.endpoint.SynNum, congestionCtrl, c.logger)
+		sentPacketsHolder.rack.active = c.config.RACK
 
 		// Report success the same way the acceptor path does, at line ~351:
 		// send nil.
@@ -4615,4 +4653,36 @@ func (c *connection) transmit(packet *packet, now time.Time, firstTransmission b
 	}
 
 	c.emitPacket(packet, isProbe)
+}
+
+// rearmRack arms RACK's reordering timer for the next packet still inside
+// its reordering window, or stops it when there is none.
+func (c *connection) rearmRack() {
+	sp := c.state.SentPackets
+	if sp == nil || !sp.rack.active || c.armRack == nil {
+		return
+	}
+	c.armRack(sp.rack.timeout)
+}
+
+// onRackTimer is RFC 8985's reordering timer (section 6.3): a packet that
+// was inside its reordering window when the last acknowledgement came has
+// passed it, with nothing since to say it arrived.
+func (c *connection) onRackTimer(now time.Time) {
+	sp := c.state.SentPackets
+	if c.state.stateType != ConnConnected || sp == nil || !sp.rack.active {
+		return
+	}
+	sp.rackDetectAndMark(now)
+	c.retransmitLostPackets(now)
+	c.rearmRack()
+}
+
+// sentRack is the connection's RACK state, or a zero one before there is a
+// send window.
+func sentRack(c *connection) rackState {
+	if c.state == nil || c.state.SentPackets == nil {
+		return rackState{}
+	}
+	return c.state.SentPackets.rack
 }
