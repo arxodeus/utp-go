@@ -1274,8 +1274,9 @@ window, by the new one, and that round trip grows about twice as fast;
 without it classic LEDBAT at 5% loss ran 9% slower (2.30 Mbps against 2.53,
 five runs). Taking the larger, the window never grows slower than libutp's
 would, and above target the factor scales the decrease the same way, so it
-never shrinks slower either. LEDBAT++, whose update is per packet, is not
-affected.
+never shrinks slower either. LEDBAT++ had the same shortfall, and now the
+same credit ("A round trip's acknowledgements add the round trip's gain",
+under LEDBAT++ below).
 
 **Measured**, against the commit before, over the emulated network; five runs
 of each classic LEDBAT profile, then twenty a side of the five that moved:
@@ -1597,6 +1598,31 @@ saved rather than the freeze's two packets or the ramp's partial window
 on a shallow bottleneck, where slowdowns and overflows coincide, split it as
 unevenly as 36/64. Classic LEDBAT keeps libutp's rule, one halving per
 100ms, exactly.
+
+**A round trip's acknowledgements add the round trip's gain.** The draft
+gives the increase per round trip ("W += GAIN") and leaves how acknowledgements
+share it to the implementation. Each acknowledgement used to add its bytes
+over the current window times the gain, truncated to whole bytes, so a round
+trip of per-packet acknowledgements added 2-14% less than the draft's figure
+(20-200 ms, windows of 4-100 packets): the truncation, and a divisor that the
+round trip's earlier acknowledgements had grown. The fractional byte is now
+carried to the next acknowledgement, and each packet is credited against the
+larger of the current window and the one it was sent under, as classic
+LEDBAT's update is (above). `TestLedbatPPRoundTripGrowth` holds the gain to
+within 1% across that range, and fails at 14% short without the change.
+
+Measured against the commit before, over the emulated network: five runs of
+each LEDBAT++ profile, then twenty a side, interleaved, of the two that moved
+more than 1.5%. Shallow queue, 1.82 Mbps median either way (z = -0.05; five
+runs had shown 3.45 against 1.82, which was whether one timeout fell in the
+run). 5% loss, 0.54 to 0.56 Mbps (z = 1.47, not significant). The rest within
+1%. Deference to a loss-based flow, ten runs each: the competitor keeps 80%
+against 78% (z = -0.72). One cost: a LEDBAT++ latecomer's share while both
+flows run, already too large, from 71.35% to 72.1% (twenty runs each,
+z = 2.2). Both flows now grow at the draft's rate, and the latecomer, which
+reads less delay than there is, gains slightly more from that; the cause is
+its base delay (KNOWN-LIMITATIONS.md, "LEDBAT++'s latecomer takes most of the
+link"), not the growth rule.
 
 ## The congestion controller: what still differs
 

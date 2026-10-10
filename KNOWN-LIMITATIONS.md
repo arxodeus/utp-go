@@ -4558,6 +4558,13 @@ went the wrong way.
 unsolved problem does not justify leaving the draft and risking stability.
 `ledbatPPDecreaseConstant` is the one line to change to revisit it.
 
+**Since: congestion avoidance grows at the draft's rate,** where a round trip
+of acknowledgements had added 2-14% less (DEVIATIONS.md, "A round trip's
+acknowledgements add the round trip's gain"). The latecomer gains slightly
+from it: 71.35% to 72.1% of the link while both run, twenty runs each,
+interleaved (z = 2.2). Kept, as the draft's rule; the advantage is the base
+error above, which this neither causes nor addresses.
+
 ## ~~IPv6 peers stalled on a minimum-MTU path~~ — fixed
 
 Found while looking for a way to test IPv6 at all on a host whose kernel has
