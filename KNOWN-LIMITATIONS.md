@@ -293,7 +293,8 @@ connection's event queue had 1,000 slots, 8 KB, though after the connection
 is set up the socket's reader hands it packets inline and it carries only
 close and ICMP events -- 1,000 simultaneous transfers dropped nothing with
 it cut to one slot; it is 64. The socket's own event channel had a million,
-8 MB per socket, and nothing on a socket reads it. And every connection's
+8 MB per socket, and nothing on a socket reads it -- it was cut to 64, and
+since removed. And every connection's
 two B-trees had a free list of their own; they share one per kind now.
 
 Measured the same way: about 23 KB per connection end

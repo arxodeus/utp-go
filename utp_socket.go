@@ -358,7 +358,6 @@ type UtpSocket struct {
 	conns                    map[string]chan *streamEvent
 	accepts                  chan *Accept
 	acceptsWithCidCh         chan *Accept
-	socketEvents             chan *socketEvent
 	awaiting                 *syncMap[*Accept]
 	awaitingExpirations      *timeWheel[any, *Accept]
 	incomingConns            *syncMap[*IncomingPacket]
@@ -625,7 +624,6 @@ func WithSocket(ctx context.Context, socket Conn, logger log.Logger, opts ...Soc
 		inlineConns:               make(map[chan *streamEvent]*connection),
 		accepts:                   make(chan *Accept, 1000),
 		acceptsWithCidCh:          make(chan *Accept, 1000),
-		socketEvents:              make(chan *socketEvent, socketEventQueueLen),
 		awaiting:                  awaitingMap,
 		awaitingExpirations:       awaitExpirations,
 		incomingConns:             incomingConns,
@@ -827,12 +825,6 @@ func (s *UtpSocket) readFailed(err error, failures *int) bool {
 // connection, about a quarter of what an idle connection held once its
 // receive buffer stopped being allocated up front.
 const connEventQueueLen = 64
-
-// socketEventQueueLen is the capacity of the socket's event channel. Nothing
-// on a socket reads it: every connection the socket makes writes through
-// sendEvent instead. It is what a connection built without one, in a test,
-// queues to. It was a million, allocated whole: 8 MB per socket, unread.
-const socketEventQueueLen = 64
 
 // encodeBufs holds the buffers outgoing packets are encoded into. A packet is
 // written the moment it is encoded and the Conn may not keep it, so a buffer
@@ -1151,7 +1143,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 		connected := make(chan error, 1)
 		newConnStream := make(chan *streamEvent, connEventQueueLen)
 		s.putConnStream(cidHash, newConnStream)
-		stream := NewUtpStream(s.ctx, s.logger, cid, s.configForPeer(accept.config, cid.Peer), packetPtr, s.socketEvents, s.sendEvent, newConnStream, connected, s.retransmitTimers)
+		stream := NewUtpStream(s.ctx, s.logger, cid, s.configForPeer(accept.config, cid.Peer), packetPtr, nil, s.sendEvent, newConnStream, connected, s.retransmitTimers)
 		s.attachInline(cidHash, newConnStream, stream.conn)
 		stream.linger = s.linger
 		go s.awaitConnected(stream, accept, connected)
@@ -1163,7 +1155,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 		// The socket's context, not the Accept call's: an accepted connection
 		// outlives the Accept that produced it, exactly as a dialled one
 		// outlives its dial. The sibling branch above already used s.ctx.
-		s.selectAcceptHelper(cid, packetPtr, accept, s.socketEvents)
+		s.selectAcceptHelper(cid, packetPtr, accept)
 	} else {
 		s.logger.Debug("put a new syn packet to incomingConns...")
 		s.putIncomingConn(cidHash, &IncomingPacket{pkt: packetPtr, cid: cid})
@@ -1316,7 +1308,7 @@ func (s *UtpSocket) handleNewAcceptWithCidEvent(acceptWithCid *Accept) {
 		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			s.logger.Trace("conn has already accepted", "key", incomingConnsKey)
 		}
-		s.selectAcceptHelper(acceptWithCid.cid, incomingConn.pkt, acceptWithCid, s.socketEvents)
+		s.selectAcceptHelper(acceptWithCid.cid, incomingConn.pkt, acceptWithCid)
 	} else {
 		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			s.logger.Trace("wait for the syn pkt arrive", "key", incomingConnsKey)
@@ -1328,7 +1320,7 @@ func (s *UtpSocket) handleNewAcceptWithCidEvent(acceptWithCid *Accept) {
 func (s *UtpSocket) handleNewAcceptEvent(accept *Accept) {
 	// A SYN that already arrived satisfies this immediately.
 	if incomingAccept := s.nextIncomingConn(); incomingAccept != nil {
-		s.selectAcceptHelper(incomingAccept.cid, incomingAccept.pkt, accept, s.socketEvents)
+		s.selectAcceptHelper(incomingAccept.cid, incomingAccept.pkt, accept)
 		return
 	}
 	// Otherwise wait for one.
@@ -1632,7 +1624,7 @@ func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *Co
 		cid,
 		s.configForPeer(config, cid.Peer),
 		nil,
-		s.socketEvents,
+		nil,
 		s.sendEvent,
 		streamEvents,
 		connectedCh,
@@ -1695,7 +1687,7 @@ func (s *UtpSocket) ConnectWithCid(
 		cid,
 		s.configForPeer(config, cid.Peer),
 		nil,
-		s.socketEvents,
+		nil,
 		s.sendEvent,
 		streamEvents,
 		connected,
@@ -1773,7 +1765,6 @@ func (s *UtpSocket) selectAcceptHelper(
 	cid *ConnectionId,
 	syn *packet,
 	accept *Accept,
-	socketEvents chan *socketEvent,
 ) {
 	if _, exists := s.getConnStream(cid.Hash()); exists {
 		accept.hand(&StreamResult{err: fmt.Errorf("connection ID unavailable")})
@@ -1794,7 +1785,7 @@ func (s *UtpSocket) selectAcceptHelper(
 		cid,
 		s.configForPeer(accept.config, cid.Peer),
 		syn,
-		socketEvents,
+		nil,
 		s.sendEvent,
 		streamEvents,
 		connected,

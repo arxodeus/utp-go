@@ -78,15 +78,19 @@ implementation sends, against libutp read the same way, on an unanswered SYN:
 
 | | first | second |
 | --- | --- | --- |
-| ours | 3.025s | 9.05s |
-| libutp | 3.0s | 9.0s |
+| ours, then | 3.025s | 9.05s |
+| ours, now | 3.0s | 9.0s |
+| libutp | 3.01s | 9.01s |
 
-The retransmission wheel rounds a delay up to a whole 25ms tick and fires up
+The retransmission wheel rounded a delay up to a whole 25ms tick and fired up
 to one tick late — deliberately, because early is the wrong direction: it
 resends a packet the peer was still going to acknowledge. Each backoff then
-re-arms relative to the moment the last one fired, so the lateness carries
+re-armed relative to the moment the last one fired, so the lateness carried
 forward. libutp cannot accumulate it, comparing the clock against an absolute
-`rto_timeout` (`utp_internal.cpp:1147-1148`) rather than trusting a timer.
+`rto_timeout` (`utp_internal.cpp:1147-1148`) rather than trusting a timer. The
+wheel now places a timer on the first tick at or after its deadline, to the
+millisecond (`timeWheel.put`), and `TestSynRetransmissionInstantsMatchLibutp`
+gives the third row; libutp's 10 ms is its driver's step.
 
 Bounded by the retransmission count times the tick, one-directional, in the
 safe direction, and against multi-second timeouts. Left alone for that reason;
