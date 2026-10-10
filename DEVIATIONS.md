@@ -103,6 +103,15 @@ worse.
   20 runs each: +4.9% to +7.6% on the profiles where the window has room to
   grow, +3.5% at 5% loss, +1.3% on the 100 Mb/s LAN; deference to a
   loss-based flow unchanged.
+- *A dialled connection's ids are clear of every id in use, and of any
+  closed in the last ten seconds.* libutp draws a receive id that no
+  connection to the peer receives on, and nothing more. Two hours of
+  connection churn against one peer, about 880,000 connections, had dialling
+  connections refused by RESETs meant for others -- one that sent on their
+  receive id, or one that had held the same ids a moment before. Three-minute
+  soaks: about four refusals a run before, one each in two runs of three with the
+  quarantine alone, none in five with the whole rule (and a fix for RESETs
+  that went unheeded, KNOWN-LIMITATIONS).
 - *A cut for a loss that was only reordering is undone.* libutp halves its
   window for a packet the selective acks overtook, and keeps it halved when
   the original arrives after all. Ours undoes the cut once the
@@ -1294,6 +1303,41 @@ to 4.28 at 1% loss (3.33).
 `TestConformanceLedbatRules` still replays libutp's own trace through the
 update with libutp's factor and matches it to the byte: the replay supplies
 no send windows, and with none the factor is libutp's.
+
+## A dialled connection's ids are clear of every id in use
+
+libutp keys a connection by address and receive id, and an outgoing
+connection draws its receive id until that key is free
+(`utp_internal.cpp:2533-2538`); its send id is the next number. Nothing
+stops the send id being another connection's receive id, or the ids being
+those of a connection that closed a moment ago. Both matter when a RESET
+arrives: libutp matches one on the receive id first and then the send id
+(`:2856-2859`), so it can be taken by a connection it was not meant for, and
+what was in flight for a closed connection reaches the next one to hold its
+ids.
+
+The long soak (`netem.TestSoakLongRunning`) found both, with one client
+churning about 120 connections a second to one server. A dialling connection
+was refused by a RESET meant for another: once because the other sent on its
+receive id and had just closed, once because the same ids had been picked
+0.18 s after the connection holding them closed. About one connect in three
+minutes failed so.
+
+A dialled connection here draws until neither of its ids is used, in either
+direction, by any connection to the peer that is live or ended in the last
+ten seconds (`idQuarantine`, the time the socket already keeps a closed
+connection's acknowledgement for). That is TCP's reason for TIME_WAIT,
+narrowed to the ids this side chooses. An incoming SYN is still judged by
+libutp's rule alone -- refused only when its receive id is taken -- since the
+peer's choice is not ours to second-guess, and refusing a SYN libutp would
+take would make this side the worse one to dial.
+
+Three-minute soaks had about four refusals a run before; with the quarantine
+alone, two runs of three had one; with the whole rule, and with RESETs heeded
+whatever their numbers (KNOWN-LIMITATIONS.md, "What a two-hour soak found"),
+five runs had none -- the two changes were not measured apart there.
+`TestClosedConnectionIdsAreNotReusedAtOnce` and
+`TestDialledConnectionDoesNotSendOnAnIdInUse` each fail without their half.
 
 ## A cut for a loss that was only reordering is undone
 

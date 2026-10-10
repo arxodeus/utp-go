@@ -327,6 +327,51 @@ profile measure 90.28 Mbps median against 86.27 for the commit before,
 +4.6%, Mann-Whitney z = 3.14: above the 89.9 the link measured before the
 memory change.
 
+## What a two-hour soak found
+
+The first long soak (`netem.TestSoakLongRunning`, FUZZING.md) ran two hours,
+about 880,000 connections between one client and one server over a link
+that loses and reorders packets, and failed on four counts. One was the
+harness; three were the library.
+
+- **The heap grew to 2.5 GB.** The emulator's: every link kept a 40-byte
+  queue sample per packet for its life, for the benchmarks' standing-queue
+  figures. `netem.Config.NoQueueSamples`, which the soak sets. The soak's
+  own table of connection metrics also kept an entry per connection ever
+  made; it keeps only those still being served. With both, five three-minute
+  runs held the heap flat at 13-16 MB, and the check was shown to catch a
+  planted leak of 1 KB a connection (43.6 MB to 87.1 MB between the halves of
+  a ten-minute run).
+- **41 established connections were killed by a SYN that was not theirs.** A
+  peer's new connection that drew ids this side still held -- a connection
+  closing, or one left behind -- had its SYN delivered into the existing one,
+  which took a SYN with another sequence number (or any SYN at a connection
+  it had dialled) for a protocol violation and reset itself. libutp never
+  lets such a SYN reach a connection: "rejected incoming connection,
+  connection already exists" (`utp_internal.cpp:2957-2965`). It is ignored
+  now; the connection's own SYN, retransmitted by a peer that missed the
+  SYN-ACK, is still answered. `TestOnSynInitiator` and
+  `TestOnSynAcceptorNonMatchingSyn`, inherited asserting the reset, now
+  assert the connection is untouched.
+- **A RESET answering one of our acknowledgements was dropped.** A peer's
+  socket answers a packet for a connection it no longer has with a RESET
+  acknowledging that packet's sequence number; for an acknowledgement or a
+  keep-alive that is our next, unsent number, which the acknowledgement check
+  read as acknowledging a packet never sent. So a connection whose peer had
+  gone was told so and carried on, and its reader waited for ever -- the
+  server connections the soak found running for clients that had given up.
+  libutp acts on a RESET before checking anything about it
+  (`:2850-2873`); so does this now. `TestResetAnsweringOurAckEndsTheConnection`
+  fails on its first iteration without the change.
+- **Connects were refused by RESETs meant for other connections.** See
+  DEVIATIONS.md, "A dialled connection's ids are clear of every id in use".
+
+And one found reading for these: `UtpSocket.Close` did not stop the linger
+acknowledgements' timer wheel, a goroutine left per socket closed.
+
+With all of it, five three-minute soaks ran clean; the two-hour result is in
+FUZZING.md.
+
 ## A packet could be delivered to the wrong connection
 
 **Fixed.** Found by the first long-running soak (`netem.TestSoakLongRunning`,
