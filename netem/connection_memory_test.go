@@ -17,7 +17,8 @@ import (
 // It was 1.08 MB per connection end: the receive buffer was allocated at its
 // full capacity, 1 MB by default, when the connection was set up, and its
 // event queue and the socket's held 1,000 and 1,000,000 slots apiece,
-// allocated whole. Now about 23 KB, measured over 500 connections; libutp
+// allocated whole. Then about 23 KB, and 13.4 KB since the timer and write
+// queues shrank, measured over 400 connection ends; libutp
 // holds about 10 KB per connection, plus 67 KB per context (measured with
 // mallinfo2 around 500 of its driver's connections that had exchanged 1 KB
 // each way). The bound is loose on purpose: heap figures move with whatever

@@ -298,12 +298,19 @@ since removed. And every connection's
 two B-trees had a free list of their own; they share one per kind now.
 
 Measured the same way: about 23 KB per connection end
-(`netem.TestIdleConnectionMemory`, which fails at 1.08 MB). What remains is
-mostly the retransmission-timer channel, 8 KB: one RTO delivers one timer per
-packet in flight, the wheel re-arms rather than blocks when the channel is
-full, and shrinking it would change when those deliveries arrive -- not done
-without measuring the timeout path. The goroutine's stack is on top of the
-heap figure, at least 8 KB.
+(`netem.TestIdleConnectionMemory`, which fails at 1.08 MB). Most of what
+remained was the retransmission-timer channel, 8 KB: one RTO delivers one
+timer per packet in flight, the wheel re-arms rather than blocks when the
+channel is full, and shrinking it would change when those deliveries arrive.
+Measured since: of a timeout's deliveries only the first acts -- the rest
+find the deadline moved and re-arm -- and with the channel at 16 slots, and
+the write queue at 16 rather than 100, twenty runs a side of the profiles that
+lean hardest on the timeout path show no difference (classic LEDBAT at 5%
+loss -1.0%, z = -0.92; LEDBAT++ at 5% loss +4.8%, z = 1.31, 154 timeouts
+against 180; the LAN -0.4%, z = -0.77). **13.4 KB per connection end now**,
+against libutp's 10 KB; what is left is mostly six timers (about 1.5 KB), the
+read queue's 100 slots, and the receive buffer's first 4 KB on an end that has
+received. The goroutine's stack is on top of the heap figure, at least 8 KB.
 
 **What it cost: 3% at 100 Mb/s, in a small process.** The benchmark suite
 against the commit before, five runs and then twenty of anything that moved,
