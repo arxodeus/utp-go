@@ -1688,7 +1688,10 @@ acknowledging one per read: 1.40 s, and 3.01 s against libutp's 3.00 s over a
 fair harness should show. The runs that still take about 2.7 s, 6-7 in 20 for
 either receiver, are libutp's sender losing two packets at the tail when the
 relay's 256 KB queue fills -- its delay target, 100 ms, is longer than the
-queue -- and waiting out a timeout for them.
+queue -- and waiting out a timeout for them. *Since:* that case's relay queue
+is 2 MB, deeper than the target at 100 Mb/s (1.25 MB), and none of 42 runs
+was slowed (7-14 in 21 per receiver with 256 KB, measured alongside); its
+gate is the median, as the other cases' are, where it had been the best run.
 
 That took away the case for letting an acknowledgement cover four packets on
 every path: at 100 Mb/s it gained nothing and cost 190 us an acknowledgement.

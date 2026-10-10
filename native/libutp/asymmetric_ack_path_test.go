@@ -32,12 +32,13 @@ import (
 //   - over a 20 Mb/s return path it is no slower, beyond asymmetricSlack, and
 //     sends no more acknowledgements than libutp's, beyond asymmetricAckShare
 //     (measured 1.96 s and 2,744 against 1.96 s and 2,769);
-//   - at 100 Mb/s and 1 ms both ways, our receiver's best time is no slower
-//     than libutp's best beyond asymmetricSlack (measured 1.387 s against
-//     1.388 s). Best, not median: libutp's sender fills the relay's 256 KB
-//     queue near the end of the transfer -- its delay target is longer than
-//     the queue -- and in 6-7 runs of 20, for either receiver, waits out a
-//     timeout for the two packets it lost, taking about 2.7 s.
+//   - at 100 Mb/s and 1 ms both ways, the same two gates (measured 1.393 s
+//     either way, 21 runs each, and 9,370 packets back against 10,207). The
+//     relay's queue there is 2 MB, deeper than libutp's 100 ms delay target
+//     at that rate (1.25 MB). It was 256 KB, and libutp's sender, filling
+//     it near the end of the transfer, lost two packets and waited out a
+//     timeout, about 2.72 s, in 7-14 runs of 21 for either receiver, so the
+//     case could only gate on the best run.
 //
 // An acknowledgement for every read (ackEvery returning 1) fails the first:
 // 3.01 s against libutp's 3.00 s.
@@ -50,7 +51,6 @@ func TestAsymmetricAckPath(t *testing.T) {
 		data, back pathConfig
 		size       int
 		thin       bool // gate the median against asymmetricThinGain
-		best       bool // gate the best run rather than the median
 	}{
 		{
 			name: "20 Mb/s data, 160 kb/s return",
@@ -84,22 +84,18 @@ func TestAsymmetricAckPath(t *testing.T) {
 					c.name, map[bool]string{false: "libutp", true: "go"}[toGo], run, el.Round(time.Millisecond), offered)
 			}
 		}
-		pick := median
-		if c.best {
-			pick = best
-		}
 		gate := t.Errorf
 		if raceEnabled {
 			gate = t.Logf // timing under the race detector; see raceEnabled
 		}
-		ours, ref := pick(times[true]), pick(times[false])
+		ours, ref := median(times[true]), median(times[false])
 		switch {
 		case c.thin && float64(ours) > asymmetricThinGain*float64(ref):
 			gate("%s: our receiver took %v, libutp's %v; want under %.2f of it", c.name, ours, ref, asymmetricThinGain)
 		case !c.thin && float64(ours) > (1+asymmetricSlack)*float64(ref):
 			gate("%s: our receiver took %v, libutp's %v", c.name, ours, ref)
 		}
-		if !c.thin && !c.best {
+		if !c.thin {
 			if o, r := medianCount(acks[true]), medianCount(acks[false]); float64(o) > asymmetricAckShare*float64(r) {
 				// A count, not a time: held under the race detector too.
 				t.Errorf("%s: our receiver sent %d packets back, libutp's %d; want under %.2f of it", c.name, o, r, asymmetricAckShare)
@@ -216,12 +212,6 @@ func median(xs []time.Duration) time.Duration {
 	s := append([]time.Duration(nil), xs...)
 	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
 	return s[len(s)/2]
-}
-
-func best(xs []time.Duration) time.Duration {
-	s := append([]time.Duration(nil), xs...)
-	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
-	return s[0]
 }
 
 func medianCount(xs []uint64) uint64 {
