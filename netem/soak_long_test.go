@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -164,6 +165,9 @@ func TestSoakLongRunning(t *testing.T) {
 		Delay: 5 * time.Millisecond, Jitter: time.Millisecond,
 		LossRate: 0.005, ReorderRate: 0.01,
 		BandwidthBps: 50_000_000, QueueBytes: 256 * 1024,
+		// The link's per-packet queue samples are kept for its life, and
+		// would be the soak's largest heap growth.
+		NoQueueSamples: true,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -192,7 +196,13 @@ func TestSoakLongRunning(t *testing.T) {
 		defer close(acceptDone)
 		for {
 			cfg := utp.NewConnectionConfig()
-			cfg.Metrics = func(m utp.ConnectionMetrics) { serverMetrics.Store(m.Cid.Hash(), m) }
+			cfg.Metrics = func(m utp.ConnectionMetrics) {
+				// Only while it is being served: an entry for every
+				// connection ever made would be the soak's own leak.
+				if _, live := serverMetrics.Load(m.Cid.Hash()); live {
+					serverMetrics.Store(m.Cid.Hash(), m)
+				}
+			}
 			s, err := pair.SockB.Accept(acceptCtx, cfg)
 			if err != nil {
 				if acceptCtx.Err() == nil {
@@ -201,8 +211,11 @@ func TestSoakLongRunning(t *testing.T) {
 				return
 			}
 			served.Add(1)
+			key := s.Cid().Hash()
+			serverMetrics.Store(key, utp.ConnectionMetrics{Cid: s.Cid(), At: time.Now(), State: "accepted"})
 			go func() {
 				defer served.Done()
+				defer serverMetrics.Delete(key)
 				if err := soakServe(ctx, s); err != nil {
 					fail(err)
 				}
@@ -297,11 +310,16 @@ func TestSoakLongRunning(t *testing.T) {
 		t.Errorf("server connections still running %v after the clients finished", time.Minute+2*29*time.Second)
 		serverMetrics.Range(func(_, v any) bool {
 			m := v.(utp.ConnectionMetrics)
-			if m.State != "closed" && time.Since(m.At) < time.Minute {
-				t.Logf("open: %+v", m)
-			}
+			t.Logf("still served: %+v", m)
 			return true
 		})
+		if f := os.Getenv("UTP_SOAK_STACKS"); f != "" {
+			if out, err := os.Create(f); err == nil {
+				pprof.Lookup("goroutine").WriteTo(out, 2)
+				out.Close()
+				t.Logf("goroutine stacks written to %s", f)
+			}
+		}
 		failMu.Lock()
 		for _, err := range failures {
 			t.Log(err)

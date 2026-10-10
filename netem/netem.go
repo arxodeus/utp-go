@@ -95,6 +95,14 @@ type Config struct {
 	// delay-based controller is supposed to keep clear of.
 	QueueBytes int
 
+	// NoQueueSamples stops the link recording a QueueSample for every
+	// packet. The samples are what QueueSamples reports, for the benchmarks'
+	// standing-queue figures, and they are kept for the link's life: 40 bytes
+	// a packet, which a soak of hours turns into gigabytes of the process's
+	// heap -- 2.5 GB in two hours, all of it the emulator's, which is what
+	// the soak then measured.
+	NoQueueSamples bool
+
 	// MTU is the largest datagram the path will carry, in bytes. Zero means
 	// unlimited, which is what every link modelled here did before: any
 	// datagram, however large, arrived.

@@ -3231,6 +3231,25 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 			"packet.windowSize", packet.Header.WndSize,
 			"now", now)
 	}
+	// A SYN that is not this connection's own, retransmitted, is ignored,
+	// and this connection is left as it was. libutp drops any SYN for a
+	// connection it already has -- "rejected incoming connection, connection
+	// already exists" (utp_internal.cpp:2957-2965) -- so the connection never
+	// sees it. This took one with another sequence number, or any SYN at a
+	// connection we dialled, for a protocol violation and reset itself: a
+	// peer's new connection that happened to draw the ids of one this side
+	// still held -- closing, or left behind -- killed the established one.
+	// Measured in a two-hour soak: 41 connections in 880,000. A SYN with
+	// this connection's own sequence number is the peer not having heard
+	// the SYN-ACK, and is still answered (the st_syn case at the end).
+	if packet.Header.PacketType == st_syn && !c.isOwnSyn(packet.Header.SeqNum) {
+		if c.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+			c.logger.Debug("ignoring a SYN that is not this connection's",
+				"seq", packet.Header.SeqNum, "cid.send", c.cid.Send, "cid.recv", c.cid.Recv)
+		}
+		return
+	}
+
 	// Every packet from the peer is evidence the connection is still alive,
 	// which is what Close watches to decide whether waiting for the flush is
 	// still worth anything.
@@ -3944,26 +3963,18 @@ func (c *connection) processAck(
 	return nil
 }
 
-func (c *connection) onSyn(seqNum uint16) {
-	var err error
-
-	if c.endpoint.Type == Acceptor {
-		// If we are the accepting endpoint, check whether the SYN is a retransmission
-		// A non-matching sequence number is incorrect behavior
-		if seqNum != c.endpoint.SynNum {
-			err = ErrInvalidSyn
-		}
-	} else {
-		// If we are the initiating endpoint, then an incoming SYN is incorrect behavior
-		err = ErrSynFromAcceptor
-	}
-
-	if err != nil {
-		if c.state.stateType != ConnClosed {
-			c.reset(err)
-		}
-	}
+// isOwnSyn reports whether a SYN is this connection's own, retransmitted by a
+// peer that has not heard the SYN-ACK.
+func (c *connection) isOwnSyn(seqNum uint16) bool {
+	return c.endpoint.Type == Acceptor && seqNum == c.endpoint.SynNum
 }
+
+// onSyn handles a SYN that reached the connection. Only its own does (see
+// onPacket), and that one changes nothing here: it is answered with the
+// SYN-ACK again. Anything else used to reset the connection with
+// ErrInvalidSyn or ErrSynFromAcceptor; libutp never lets such a SYN reach
+// one (utp_internal.cpp:2957-2965).
+func (c *connection) onSyn(seqNum uint16) {}
 
 func (c *connection) onState(seqNum, ackNum uint16) {
 	if ConnConnecting != c.state.stateType {

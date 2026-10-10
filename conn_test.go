@@ -74,11 +74,16 @@ func TestOnSynInitiator(t *testing.T) {
 		SynNum: syn,
 	}
 	conn := CreateTestConnection(endpoint)
+	before := conn.state.stateType
 
-	conn.onSyn(syn)
+	// A SYN at a connection we dialled is not ours to answer, and libutp
+	// never lets one reach the connection ("connection already exists",
+	// utp_internal.cpp:2957-2965). It used to reset it with
+	// ErrSynFromAcceptor.
+	conn.onPacket(NewPacketBuilder(st_syn, 7, 0, 1<<20, syn).Build(), time.Now())
 
-	require.Equal(t, ConnClosed, conn.state.stateType, "expected state to be closed")
-	require.ErrorIs(t, conn.state.Err, ErrSynFromAcceptor, "expected error to be %v, got %v", ErrSynFromAcceptor, conn.state.Err)
+	require.Equal(t, before, conn.state.stateType, "a stray SYN changed the connection's state")
+	require.NoError(t, conn.state.Err, "a stray SYN ended the connection")
 }
 
 func TestOnSynAcceptor(t *testing.T) {
@@ -108,13 +113,19 @@ func TestOnSynAcceptorNonMatchingSyn(t *testing.T) {
 	}
 	conn := CreateTestConnection(endpoint)
 
-	// Step 2: Try with different syn value
+	before := conn.state.stateType
+
+	// Step 2: a SYN with a different sequence number is another
+	// connection's, one that drew the same ids. It is ignored, as libutp
+	// ignores any SYN for a connection it has (utp_internal.cpp:2957-2965).
+	// It used to reset this one with ErrInvalidSyn: the long soak saw a
+	// peer's new connection kill an established one that way, 41 times in
+	// 880,000 connections.
 	altSyn := uint16(128)
-	conn.onSyn(altSyn)
-	require.Equal(t, ConnClosed, conn.state.stateType,
-		"expected state to be closed, got %v", conn.state.stateType)
-	require.ErrorIs(t, conn.state.Err, ErrInvalidSyn,
-		"expected error to be %v, got %v", ErrInvalidSyn, conn.state.Err)
+	conn.onPacket(NewPacketBuilder(st_syn, 7, 0, 1<<20, altSyn).Build(), time.Now())
+	require.Equal(t, before, conn.state.stateType,
+		"a SYN that was not this connection's changed its state")
+	require.NoError(t, conn.state.Err, "a SYN that was not this connection's ended it")
 }
 
 func TestOnStateConnectingInitiator(t *testing.T) {

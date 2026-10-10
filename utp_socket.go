@@ -31,6 +31,10 @@ const (
 	// retransmissions back off from its 1000ms RTO floor, so this covers the
 	// first few, which is where a lost acknowledgement costs something.
 	lingerAckTimeout = 10 * time.Second
+
+	// idQuarantine is how long a closed connection's ids are kept from a new
+	// connection to the same peer. See GenerateCid.
+	idQuarantine = lingerAckTimeout
 	// rstInfoLimit is the number of remembered RESETs past which we stop
 	// answering unknown packets at all. Matches libutp's RST_INFO_LIMIT
 	// (utp_internal.cpp:72).
@@ -392,6 +396,10 @@ type UtpSocket struct {
 	// again. See connection.lingerAck.
 	lingerAcks        *syncMap[*packet]
 	lingerExpirations *timeWheel[any, string]
+	// recentlyClosed holds the keys of connections that ended in the last
+	// idQuarantine. See GenerateCid.
+	recentlyClosed            *syncMap[struct{}]
+	recentlyClosedExpirations *timeWheel[any, string]
 	// resetsSent counts RESETs answered to packets for connections this
 	// socket does not have. A RESET tells the peer to give up, so a healthy
 	// connection that draws one has been killed by us.
@@ -597,26 +605,33 @@ func WithSocket(ctx context.Context, socket Conn, logger log.Logger, opts ...Soc
 		lingerAcks.remove(key)
 	})
 
+	recentlyClosed := newSyncMap[struct{}]()
+	recentlyClosedExpirations := newTimeWheel[any, string](time.Second, 16, func(key any, _ string) {
+		recentlyClosed.remove(key)
+	})
+
 	utp := &UtpSocket{
-		ctx:                      ctx,
-		cancel:                   cancel,
-		lingerAcks:               lingerAcks,
-		lingerExpirations:        lingerExpirations,
-		retransmitTimers:         newRetransmitTimers(defaultRetransmitTickInterval, defaultRetransmitSlots),
-		rstInfo:                  rstInfo,
-		rstInfoExpirations:       rstExpirations,
-		logger:                   logger,
-		conns:                    make(map[string]chan *streamEvent),
-		inlineConns:              make(map[chan *streamEvent]*connection),
-		accepts:                  make(chan *Accept, 1000),
-		acceptsWithCidCh:         make(chan *Accept, 1000),
-		socketEvents:             make(chan *socketEvent, socketEventQueueLen),
-		awaiting:                 awaitingMap,
-		awaitingExpirations:      awaitExpirations,
-		incomingConns:            incomingConns,
-		incomingConnsExpirations: incomingExpirations,
-		socket:                   socket,
-		maxConns:                 DefaultMaxConnections,
+		recentlyClosed:            recentlyClosed,
+		recentlyClosedExpirations: recentlyClosedExpirations,
+		ctx:                       ctx,
+		cancel:                    cancel,
+		lingerAcks:                lingerAcks,
+		lingerExpirations:         lingerExpirations,
+		retransmitTimers:          newRetransmitTimers(defaultRetransmitTickInterval, defaultRetransmitSlots),
+		rstInfo:                   rstInfo,
+		rstInfoExpirations:        rstExpirations,
+		logger:                    logger,
+		conns:                     make(map[string]chan *streamEvent),
+		inlineConns:               make(map[chan *streamEvent]*connection),
+		accepts:                   make(chan *Accept, 1000),
+		acceptsWithCidCh:          make(chan *Accept, 1000),
+		socketEvents:              make(chan *socketEvent, socketEventQueueLen),
+		awaiting:                  awaitingMap,
+		awaitingExpirations:       awaitExpirations,
+		incomingConns:             incomingConns,
+		incomingConnsExpirations:  incomingExpirations,
+		socket:                    socket,
+		maxConns:                  DefaultMaxConnections,
 	}
 
 	// Applied before the loops start, so nothing can observe a half-built
@@ -1443,6 +1458,8 @@ func (s *UtpSocket) Close() {
 		s.incomingConnsExpirations.stop()
 		s.retransmitTimers.stop()
 		s.rstInfoExpirations.stop()
+		s.lingerExpirations.stop()
+		s.recentlyClosedExpirations.stop()
 		// Close the underlying socket when we opened it. Without this the UDP
 		// port stayed bound for the life of the process and readLoop stayed
 		// parked in ReadFrom, which cancelling the context does not interrupt
@@ -1525,8 +1542,18 @@ func (s *UtpSocket) GenerateCid(peer ConnectionPeer, isInitiator bool, eventCh c
 		// id) key is free (utp_internal.cpp:2533-2538). This checked only the
 		// exact pair, so a new connection could take the receive id an
 		// accepted one already had.
+		//
+		// Nor one that ended in the last idQuarantine: what is still in
+		// flight for it, or still coming from a peer finishing its side of
+		// it, would reach the new connection. A RESET for the old one
+		// arriving while the new one dialled refused it -- the long soak
+		// drew that once a minute or so, the same ids picked 0.18s after
+		// the last connection to hold them closed. TCP keeps a closed
+		// connection's ports out of use for the same reason (TIME_WAIT);
+		// libutp does not. See DEVIATIONS.md, "A closed connection's ids
+		// are not reused at once".
 		s.connsMutex.Lock()
-		if !s.recvIdTakenLocked(recv, peer.Hash()) {
+		if !s.recvIdTakenLocked(recv, peer.Hash()) && !s.recentlyClosedRecvId(recv, peer.Hash()) {
 			if eventCh != nil {
 				s.conns[cid.Hash()] = eventCh
 				s.connsGen.Add(1)
@@ -1777,6 +1804,8 @@ func (s *UtpSocket) removeConnStream(key string) {
 	}
 	if ch, ok := s.conns[key]; ok {
 		delete(s.inlineConns, ch)
+		s.recentlyClosed.put(key, struct{}{})
+		s.recentlyClosedExpirations.put(key, key, idQuarantine)
 	}
 	delete(s.conns, key)
 	s.connsGen.Add(1)
@@ -1887,6 +1916,18 @@ func routeCandidates(p *packet, pairs *[4][2]uint16) [][2]uint16 {
 		pairs[1] = [2]uint16{id - 1, id}
 		return pairs[:2]
 	}
+}
+
+// recentlyClosedRecvId reports whether a connection to the peer that received
+// on recv ended in the last idQuarantine.
+func (s *UtpSocket) recentlyClosedRecvId(recv uint16, peerKey string) bool {
+	var buf [96]byte
+	for _, send := range [2]uint16{recv + 1, recv - 1} {
+		if _, ok := s.recentlyClosed.get(string(appendConnKey(buf[:0], send, recv, peerKey))); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // recvIdTakenLocked reports whether a connection to the peer already receives

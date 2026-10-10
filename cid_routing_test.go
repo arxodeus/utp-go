@@ -160,3 +160,56 @@ func TestDialledConnectionAvoidsAReceiveIdInUse(t *testing.T) {
 		t.Fatalf("a dialled connection was given receive id %d, which an accepted one already has", taken)
 	}
 }
+
+// A connection that has just ended does not lend its ids to the next one to
+// the same peer. Whatever was still in flight for it -- here, the RESET the
+// peer sent -- would reach the new connection; in the long soak a RESET for
+// the old connection refused the new one while it dialled.
+func TestClosedConnectionIdsAreNotReusedAtOnce(t *testing.T) {
+	const recv = 7000
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn := newScriptedConn()
+	sock := WithSocket(ctx, conn, conformanceLogger())
+	defer sock.Close()
+
+	done := make(chan *UtpStream, 1)
+	go func() {
+		s, _ := sock.ConnectWithCid(ctx, NewConnectionId(conn.peer, recv, recv+1), NewConnectionConfig())
+		done <- s
+	}()
+	syn := awaitSyn(t, conn)
+	conn.inject(NewPacketBuilder(st_state, syn.Header.ConnectionId, uint32(time.Now().UnixMicro()), 1<<20, 300).
+		WithAckNum(syn.Header.SeqNum).Build().Encode())
+	if <-done == nil {
+		t.Fatal("did not connect")
+	}
+	// The peer resets it, and it is gone.
+	conn.inject(NewPacketBuilder(st_reset, recv, 0, 0, 301).WithAckNum(syn.Header.SeqNum).Build().Encode())
+	deadline := time.Now().Add(5 * time.Second)
+	for sock.NumConnections() > 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if n := sock.NumConnections(); n != 0 {
+		t.Fatalf("%d connections after the reset", n)
+	}
+
+	draws := []uint16{recv, recv + 100}
+	var mu sync.Mutex
+	next := func() uint16 {
+		mu.Lock()
+		defer mu.Unlock()
+		v := draws[0]
+		if len(draws) > 1 {
+			draws = draws[1:]
+		}
+		return v
+	}
+	prev := randomUint16Source.Load()
+	randomUint16Source.Store(&next)
+	cid := sock.GenerateCid(conn.peer, true, nil)
+	randomUint16Source.Store(prev)
+	if cid.Recv == recv {
+		t.Fatalf("receive id %d reused the moment the connection holding it ended", recv)
+	}
+}

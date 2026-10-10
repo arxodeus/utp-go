@@ -283,7 +283,9 @@ accepted:
 	if queueDelay > l.stats.QueueDelayMax {
 		l.stats.QueueDelayMax = queueDelay
 	}
-	l.samples = append(l.samples, QueueSample{At: now, Delay: queueDelay, BacklogBytes: l.queuedBytes})
+	if !cfg.NoQueueSamples {
+		l.samples = append(l.samples, QueueSample{At: now, Delay: queueDelay, BacklogBytes: l.queuedBytes})
+	}
 	l.mu.Unlock()
 
 	// Nudge the delivery goroutine: the new packet may be due before whatever
