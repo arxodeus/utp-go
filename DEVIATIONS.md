@@ -628,9 +628,14 @@ is still ahead of it. The cause was the window update, not linear in the
 acknowledgements after all: each one divided by a window its predecessor had
 just grown. It no longer does, and the link now takes 2.15 Mbps (see "The
 window grows by a round trip's worth per round trip"). The emulated network hands this receiver each
-datagram on its own, so it sends 0.78 acknowledgements per data packet there
-where libutp's receiver, driven over the same network, sends 0.63; over real
-sockets the two send the same number.
+datagram on its own, and so did the libutp comparisons over it, where
+libutp's end drains a batch before acknowledging: 0.78 acknowledgements per
+data packet against libutp's 0.63. Those comparisons now give our end the
+same batches (`batchedReader`), and it sends fewer than libutp's receiver
+over the same network: 0.78-0.82 per data packet against 0.98 at 10 Mb/s,
+0.55-0.56 against 0.64-0.66 at 20 Mb/s, 0.24-0.27 against 0.27-0.29 at
+100 Mb/s (2 MB, three runs each). Over real sockets the two send the same
+number.
 
 *Earlier versions of this entry* applied the rate term on every path. It
 measured as a trade-off -- 1.43 s against libutp's best of 1.51 s at 100

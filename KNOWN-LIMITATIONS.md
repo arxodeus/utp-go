@@ -1695,8 +1695,22 @@ every path: at 100 Mb/s it gained nothing and cost 190 us an acknowledgement.
 It now applies only once ours are seen to queue on the way back, which keeps
 the gain on slow return paths (DEVIATIONS.md).
 
-The virtual-clock driver (`driver.cpp`) consumes its buffer the same way; its
-time is virtual, so the copying changes nothing it measures, and it is left.
+The driver (`driver.cpp`) had the same flat buffer, and this file said its
+time was virtual, so the copying changed nothing it measured. That was true
+of the conformance corpus and not of the comparisons over the emulated
+network, which drive it on the real clock (`libutpEndpoint.setTime`) with the
+whole payload written at once: every `utp_write` moved the rest of a 2-4 MB
+queue. It now consumes by offset as the bridge does. libutp to libutp at 100
+Mb/s over the emulated network, twenty runs a side interleaved: 79.14 to
+82.16 Mbps median (z = 2.42). The 10 and 20 Mb/s profiles did not move.
+
+The same comparisons handed our end each datagram as its own read, where
+libutp's end drains what has arrived before acknowledging
+(`libutpEndpoint.run`). Our end now reads in batches there too
+(`batchedReader`). With both changes, libutp's sender to our receiver at 100
+Mb/s: 74.3 to 88.8 Mbps median (z = 4.6), and runs slowed to about 20 Mbps
+by a timeout from 8 in 20 to none; libutp's sender to its own receiver had 3
+in 20.
 
 ## libutp was wired up wrongly, three times, and each time it looked like a result
 
