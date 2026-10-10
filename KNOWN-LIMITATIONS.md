@@ -4259,6 +4259,19 @@ bimodal in both, runs landing near 1.4 or near 3.4 Mbps: 5 of 15 in the fast
 mode before, 10 of 15 after. That leans towards an improvement but fifteen
 runs do not settle it. Nothing measured got worse.
 
+## Two LEDBAT++ flows on a 64 KB queue split less evenly since the MTU search starts at the ceiling — open
+
+Found regenerating BENCHMARKS.md: the "Two flows, 8Mbps bottleneck" row for
+LEDBAT++ split 43/57 while both ran (worst 33/67), where the table had said
+49/51 (worst 47/53). Bisected, seven runs a step, to `3635024`, "Start the
+MTU search at the ceiling, as libutp does", and confirmed against its parent
+with fourteen runs each: the smaller share 48.5% median (44.3-49.9) before,
+43.75% (33.4-49.9) after, z = -3.15, with the same 11 queue drops. Classic
+LEDBAT on the same row is 50/50 either way, and the 2 MB queue row is
+unaffected. The commit matches libutp, which has no LEDBAT++; why full-size
+packets from the first round trip unbalance two LEDBAT++ flows on a queue
+that holds about 45 of them has not been traced.
+
 ## LEDBAT++'s latecomer takes most of the link — open
 
 Found while re-measuring the latecomer experiment after the fixes above. A
