@@ -2277,6 +2277,7 @@ func (c *connection) sampleMetrics(now time.Time, force bool) {
 		m.InFlightBytes = cs.WindowSizeBytes
 		m.MinCwndBytes = cs.MinWindowSizeBytes
 		m.RTT = cs.RTT
+		m.FineRTT = cs.FineRTT
 		m.RTTVarianceMicros = cs.RTTVarianceMicros
 		m.Timeout = cs.Timeout
 		m.BaseDelay = cs.BaseDelay

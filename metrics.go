@@ -27,8 +27,12 @@ type ConnectionMetrics struct {
 	// smaller than CwndBytes, flow control -- not congestion control -- is
 	// what limits sending.
 	PeerRecvWindow uint32
-	// RTT is the smoothed round-trip estimate.
+	// RTT is the smoothed round-trip estimate: libutp's, in whole
+	// milliseconds.
 	RTT time.Duration
+	// FineRTT is the same estimate kept in microseconds, for measuring a
+	// queue a millisecond or two deep.
+	FineRTT time.Duration
 	// RTTVarianceMicros is the RTT variance estimate, in microseconds.
 	RTTVarianceMicros int64
 	// Timeout is the current retransmission timeout.

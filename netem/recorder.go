@@ -179,13 +179,15 @@ func (r *Recorder) Summary() Summary {
 				pinned++
 			}
 		}
-		if m.RTT > 0 {
-			rtts = append(rtts, m.RTT)
-			if m.RTT > s.RTTMax {
-				s.RTTMax = m.RTT
+		// The fine estimate: the whole-millisecond one rounds a 2 ms queue
+		// to 1 or 3 and cannot show one under a millisecond at all.
+		if rtt := m.FineRTT; rtt > 0 {
+			rtts = append(rtts, rtt)
+			if rtt > s.RTTMax {
+				s.RTTMax = rtt
 			}
-			if s.RTTMin == 0 || m.RTT < s.RTTMin {
-				s.RTTMin = m.RTT
+			if s.RTTMin == 0 || rtt < s.RTTMin {
+				s.RTTMin = rtt
 			}
 		}
 		if q := m.QueueingDelay(); q > 0 {
