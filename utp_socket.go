@@ -1552,8 +1552,18 @@ func (s *UtpSocket) GenerateCid(peer ConnectionPeer, isInitiator bool, eventCh c
 		// connection's ports out of use for the same reason (TIME_WAIT);
 		// libutp does not. See DEVIATIONS.md, "A closed connection's ids
 		// are not reused at once".
+		//
+		// And neither of its ids may be one another connection to the peer
+		// uses in either direction. A RESET is matched on the receive id
+		// first, as libutp matches it, so a connection sending on the id
+		// another receives on has its RESETs taken by the other: in the soak
+		// a dialling connection was refused by a RESET meant for one that
+		// sent on its receive id and had just closed. libutp draws only the
+		// receive id free and has the same ambiguity. With every id used by
+		// one connection at most, no packet can be for two.
 		s.connsMutex.Lock()
-		if !s.recvIdTakenLocked(recv, peer.Hash()) && !s.recentlyClosedRecvId(recv, peer.Hash()) {
+		peerKey := peer.Hash()
+		if !s.idInUseLocked(recv, peerKey) && !s.idInUseLocked(send, peerKey) {
 			if eventCh != nil {
 				s.conns[cid.Hash()] = eventCh
 				s.connsGen.Add(1)
@@ -1918,12 +1928,17 @@ func routeCandidates(p *packet, pairs *[4][2]uint16) [][2]uint16 {
 	}
 }
 
-// recentlyClosedRecvId reports whether a connection to the peer that received
-// on recv ended in the last idQuarantine.
-func (s *UtpSocket) recentlyClosedRecvId(recv uint16, peerKey string) bool {
+// idInUseLocked reports whether a connection to the peer, live or ended in
+// the last idQuarantine, sends or receives on id. Called with connsMutex
+// held.
+func (s *UtpSocket) idInUseLocked(id uint16, peerKey string) bool {
 	var buf [96]byte
-	for _, send := range [2]uint16{recv + 1, recv - 1} {
-		if _, ok := s.recentlyClosed.get(string(appendConnKey(buf[:0], send, recv, peerKey))); ok {
+	for _, pair := range [4][2]uint16{{id + 1, id}, {id - 1, id}, {id, id + 1}, {id, id - 1}} {
+		key := appendConnKey(buf[:0], pair[0], pair[1], peerKey)
+		if _, ok := s.conns[string(key)]; ok {
+			return true
+		}
+		if _, ok := s.recentlyClosed.get(string(key)); ok {
 			return true
 		}
 	}

@@ -213,3 +213,41 @@ func TestClosedConnectionIdsAreNotReusedAtOnce(t *testing.T) {
 		t.Fatalf("receive id %d reused the moment the connection holding it ended", recv)
 	}
 }
+
+// A dialled connection does not send on an id another connection to the
+// peer receives on. A RESET is matched on the receive id first, as libutp
+// matches it, so the first connection would take the second's RESETs: in the
+// long soak, one dialling was refused by a RESET meant for one that sent on
+// its receive id.
+func TestDialledConnectionDoesNotSendOnAnIdInUse(t *testing.T) {
+	const recv = 7000
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn := newScriptedConn()
+	sock := WithSocket(ctx, conn, conformanceLogger())
+	defer sock.Close()
+
+	// A connection receiving on recv, sending on recv+1.
+	go sock.ConnectWithCid(ctx, NewConnectionId(conn.peer, recv, recv+1), NewConnectionConfig())
+	awaitSyn(t, conn)
+
+	// The first draw would receive on recv-1 and send on recv.
+	draws := []uint16{recv - 1, recv + 100}
+	var mu sync.Mutex
+	next := func() uint16 {
+		mu.Lock()
+		defer mu.Unlock()
+		v := draws[0]
+		if len(draws) > 1 {
+			draws = draws[1:]
+		}
+		return v
+	}
+	prev := randomUint16Source.Load()
+	randomUint16Source.Store(&next)
+	cid := sock.GenerateCid(conn.peer, true, nil)
+	randomUint16Source.Store(prev)
+	if cid.Send == recv {
+		t.Fatalf("a dialled connection sends on %d, which another connection to the peer receives on", recv)
+	}
+}

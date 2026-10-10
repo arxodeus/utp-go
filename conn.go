@@ -3258,6 +3258,22 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	c.packetsReceived++
 	c.bytesReceived += uint64(len(packet.Body))
 
+	// A RESET ends the connection whatever its numbers say. libutp acts on
+	// one at the socket, before anything about the packet is checked
+	// (utp_internal.cpp:2850-2873). It went through the checks below here,
+	// and a RESET acknowledges the packet that drew it: one answering our
+	// acknowledgement or keep-alive names our next, unsent sequence number,
+	// which the acknowledgement check reads as acknowledging a packet never
+	// sent, and its random sequence number can fall outside the reorder
+	// window. Either way it was dropped, so a connection whose peer had gone
+	// heard the peer's socket say so and carried on: in the long soak,
+	// server connections left behind by clients that had given up, never
+	// ending.
+	if packet.Header.PacketType == st_reset {
+		c.onReset()
+		return
+	}
+
 	// libutp validates the acknowledgement number before anything else, and
 	// so does this. Order matters: a packet rejected here must not first
 	// draw a re-ack from the reorder-window check below.
