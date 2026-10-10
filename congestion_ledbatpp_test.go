@@ -248,14 +248,14 @@ func TestLedbatPPSlowStartExitsAtThreeQuartersTarget(t *testing.T) {
 
 	// Half the target: still ramping.
 	half := target / 2
-	ctrl.applyLedbatPP(0, uint32(half.Microseconds()), 1024, ctrl.minRTT+half, now)
+	ctrl.applyLedbatPP(0, uint32(half.Microseconds()), 1024, 0, ctrl.minRTT+half, now)
 	if ctrl.ppPhase != ppSlowStart {
 		t.Fatalf("left slow start at half the target delay, phase %v", ctrl.ppPhase)
 	}
 
 	// Four fifths of it: over the three-quarter line, so out.
 	fourFifths := target * 4 / 5
-	ctrl.applyLedbatPP(0, uint32(fourFifths.Microseconds()), 1024, ctrl.minRTT+fourFifths, now)
+	ctrl.applyLedbatPP(0, uint32(fourFifths.Microseconds()), 1024, 0, ctrl.minRTT+fourFifths, now)
 	if ctrl.ppPhase != ppCongestionAvoidance {
 		t.Errorf("phase is %v at 4/5 of the target delay, want congestion avoidance", ctrl.ppPhase)
 	}
@@ -273,7 +273,7 @@ func TestLedbatPPClampsDelayToRoundTrip(t *testing.T) {
 	ctrl.maxWindowSizeBytes = 16 * (ctrl.minWindowSizeBytes / 2)
 
 	// A reported queue of a full second on a 5ms path.
-	ctrl.applyLedbatPP(0, uint32(time.Second.Microseconds()), 1024, 5*time.Millisecond, time.Now())
+	ctrl.applyLedbatPP(0, uint32(time.Second.Microseconds()), 1024, 0, 5*time.Millisecond, time.Now())
 
 	if ctrl.ppPhase != ppSlowStart {
 		t.Errorf("a one-second delay claim on a 5ms path ended slow start; it should be clamped to the round trip")
@@ -445,5 +445,43 @@ func TestLedbatPPLossIsChargedOncePerCongestionEvent(t *testing.T) {
 	if got := ctrl.maxWindowSizeBytes; got != 16*packet {
 		t.Errorf("a packet sent after the cut is a new event and should halve the window: %d, want %d",
 			got, 16*packet)
+	}
+}
+
+// A round trip of acknowledgements below the target grows LEDBAT++'s window
+// by the draft's figure for a round trip: GAIN packets (§4.2).
+//
+// Each acknowledgement earns its share of the round trip's change. Two things
+// took some of it: the share was reckoned against the window as it stood,
+// which the round trip's earlier acknowledgements had already grown, and
+// each update was truncated to whole bytes -- a few bytes apiece when the
+// gain is small and the window large, so up to a byte of each was lost.
+// Measured before: 2-14% short, worst at the 20 ms gain of a sixth of a
+// packet and a hundred-packet window.
+func TestLedbatPPRoundTripGrowth(t *testing.T) {
+	for _, rtt := range []time.Duration{20 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond} {
+		for _, packets := range []int{4, 10, 30, 100} {
+			config := defaultCtrlConfig()
+			config.Algorithm = AlgorithmLEDBATPP
+			c := newDefaultController(config)
+			c.minRTT = rtt
+			c.ppPhase = ppCongestionAvoidance
+			c.ppNextSlowdownAt = time.Now().Add(time.Hour)
+			c.lastMaxedOutWindow = time.Now()
+			packet := c.minWindowSizeBytes / 2
+			window := uint32(packets) * packet
+			c.maxWindowSizeBytes = window
+			now := time.Now()
+			for i := 0; i < packets; i++ {
+				// A millisecond of queueing, well under the target.
+				c.applyLedbatPP(0, 1000, packet, window, rtt, now)
+			}
+			got := float64(c.maxWindowSizeBytes-window) / float64(packet)
+			want := ledbatPPGain(rtt)
+			if got < want*0.99 || got > want*1.01 {
+				t.Errorf("rtt %v, window of %d packets: a round trip grew it %.4f packets, the draft's figure is %.4f",
+					rtt, packets, got, want)
+			}
+		}
 	}
 }

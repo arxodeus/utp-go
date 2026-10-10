@@ -244,6 +244,7 @@ func (c *defaultController) applyLedbatPP(
 	baseMicros uint32,
 	currentMicros uint32,
 	bytesAcked uint32,
+	sentWindow uint32,
 	rtt time.Duration,
 	now time.Time,
 ) {
@@ -343,11 +344,27 @@ func (c *defaultController) applyLedbatPP(
 
 		// The formula is per round trip; this ack covers bytesAcked of the
 		// window, so it earns that fraction of the change.
+		//
+		// Of the window it was sent in, too, when that is the larger share:
+		// the window as it stands has been grown by the acknowledgements of
+		// the same round trip before this one, so a round trip's worth of
+		// them added less than a round trip's change. Classic LEDBAT does the
+		// same (sendWindowCredit; DEVIATIONS.md, "The window grows by a round
+		// trip's worth per round trip").
 		fraction := float64(bytesAcked) / float64(c.maxWindowSizeBytes)
+		if sendWindowCredit.Load() && sentWindow > 0 {
+			fraction = math.Max(fraction, float64(bytesAcked)/float64(sentWindow))
+		}
 		if fraction > 1 {
 			fraction = 1
 		}
-		adjusted := float64(c.maxWindowSizeBytes) + deltaPerRTT*fraction*float64(packetSize)
+		// With the fraction of a byte the last update could not add. An
+		// update is a few bytes when the gain is small and the window large
+		// -- a sixth of a packet a round trip, shared among a hundred
+		// packets, is two bytes each -- and truncating each to whole bytes
+		// lost up to a byte of it: a round trip grew the window 14% less
+		// than the draft's figure, measured (TestLedbatPPRoundTripGrowth).
+		adjusted := float64(c.maxWindowSizeBytes) + c.ppWindowFraction + deltaPerRTT*fraction*float64(packetSize)
 
 		// A sender that never fills its window is limited by the
 		// application, not the path, and learns nothing from the delay it
@@ -360,6 +377,10 @@ func (c *defaultController) applyLedbatPP(
 			adjusted = float64(c.minWindowSizeBytes)
 		}
 		c.maxWindowSizeBytes = clampUint32(uint32(adjusted), c.minWindowSizeBytes, c.maxWindowUpperBytes)
+		c.ppWindowFraction = 0
+		if whole := math.Floor(adjusted); whole == float64(c.maxWindowSizeBytes) {
+			c.ppWindowFraction = adjusted - whole
+		}
 	}
 }
 

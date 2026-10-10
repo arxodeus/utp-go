@@ -360,6 +360,9 @@ type defaultController struct {
 	ppFreezeUntil       time.Time
 	ppNextSlowdownAt    time.Time
 	ppSlowdownSsthresh  uint32
+	// ppWindowFraction is the part of a byte LEDBAT++'s last update in
+	// congestion avoidance added to the window and could not store in it.
+	ppWindowFraction float64
 
 	mu sync.Mutex
 }
@@ -776,7 +779,7 @@ func (c *defaultController) OnAck(seqNum uint16, ack Ack) error {
 		}
 		base, current := c.ledbatPPRTTDelay()
 		c.applyLedbatPP(uint32(base.Microseconds()), uint32(current.Microseconds()),
-			packetInst.SizeBytes, ack.RTT, ack.ReceivedAt)
+			packetInst.SizeBytes, packetInst.SentWindow, ack.RTT, ack.ReceivedAt)
 	} else {
 		// Counted towards the acknowledgement's single update, in ApplyAck.
 		rtt := ack.RTT
