@@ -155,6 +155,32 @@ silently.
 - `TestSoakUnknownConnectionFlood` — 20,000 packets for connections the socket
   does not have. Checks that the RESET rate limiting holds: 1,001 answers to
   20,000 packets, and flat memory.
+- `netem.TestSoakLongRunning` — the traffic a BitTorrent client lives with,
+  for as long as it is told to run: sixteen workers opening a connection,
+  exchanging one message of random size (mostly small, up to 512 KB) and
+  closing it, over and over, and four connections held open throughout that
+  send a message and go quiet for up to twenty seconds. The link loses 0.5%
+  and reorders 1%. Every message is answered with its SHA-256. The heap,
+  goroutines and connections are sampled; at the end there must be no
+  connections left on either socket, no more goroutines than at the start,
+  and no more growth between the halves of the run than 4 MB and a quarter
+  -- which over two hours resolves a leak of about 25 bytes a connection,
+  and was shown to catch a planted one of 1 KB in ten minutes. Fifteen
+  seconds by default; for a real soak:
+
+  ```sh
+  UTP_SOAK_DURATION=2h go test ./netem/ -run TestSoakLongRunning -count=1 -timeout 3h -v
+  ```
+
+  `UTP_SOAK_STACKS=<file>` writes every goroutine's stack there if a
+  connection is left running at the end.
+
+  **Two hours, on the code as it stands:** 885,718 exchanges, 34.7 GB,
+  no failures; the live heap 14-20 MB throughout (median 17.5 MB over the
+  first half, 19.4 over the second), no connections left, goroutines back
+  to where they started. The first two-hour run, before the fixes it led
+  to, failed four ways -- KNOWN-LIMITATIONS.md, "What a two-hour soak found"
+  and "A packet could be delivered to the wrong connection".
 - `TestTeardownRace` — the four ways a connection can end, concurrently: clean
   close, idle timeout, abandoned without reading, and context cancelled
   mid-transfer, with the sockets closed underneath while connections are still
@@ -303,9 +329,9 @@ connection outliving its socket cannot block on the report.
   the hand-written cases do not.
 - **Each differential execution injects at most 8 packets**, so a divergence
   that only appears deep into a long conversation is out of reach.
-- **No long-running soak.** The longest run here is a few hundred connection
-  cycles over seconds. Nothing has been run for hours, which is where a slow
-  leak — a few bytes per connection — would show and these would not.
+- ~~**No long-running soak.**~~ `netem.TestSoakLongRunning`, above, has run
+  two hours clean. One process, one emulated link, one pair of sockets: a
+  soak over real sockets, across many peers, or for days has not been run.
 - **No memory limit under adversarial input.** The flood test checks that
   RESET answers are rate limited, but nothing bounds what a peer can make the
   socket allocate by, say, opening many half-connections.
