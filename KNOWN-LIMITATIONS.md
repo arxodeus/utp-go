@@ -826,9 +826,22 @@ library. `native/libutp/` replaces it and does.
 
 ## Verification, and what the numbers mean
 
-All measurements here are **loopback on a single Linux machine**. No test has
-run over a real network, an emulated one with configurable loss and delay, or
-against another implementation.
+All measurements here are **on a single Linux machine**: over loopback, over
+the in-process emulated network (`netem`), or through the relay that
+emulates a link between real UDP sockets (`native/libutp/relay_test.go`).
+Most compare against real libutp on the same links. *When this paragraph
+was first written none of that existed;* it said so, and that part is no
+longer true.
+
+**What has not been measured is a real wide-area path,** and that gap
+stands. No emulator reproduces a real path's cross-traffic, its queue
+discipline (a CoDel or fq_codel router reorders the delay signal a LEDBAT
+sender reads), its delay jitter's real distribution, NAT rebinding or
+middleboxes that drop or rewrite UDP. Each number in these documents is a
+claim about the emulated link it names, and none is a claim about the
+internet. Closing the gap would take two hosts on separate networks, a
+transfer in each direction against libutp over the same path, interleaved,
+and the standing queue measured at the bottleneck, not inferred.
 
 Gates that pass:
 
