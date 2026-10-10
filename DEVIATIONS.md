@@ -605,7 +605,9 @@ Mb/s rows):
 Times are medians. At 100 Mb/s 6-7 runs in 20 took about 2.7 s for either
 receiver: libutp's sender fills the relay's 256 KB queue near the end -- its
 100 ms delay target is longer than the queue -- loses two packets, and waits
-out a timeout for them.
+out a timeout for them. With the relay's queue at 2 MB, deeper than that
+target at 100 Mb/s, none of 42 runs did, and the two receivers' medians are
+1.393 s each (9,370 acknowledgements against libutp's 10,207).
 
 The acknowledgement leaves when libutp's would, but for the runtime's wake:
 the median from a data packet reaching our socket to its acknowledgement
