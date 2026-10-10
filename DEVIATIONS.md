@@ -103,6 +103,13 @@ worse.
   20 runs each: +4.9% to +7.6% on the profiles where the window has room to
   grow, +3.5% at 5% loss, +1.3% on the 100 Mb/s LAN; deference to a
   loss-based flow unchanged.
+- *A cut for a loss that was only reordering is undone.* libutp halves its
+  window for a packet the selective acks overtook, and keeps it halved when
+  the original arrives after all. Ours undoes the cut once the
+  acknowledgement's echoed timestamp shows the original filled the hole.
+  On the reordering link, 20 runs each: classic LEDBAT 4.02 to 4.43 Mbps,
+  LEDBAT++ 2.37 to 3.37; under loss and elsewhere unchanged, deference
+  unchanged.
 - *A refused MTU probe is judged at three duplicates or more, not exactly
   three.* With a receiver that batches its reads, libutp's rule judged no
   probe in 3 runs of 3 and the search stayed at 1402 bytes on a 1000-byte
@@ -1051,7 +1058,7 @@ count at three or more, once per run; a run ends when the acknowledgement
 moves (`connection.noteDuplicateAck`, `judgeProbeFromDuplicates`). The
 evidence is the same as libutp's -- at least three packets after the probe
 arrived and the probe did not -- and it is what libutp's own selective ack
-resends on (`count >= DUPLICATE_ACKS_BEFORE_RESEND`, `:1590`).
+resends on (`count >= DUPLICATE_ACKS_BEFORE_RESEND`, `:1538`).
 
 Measured over netem, 1000-byte path, 1400-byte ceiling, the probe sent with
 the don't-fragment bit, the receiver reading in batches
@@ -1287,6 +1294,56 @@ to 4.28 at 1% loss (3.33).
 `TestConformanceLedbatRules` still replays libutp's own trace through the
 update with libutp's factor and matches it to the byte: the replay supplies
 no send windows, and with none the factor is libutp's.
+
+## A cut for a loss that was only reordering is undone
+
+libutp declares a packet lost once three later ones are selectively
+acknowledged (`count >= DUPLICATE_ACKS_BEFORE_RESEND`, `utp_internal.cpp:1538`),
+resends it, and halves the window. A packet that was only displaced -- the
+reordering benchmark link delays 2% of packets by 20 ms, which at 10 Mb/s is
+about eighteen packets -- is taken for lost every time, and the halving
+stands when the original arrives a moment later. Under LEDBAT++, whose
+window recovers slowly, how many such halvings a transfer took decided which
+of two modes it fell in, 2.35 or 2.62 Mbps; which one varied with when the
+garbage collector ran (KNOWN-LIMITATIONS.md, "Allocations per packet").
+
+This library undoes the cut when the acknowledgement shows the original
+arrived. An acknowledgement echoes the timestamp of the packet that drew it
+(the sender reads it as `ackEcho`, as the loss probe does), so the first one
+to cover the packet says which copy filled the hole: one echoing a time
+before the resend was sent means the original did. One that covers the
+packet before it was resent at all says the same without a timestamp. That
+is RFC 3522's detection; the response is RFC 4015's, restoring the window
+and the threshold to what they were before the cut, without resuming slow
+start. `defaultController.undoSpuriousLoss`; `checkSpuriousLoss` in conn.go
+decides.
+
+Every doubt leaves the cut standing, as libutp would: an echo of the resend
+or of a later packet, a peer that reports no delay, a second loss while the
+first is undecided (one halving can stand for several), a newer cut, or a
+retransmission timeout. So a wrong decision can only fail to undo.
+
+Measured against the commit before, interleaved:
+
+| Profile | Before | After |
+| --- | --- | --- |
+| Reordering, classic LEDBAT (20 runs each) | 4.02 Mbps | 4.43 Mbps (z = 5.41) |
+| Reordering, LEDBAT++ (20 runs each) | 2.37 Mbps | 3.37 Mbps (z = 5.41) |
+| 5% loss, classic LEDBAT (20 runs each) | 2.51 Mbps | 2.56 Mbps (z = 1.88) |
+| 5% loss, LEDBAT++ (20 runs each) | 0.54 Mbps | 0.56 Mbps (z = 1.39) |
+
+The rest of the benchmark suite, five runs each, moved less than 1.5% but
+for LEDBAT++ on the shallow queue, which is bimodal and split 8 of 25 runs
+into its high mode against 10 of 25 (z = -0.34 over twenty). Deference to a
+loss-based flow is unchanged: it kept 3.64-3.91 Mbps of what it got alone
+against 3.69-3.80 under classic LEDBAT, and 4.62-5.42 against 4.33-5.44
+under LEDBAT++, ten runs each; so is the latecomer's share.
+
+`TestSpuriousLossCutIsUndone` drives both answers through a scripted peer --
+the window 8,639 bytes before the loss, 5,039 after it, 10,078 once the
+original is shown to have arrived, and the cut kept when the resend's
+timestamp is echoed -- and fails with the undo switched off
+(`lossUndoEnabled`).
 
 ## A loss probe resends before the retransmission timeout
 

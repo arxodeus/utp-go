@@ -1776,6 +1776,17 @@ waiting for the reader; writers got `context canceled`. It now ends with
 (`TestSocketCloseIsReportedToTheConnection`). libutp reports
 `UTP_STATE_DESTROYING` (`utp_internal.cpp:2490`), not an end of stream.
 
+## PR 62 — undo a cut for a loss that was only reordering
+
+A packet the selective acks overtake is taken for lost and the window
+halved, as libutp does; when the first acknowledgement to cover it echoes a
+timestamp from before the resend -- or covers it before it was resent -- the
+original arrived, and the cut is undone (RFC 3522 detection, RFC 4015
+response). Any doubt leaves the cut standing. Reordering link, 20 runs each:
+classic LEDBAT 4.02 to 4.43 Mbps, LEDBAT++ 2.37 to 3.37; loss profiles and
+deference unchanged. A deviation from libutp, switchable
+(`lossUndoEnabled`); see DEVIATIONS.md.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

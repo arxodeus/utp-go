@@ -3681,7 +3681,7 @@ const duplicateAcksBeforeResend = 3
 // 10 under the equality test, the search never once hearing that a probe was
 // refused. Three or more is the same evidence -- at least three packets after
 // the hole arrived and the hole did not -- that libutp's selective ack already
-// resends on (`count >= DUPLICATE_ACKS_BEFORE_RESEND`, :1590).
+// resends on (`count >= DUPLICATE_ACKS_BEFORE_RESEND`, :1538).
 func (c *connection) noteDuplicateAck(packetType PacketType, ackNum uint16) {
 	if c.state.stateType != ConnConnected || c.state.SentPackets == nil {
 		return

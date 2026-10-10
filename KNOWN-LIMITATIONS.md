@@ -428,9 +428,15 @@ lands high, 9 times in 40 against 21. A high run is one where reordering is
 taken for loss five times, a low one six or more: one more spurious fast
 retransmission, which LEDBAT++ halves its window for. Under `GOGC=400`,
 thirty runs a side, the split is 15 against 14 (z = 0.78). Classic LEDBAT on
-the same link is unchanged (4.01 against 4.01). Left as it is: what moves
-the mode is when the collector runs in a process the sender, the receiver
-and the emulated network share, not anything the protocol does.
+the same link is unchanged (4.01 against 4.01). What moves the mode is when
+the collector runs in a process the sender, the receiver and the emulated
+network share, not anything the protocol does.
+
+**Since removed at its root.** The halving a reordered packet causes is now
+undone once the acknowledgement shows the original arrived (DEVIATIONS.md, "A
+cut for a loss that was only reordering is undone"), so neither mode is left:
+LEDBAT++ on that link goes from 2.37 to 3.37 Mbps and classic LEDBAT from
+4.02 to 4.43, twenty runs each.
 
 The benchmark suite against the commit before, five runs a side and then
 twenty of each profile that moved more than 1.5%: the 100 Mb/s LAN link
