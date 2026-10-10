@@ -327,6 +327,44 @@ profile measure 90.28 Mbps median against 86.27 for the commit before,
 +4.6%, Mann-Whitney z = 3.14: above the 89.9 the link measured before the
 memory change.
 
+## A packet could be delivered to the wrong connection
+
+**Fixed.** Found by the first long-running soak (`netem.TestSoakLongRunning`,
+FUZZING.md) in the first seconds it ran: a churning client's connect failed
+with "connection refused", now and then, and the server was left holding a
+connection that never ended.
+
+A uTP packet carries the receiving end's connection id: each side sends with
+its send id, which is the other's receive id. The socket looked each packet
+up three ways in turn, and the first treated the id as our *send* id. Two
+connections to one peer whose ids are adjacent -- one receiving on R and
+sending on R+1, the next receiving on R+1 -- then share a number, and a
+packet for the second matched the first. The second connection's SYN-ACK
+was delivered into the first, which dropped it as an acknowledgement outside
+its window; the second never connected, and the server's half of it waited
+for a client that had given up. With random 16-bit ids the pair comes up
+once every few thousand connections to one peer -- in the soak, which makes
+about 120 a second, in four fifteen-second runs of five. Inherited from the original
+upstream code.
+
+libutp keys a connection by address and receive id. A packet is looked up
+on its id as the receive id alone; only a RESET is also tried as the send id;
+a SYN is matched only as a retransmission of one already taken
+(`utp_internal.cpp:2856-2892`, `:2957`). Routing here now does exactly that.
+It relies on receive ids being unique per peer, which libutp keeps and this
+did not: a dialled connection draws its id until no connection to the peer
+receives on it (`:2533-2538`), where the check was for the identical pair
+only, and a SYN whose connection would receive on an id a dialled connection
+holds is refused without an answer, as libutp refuses it (`:2957-2965`;
+counted in `UtpSocket.ConnectionsRefusedIdInUse`).
+
+`TestPacketReachesTheConnectionItIsFor` dials two such connections over a
+scripted peer and fails without the routing change; the two uniqueness rules
+have a test each (`TestSynForATakenReceiveIdIsRefused`,
+`TestDialledConnectionAvoidsAReceiveIdInUse`), each failing without its
+rule. The soak failed four runs in five before (two hung, two failed) and
+passed six of six after.
+
 ## A busy connection grew without bound
 
 **Fixed.** Found looking for the allocations behind the cost above. Two
