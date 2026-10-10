@@ -671,7 +671,7 @@ func newConnection(
 		peerRecvWindow = math.MaxUint32
 	}
 
-	unackTimeoutCh := make(chan *packet, 1000)
+	unackTimeoutCh := make(chan *packet, unackTimeoutQueueLen)
 
 	return &connection{
 		ctx:            ctx,
@@ -702,6 +702,18 @@ func newConnection(
 		mtu: newMtuSearch(uint32(config.MaxPacketSize), clk.Now()),
 	}
 }
+
+// unackTimeoutQueueLen is the capacity of a connection's queue of expired
+// retransmission timers.
+//
+// It was 1000, 8 KB allocated whole on every connection, more than a third
+// of what an idle one held. When the retransmission timeout passes, every
+// outstanding packet's timer expires on the same tick, but only the first
+// delivered acts: it moves the deadline, and each one after it finds the
+// deadline ahead and re-arms (onTimeout). The wheel never blocks on a full
+// queue -- it re-arms the timer for its next tick (newRetransmitTimers) -- so
+// what does not fit arrives one tick later to the same no-op.
+const unackTimeoutQueueLen = 16
 
 // armRetransmit schedules a retransmission timer for one packet.
 func (c *connection) armRetransmit(pkt *packet, delay time.Duration) {

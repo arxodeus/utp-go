@@ -65,6 +65,12 @@ type UtpStream struct {
 	ended chan struct{}
 }
 
+// writeQueueLen is how many writes can wait for a connection to take them.
+// A Write blocks until its bytes are accepted, so more than one is waiting
+// only when several goroutines write to one stream at once, and those wait
+// either way. It was 100, 800 bytes allocated whole per connection.
+const writeQueueLen = 16
+
 func NewUtpStream(
 	ctx context.Context,
 	logger log.Logger,
@@ -91,7 +97,7 @@ func NewUtpStream(
 		logger:       logger,
 		cid:          cid,
 		reads:        make(chan *readOrWriteResult, 100),
-		writes:       make(chan *queuedWrite, 100),
+		writes:       make(chan *queuedWrite, writeQueueLen),
 		streamEvents: streamEvents,
 		connHandle:   connHandle,
 		shutdown:     &atomic.Bool{},
