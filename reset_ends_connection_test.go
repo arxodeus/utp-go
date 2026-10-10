@@ -47,7 +47,7 @@ func TestResetAnsweringOurAckEndsTheConnection(t *testing.T) {
 			time.Sleep(time.Millisecond)
 		}
 		conn.inject(NewPacketBuilder(st_data, peerID+1, uint32(time.Now().UnixMicro()), 1<<20, 901).
-			WithAckNum(ourSeq-1).WithPayload([]byte("hi")).Build().Encode())
+			WithAckNum(ourSeq - 1).WithPayload([]byte("hi")).Build().Encode())
 		got := make(chan error, 1)
 		go func() {
 			buf := make([]byte, 16)
