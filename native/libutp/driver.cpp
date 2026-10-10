@@ -59,11 +59,14 @@ struct libutp_driver {
 	int want_close;
 	int close_sent;
 
+	// Each buffer holds len bytes at buf + head; see drv_consume.
 	unsigned char *rx;
+	size_t rx_head;
 	size_t rx_len;
 	size_t rx_cap;
 
 	unsigned char *tx;
+	size_t tx_head;
 	size_t tx_len;
 	size_t tx_cap;
 };
@@ -77,9 +80,13 @@ static void driver_peer_addr(struct sockaddr_in *addr) {
 	addr->sin_port = htons(23456);
 }
 
-static int drv_append(unsigned char **buf, size_t *len, size_t *cap,
+static int drv_append(unsigned char **buf, size_t *head, size_t *len, size_t *cap,
                       const void *src, size_t n) {
 	if (n == 0) return 0;
+	if (*head + *len + n > *cap && *head > 0) {
+		memmove(*buf, *buf + *head, *len);
+		*head = 0;
+	}
 	if (*len + n > *cap) {
 		size_t want = *cap ? *cap : 4096;
 		while (want < *len + n) want *= 2;
@@ -88,25 +95,29 @@ static int drv_append(unsigned char **buf, size_t *len, size_t *cap,
 		*buf = grown;
 		*cap = want;
 	}
-	memcpy(*buf + *len, src, n);
+	memcpy(*buf + *head + *len, src, n);
 	*len += n;
 	return 0;
 }
 
-static void drv_consume(unsigned char *buf, size_t *len, size_t n) {
+// drv_consume moves head on; the bytes are moved to the front only when an
+// append needs the room, so taking a packet's worth off a large send queue
+// does not move the rest of it, as in bridge.cpp's byte_buf.
+static void drv_consume(size_t *head, size_t *len, size_t n) {
 	if (n >= *len) {
+		*head = 0;
 		*len = 0;
 		return;
 	}
-	memmove(buf, buf + n, *len - n);
+	*head += n;
 	*len -= n;
 }
 
 static void drv_pump_writes(libutp_driver *d) {
 	while (d->sock && d->tx_len > 0) {
-		ssize_t n = utp_write(d->sock, d->tx, d->tx_len);
+		ssize_t n = utp_write(d->sock, d->tx + d->tx_head, d->tx_len);
 		if (n <= 0) break;
-		drv_consume(d->tx, &d->tx_len, (size_t)n);
+		drv_consume(&d->tx_head, &d->tx_len, (size_t)n);
 	}
 	if (d->want_close && !d->close_sent && d->tx_len == 0 && d->sock) {
 		utp_close(d->sock);
@@ -134,7 +145,7 @@ static uint64 drv_sendto(utp_callback_arguments *a) {
 
 static uint64 drv_on_read(utp_callback_arguments *a) {
 	libutp_driver *d = drv_of(a);
-	drv_append(&d->rx, &d->rx_len, &d->rx_cap, a->buf, a->len);
+	drv_append(&d->rx, &d->rx_head, &d->rx_len, &d->rx_cap, a->buf, a->len);
 	utp_read_drained(a->socket);
 	return 0;
 }
@@ -397,7 +408,7 @@ long libutp_driver_write(libutp_driver *d, const void *buf, size_t len) {
 	// See global_lock.h: libutp's statics are process-wide, so two
 	// drivers on two goroutines are two threads inside one libutp.
 	libutp_guard guard;
-	if (drv_append(&d->tx, &d->tx_len, &d->tx_cap, buf, len) < 0) return -1;
+	if (drv_append(&d->tx, &d->tx_head, &d->tx_len, &d->tx_cap, buf, len) < 0) return -1;
 	drv_pump_writes(d);
 	return (long)len;
 }
@@ -408,8 +419,8 @@ long libutp_driver_read(libutp_driver *d, void *buf, size_t len) {
 	libutp_guard guard;
 	size_t n = d->rx_len < len ? d->rx_len : len;
 	if (n > 0) {
-		memcpy(buf, d->rx, n);
-		drv_consume(d->rx, &d->rx_len, n);
+		memcpy(buf, d->rx + d->rx_head, n);
+		drv_consume(&d->rx_head, &d->rx_len, n);
 	}
 	return (long)n;
 }

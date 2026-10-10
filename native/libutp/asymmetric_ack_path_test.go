@@ -101,7 +101,8 @@ func TestAsymmetricAckPath(t *testing.T) {
 		}
 		if !c.thin && !c.best {
 			if o, r := medianCount(acks[true]), medianCount(acks[false]); float64(o) > asymmetricAckShare*float64(r) {
-				gate("%s: our receiver sent %d packets back, libutp's %d; want under %.2f of it", c.name, o, r, asymmetricAckShare)
+				// A count, not a time: held under the race detector too.
+				t.Errorf("%s: our receiver sent %d packets back, libutp's %d; want under %.2f of it", c.name, o, r, asymmetricAckShare)
 			}
 		}
 	}

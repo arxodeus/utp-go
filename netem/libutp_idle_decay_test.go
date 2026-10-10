@@ -48,14 +48,16 @@ import (
 // peer would see it: idle for a while, then write a burst, and count what
 // comes out before anything is acknowledged. That first flight is the window.
 func TestLibutpIdleWindowDecay(t *testing.T) {
+	const idle = 8 * time.Second
 	if raceEnabled {
 		// Under the detector libutp's first flight measured one packet
 		// whether idle or not -- 1452 of 1452 bytes, on this commit and on
-		// the one before it -- and the check below rightly refuses to draw
-		// anything from that.
-		t.Skip("libutp's first flight over the emulated network is not measurable under -race")
+		// the one before it -- so there is no reference to compare with.
+		// Our side still runs, so the detector sees the idle timeout path,
+		// and is held to the schedule libutp's rule allows.
+		ourIdleDecayWithoutReference(t, idle)
+		return
 	}
-	const idle = 8 * time.Second
 
 	busy := libutpFirstFlightAfterIdle(t, 0)
 	idled := libutpFirstFlightAfterIdle(t, idle)
@@ -113,6 +115,25 @@ func TestLibutpIdleWindowDecay(t *testing.T) {
 	}
 	// Neither should fall below one packet, which is the floor libutp clamps
 	// to in the same expression.
+	if ourIdled < 1000 {
+		t.Errorf("our window decayed to %d bytes, below the one-packet floor", ourIdled)
+	}
+}
+
+// ourIdleDecayWithoutReference checks our window across `idle` against the
+// rule alone, for when libutp cannot be measured: decays by a third at one,
+// three, seven and fifteen RTOs from the last packet, the RTO at least 500 ms
+// (utp_internal.cpp:1216-1222, :1204), so 8 s of idle holds two to four.
+func ourIdleDecayWithoutReference(t *testing.T, idle time.Duration) {
+	t.Helper()
+	ourBusy, ourIdled := ourWindowAcrossIdle(t, idle)
+	steps := math.Log(float64(ourIdled)/float64(ourBusy)) / math.Log(2.0/3.0)
+	t.Logf("ours, congestion window: %d bytes with no idle, %d after %v (%.2f decays by a third)",
+		ourBusy, ourIdled, idle, steps)
+	if steps < 1.9 || steps > 4.1 {
+		t.Errorf("across %v idle we kept %d of %d bytes, %.2f decays by a third; libutp's "+
+			"rule allows two to four (utp_internal.cpp:1216-1222, :1204)", idle, ourIdled, ourBusy, steps)
+	}
 	if ourIdled < 1000 {
 		t.Errorf("our window decayed to %d bytes, below the one-packet floor", ourIdled)
 	}

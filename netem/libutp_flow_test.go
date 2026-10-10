@@ -270,7 +270,9 @@ func libutpToGo(ctx context.Context, n *Network, from, to *Endpoint, payload []b
 	defer sender.Close()
 	sender.payload = payload
 
-	sock := utp.WithSocket(ctx, to, flowLogger())
+	// Our end reads in batches, as libutp's does here (Inject then IssueAcks
+	// above) and as both do from a real socket.
+	sock := utp.WithSocket(ctx, batchedReader{to}, flowLogger())
 	defer func() {
 		lastReceiverResets.Store(sock.PacketsResetSent())
 		sock.Close()
@@ -343,7 +345,7 @@ func goToLibutp(ctx context.Context, n *Network, from, to *Endpoint, payload []b
 	defer receiver.Close()
 	receiver.expect = len(payload)
 
-	sock := utp.WithSocket(ctx, from, quiet())
+	sock := utp.WithSocket(ctx, batchedReader{from}, quiet()) // as in libutpToGo
 	defer sock.Close()
 
 	// libutp is listening and will take whatever ids the SYN carries.
