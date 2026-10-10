@@ -364,9 +364,12 @@ func TestSoakLongRunning(t *testing.T) {
 	if len(samples) >= 4 {
 		half := len(samples) / 2
 		first, last := heapMedian(samples[1:half]), heapMedian(samples[half:])
-		// Generous: one sample's heap includes whatever large messages are in
-		// flight at that moment, up to churners x 512 KB on each side.
-		slack := uint64(churners*2*512*1024) + first/4
+		// Clean three-minute runs put the two medians within 1.6 MB of each
+		// other, at 13-16 MB. What this resolves is growth of 4 MB plus a
+		// quarter of the first half's median between the halves: over two
+		// hours, about 880,000 connections, a leak of some 25 bytes each.
+		// A run of seconds resolves nothing that small, and is not meant to.
+		slack := uint64(4<<20) + first/4
 		t.Logf("live heap median %.1f MB over the first half, %.1f MB over the second",
 			float64(first)/(1<<20), float64(last)/(1<<20))
 		if last > first+slack {
