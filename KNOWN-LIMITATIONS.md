@@ -901,7 +901,13 @@ sizes its chunks to the data and returns them to a pool once read, the
 reader's datagrams are no longer copied whole, the two million-slot channels
 are 64 slots, and `ReadToEOF` fills the caller's buffer instead of growing
 its own (see "An idle connection held a megabyte" and "Allocations per
-packet" above). The 5 GB figure has not been re-measured since.
+packet" above). *Re-measured on 2026-10-10* (`ed39efd`), three runs, peak
+`VmHWM` 3.17, 3.28 and 3.33 GB. About 3.2 MB a transfer, which is what its
+data accounts for: the payload is shared, and each transfer holds `Write`'s
+private copy (1 MB; libutp copies once too), a receive buffer grown to at
+most 1 MB, and the test's `ReadToEOF` result, grown from zero capacity to
+1 MB. The library's own overhead is not separable at this scale; idle, it is
+13.4 KB a connection end (`TestIdleConnectionMemory`).
 
 `numTransfers` is overridable via `UTP_TEST_TRANSFERS` so the test can be run
 where the default does not fit.

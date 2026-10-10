@@ -61,7 +61,8 @@ of seven, because the loss profiles are bimodal -- one retransmission timeout
 dominates a short transfer -- and fewer runs cannot separate the two modes.
 
 `TestManyConcurrentTransfers` runs 1000 concurrent 1 MB transfers by default
-and peaks at roughly 5 GB RSS. Set `UTP_TEST_TRANSFERS` to run it smaller —
+and peaks at about 3.2 GB RSS (3.17-3.33 GB, three runs), nearly all of it
+the transfers' data: each write's copy, each receive buffer, each read result. Set `UTP_TEST_TRANSFERS` to run it smaller —
 which is necessary under `-race`.
 
 The interop tests link a vendored copy of libutp and so need cgo and a C++
