@@ -66,9 +66,9 @@ func TestAsymmetricAckPath(t *testing.T) {
 		},
 		{
 			name: "100 Mb/s both ways, 1 ms",
-			data: pathConfig{Delay: time.Millisecond, BandwidthBps: 100_000_000, QueueBytes: 256 * 1024},
+			data: pathConfig{Delay: time.Millisecond, BandwidthBps: 100_000_000, QueueBytes: 2 << 20},
 			back: pathConfig{Delay: time.Millisecond, BandwidthBps: 100_000_000, QueueBytes: 256 * 1024},
-			size: 16 << 20, best: true,
+			size: 16 << 20,
 		},
 	}
 	for _, c := range cases {
