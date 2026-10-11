@@ -5,6 +5,7 @@ package netem
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"os"
 	"sync"
 	"testing"
@@ -211,4 +212,66 @@ func runLibutpDeference(t *testing.T) (utpMbps, renoMbps, utpShare float64) {
 		t.Errorf("the two flows never overlapped; there is no split to report")
 	}
 	return utpMbps, renoMbps, share
+}
+
+// A receiver's acknowledgements that queue behind another flow's data are
+// not its own queue, and coalescing them cost the sender's yielding: libutp's
+// sender, sharing a bottleneck with a loss-based flow, left it 64.0% of its
+// rate with this receiver coalescing to a third of libutp's acknowledgements,
+// against 67.5% with libutp's receiver. This receiver now coalesces only
+// once the way back climbs as its own acknowledgements make it climb
+// (ackPathSelfQueued), and here acknowledges as libutp does. Measured: 0.95-
+// 0.98 acknowledgements per data packet, libutp's 0.97; 0.35-0.41 before.
+func TestReceiverDoesNotCoalesceBehindAnotherFlow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("not a -short test")
+	}
+	var mu sync.Mutex
+	var data, acks int
+	cfg := deferenceLinkConfig()
+	cfg.OnOffered = func(p []byte, _ time.Time) {
+		if len(p) < 20 || p[0]&0x0f != 1 {
+			return // the competitor's packets are not uTP
+		}
+		if cid := binary.BigEndian.Uint16(p[2:4]); cid < 9300 || cid > 9301 {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		switch p[0] >> 4 {
+		case 0: // ST_DATA
+			data++
+		case 2: // ST_STATE
+			acks++
+		}
+	}
+	n := NewNetwork(311)
+	defer n.Close()
+	us := n.MustAddEndpoint("utp-sender")
+	ur := n.MustAddEndpoint("utp-receiver")
+	rs := n.MustAddEndpoint("reno-sender")
+	rr := n.MustAddEndpoint("reno-receiver")
+	n.ConnectShared(cfg, [2]*Endpoint{us, ur}, [2]*Endpoint{ur, us}, [2]*Endpoint{rs, rr}, [2]*Endpoint{rr, rs})
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = RunRenoFlow(ctx, rs, rr, deferencePayload, 1024)
+	}()
+	time.Sleep(1500 * time.Millisecond)
+	payload := make([]byte, deferencePayload)
+	if _, _, err := libutpToGo(ctx, n, us, ur, payload, 9300); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	ratio := float64(acks) / float64(data)
+	t.Logf("%d data packets drew %d acknowledgements (%.2f each); libutp's receiver sends about 0.97", data, acks, ratio)
+	if ratio < 0.8 {
+		t.Errorf("%.2f acknowledgements per data packet behind another flow's queue; this receiver is "+
+			"coalescing where its acknowledgements are not the queue", ratio)
+	}
 }

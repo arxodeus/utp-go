@@ -4338,6 +4338,41 @@ reach the overflow sooner, which is why the transient grew. A change to slow
 start or the first slowdown to even out one second, with no lasting effect,
 would be tuning to the profile; none is made.
 
+## Our receiver made LEDBAT senders yield less than libutp's receiver does — fixed
+
+What libutp itself yields to a loss-based flow had been assumed, not
+measured. `netem.TestLibutpDeferenceToLossBasedFlow` now measures it, in the
+same experiment as `TestDeferenceToLossBasedFlow`. Pooled over every run: the
+competitor kept 67.0% of its rate against libutp (120 runs) and 65.0%
+against this library's classic LEDBAT (70 runs), z = -3.58.
+
+Swapping one end at a time (`UTP_DEFERENCE_MIXED=1`): libutp's sender into
+our receiver yielded as ours does, ours into libutp's receiver as libutp
+does -- by receiver z = -4.85, by sender z = -1.67. Ruled out on the way:
+the loss probe, the window-growth credit and the undo, all three off
+together (63.5% against 65.0%, z = -1.22); the advertised window and the
+delay the receiver reports, the same distributions from both; the
+acknowledgement count on an unshared path. What remained was coalescing:
+behind the shared bottleneck, the receiver's acknowledgements queued behind
+the competitor's data, it read that as its own queue on the way back, and it
+sent 0.35-0.41 acknowledgements per data packet where libutp sends 0.97.
+Built to acknowledge as libutp does, it yielded as libutp does: 67.5%
+against 67.5%, thirty runs each, interleaved.
+
+Fixed by coalescing only once the way back climbs as the receiver's own
+acknowledgements make it climb (DEVIATIONS.md, "A queue that is not ours"):
+67.0% against libutp's 66.0% (z = 0.16), and our flow's own goodput 5.84 to
+6.22 Mbps. Slow return paths keep their gain (2.48 s against libutp's 7.32
+over 64 kb/s, 2.04 against 3.0 over 160 kb/s).
+
+Two corrections the measurement forced along the way. An earlier claim in
+DEVIATIONS.md that RACK makes classic LEDBAT yield more (61.5% to 67.0%, ten
+runs) did not survive fifteen more, interleaved (65.0% against 63.0%,
+z = -0.25). And with several comparisons a batch, z of about 2 came up by
+chance: libutp's identical arm differed by z = -1.87 between two batches.
+The conclusions above rest on pooled runs and on comparisons with libutp in
+every run as a control.
+
 ## LEDBAT++'s latecomer takes most of the link — open
 
 Found while re-measuring the latecomer experiment after the fixes above. A

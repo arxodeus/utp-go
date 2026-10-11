@@ -222,6 +222,18 @@ This is the measurement that was missing, and it reverses the reading of the
 throughput tables. Classic LEDBAT is faster in those tables *because it is not
 doing the one thing the protocol exists to do*.
 
+**libutp does not yield either, and now neither more nor less than this
+library.** The same experiment with libutp at both ends of the uTP flow
+(`netem.TestLibutpDeferenceToLossBasedFlow`): the competitor keeps about 67%
+of what it gets alone against libutp's classic LEDBAT, and libutp takes about
+70% of the link while both run. Classic LEDBAT's failure to yield here is the
+reference's, not this fork's. Measuring it found the one way this library was
+worse: its receiver coalesced acknowledgements that were queueing behind the
+competitor's data, and any LEDBAT sender, libutp's included, took more for
+it -- the competitor kept 65.0% against 67.0% (70 and 120 runs). Confined to
+queues of the receiver's own making, 67.0% against libutp's 66.0% (thirty
+runs each, z = 0.16). DEVIATIONS.md, "Acknowledgements: one per read".
+
 ### The latecomer experiment
 
 `TestLatecomerShare`. One uTP flow runs until it has filled the bottleneck
@@ -382,13 +394,17 @@ the sending controller's.
 **Our sender is faster than libutp's**: 20% on broadband, 30% under 1% loss,
 6-11% on the high-BDP path, 6% on the shallow queue -- more than when this
 table was last regenerated (13%, 21%, 5% and 2%), most of it from the window
-growing a round trip's worth per round trip (DEVIATIONS.md). That is not a win, and
-reading it as one would be the mistake this file exists to prevent. LEDBAT's
-whole purpose is to yield, and the deference measurement above already
-records that our classic LEDBAT takes two thirds of a link from a loss-based
-flow. A controller that yields less finishes sooner. The
-defensible reading is that this fork's classic LEDBAT is more aggressive than
-the reference's, which is a finding about this library.
+growing a round trip's worth per round trip (DEVIATIONS.md). On its own that
+would not be a win: LEDBAT's whole purpose is to yield, and a controller that
+yields less finishes sooner. So it was measured where yielding is the
+question, against a loss-based flow on a shared bottleneck, and there the two
+are level: the competitor keeps 67.0% of its rate against ours and 66.0%
+against libutp's (thirty runs each, z = 0.16; see "Deference to a loss-based
+flow"). The extra speed is taken from an empty link, not from other traffic.
+An earlier version of this paragraph read it as this fork being more
+aggressive than the reference; that was before libutp had been put through
+the deference experiment, and when it was, the one difference it found was
+this library's receiver, now fixed.
 
 An earlier version of this table said 34% and 41%, and that libutp's LAN runs
 were bimodal. Both were the harness: a libutp sender was timed to libutp's

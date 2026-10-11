@@ -95,7 +95,10 @@ worse.
   seen queueing on the way back. Measured against libutp, 20 runs each: 2.03 s
   against 2.99 s for 4 MB over a 160 kb/s return path, 2.43 s against 7.33 s
   over 64 kb/s; libutp's rule, built here, took 3.01 s and 7.33 s. Elsewhere
-  the same times and as many acknowledgements as libutp's.
+  the same times and as many acknowledgements as libutp's -- including behind
+  another flow's queue, where coalescing had cost the sender's yielding to a
+  loss-based flow (65.0% of its rate kept against libutp's 67.0%) until it was
+  confined to queues of the receiver's own making.
 - *The window grows by a round trip's worth per round trip, however the
   acknowledgements are split.* libutp's growth falls short the more
   acknowledgements a round trip is split into; ours credits each against the
@@ -567,7 +570,8 @@ acknowledgements a second, libutp receiving from libutp took 2.99 s for 4 MB
 where the data path allows 2.0 s, and over 64 kb/s 7.33 s.
 
 So `connection.ackEvery` lets an acknowledgement wait to cover more than one
-packet once ours are seen to queue on the way back. The peer reports on every
+packet once ours are seen to queue on the way back -- and only ours: see "A
+queue that is not ours" below. The peer reports on every
 packet how long ours took to reach it (`timestamp_difference`), and for a
 connection that only receives, ours are its acknowledgements:
 
@@ -638,6 +642,39 @@ over the same network: 0.78-0.82 per data packet against 0.98 at 10 Mb/s,
 0.55-0.56 against 0.64-0.66 at 20 Mb/s, 0.24-0.27 against 0.27-0.29 at
 100 Mb/s (2 MB, three runs each). Over real sockets the two send the same
 number.
+
+**A queue that is not ours.** Coalescing used to start whenever the way back
+showed a queue, whoever's it was. Put through `TestDeferenceToLossBasedFlow`'s
+experiment against libutp (`netem.TestLibutpDeferenceToLossBasedFlow`, the
+same shared bottleneck, the same loss-based competitor, libutp at both ends of
+the uTP flow), our classic LEDBAT yielded less than libutp's: the competitor
+kept 65.0% of its rate against 67.0%, 70 and 120 runs (z = -3.58). Swapping
+one end at a time put all of it on the receiver -- libutp's sender into our
+receiver yielded as ours does, ours into libutp's as libutp does -- and the
+receiver was coalescing: its acknowledgements queued behind the competitor's
+data, and it sent a third as many as libutp's (0.35-0.41 per data packet
+against 0.97). Acknowledging as libutp does, it yielded as libutp does
+(67.5% against 67.5%, 30 runs each).
+
+So coalescing now waits until the way back climbs as only this receiver's
+own acknowledgements make it climb (`connection.ackPathSelfQueued`): the
+least of its four newest 25 ms samples above the greatest of the four taken
+200 ms before, by 2 ms. A path that cannot carry the acknowledgements climbs
+steadily -- over 160 kb/s from nothing to 43 ms in 1.2 s, about 2 ms a
+sample -- and another flow's queue swings: here between nothing and 50-80 ms
+from one sample to the next. Once seen climbing, the rule above applies for
+10 s; otherwise one acknowledgement per read, libutp's. Four simpler tests
+failed first and are recorded at `ackPathSelfQueued`.
+
+Measured, thirty runs each, interleaved, libutp in every run as a control:
+the competitor keeps 67.0% against this receiver now, 63.5% before it,
+66.0% against libutp's (z = 0.16 against libutp, 2.71 against before); our
+uTP flow's own goodput rose with it, 5.84 to 6.22 Mbps (z = 3.26). Behind
+the competitor's queue the receiver sends 0.97-0.98 acknowledgements per
+data packet (`netem.TestReceiverDoesNotCoalesceBehindAnotherFlow`, which
+fails on the old rule at 0.34). Where the acknowledgements are the queue,
+the gain stands: 2.48 s against libutp's 7.32 over 64 kb/s, 2.04 against
+3.0 over 160 kb/s, the same as libutp over 320 kb/s.
 
 *Earlier versions of this entry* applied the rate term on every path. It
 measured as a trade-off -- 1.43 s against libutp's best of 1.51 s at 100
