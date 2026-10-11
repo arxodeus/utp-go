@@ -175,6 +175,9 @@ func (s *UtpStream) endedErr() error {
 	default:
 		return nil
 	}
+	if boxed := s.conn.endErr.Load(); boxed != nil && boxed.err != nil {
+		return boxed.err
+	}
 	if err := s.terminalErr(); err != nil && !errors.Is(err, ErrReadClosed) {
 		return err
 	}

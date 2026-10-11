@@ -5316,3 +5316,38 @@ Measured:
 - `MetricsObserver` runs with the connection's lock held, from whichever
   goroutine is running the connection; it must not block.
 
+
+## A reset after the peer's FIN turned a complete transfer into an error
+
+**Fixed.** `integrated.TestUdpTransfer`, 16 MB over loopback, failed about
+one run in ten under CPU load with "read: reset" -- 10 of 100 on this
+branch and 10 of 100 on the commit before it, so not new -- after every
+byte had arrived. Traced with the send and close paths instrumented:
+
+1. The sender's FIN was acknowledged, so its connection closed and left the
+   socket, as libutp's does (`utp_internal.cpp:2179-2182`).
+2. The receiver's reader had fallen behind: its queue was full and the rest
+   sat in the receive buffer. Draining it reopened the window, and the
+   receiver sent the update.
+3. The sender's socket no longer had the connection, and answered with a
+   RESET, as libutp does for any unmatched packet (`:2907-2944`).
+4. The reset closed the receiver's connection with `ErrReset`. The teardown
+   still handed the reader every byte, then ended the stream with that
+   error instead of a clean end.
+
+The wire behaviour is libutp's on both sides. The defect was the last step.
+By the time the FIN is reached, libutp has given its embedder every byte and
+`UTP_STATE_EOF` (`:2339-2343`, `:2355-2357`). go-libutp's reader returns the
+data and `io.EOF` ahead of any error that comes later (`readNoWait` checks
+`gotEOF` first).
+
+Now the read side ends cleanly once everything before the peer's FIN has
+arrived, whatever ends the connection afterwards (`readEndErr`). A writer is
+still told the connection was reset: the error the connection ended with is
+kept apart for writers (`connection.endErr`).
+
+`TestResetAfterTheFinTakesNothingBack` delivers 900 KB and a FIN to a
+receiver nobody reads from, so some of it is still in the receive buffer,
+and then resets it. With the old rule it reads all 917,504 bytes and then
+fails with "reset"; with the new one it reaches a clean end, and a write
+returns `ErrReset`. `TestUdpTransfer` under the same load: 0 failures in 100.

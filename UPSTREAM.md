@@ -1923,6 +1923,16 @@ and `Options.OnWriteError`, which go-libutp's sendto callback has.
 `compat/golibutp`, go-libutp's API on these, is optional for upstream and
 the obvious thing to offer anacrolix/torrent's users.
 
+## PR 71 — a reset after the peer's FIN takes nothing back
+
+A reader that has had everything before the peer's FIN ends cleanly even if
+the connection is reset afterwards; a writer is still told. Without it, the
+side that closed first resetting the other's window update -- libutp's
+behaviour on the wire -- turned about one 16 MB loopback transfer in ten
+under load into "read: reset" after every byte had arrived.
+`TestResetAfterTheFinTakesNothingBack`. KNOWN-LIMITATIONS.md, "A reset after
+the peer's FIN turned a complete transfer into an error".
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

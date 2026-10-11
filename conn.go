@@ -476,6 +476,12 @@ type connection struct {
 	// not handed the marker directly. Written under mu and read by the
 	// stream's reader without it, so it is atomic.
 	terminalErr atomic.Pointer[terminalError]
+	// endErr is the error the connection itself ended with, for a writer,
+	// set as the event loop returns. It differs from terminalErr, the
+	// reader's, when the connection failed after the peer's whole stream
+	// had arrived: the reader has had everything and ends cleanly, and a
+	// writer is still told why its connection ended.
+	endErr atomic.Pointer[terminalError]
 
 	// Counters, guarded by mu.
 	packetsSent          uint64
@@ -859,6 +865,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		if c.terminalErr.Load() == nil {
 			c.terminalErr.Store(&terminalError{err: c.readEndErr()})
 		}
+		c.endErr.Store(&terminalError{err: c.state.Err})
 		close(c.reads)
 	}()
 	// Tell the socket to drop this connection on *every* exit, not only the
@@ -2436,14 +2443,27 @@ func (c *connection) deliverTerminalRead() {
 // TestDataValidWhenResendingSynStateResponse saw it about once in 20 runs
 // under -race, before this change as after. It is ErrReadClosed now: this end
 // closed before it had read everything.
+//
+// Once everything the peer sent before its FIN has arrived and been handed
+// on, the read side has ended cleanly, whatever ends the connection
+// afterwards. libutp has delivered every byte to its embedder by then and
+// signalled UTP_STATE_EOF (utp_internal.cpp:2339-2343, :2355-2357); a RESET
+// that follows is reported as an error but takes nothing back, and
+// go-libutp's reader returns the data and io.EOF before it
+// (conn.go, readNoWait). It happens: the side that closed first destroys
+// its connection once its FIN is acknowledged, and answers whatever the
+// other side sends next -- a window update as its reader drains -- with a
+// RESET (:2179-2182, :2907-2944). Here that reset turned a complete
+// transfer into "read: reset", one 16 MB loopback transfer in ten under
+// load (integrated.TestUdpTransfer).
 func (c *connection) readEndErr() error {
+	if !c.readsTruncated && c.receivedThroughFin() {
+		return nil
+	}
 	if c.state.Err != nil {
 		return c.state.Err
 	}
-	if c.readsTruncated || !c.receivedThroughFin() {
-		return ErrReadClosed
-	}
-	return nil
+	return ErrReadClosed
 }
 
 // receivedThroughFin reports whether every byte the peer sent before its FIN
