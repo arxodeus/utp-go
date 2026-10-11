@@ -1497,6 +1497,77 @@ probe: 1 packet resent in each, the probe, against 21 and 20 without the
 checks; the minimum-round-trip rule alone catches the second and not the
 first.
 
+## RACK loss detection (opt-in)
+
+**Off by default, and off, loss detection is libutp's**: a packet is lost
+once three packets after it have been acknowledged (`utp_internal.cpp:1537`,
+`:1560`), each is fast-retransmitted once (`fast_resend_seq_nr`), and at most
+four go per acknowledgement. The root suite's conformance tests, which
+compare those decisions with libutp's, run with it off and pass unchanged.
+
+`ConnectionConfig.RACK` replaces that rule with RFC 8985's (`rack.go`). A
+packet is lost once a packet sent after it has been delivered and a round
+trip plus a reordering window has passed since it was sent; a timer catches
+a packet still inside the window when the acknowledgements stop. The window
+is zero until the path has been seen to reorder -- once three packets are
+selectively acknowledged, or during a recovery, which reproduces libutp's
+count -- and otherwise a quarter of the minimum round trip, never more than
+the smoothed one. A retransmission can be declared lost too, where libutp
+leaves a lost fast retransmission to its retransmission timeout of a second
+or more.
+
+Three places where uTP is not TCP, and the implementation differs from the
+RFC for them:
+
+- **No DSACK.** RFC 8985 widens the window when a DSACK shows a
+  retransmission was spurious. uTP has none; a cut the undo shows was for a
+  packet that was only late ("A cut for a loss that was only reordering is
+  undone") widens it instead, for sixteen recoveries.
+- **The selective ack reaches 30 packets.** TCP's blocks report delivery
+  anywhere; uTP's bitmask covers a fixed window past the ack number -- 30
+  packets in libutp's and ours, in a 32-bit field, fewer from a libutp peer
+  with a small receive buffer. Only packets up to the highest one an
+  acknowledgement reports delivered are judged. Without that, a slow-start
+  overflow that dropped 22 packets had 101 declared lost: everything past
+  the window that was sent before a delivered resend.
+- **Send order, not send time.** What was sent before what is taken from a
+  count of transmissions, not the recorded times, which are read at
+  different points of an event-loop pass: a packet sent after a resend
+  could carry an earlier time than it. With both fixes the same overflow
+  had 21 declared lost for 21 dropped.
+
+**Measured** over the emulated network, RACK against libutp's rule in one
+binary, interleaved; five runs of every profile under both controllers, then
+twenty seeds of each loss profile (a sender that resends differently meets
+a different loss pattern on one seed) and twenty runs of anything else that
+moved more than 1.5%:
+
+| | libutp's rule | RACK | z |
+| --- | --- | --- | --- |
+| Classic LEDBAT, 5% loss (20 seeds) | 2.70 Mbps | 3.08 | 3.69 |
+| LEDBAT++, 5% loss (20 seeds) | 0.54 Mbps | 0.70 | 4.18 |
+| Classic LEDBAT, 1% loss (20 seeds) | 5.48 Mbps | 5.52 | 0.20 |
+| LEDBAT++, 1% loss (20 seeds) | 1.85 Mbps | 1.94 | 0.81 |
+| Deference, classic: competitor keeps (10 runs) | 61.5% | 67.0% | 2.87 |
+| Deference, LEDBAT++: competitor keeps (10 runs) | 79.5% | 81.0% | 1.59 |
+| Latecomer's share, classic / LEDBAT++ (10 runs) | 22.5% / 71.4% | 22.8% / 72.0% | 1.66 / -0.08 |
+
+Every other profile within 1.5% in five runs, or not significant over twenty
+(LEDBAT++ on the 16 KB queue, bimodal on whether a timeout falls in the run,
+1.83 against 3.34 Mbps median, z = 0.73). A loss-based competitor keeps more
+of its own rate against classic LEDBAT with RACK, not less. Resends on a
+link that reorders 2% of packets by 5 ms and loses none, 2 MB:
+23-24 with libutp's rule, 3 with RACK (`netem.TestRackResendsLessUnderReordering`).
+The benchmark suite's reordering profile displaces packets by 20 ms, more
+than the window on its 40 ms path, and there RACK resends as libutp's rule
+does (6 against 7). Against real libutp over real sockets,
+`native/libutp.TestInteropUnderAdverseConditionsWithRACK` sends through the
+relay's four damaging profiles, three seeds each, all verified.
+
+Seven unit tests (`rack_test.go`) each fail without the mechanism they
+cover. It stays off by default: it is not libutp's behaviour, and the
+measurements above are one machine's emulated links.
+
 ## An initiator can fast-retransmit from its first packet
 
 **libutp's initiator often cannot.** `utp_create_socket` sets `seq_nr = 1` and

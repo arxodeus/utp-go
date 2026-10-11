@@ -223,7 +223,7 @@ func runPair(t *testing.T, pair string, cfg pathConfig, payload []byte) {
 	case "libutp->go":
 		adverseLibutpToGo(t, cfg, payload, 1)
 	case "go->libutp":
-		adverseGoToLibutp(t, cfg, payload, 1)
+		adverseGoToLibutp(t, cfg, payload, 1, utp.NewConnectionConfig())
 	case "libutp->libutp":
 		a, err := libutp.NewPeer(0)
 		if err != nil {

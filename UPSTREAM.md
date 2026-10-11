@@ -1884,6 +1884,19 @@ Found by a two-hour soak (`netem.TestSoakLongRunning`, 880,000 connections).
 `TestDialledConnectionDoesNotSendOnAnIdInUse` each fail without their change.
 The soak then ran two hours clean: 885,718 exchanges, heap flat.
 
+## PR 69 — RACK loss detection, opt-in
+
+`ConnectionConfig.RACK`, off by default: RFC 8985's time-based rule in place
+of libutp's three-packet count, with the reordering window widened by the
+undo's spurious-loss detection (uTP has no DSACK), judged only up to the
+highest packet an acknowledgement reports (uTP's selective ack reaches 30
+packets), and ordered by transmission count rather than send time. Off, the
+conformance tests pass unchanged. On, over twenty seeds: 5% loss 2.70 to
+3.08 Mbps under classic LEDBAT and 0.54 to 0.70 under LEDBAT++, a
+loss-based competitor keeping 67% of its rate against classic LEDBAT where
+it kept 61.5%, and a fifth of the spurious resends on a lightly reordering
+link. See DEVIATIONS.md, "RACK loss detection (opt-in)".
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it
