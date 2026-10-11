@@ -4278,7 +4278,7 @@ bimodal in both, runs landing near 1.4 or near 3.4 Mbps: 5 of 15 in the fast
 mode before, 10 of 15 after. That leans towards an improvement but fifteen
 runs do not settle it. Nothing measured got worse.
 
-## Two LEDBAT++ flows on a 64 KB queue split less evenly since the MTU search starts at the ceiling — open
+## Two LEDBAT++ flows on a 64 KB queue split less evenly in their first second since the MTU search starts at the ceiling — explained, not a lasting unfairness
 
 Found regenerating BENCHMARKS.md: the "Two flows, 8Mbps bottleneck" row for
 LEDBAT++ split 43/57 while both ran (worst 33/67), where the table had said
@@ -4287,9 +4287,9 @@ MTU search at the ceiling, as libutp does", and confirmed against its parent
 with fourteen runs each: the smaller share 48.5% median (44.3-49.9) before,
 43.75% (33.4-49.9) after, z = -3.15, with the same 11 queue drops. Classic
 LEDBAT on the same row is 50/50 either way, and the 2 MB queue row is
-unaffected. The commit matches libutp, which has no LEDBAT++; why full-size
+unaffected. The commit matches libutp, which has no LEDBAT++. Why full-size
 packets from the first round trip unbalance two LEDBAT++ flows on a queue
-that holds about 45 of them has not been traced.
+that holds about 45 of them is traced below: the first second only.
 
 **Tried: no ramp credit for the backlog.** Logged, one run's flows both lost
 packets entering their first slowdown, and the one whose repair landed in
@@ -4303,6 +4303,22 @@ fourteen runs a side, interleaved, the smaller share 44.35% either way
 Mbps and 7.76 to 7.58, z = -3.22 and -3.45). Not applied. What decides the
 split is elsewhere -- in that run's logs, which flow entered its slowdown
 first and with the larger saved window.
+
+**Explained: it is the first second, not the transfer.** Logged over twelve
+runs, two flows that start together do not stay together: one grows faster
+in slow start (a peak of 63-65 KB against 55-56 KB), overflows the queue
+first, and enters its first slowdown about 40 ms before the other. Which
+flow leads varies from run to run, and in ten of twelve the leader took the
+larger share, usually about 56%. After the slowdown the two windows are
+level (about 29.5 KB each, 300 ms later). The benchmark's flows carry 512 KB
+each, about one second of sharing, so the slow-start transient is most of
+what the split measures. Over 4 MB a flow, fourteen runs each, interleaved,
+the smaller share is 47.9% at HEAD against 45.8% at `abf9d21`, the commit
+before the change (z = 1.54): no regression, if anything the reverse, and
+both have one run near 23%. Full-size packets from the first round trip
+reach the overflow sooner, which is why the transient grew. A change to slow
+start or the first slowdown to even out one second, with no lasting effect,
+would be tuning to the profile; none is made.
 
 ## LEDBAT++'s latecomer takes most of the link — open
 

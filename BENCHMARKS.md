@@ -60,9 +60,11 @@ regeneration classic LEDBAT's window grows by a round trip's worth per round
 trip, a cut for reordering is undone, and fewer allocations are made per
 packet; LEDBAT++ grows at the draft's rate. No row is carried over.
 
-One row moved for a reason not yet traced: two LEDBAT++ flows on the 64 KB
-queue split 43/57 where they had split 49/51, since the MTU search began at
-the ceiling (KNOWN-LIMITATIONS.md, bisected).
+One row moved: two LEDBAT++ flows on the 64 KB queue split 43/57 where they
+had split 49/51, since the MTU search began at the ceiling. It is the first
+second of each 512 KB flow -- slow start, which one flow leaves ahead of the
+other -- not a lasting unfairness: over 4 MB a flow the split is 48/52, as
+level as before the change (KNOWN-LIMITATIONS.md).
 
 The **standing queue** column had silently lost its precision between the
 two: since commit `9e90d17` the round trip the metrics report is libutp's, in
