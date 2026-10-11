@@ -568,6 +568,15 @@ type connection struct {
 	// ackPathQueuedAt is when the way back last showed a queue; the rate
 	// term in ackEvery applies for ackRateMemory after it.
 	ackPathQueuedAt time.Time
+	// coalesceSince, coalesceStartQ and coalesceMinQ follow a spell of
+	// coalescing: when it began, the return path's queueing delay then, and
+	// the least since. coalesceOffUntil holds acknowledgements to one per
+	// read after a spell that did not drain the queue. See ackEvery.
+	coalesceSince    time.Time
+	coalesceStartQ   time.Duration
+	coalesceMinQ     time.Duration
+	coalesceOffUntil time.Time
+	coalesceBackoffs uint64
 	// armProbeTimer wakes the event loop when a closed window has gone
 	// unprobed for long enough. Installed by the event loop, which owns the
 	// timer.
@@ -2676,6 +2685,12 @@ const (
 	// trip or two.
 	ackRateGate   = 10 * time.Millisecond
 	ackRateMemory = 10 * time.Second
+	// coalesceProbePeriod is how long a spell of coalescing has to halve the
+	// queue on the way back before the queue is taken for someone else's,
+	// and coalesceBackoff how long the receiver then acknowledges every read.
+	// See ackEvery.
+	coalesceProbePeriod = time.Second
+	coalesceBackoff     = 10 * time.Second
 )
 
 // ackEvery is how many data packets an acknowledgement may wait to cover.
@@ -2718,6 +2733,21 @@ const (
 //
 // Never while a gap is open: the selective ack is how the peer learns of a
 // loss, and holding it back would delay recovery.
+//
+// And only while it works. Coalescing helps when the queue on the way back
+// is this receiver's own acknowledgements; then sending fewer drains it. When
+// the queue is other traffic's -- an uplink shared with someone's upload --
+// fewer acknowledgements change nothing there, and cost the sender's
+// yielding: a LEDBAT sender, libutp's or ours, grows faster on fewer, larger
+// acknowledgements and samples its delay less often. Measured with a
+// loss-based flow sharing one bottleneck both ways, where this receiver
+// coalesced to a third of libutp's acknowledgements: the competitor kept
+// 64.0% of its rate against 67.5% with libutp's receiver, and 67.5% with
+// this one acknowledging as libutp does (30 runs each). So a spell of
+// coalescing that has not at least halved the queue within
+// coalesceProbePeriod is taken as someone else's queue, and the receiver
+// acknowledges every read, as libutp does, for coalesceBackoff before trying
+// again.
 func (c *connection) ackEvery() int {
 	if c.state == nil || c.state.SentPackets == nil || c.state.RecvBuf == nil {
 		return 1
@@ -2726,21 +2756,52 @@ func (c *connection) ackEvery() int {
 		return 1
 	}
 	q := c.state.SentPackets.QueueingDelay()
-	k := min(1+int(q/ackQueueStep), maxAckQueueRun)
 	now := c.now()
+	if now.Before(c.coalesceOffUntil) {
+		return 1
+	}
+	k := min(1+int(q/ackQueueStep), maxAckQueueRun)
 	if q >= ackRateGate {
 		c.ackPathQueuedAt = now
 	}
-	if c.ackPathQueuedAt.IsZero() || now.Sub(c.ackPathQueuedAt) >= ackRateMemory {
+	if !c.ackPathQueuedAt.IsZero() && now.Sub(c.ackPathQueuedAt) < ackRateMemory {
+		gap := c.dataGap
+		if c.lastDataGap > 0 {
+			gap = min(gap, c.lastDataGap)
+		}
+		if gap > 0 {
+			k = max(k, min(max(int((ackRatePeriod+gap/2)/gap), 1), maxAckRateRun))
+		}
+	}
+	return c.coalescingWorks(k, q, now)
+}
+
+// coalescingWorks returns k, or 1 once a spell of coalescing has gone on for
+// coalesceProbePeriod without halving the queue on the way back. See
+// ackEvery.
+func (c *connection) coalescingWorks(k int, q time.Duration, now time.Time) int {
+	if k <= 1 || q < ackRateGate {
+		// Nothing to coalesce, or nothing queued to answer: any spell ends.
+		c.coalesceSince = time.Time{}
 		return k
 	}
-	gap := c.dataGap
-	if c.lastDataGap > 0 {
-		gap = min(gap, c.lastDataGap)
+	if c.coalesceSince.IsZero() {
+		c.coalesceSince, c.coalesceStartQ, c.coalesceMinQ = now, q, q
+		return k
 	}
-	if gap > 0 {
-		k = max(k, min(max(int((ackRatePeriod+gap/2)/gap), 1), maxAckRateRun))
+	c.coalesceMinQ = min(c.coalesceMinQ, q)
+	if now.Sub(c.coalesceSince) < coalesceProbePeriod {
+		return k
 	}
+	if c.coalesceMinQ*2 > c.coalesceStartQ {
+		// A second of fewer acknowledgements, and the queue stood.
+		c.coalesceSince = time.Time{}
+		c.coalesceOffUntil = now.Add(coalesceBackoff)
+		c.coalesceBackoffs++
+		return 1
+	}
+	// It drained: the queue was ours. Judge the next spell afresh.
+	c.coalesceSince, c.coalesceStartQ, c.coalesceMinQ = now, q, q
 	return k
 }
 
