@@ -62,6 +62,33 @@ replace github.com/anacrolix/go-libutp => /path/to/utp-go/compat/golibutp
 
   With the `replace` removed, so that real go-libutp is used, the test fails.
 
+## Throughput
+
+go-libutp's own benchmark, `BenchmarkThroughput10MB` and `100MB`, measures one
+connection over loopback on one socket pair. It was run on real go-libutp
+v1.5.1 (cgo, libutp) and on this package, interleaved, ten rounds of three
+transfers each, on one machine:
+
+| Benchmark | go-libutp | this package | Mann-Whitney z |
+| --- | --- | --- | --- |
+| 10 MB | 15.2 MB/s median (6.8-17.0) | 184.2 MB/s (163.7-201.2) | 3.78 |
+| 100 MB | 19.7 MB/s (13.9-21.8) | 207.3 MB/s (87.6-214.6) | 3.78 |
+| Bytes allocated per 100 MB | 39.6 MB | 272 MB | |
+
+This is loopback, where nothing is queued and nothing is lost, so it measures
+how fast each implementation turns packets around, not how it behaves on a
+network. The repository's emulated-network comparisons
+([BENCHMARKS.md](../../BENCHMARKS.md)) are the ones that say that.
+
+The allocation figures are not like for like. go-libutp's counts only the
+Go heap; libutp allocates each packet it builds or holds out of order with
+`malloc`, which Go's counter never sees. Of this package's 2.7 bytes per byte
+moved, a memory profile of the 100 MB benchmark puts 39% in the copy
+`utpnet` makes of every datagram it reads, so that it can route it to uTP or
+to `ReadFrom`, and 38% in the copy a `Write` makes so that it can return
+before its bytes are sent (the send buffer's, KNOWN-LIMITATIONS.md, "The send
+buffer retained the caller's slice"). The first could be pooled; it is open.
+
 ## What differs from go-libutp
 
 Each difference is something go-libutp or libutp could not do:
