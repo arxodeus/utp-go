@@ -68,6 +68,9 @@ type libutpEndpoint struct {
 
 	received []byte
 	emitted  uint64
+	// delivered is a receiver's bytes in hand over time, for the split
+	// between flows sharing a link (SplitWhileBothRan).
+	delivered deliveryTimeline
 
 	// linger keeps a receiver running after the last byte has arrived, until
 	// its context ends, so that it is still there to acknowledge the FIN of a
@@ -184,12 +187,16 @@ func (l *libutpEndpoint) run(ctx context.Context) (time.Duration, error) {
 		// Drain received data every pass. libutp advertises its window from
 		// what is still unread (drv_get_read_buffer_size, driver.cpp:275-278),
 		// so a receiver that does not read closes its own window.
+		before := len(l.received)
 		for {
 			n := l.drv.Read(readBuf)
 			if n == 0 {
 				break
 			}
 			l.received = append(l.received, readBuf[:n]...)
+		}
+		if len(l.received) > before {
+			l.delivered.record(time.Now(), uint64(len(l.received)))
 		}
 		l.flush()
 
