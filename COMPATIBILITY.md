@@ -199,9 +199,10 @@ so it sent 288-byte packets. Both are written up in
   rather than on the wire.
 - **~~The initiator role in the hand-written corpus.~~** Covered:
   `conformance_initiator_corpus_test.go` drives both implementations as the
-  dialling side through nine curated cases — the handshake and the SYN itself,
+  dialling side through ten curated cases — the handshake and the SYN itself,
   in-order data, reordering, duplicates, a peer that resets instead of
-  answering, an incoming FIN, and a zero window with its control. It runs on
+  answering, an incoming FIN, a zero window with its control, and the Nagle
+  rule with and without data in flight. It runs on
   the virtual clock, so each step is deterministic rather than a sleep.
 - **~~Inbound timing.~~** Covered: the socket's read and event loops are
   barrier participants, so the whole chain from wire to connection and back is

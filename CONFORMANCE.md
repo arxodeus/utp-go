@@ -293,9 +293,9 @@ depends on load, and is measured under load by
 `netem.TestAckCoalescingUnderLoad` instead.
 
 This is the one place the corpus compares *volume* rather than content. Ack
-*latency* is still not compared — that needs an injectable clock in our
-connection, and is listed in [COMPATIBILITY.md](COMPATIBILITY.md) as not
-covered.
+*latency* is not compared here -- see "Limits" -- but over real sockets, by
+`native/libutp.TestAckTurnaround` ([COMPATIBILITY.md](COMPATIBILITY.md), "Ack
+turnaround").
 
 ## Deliberate divergences
 
@@ -409,8 +409,12 @@ none.
   and both fields are compared like every other. That found three real
   divergences — see "What it found" — and every one of them was in a field a
   peer reads.
-- **Ack timing is not compared, though ack *count* and retransmission timing
-  now are.** `conformance_timing_test.go` measures libutp's retransmission
+- **~~Ack timing is not compared.~~** Not in this corpus, and it cannot be
+  (the last paragraph of this entry says why); it is compared over real
+  sockets instead, where each implementation runs on its production trigger:
+  `native/libutp.TestAckTurnaround`, medians of 70 us here against 40 us in
+  libutp at 10 Mb/s, a recorded shortfall. What follows is the history.
+  Ack *count* and retransmission timing are compared here. `conformance_timing_test.go` measures libutp's retransmission
   schedule on its virtual clock and asserts ours has the same shape — see
   "Retransmission timing" above — and `TestConformanceAckCoalescing` compares
   how many acks each side emits per batch. What is still uncompared is ack
@@ -440,8 +444,11 @@ none.
   the packet — has since been fixed (`TestStaleAckIsIgnoredNotFatal`), but the
   limit itself stands: a corpus that reads only emitted packets cannot tell a
   connection that is alive from one that has just died quietly.
-- **Malformed headers are barely covered.** Truncated packets, bad version
-  nibbles, unknown extension types and malformed extension chains are not in
-  the corpus. That is the gap most likely to hide another finding, and it is
-  where M8's fuzzing should start.
-- The corpus is nine cases. It proves what it covers and nothing else.
+- **~~Malformed headers are barely covered.~~** They are in the corpus now:
+  the twelve `TestMalformed*` cases (`conformance_malformed_test.go`) -- truncated and empty datagrams, every
+  bad version and type nibble, extension chains that are absent, overrun or
+  loop, unknown extension types and bad selective-ack lengths -- and the
+  decoder and differential fuzz targets (FUZZING.md).
+- The corpus is twenty-eight responder cases (`conformance_corpus_test.go`,
+  `conformance_malformed_test.go`) and ten initiator cases. It proves what it
+  covers and nothing else.
