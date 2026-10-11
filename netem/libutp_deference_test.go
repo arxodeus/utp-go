@@ -3,7 +3,9 @@
 package netem
 
 import (
+	"bytes"
 	"context"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -28,21 +30,89 @@ func TestLibutpDeferenceToLossBasedFlow(t *testing.T) {
 	solo := runRenoSolo(t)
 	t.Logf("baseline: the competitor alone gets %.2f Mbps", solo)
 
-	for _, impl := range []string{"libutp", "ours"} {
+	impls := []string{"libutp", "ours"}
+	if os.Getenv("UTP_DEFERENCE_MIXED") != "" {
+		// The two mixed pairings, to put a difference on the end that makes
+		// it: the sender's controller, or the receiver's acknowledgements,
+		// which here share the bottleneck with the competitor's data.
+		impls = append(impls, "libutp->ours", "ours->libutp")
+	}
+	for _, impl := range impls {
 		var utpMbps, renoMbps, share float64
-		if impl == "libutp" {
+		switch impl {
+		case "libutp":
 			utpMbps, renoMbps, share = runLibutpDeference(t)
-		} else {
+		case "ours":
 			utpMbps, renoMbps, _, share = runDeference(t, utp.AlgorithmLEDBAT)
+		default:
+			utpMbps, renoMbps = runMixedDeference(t, impl == "libutp->ours")
 		}
 		t.Logf("%s: uTP %.2f Mbps, competitor %.2f Mbps", impl, utpMbps, renoMbps)
 		t.Logf("%s: the competitor kept %.0f%% of what it got alone (%.2f of %.2f Mbps)",
 			impl, 100*renoMbps/solo, renoMbps, solo)
-		t.Logf("%s: uTP's share while both ran %.1f%%", impl, 100*share)
+		if share > 0 {
+			t.Logf("%s: uTP's share while both ran %.1f%%", impl, 100*share)
+		}
 		if utpMbps <= 0 || renoMbps <= 0 {
 			t.Errorf("%s: a flow got no bandwidth at all; nothing can be concluded", impl)
 		}
 	}
+}
+
+// runMixedDeference is the experiment with libutp at one end of the uTP flow
+// and this library at the other.
+func runMixedDeference(t *testing.T, libutpSends bool) (utpMbps, renoMbps float64) {
+	t.Helper()
+	n := NewNetwork(311)
+	defer n.Close()
+	utpSender := n.MustAddEndpoint("utp-sender")
+	utpReceiver := n.MustAddEndpoint("utp-receiver")
+	renoSender := n.MustAddEndpoint("reno-sender")
+	renoReceiver := n.MustAddEndpoint("reno-receiver")
+	n.ConnectShared(deferenceLinkConfig(),
+		[2]*Endpoint{utpSender, utpReceiver},
+		[2]*Endpoint{utpReceiver, utpSender},
+		[2]*Endpoint{renoSender, renoReceiver},
+		[2]*Endpoint{renoReceiver, renoSender},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+	data := make([]byte, deferencePayload)
+	for i := range data {
+		data[i] = byte(i)
+	}
+	var (
+		wg      sync.WaitGroup
+		renoRes *RenoResult
+		renoErr error
+	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		renoRes, renoErr = RunRenoFlow(ctx, renoSender, renoReceiver, deferencePayload, 1024)
+	}()
+	time.Sleep(1500 * time.Millisecond)
+	var (
+		elapsed time.Duration
+		got     []byte
+		err     error
+	)
+	if libutpSends {
+		elapsed, got, err = libutpToGo(ctx, n, utpSender, utpReceiver, data, 9200)
+	} else {
+		elapsed, got, err = goToLibutp(ctx, n, utpSender, utpReceiver, data, 9200)
+	}
+	wg.Wait()
+	if err != nil {
+		t.Fatalf("uTP flow: %v", err)
+	}
+	if renoErr != nil {
+		t.Fatalf("competitor: %v", renoErr)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("uTP flow delivered %d bytes, not the payload", len(got))
+	}
+	return float64(len(data)) * 8 / elapsed.Seconds() / 1e6, renoRes.Goodput.Mbps()
 }
 
 // runLibutpDeference is runDeference with libutp sending to libutp.
