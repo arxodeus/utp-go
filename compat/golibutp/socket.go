@@ -28,12 +28,6 @@ var (
 	errSocketClosed = errors.New("Socket closed")
 )
 
-// acceptBacklog is how many accepted connections wait for Accept before
-// more are closed. libutp answers a SYN at once and hands the connection to
-// its embedder, which go-libutp queues five deep (socket.go); this queues
-// deeper, so a burst of dials is not cut off at five.
-const acceptBacklog = 128
-
 // A FirewallCallback returns true if an incoming connection request from the
 // address should be refused. A refused SYN gets no answer, which is better
 // than accepting and closing: the peer learns nothing.
@@ -53,10 +47,9 @@ func WithLogger(l log.Logger) NewSocketOpt {
 // for the datagrams that are not uTP, which is how a BitTorrent client runs
 // its DHT on the same port, and a net.Listener for incoming connections.
 type Socket struct {
-	pc      net.PacketConn
-	us      *utpnet.Socket
-	logger  log.Logger
-	backlog chan *Conn
+	pc     net.PacketConn
+	us     *utpnet.Socket
+	logger log.Logger
 
 	// minLogLevel is the least slog level passed to logger; see logHandler.
 	minLogLevel atomic.Int64
@@ -117,7 +110,6 @@ func NewSocketFromPacketConn(pc net.PacketConn, opts ...NewSocketOpt) (*Socket, 
 		conns:   make(map[*Conn]struct{}),
 		options: defaultContextOptions(),
 		dialing: make(map[string]map[*dialAttempt]struct{}),
-		backlog: make(chan *Conn, acceptBacklog),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -137,41 +129,7 @@ func NewSocketFromPacketConn(pc net.PacketConn, opts ...NewSocketOpt) (*Socket, 
 	mu.Lock()
 	sockets[s] = struct{}{}
 	mu.Unlock()
-	go s.acceptLoop()
 	return s, nil
-}
-
-// acceptLoop takes every incoming connection as it arrives, whether or not
-// anything is waiting in Accept: libutp answers a SYN at once and hands the
-// connection to its embedder (utp_process_udp, utp_internal.cpp:2984-2990,
-// and the accept callback), so a dial to a socket whose application has not
-// yet called Accept completes, as callers of go-libutp rely on. The engine on
-// its own answers a SYN only once an Accept takes it.
-func (s *Socket) acceptLoop() {
-	defer close(s.backlog)
-	for {
-		nc, err := s.us.Accept()
-		if err != nil {
-			mu.Lock()
-			closed := s.closed
-			mu.Unlock()
-			if closed {
-				return
-			}
-			s.logger.Levelf(log.Debug, "accepting: %v", err)
-			time.Sleep(10 * time.Millisecond) // not to spin on an error that persists
-			continue
-		}
-		c, err := s.newConn(nc.(*utpnet.Conn))
-		if err != nil {
-			return // the socket closed
-		}
-		select {
-		case s.backlog <- c:
-		default:
-			c.Close() // as go-libutp's pushBacklog does
-		}
-	}
 }
 
 // firewall is the engine's firewall hook: the synchronous callback if there
@@ -261,12 +219,24 @@ func (s *Socket) LocalAddr() net.Addr {
 }
 
 // Accept waits for the next incoming connection.
+//
+// A dial completes whether or not anything is waiting here: the engine
+// answers a SYN as it arrives and holds the connection until an Accept takes
+// it, as libutp hands it to go-libutp's backlog. go-libutp closes any beyond
+// five waiting; these are held, counted against the socket's connection cap
+// (libutp's 3000), until taken.
 func (s *Socket) Accept() (net.Conn, error) {
-	c, ok := <-s.backlog
-	if !ok {
-		return nil, errors.New("closed")
+	nc, err := s.us.Accept()
+	if err != nil {
+		mu.Lock()
+		closed := s.closed
+		mu.Unlock()
+		if closed {
+			return nil, errors.New("closed")
+		}
+		return nil, err
 	}
-	return c, nil
+	return s.newConn(nc.(*utpnet.Conn))
 }
 
 // Dial connects to addr and waits as long as libutp does for an answer.

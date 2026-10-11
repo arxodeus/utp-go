@@ -96,6 +96,9 @@ type Accept struct {
 	// is either queued for a caller still waiting, or closed. See hand.
 	mu     sync.Mutex
 	gaveUp bool
+	// onHand, when set, takes the result in place of a caller: the socket's
+	// own request for a SYN it answered with nobody waiting (holdAnswered).
+	onHand func(*StreamResult)
 }
 
 func newAccept(ctx context.Context, cid *ConnectionId, config *ConnectionConfig) *Accept {
@@ -118,6 +121,10 @@ func newAccept(ctx context.Context, cid *ConnectionId, config *ConnectionConfig)
 // inside the call that received the SYN (utp_call_on_accept,
 // utp_internal.cpp:3001), so it has no such gap to close.
 func (a *Accept) hand(res *StreamResult) {
+	if a.onHand != nil {
+		a.onHand(res)
+		return
+	}
 	a.mu.Lock()
 	if !a.gaveUp {
 		select {
@@ -368,9 +375,12 @@ type UtpSocket struct {
 	// retransmit_timer.go.
 	retransmitTimers *retransmitTimers
 	// pendingAccepts holds Accept calls that named no connection id and are
-	// waiting for any incoming SYN. Touched only from the socket event loop,
-	// so it needs no lock.
+	// waiting for any incoming SYN. Guarded by dispatchMu.
 	pendingAccepts []*Accept
+	// answered holds connections whose SYN was answered with no Accept
+	// waiting, oldest first, until an Accept or AcceptWithCid takes one. Only
+	// a socket with WithAcceptConfig answers so. Guarded by dispatchMu.
+	answered []*UtpStream
 	// rstInfo remembers RESETs recently sent for connections we do not have.
 	rstInfo            *syncMap[struct{}]
 	rstInfoExpirations *timeWheel[any, rstInfoKey]
@@ -515,12 +525,29 @@ func WithFirewall(refuse func(peer ConnectionPeer) bool) SocketOption {
 	return func(s *UtpSocket) { s.firewall = refuse }
 }
 
-// WithAcceptConfig supplies the configuration of an incoming connection
-// accepted with a nil config, read when the connection is made rather than
-// when Accept was called. An Accept already waiting then gives the next
-// connection whatever the function returns by the time its SYN arrives,
-// as libutp gives a new socket the context's options as they stand
-// (utp_internal.cpp:2616-2621).
+// WithAcceptConfig gives the socket a configuration of its own for incoming
+// connections, read as each one is made, and with it libutp's way of
+// accepting: a SYN is answered as it arrives, whether or not an Accept is
+// waiting, and the connection is held until an Accept or AcceptWithCid takes
+// it. libutp creates the socket and sends the SYN-ACK in utp_process_udp
+// (utp_internal.cpp:2984-2990) with the context's options as they stand
+// (:2616-2621), and hands the connection to its embedder.
+//
+// The function's configuration is used for every connection the socket
+// answers before an Accept asks, and for one accepted with a nil config. An
+// Accept or AcceptWithCid given a config of its own still applies it to a
+// connection whose SYN arrives while it waits; one that takes a connection
+// already answered gets that connection as it was made.
+//
+// Without it, the configuration is each Accept's, so a SYN that arrives
+// before its Accept is parked, unanswered, until an Accept claims it or
+// AWAITING_CONNECTION_TIMEOUT passes: the connection cannot be made before
+// the call that says how. DEVIATIONS.md, "A SYN is answered when an Accept
+// takes it, unless the socket has a configuration of its own".
+//
+// The answered connections count against WithMaxConnections, as libutp's
+// do against its cap, and are held, like libutp's, for as long as the
+// application leaves them.
 func WithAcceptConfig(config func() *ConnectionConfig) SocketOption {
 	return func(s *UtpSocket) { s.acceptConfig = config }
 }
@@ -1180,9 +1207,74 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 		// outlives the Accept that produced it, exactly as a dialled one
 		// outlives its dial. The sibling branch above already used s.ctx.
 		s.selectAcceptHelper(cid, packetPtr, accept)
+	} else if s.acceptConfig != nil {
+		// Nobody is waiting, and the socket has a configuration of its own:
+		// answer now, as libutp does, and hold the connection for an Accept.
+		s.selectAcceptHelper(cid, packetPtr, &Accept{
+			ctx:    s.ctx,
+			stream: make(chan *StreamResult, 1),
+			onHand: s.holdAnswered,
+		})
 	} else {
 		s.logger.Debug("put a new syn packet to incomingConns...")
 		s.putIncomingConn(cidHash, &IncomingPacket{pkt: packetPtr, cid: cid})
+	}
+	return nil
+}
+
+// holdAnswered takes a connection the socket answered with nobody waiting,
+// once its handshake is done: to an Accept that has come for it meanwhile,
+// or into answered until one does. A connection that failed is dropped; it
+// has already ended.
+func (s *UtpSocket) holdAnswered(res *StreamResult) {
+	if res == nil || res.err != nil || res.stream == nil {
+		return
+	}
+	key := res.stream.Cid().Hash()
+	s.dispatchMu.Lock()
+	defer s.dispatchMu.Unlock()
+	if accept, ok := s.getAwaiting(key); ok {
+		s.removeAwaiting(key)
+		accept.hand(res)
+		return
+	}
+	if accept := s.takePendingAccept(); accept != nil {
+		accept.hand(res)
+		return
+	}
+	// Those that ended while waiting -- reset, timed out, closed by the
+	// peer -- go now: they are no longer counted as connections, and kept
+	// here they would pile up behind a socket nobody accepts on.
+	live := s.answered[:0]
+	for _, st := range s.answered {
+		select {
+		case <-st.Done():
+		default:
+			live = append(live, st)
+		}
+	}
+	clear(s.answered[len(live):])
+	s.answered = append(live, res.stream)
+}
+
+// takeAnswered removes and returns the oldest answered connection still
+// alive, or the one for key if key is not empty; nil if there is none.
+// Called with dispatchMu held.
+func (s *UtpSocket) takeAnswered(key string) *UtpStream {
+	for i := 0; i < len(s.answered); i++ {
+		st := s.answered[i]
+		select {
+		case <-st.Done():
+			s.answered = append(s.answered[:i], s.answered[i+1:]...)
+			i--
+			continue
+		default:
+		}
+		if key != "" && st.Cid().Hash() != key {
+			continue
+		}
+		s.answered = append(s.answered[:i], s.answered[i+1:]...)
+		return st
 	}
 	return nil
 }
@@ -1328,6 +1420,10 @@ func (s *UtpSocket) handleNewAcceptWithCidEvent(acceptWithCid *Accept) {
 		"hash", acceptWithCid.cid.Hash())
 	incomingConnsKey := acceptWithCid.cid.Hash()
 
+	if st := s.takeAnswered(incomingConnsKey); st != nil {
+		acceptWithCid.hand(&StreamResult{stream: st})
+		return
+	}
 	if incomingConn, exists := s.removeIncomingConn(incomingConnsKey); exists {
 		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 			s.logger.Trace("conn has already accepted", "key", incomingConnsKey)
@@ -1342,7 +1438,12 @@ func (s *UtpSocket) handleNewAcceptWithCidEvent(acceptWithCid *Accept) {
 }
 
 func (s *UtpSocket) handleNewAcceptEvent(accept *Accept) {
-	// A SYN that already arrived satisfies this immediately.
+	// A connection already answered satisfies this immediately, and so does
+	// a SYN that already arrived.
+	if st := s.takeAnswered(""); st != nil {
+		accept.hand(&StreamResult{stream: st})
+		return
+	}
 	if incomingAccept := s.nextIncomingConn(); incomingAccept != nil {
 		s.selectAcceptHelper(incomingAccept.cid, incomingAccept.pkt, accept)
 		return
@@ -1421,7 +1522,17 @@ func (s *UtpSocket) nextIncomingConn() *IncomingPacket {
 // AcceptBacklog reports how many incoming connections are waiting for an
 // Accept to take them.
 func (s *UtpSocket) AcceptBacklog() int {
-	return s.incomingConns.len()
+	s.dispatchMu.Lock()
+	defer s.dispatchMu.Unlock()
+	n := s.incomingConns.len()
+	for _, st := range s.answered {
+		select {
+		case <-st.Done():
+		default:
+			n++
+		}
+	}
+	return n
 }
 
 // LocalAddr returns the address the underlying socket is bound to, or nil if

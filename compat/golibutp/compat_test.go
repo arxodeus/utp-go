@@ -225,8 +225,9 @@ func TestLogOptions(t *testing.T) {
 }
 
 // A dial completes whether or not anything is waiting in Accept, as it does
-// against libutp, and Accept then returns the connection. On its own the
-// engine answers a SYN only once an Accept takes it.
+// against libutp, and Accept then returns the connection: the engine answers
+// a SYN as it arrives on a socket with a configuration of its own, which
+// utpnet's always has (utp.WithAcceptConfig).
 func TestDialCompletesBeforeAccept(t *testing.T) {
 	a, b := udpPair(t)
 	d, err := a.DialTimeout(b.Addr().String(), 5*time.Second)

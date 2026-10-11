@@ -101,8 +101,10 @@ Each difference is something go-libutp or libutp could not do:
 - **Firewall callbacks only see connection requests.** The asynchronous
   callback is asked only about connection requests, which is all go-libutp
   uses its answer for. go-libutp asks it about every datagram.
-- **A deeper accept backlog.** Incoming connections queue 128 deep for
-  `Accept`, where go-libutp closes any beyond 5.
+- **No five-connection backlog.** Incoming connections are answered as they
+  arrive, as libutp answers them, and held until `Accept` takes them, up to
+  the socket's connection cap (libutp's 3000). go-libutp closes any beyond 5
+  waiting.
 - **Bad options fail cleanly.** A buffer option below one byte is refused
   with -1. libutp would abort the process on its assertion.
 - **The acceptor can write first.** An accepted connection can write before

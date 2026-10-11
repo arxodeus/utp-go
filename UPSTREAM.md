@@ -1908,9 +1908,13 @@ Four small additions to the core, each libutp's:
 - `UtpStream.Done`, closed when the connection has ended: libutp's
   `UTP_STATE_DESTROYING`.
 - `UtpSocket.AcceptBacklog`, the SYNs waiting for an Accept.
-- `WithAcceptConfig`, so that an Accept given a nil config takes the socket's
-  as it stands when the SYN arrives, as libutp copies its context's options
-  into a new socket.
+- `WithAcceptConfig`: a configuration of the socket's own for incoming
+  connections, and with it libutp's accepting -- a SYN answered as it
+  arrives and the connection held for an Accept, rather than parked
+  unanswered until one comes. Opt-in, because upstream's Accept and
+  AcceptWithCid configure each connection per call (DEVIATIONS.md, "A SYN is
+  answered when an Accept takes it, unless the socket has a configuration of
+  its own").
 
 In `utpnet` (PR 16): `NewSocketFromPacketConn`, for any `net.PacketConn`,
 with `DialAddr` for the PacketConn's own address type; `SetConnectionConfig`;

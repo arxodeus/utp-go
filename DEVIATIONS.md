@@ -190,6 +190,13 @@ consequence, or equivalent on the wire.
   on a plain 1500-byte path is 5% more packets and 0.16 points more header
   overhead per byte (48 bytes against 1402, and against 1472); its gain is a
   PPPoE or GRE hop beyond the local interface carried without a probe.
+- *A SYN is answered when an Accept takes it, on a socket with no
+  configuration of its own:* a bare `UtpSocket` whose callers configure each
+  connection in their Accept or AcceptWithCid parks a SYN until that call
+  comes, since only it says how to make the connection. With
+  `WithAcceptConfig` -- which `utpnet`, and so torrent and the go-libutp
+  drop-in, always set -- a SYN is answered as it arrives, as libutp answers
+  it.
 - *Timeouts act when due, not on a 500ms pass:* retransmissions, keep-alives
   and the zero-window probe fire within our 25ms timer tick of their
   deadline; libutp's fire on the first of its 500ms passes after it.
@@ -232,14 +239,6 @@ consequence, or equivalent on the wire.
   its own thread was tried and was no faster. No throughput cost has been
   measured. See KNOWN-LIMITATIONS.md, "Acknowledgement latency: what is
   left".
-
-**Worse than libutp, open.**
-
-- *A SYN is answered when an Accept takes it* (`UtpSocket.Accept`,
-  `utpnet.Socket.Accept`): libutp answers at once. A dial to a socket whose
-  application is not waiting in Accept waits for it, and fails after 21 s if
-  none comes. Not in the go-libutp drop-in, which accepts continuously as
-  libutp's embedder does.
 
 ## Intentional deviations
 
@@ -396,41 +395,53 @@ with one data packet before feeding them generated input: without that, every
 sequence not starting with data reports this divergence instead of finding a
 new one.
 
-## A SYN is answered when an Accept takes it
+## A SYN is answered when an Accept takes it, unless the socket has a configuration of its own
 
-**libutp answers a SYN at once. `UtpSocket.Accept` -- and `utpnet.Socket`'s,
-which is built on it -- answers it once an Accept takes it.**
+**libutp answers a SYN at once. A socket here does too when it has a
+configuration of its own for incoming connections (`WithAcceptConfig`);
+without one, the SYN waits for the Accept that configures its connection.**
 
 `utp_process_udp` creates the socket and sends the SYN-ACK as the SYN arrives
-(`utp_internal.cpp:2984-2990`), and hands it to the embedder's accept
-callback; what the embedder does with it is its own business. Here a SYN that
-arrives with no Accept waiting is parked, unanswered, for up to
-`AWAITING_CONNECTION_TIMEOUT` (20 s), and answered when an Accept claims it.
-The dialler retransmits its SYN meanwhile, so the connection completes if an
-Accept comes within the dialler's 21 s, late by however long it took.
+(`utp_internal.cpp:2984-2990`), with the context's options as they stand
+(`:2616-2621`), and hands it to the embedder's accept callback; what the
+embedder does with it is its own business.
 
-It is a consequence of the API rather than a choice: the Accept call carries
-the connection's configuration, and `AcceptWithCid` names the connection it
-wants before its SYN arrives -- the Portal network's pattern, which an
-acceptor that took every SYN would break.
+This library's Accept and AcceptWithCid take a `ConnectionConfig` per call,
+which libutp has no counterpart for. A socket answering a SYN before its
+Accept would have to make the connection without that call's
+configuration -- and the emulated-network harness races AcceptWithCid
+against the dial with a per-flow configuration carrying the congestion
+algorithm and the metrics recorder, so a flow whose SYN won the race would
+have run on the wrong controller, unrecorded. So:
 
-A server with an accept loop, which is what anacrolix/torrent and every other
-listener has, never sees it. A caller that dials and then accepts on the same
-socket, or accepts only after some other work, does: go-libutp's own
-`TestSocketConnsAfterConnClosed` timed out its dial after 21 s against this
-until the go-libutp drop-in (compat/golibutp) took every connection as it
-arrived and queued it for Accept, as go-libutp's embedder does with libutp's
-callback. That test, and `TestDialCompletesBeforeAccept` there, which fails
-without the loop, pin it.
+- **With `WithAcceptConfig`**, the socket has a configuration of its own, and
+  accepts as libutp does: a SYN with no Accept waiting is answered as it
+  arrives, made with the socket's configuration, and held until an Accept or
+  an AcceptWithCid naming it takes it (`holdAnswered`). An Accept already
+  waiting, or an AcceptWithCid already registered for the connection, gets
+  it as before, with its own configuration. Answered connections count
+  against the connection cap, and are held, as libutp's are, until the
+  application takes them; one that ends while waiting is dropped.
+  `utpnet.Socket` always sets it, so torrent, every other `utpnet` user and
+  the go-libutp drop-in accept this way.
+- **Without it**, a SYN that arrives with no Accept waiting is parked,
+  unanswered, for up to `AWAITING_CONNECTION_TIMEOUT` (20 s), and answered
+  when an Accept claims it. The dialler retransmits its SYN meanwhile, so
+  the connection completes if an Accept comes within the dialler's 21 s,
+  late by however long it took.
 
-Two smaller pieces of this were changed along the way: an Accept given a nil
-config takes the socket's (`utp.WithAcceptConfig`) as it stands when the SYN
-arrives, as libutp copies the context's options into a socket at that moment
-(`:2616-2621`); `utpnet.Socket` uses that, so `SetConnectionConfig` reaches a
+Found by go-libutp's own `TestSocketConnsAfterConnClosed`, which dials its
+own socket and accepts afterwards: its dial timed out after 21 s. Pinned by
+`TestSynIsAnsweredWithNoAcceptWaiting` (the dial completes in about a
+millisecond with no Accept, and the connection has the socket's
+configuration), `TestAcceptWithCidTakesAnAnsweredConnection` and
+`utpnet.TestDialCompletesWithNoAcceptWaiting`, which fail with the answering
+removed, and by `TestSynWaitsForAcceptWithoutASocketConfig` for the bare
+socket.
+
+An Accept given a nil config takes the socket's configuration as it stands
+when the SYN arrives, so `utpnet.Socket.SetConnectionConfig` reaches a
 connection whose Accept was already waiting.
-
-Open: the same continuous accept could be offered by `utpnet.Socket`, opt-in
-for `UtpSocket.Accept`.
 
 ## Reaching the end of the peer's stream does not time out what is in flight
 

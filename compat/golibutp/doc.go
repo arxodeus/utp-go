@@ -20,8 +20,8 @@
 //     go-libutp panics with "not implemented".
 //   - A firewall callback is not called with this package's lock held, so
 //     it cannot deadlock against it.
-//   - Pending incoming connections wait for Accept rather than being closed
-//     once five are queued.
+//   - Incoming connections waiting for Accept are held up to the connection
+//     cap rather than closed once five are queued.
 //   - Option values that libutp asserts on (a buffer below one byte) are
 //     refused with -1 rather than aborting the process.
 //   - RecvBuffer sizes this library's send buffer as well as its receive
