@@ -568,15 +568,14 @@ type connection struct {
 	// ackPathQueuedAt is when the way back last showed a queue; the rate
 	// term in ackEvery applies for ackRateMemory after it.
 	ackPathQueuedAt time.Time
-	// coalesceSince, coalesceStartQ and coalesceMinQ follow a spell of
-	// coalescing: when it began, the return path's queueing delay then, and
-	// the least since. coalesceOffUntil holds acknowledgements to one per
-	// read after a spell that did not drain the queue. See ackEvery.
-	coalesceSince    time.Time
-	coalesceStartQ   time.Duration
-	coalesceMinQ     time.Duration
-	coalesceOffUntil time.Time
-	coalesceBackoffs uint64
+	// ackQueueSamples holds the way back's queueing delay, sampled every
+	// ackQueueSampleEvery (the next at ackQueueNext), and ackSelfQueuedAt
+	// is when it was last seen climbing as only this receiver's own
+	// acknowledgements make it climb. See ackPathSelfQueued.
+	ackQueueSampledAt time.Time
+	ackQueueSamples   [ackQueueSpan + ackQueueWindow]time.Duration
+	ackQueueNext      int
+	ackSelfQueuedAt   time.Time
 	// armProbeTimer wakes the event loop when a closed window has gone
 	// unprobed for long enough. Installed by the event loop, which owns the
 	// timer.
@@ -2685,12 +2684,15 @@ const (
 	// trip or two.
 	ackRateGate   = 10 * time.Millisecond
 	ackRateMemory = 10 * time.Second
-	// coalesceProbePeriod is how long a spell of coalescing has to halve the
-	// queue on the way back before the queue is taken for someone else's,
-	// and coalesceBackoff how long the receiver then acknowledges every read.
-	// See ackEvery.
-	coalesceProbePeriod = time.Second
-	coalesceBackoff     = 10 * time.Second
+	// A queue on the way back is taken for this receiver's own
+	// acknowledgements once the least of its newest ackQueueWindow samples,
+	// ackQueueSampleEvery apart, exceeds the greatest of the ackQueueWindow
+	// before the ackQueueSpan before them by ackQueueClimb: a climb out of
+	// its own noise over 300 ms. See ackPathSelfQueued.
+	ackQueueSampleEvery = 25 * time.Millisecond
+	ackQueueWindow      = 4
+	ackQueueSpan        = 8
+	ackQueueClimb       = 2 * time.Millisecond
 )
 
 // ackEvery is how many data packets an acknowledgement may wait to cover.
@@ -2734,20 +2736,18 @@ const (
 // Never while a gap is open: the selective ack is how the peer learns of a
 // loss, and holding it back would delay recovery.
 //
-// And only while it works. Coalescing helps when the queue on the way back
-// is this receiver's own acknowledgements; then sending fewer drains it. When
-// the queue is other traffic's -- an uplink shared with someone's upload --
-// fewer acknowledgements change nothing there, and cost the sender's
-// yielding: a LEDBAT sender, libutp's or ours, grows faster on fewer, larger
-// acknowledgements and samples its delay less often. Measured with a
+// And only when the queue is this receiver's own. Coalescing helps when the
+// way back is clogged with its acknowledgements; then sending fewer drains
+// it. When the queue is other traffic's -- an uplink shared with someone's
+// upload -- fewer acknowledgements change nothing there, and cost the
+// sender's yielding, libutp's sender as much as ours. Measured with a
 // loss-based flow sharing one bottleneck both ways, where this receiver
 // coalesced to a third of libutp's acknowledgements: the competitor kept
 // 64.0% of its rate against 67.5% with libutp's receiver, and 67.5% with
-// this one acknowledging as libutp does (30 runs each). So a spell of
-// coalescing that has not at least halved the queue within
-// coalesceProbePeriod is taken as someone else's queue, and the receiver
-// acknowledges every read, as libutp does, for coalesceBackoff before trying
-// again.
+// this one acknowledging as libutp does (30 runs each). So it coalesces only
+// after the queue has been seen climbing as only its own acknowledgements
+// make it climb (ackPathSelfQueued), and otherwise acknowledges every read,
+// as libutp does.
 func (c *connection) ackEvery() int {
 	if c.state == nil || c.state.SentPackets == nil || c.state.RecvBuf == nil {
 		return 1
@@ -2757,7 +2757,7 @@ func (c *connection) ackEvery() int {
 	}
 	q := c.state.SentPackets.QueueingDelay()
 	now := c.now()
-	if now.Before(c.coalesceOffUntil) {
+	if !c.ackPathSelfQueued(q, now) {
 		return 1
 	}
 	k := min(1+int(q/ackQueueStep), maxAckQueueRun)
@@ -2773,36 +2773,48 @@ func (c *connection) ackEvery() int {
 			k = max(k, min(max(int((ackRatePeriod+gap/2)/gap), 1), maxAckRateRun))
 		}
 	}
-	return c.coalescingWorks(k, q, now)
+	return k
 }
 
-// coalescingWorks returns k, or 1 once a spell of coalescing has gone on for
-// coalesceProbePeriod without halving the queue on the way back. See
-// ackEvery.
-func (c *connection) coalescingWorks(k int, q time.Duration, now time.Time) int {
-	if k <= 1 || q < ackRateGate {
-		// Nothing to coalesce, or nothing queued to answer: any spell ends.
-		c.coalesceSince = time.Time{}
-		return k
+// ackPathSelfQueued reports whether the queue on the way back is this
+// receiver's own acknowledgements, as far as can be told: it has been seen,
+// within ackRateMemory, climbing out of its own noise. The delay is sampled
+// every ackQueueSampleEvery; it is climbing when the least of the newest
+// ackQueueWindow samples exceeds the greatest of the ackQueueWindow taken
+// ackQueueSpan earlier by ackQueueClimb or more. See ackEvery.
+//
+// Acknowledgements a return path cannot carry pile up steadily: over a
+// 160 kb/s return path, with a 20 Mb/s flow in slow start, the delay read
+// for the way back climbed from nothing to 43 ms in 1.2 s, about 2 ms every
+// 25 ms, with small dips. Another flow's queue does not climb like that
+// under this one's acknowledgements: with a loss-based flow sharing the
+// bottleneck, the delay swung between nothing and 50-80 ms from one 50 ms
+// sample to the next, and a window of those holds a sample near nothing.
+// Four simpler tests were tried first and failed: whether coalescing halved
+// the queue (those swings halve on their own), whether the queue came back
+// while coalescing, whether it fell between the halves of a second of
+// coalescing (over 64 kb/s the sender is still in slow start, its
+// acknowledgements growing faster than coalescing takes them), and whether
+// it rose by 5 ms in each of four samples (it rises by about 2).
+func (c *connection) ackPathSelfQueued(q time.Duration, now time.Time) bool {
+	if c.ackQueueSampledAt.IsZero() || now.Sub(c.ackQueueSampledAt) >= ackQueueSampleEvery {
+		c.ackQueueSampledAt = now
+		c.ackQueueSamples[c.ackQueueNext%len(c.ackQueueSamples)] = q
+		c.ackQueueNext++
+		if c.ackQueueNext >= len(c.ackQueueSamples) {
+			n := len(c.ackQueueSamples)
+			oldest := c.ackQueueNext - n
+			olderMax, newerMin := time.Duration(0), time.Duration(math.MaxInt64)
+			for i := 0; i < ackQueueWindow; i++ {
+				olderMax = max(olderMax, c.ackQueueSamples[(oldest+i)%n])
+				newerMin = min(newerMin, c.ackQueueSamples[(c.ackQueueNext-1-i)%n])
+			}
+			if newerMin-olderMax >= ackQueueClimb {
+				c.ackSelfQueuedAt = now
+			}
+		}
 	}
-	if c.coalesceSince.IsZero() {
-		c.coalesceSince, c.coalesceStartQ, c.coalesceMinQ = now, q, q
-		return k
-	}
-	c.coalesceMinQ = min(c.coalesceMinQ, q)
-	if now.Sub(c.coalesceSince) < coalesceProbePeriod {
-		return k
-	}
-	if c.coalesceMinQ*2 > c.coalesceStartQ {
-		// A second of fewer acknowledgements, and the queue stood.
-		c.coalesceSince = time.Time{}
-		c.coalesceOffUntil = now.Add(coalesceBackoff)
-		c.coalesceBackoffs++
-		return 1
-	}
-	// It drained: the queue was ours. Judge the next spell afresh.
-	c.coalesceSince, c.coalesceStartQ, c.coalesceMinQ = now, q, q
-	return k
+	return !c.ackSelfQueuedAt.IsZero() && now.Sub(c.ackSelfQueuedAt) < ackRateMemory
 }
 
 // flushAck sends the acknowledgement owed for whatever was received, if any,
