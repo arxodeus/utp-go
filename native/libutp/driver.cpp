@@ -56,6 +56,16 @@ struct libutp_driver {
 	char **cc_log;
 	int cc_log_count;
 	int cc_log_cap;
+
+	// win_log holds max_window as is_full logs it each time libutp asks
+	// whether a packet fits (utp_internal.cpp:950-953): the window itself,
+	// which libutp keeps private and utp_socket_stats does not report. The
+	// line is compiled only with UTP_DEBUG_LOGGING, so this works only in a
+	// libutp_debuglog build. See libutp_driver_enable_window_log.
+	int win_log_on;
+	uint32_t *win_log;
+	int win_log_count;
+	int win_log_cap;
 	int want_close;
 	int close_sent;
 
@@ -237,9 +247,28 @@ static uint64 drv_get_random(utp_callback_arguments *a) {
 	return (uint64)v;
 }
 
+static void drv_log_window(libutp_driver *d, const char *line) {
+	// UTPSocket::log prefixes the socket, its address and its id
+	// (utp_internal.cpp:577), so the line's own text is found, not assumed.
+	const char *is_full = strstr(line, "is_full:");
+	if (!is_full) return;
+	const char *p = strstr(is_full, "max_window:");
+	if (!p) return;
+	if (d->win_log_count >= d->win_log_cap) {
+		int cap = d->win_log_cap ? d->win_log_cap * 2 : 256;
+		uint32_t *grown = (uint32_t *)realloc(d->win_log, sizeof(uint32_t) * (size_t)cap);
+		if (!grown) return;
+		d->win_log = grown;
+		d->win_log_cap = cap;
+	}
+	d->win_log[d->win_log_count++] = (uint32_t)strtoul(p + 11, NULL, 10);
+}
+
 static uint64 drv_log(utp_callback_arguments *a) {
 	libutp_driver *d = drv_of(a);
-	if (!d->cc_log_cap || !a->buf) return 0;
+	if (!a->buf) return 0;
+	if (d->win_log_on) drv_log_window(d, (const char *)a->buf);
+	if (!d->cc_log_cap) return 0;
 	const char *line = (const char *)a->buf;
 	// Only apply_ccontrol's line: it is the one that starts with the delay
 	// it acted on.
@@ -297,6 +326,7 @@ void libutp_driver_destroy(libutp_driver *d) {
 	libutp_driver_emitted_clear(d);
 	libutp_driver_cc_log_clear(d);
 	free(d->cc_log);
+	free(d->win_log);
 	free(d->rx);
 	free(d->tx);
 	free(d);
@@ -328,6 +358,34 @@ const char *libutp_driver_cc_log_get(libutp_driver *d, int i) {
 void libutp_driver_cc_log_clear(libutp_driver *d) {
 	for (int i = 0; i < d->cc_log_count; i++) free(d->cc_log[i]);
 	d->cc_log_count = 0;
+}
+
+int libutp_driver_enable_window_log(libutp_driver *d) {
+#if UTP_DEBUG_LOGGING
+	libutp_guard guard;
+	d->win_log_on = 1;
+	utp_context_set_option(d->ctx, UTP_LOG_DEBUG, 1);
+	return 1;
+#else
+	(void)d;
+	return 0;
+#endif
+}
+
+int libutp_driver_window_log_count(libutp_driver *d) {
+	libutp_guard guard;
+	return d->win_log_count;
+}
+
+uint32_t libutp_driver_window_log_get(libutp_driver *d, int i) {
+	libutp_guard guard;
+	if (i < 0 || i >= d->win_log_count) return 0;
+	return d->win_log[i];
+}
+
+void libutp_driver_window_log_clear(libutp_driver *d) {
+	libutp_guard guard;
+	d->win_log_count = 0;
 }
 
 void libutp_driver_set_time(libutp_driver *d, uint64_t now_micros) {

@@ -1312,6 +1312,19 @@ to 4.28 at 1% loss (3.33).
 update with libutp's factor and matches it to the byte: the replay supplies
 no send windows, and with none the factor is libutp's.
 
+**What is left of the whole-packet near-misses: nothing measurable.** Before
+this change a sweep of the high-BDP link's delay showed the window ending
+just short of a whole packet at some delays -- about 155 ms (2%) slower at
+95 and 105 ms than either side. libutp sends only while a whole packet fits
+(`is_full`, `utp_internal.cpp:956`), and so does this library, so a window a
+few bytes short of a packet sends a packet fewer every round trip. Swept
+again with this in place, classic LEDBAT, 2 MB at 20 Mb/s, one-way delays
+from 90 to 110 ms in steps of 1-2 ms, three to five runs each: every delay
+takes 38.9-39.0 round trips, the time per round trip within 0.4%
+(0.03891-0.03907 s) and falling smoothly, with nothing at 95 or 105 ms. The
+whole-packet rule is unchanged; the window no longer lands short of the
+packet it needs.
+
 ## A dialled connection's ids are clear of every id in use
 
 libutp keys a connection by address and receive id, and an outgoing

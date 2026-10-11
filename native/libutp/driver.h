@@ -41,6 +41,10 @@ void libutp_driver_enable_cc_log(libutp_driver *d);
 int libutp_driver_cc_log_count(libutp_driver *d);
 const char *libutp_driver_cc_log_get(libutp_driver *d, int i);
 void libutp_driver_cc_log_clear(libutp_driver *d);
+int libutp_driver_enable_window_log(libutp_driver *d);
+int libutp_driver_window_log_count(libutp_driver *d);
+uint32_t libutp_driver_window_log_get(libutp_driver *d, int i);
+void libutp_driver_window_log_clear(libutp_driver *d);
 
 // The virtual clock. Nothing advances it but these.
 void libutp_driver_set_time(libutp_driver *d, uint64_t now_micros);

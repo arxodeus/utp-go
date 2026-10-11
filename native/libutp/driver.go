@@ -77,6 +77,31 @@ func (d *Driver) CCLog() []string {
 // ClearCCLog discards the captured lines.
 func (d *Driver) ClearCCLog() { C.libutp_driver_cc_log_clear(d.c) }
 
+// EnableWindowLog starts capturing libutp's congestion window, max_window,
+// each time libutp asks whether a packet fits (is_full,
+// utp_internal.cpp:950-953). libutp keeps the window private and
+// utp_socket_stats does not report it; this reads it from a debug log line,
+// which is compiled only with UTP_DEBUG_LOGGING. That define is set by the
+// libutp_debuglog build tag (debuglog.go), not by default: some of the debug
+// blocks it compiles do work whether or not the log is switched on, and the
+// libutp the timing comparisons measure should be the plain one. It reports
+// whether the build has the log; without it nothing is captured. The
+// vendored sources are unchanged either way.
+func (d *Driver) EnableWindowLog() bool { return C.libutp_driver_enable_window_log(d.c) != 0 }
+
+// WindowLog returns the captured windows, oldest first.
+func (d *Driver) WindowLog() []uint32 {
+	n := int(C.libutp_driver_window_log_count(d.c))
+	out := make([]uint32, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, uint32(C.libutp_driver_window_log_get(d.c, C.int(i))))
+	}
+	return out
+}
+
+// ClearWindowLog discards the captured windows.
+func (d *Driver) ClearWindowLog() { C.libutp_driver_window_log_clear(d.c) }
+
 // SetTime and Advance move the virtual clock, in microseconds.
 func (d *Driver) SetTime(micros uint64) { C.libutp_driver_set_time(d.c, C.uint64_t(micros)) }
 func (d *Driver) Advance(micros uint64) { C.libutp_driver_advance(d.c, C.uint64_t(micros)) }

@@ -171,11 +171,18 @@ so it sent 288-byte packets. Both are written up in
   on the wire, and for the in-flight timeout branch the cross-implementation
   number agrees without discriminating. Both are noted against their rows.
 
-  Reading libutp's window directly would still be worth more than any of these
-  and is not available: `max_window` is private to `UTPSocket`,
-  `utp_socket_stats` does not report it, and reaching in means modifying the
-  copy REFERENCE.md pins. Where it was needed it was inferred from libutp's
-  first flight instead, which is what a peer can see.
+  ~~Reading libutp's window directly is not available~~ -- it is, in a
+  `libutp_debuglog` build: libutp's own debug log prints `max_window` each
+  time `is_full` asks whether a packet fits (`utp_internal.cpp:950-953`),
+  and `libutp.Driver.EnableWindowLog` collects it. The line is compiled only
+  with `UTP_DEBUG_LOGGING`, a compile flag the tag sets, so the copy
+  REFERENCE.md pins is unchanged; it is not the default because some debug
+  blocks do work whether or not the log is on, and the libutp the timing
+  comparisons measure should be the plain one. In that build
+  `netem.TestLibutpIdleWindowDecay` checks the first-flight inference
+  against the window itself: 55,176 bytes of flight for a 55,891-byte
+  window, 15,972 for 16,534, each the window rounded down to whole packets,
+  as `is_full`'s rule makes it.
 - **~~libutp against libutp on the emulated network.~~** Covered:
   `libutpToLibutp` runs the reference at both ends, and the comparison table
   now has every sender against every receiver. It showed our receiver is

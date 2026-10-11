@@ -859,9 +859,9 @@ Gates that pass:
   and within the gate in another. The first had been failing there
   unnoticed. `TestAsymmetricAckPath`'s acknowledgement count, which is a
   count and not a time, fails under `-race` as it does without it, and
-  `TestLibutpIdleWindowDecay`, which cannot measure libutp under the
-  detector, runs our side there against the decay schedule libutp's rule
-  allows rather than skipping (it fails with the decay removed). Both
+  `TestLibutpIdleWindowDecay` runs whole there: it skipped, then ran only
+  our side, because libutp's first flight read as one packet under the
+  detector -- the measurement's timing, since fixed, not libutp. Both
   packages green under `-race` with those changes.
 - `go test -race ./integrated/ -run 'TestUdpTransfer|TestManyConcurrentTransfers' -count=3` — green, **but at `UTP_TEST_TRANSFERS=150`, not the default 1000.** See "Memory" below: the full 1000 did not fit under the race detector on a 16 GB machine. *It does now*: `TestManyConcurrentTransfers` at the full 1000 under `-race`, four runs, green, no data races, peak RSS 5.4-5.8 GB, 77-90 s each.
 - `go test ./netem/ -count=3` — green. The M1 gate; figures in [HARNESS.md](HARNESS.md).
@@ -3244,6 +3244,17 @@ same emulated link, after a 512 KB transfer:
 from a 1000 ms floor puts them in eight seconds. That the arithmetic predicted
 the measurement is the reason to believe the reading of the source.
 
+*Since, read directly:* a `libutp_debuglog` build reads `max_window` from
+libutp's own `is_full` log line (see COMPATIBILITY.md), and the window behind
+those flights was 55,891 and 16,534 bytes -- each flight the window rounded
+down to whole packets. The flight is now counted as what libutp emits inside
+the write that queues the burst, with the pump paused, rather than timed as
+what leaves within 40 ms of the burst's first packet: under load the pump
+could stall inside that window, and the flight read as one packet, 1,452
+bytes, against a window read directly as 16,534. That was also why the test
+skipped libutp's side under `-race`; it now runs there whole (55,176 and
+15,972, three runs of three).
+
 The fix gives the event loop one wake-up for the case: `scheduleIdleRto` arms a
 timer for the retransmission deadline whenever nothing is outstanding, and
 `onIdleRto` applies the decay through the same call the in-flight path uses --
@@ -3437,6 +3448,13 @@ and treats a flight that never starts as a failure rather than as a zero.
 
 That one only appeared when the whole suite ran, which is the argument for
 running it that way rather than test by test.
+
+*The same flaw, a second time:* starting the window at the first packet
+still left the rest of the flight to arrive within 40 ms of it, and under
+load it sometimes did not -- one packet counted against a window of 16 KB.
+No window is used now: the flight is what libutp emits inside the write
+that queues the burst, counted with the pump paused, which no scheduling
+can shorten.
 
 ## The firewall callback was accepted and ignored
 

@@ -43,24 +43,36 @@ import (
 // what libutp actually does rather than on what its source appears to say,
 // which is what this measures.
 //
-// The window is not readable from outside libutp -- `max_window` is private
-// and `utp_socket_stats` does not report it -- so it is measured the way a
-// peer would see it: idle for a while, then write a burst, and count what
-// comes out before anything is acknowledged. That first flight is the window.
+// The window is not readable from outside libutp in an ordinary build --
+// `max_window` is private and `utp_socket_stats` does not report it -- so it
+// is measured the way a peer would see it: idle for a while, then write a
+// burst, and count what comes out before anything is acknowledged. That
+// first flight is the window, rounded down to whole packets. A
+// libutp_debuglog build also reads the window itself, and checks the two
+// agree.
 func TestLibutpIdleWindowDecay(t *testing.T) {
 	const idle = 8 * time.Second
-	if raceEnabled {
-		// Under the detector libutp's first flight measured one packet
-		// whether idle or not -- 1452 of 1452 bytes, on this commit and on
-		// the one before it -- so there is no reference to compare with.
-		// Our side still runs, so the detector sees the idle timeout path,
-		// and is held to the schedule libutp's rule allows.
-		ourIdleDecayWithoutReference(t, idle)
-		return
-	}
 
-	busy := libutpFirstFlightAfterIdle(t, 0)
-	idled := libutpFirstFlightAfterIdle(t, idle)
+	busy, busyWindow, direct := libutpFirstFlightAfterIdle(t, 0)
+	idled, idledWindow, _ := libutpFirstFlightAfterIdle(t, idle)
+	if direct {
+		// The first flight is how this test reads libutp's window without
+		// the debug build. libutp sends a packet only while the whole of it
+		// fits (is_full, utp_internal.cpp:956), so the flight is the window
+		// rounded down to whole packets: within one packet of it, never over.
+		for _, c := range []struct {
+			name   string
+			flight int
+			window uint32
+		}{{"no idle", busy, busyWindow}, {"after idle", idled, idledWindow}} {
+			t.Logf("libutp %s: window %d bytes read directly, first flight %d", c.name, c.window, c.flight)
+			if c.flight > int(c.window) || int(c.window)-c.flight >= maxLibutpPayload {
+				t.Errorf("libutp %s: first flight %d bytes for a window of %d; the flight is meant to be "+
+					"the window to within a packet (%d), so the inference this test makes is wrong",
+					c.name, c.flight, c.window, maxLibutpPayload)
+			}
+		}
+	}
 	ourBusy, ourIdled := ourWindowAcrossIdle(t, idle)
 
 	t.Logf("libutp first flight: %d bytes with no idle, %d after %v (%.0f%% of it)",
@@ -115,25 +127,6 @@ func TestLibutpIdleWindowDecay(t *testing.T) {
 	}
 	// Neither should fall below one packet, which is the floor libutp clamps
 	// to in the same expression.
-	if ourIdled < 1000 {
-		t.Errorf("our window decayed to %d bytes, below the one-packet floor", ourIdled)
-	}
-}
-
-// ourIdleDecayWithoutReference checks our window across `idle` against the
-// rule alone, for when libutp cannot be measured: decays by a third at one,
-// three, seven and fifteen RTOs from the last packet, the RTO at least 500 ms
-// (utp_internal.cpp:1216-1222, :1204), so 8 s of idle holds two to four.
-func ourIdleDecayWithoutReference(t *testing.T, idle time.Duration) {
-	t.Helper()
-	ourBusy, ourIdled := ourWindowAcrossIdle(t, idle)
-	steps := math.Log(float64(ourIdled)/float64(ourBusy)) / math.Log(2.0/3.0)
-	t.Logf("ours, congestion window: %d bytes with no idle, %d after %v (%.2f decays by a third)",
-		ourBusy, ourIdled, idle, steps)
-	if steps < 1.9 || steps > 4.1 {
-		t.Errorf("across %v idle we kept %d of %d bytes, %.2f decays by a third; libutp's "+
-			"rule allows two to four (utp_internal.cpp:1216-1222, :1204)", idle, ourIdled, ourBusy, steps)
-	}
 	if ourIdled < 1000 {
 		t.Errorf("our window decayed to %d bytes, below the one-packet floor", ourIdled)
 	}
@@ -241,10 +234,18 @@ func ourWindowAcrossIdle(t *testing.T, idle time.Duration) (busy, idled uint32) 
 	return 0, 0
 }
 
+// maxLibutpPayload bounds a libutp data packet's payload on these links: an
+// Ethernet frame's worth, larger than any packet libutp sends here.
+const maxLibutpPayload = 1500
+
 // libutpFirstFlightAfterIdle drives real libutp as the sender: a bulk transfer
 // to grow its window, then `idle` of silence, then a burst. It reports how
 // many bytes libutp put on the wire in the burst's first flight.
-func libutpFirstFlightAfterIdle(t *testing.T, idle time.Duration) int {
+//
+// window is libutp's congestion window read directly as the burst began, and
+// direct whether it could be: only in a libutp_debuglog build (see
+// libutp.Driver.EnableWindowLog).
+func libutpFirstFlightAfterIdle(t *testing.T, idle time.Duration) (flight int, window uint32, direct bool) {
 	t.Helper()
 
 	n := NewNetwork(7171)
@@ -299,11 +300,9 @@ func libutpFirstFlightAfterIdle(t *testing.T, idle time.Duration) int {
 	recv := newReceivingEndpoint(t, ctx, b)
 	defer recv.close()
 
-	type burst struct {
-		at    time.Time
-		bytes int
-	}
-	sent := make(chan burst, 8192)
+	// pumpMu is held by the pump for each pass and by the test around the
+	// burst, so the burst's packets can be counted before they are sent.
+	var pumpMu sync.Mutex
 
 	go func() {
 		defer close(pumped)
@@ -311,17 +310,21 @@ func libutpFirstFlightAfterIdle(t *testing.T, idle time.Duration) int {
 		defer tick.Stop()
 		readBuf := make([]byte, 64*1024)
 		for {
+			var pkt []byte
 			select {
 			case <-stopPump:
 				return
 			case <-ctx.Done():
 				return
-			case pkt := <-inbox:
-				drv.SetTime(uint64(time.Now().UnixMicro()))
+			case pkt = <-inbox:
+			case <-tick.C:
+			}
+			pumpMu.Lock()
+			drv.SetTime(uint64(time.Now().UnixMicro()))
+			if pkt != nil {
 				drv.Inject(pkt)
 				drv.IssueAcks()
-			case <-tick.C:
-				drv.SetTime(uint64(time.Now().UnixMicro()))
+			} else {
 				drv.CheckTimeouts()
 			}
 			for {
@@ -331,16 +334,10 @@ func libutpFirstFlightAfterIdle(t *testing.T, idle time.Duration) int {
 			}
 			out := drv.Emitted()
 			drv.ClearEmitted()
+			pumpMu.Unlock()
 			for _, pkt := range out {
 				if _, err := a.WriteTo(pkt, b.Addr()); err != nil {
 					return
-				}
-				// Only data packets count towards a flight.
-				if len(pkt) > 20 {
-					select {
-					case sent <- burst{time.Now(), len(pkt) - 20}:
-					default:
-					}
 				}
 			}
 		}
@@ -360,58 +357,48 @@ func libutpFirstFlightAfterIdle(t *testing.T, idle time.Duration) int {
 	if !recv.waitForBytes(len(bulk), 120*time.Second) {
 		t.Fatalf("libutp delivered only %d of %d bytes", recv.count(), len(bulk))
 	}
-	drainBursts(sent)
-
 	if idle > 0 {
 		time.Sleep(idle)
-		drainBursts(sent)
 	}
 
-	// The burst. Everything libutp emits before the first acknowledgement can
-	// come back -- one propagation delay each way plus slack -- is its window.
+	// The burst. libutp sends from inside the write that queues it, as much
+	// as its window allows (utp_writev, utp_internal.cpp:3200-3212), and no
+	// acknowledgement can arrive while the driver is in that call -- so what
+	// the write emits is the first flight, exactly. It is counted before the
+	// pump sends it.
+	//
+	// It used to be timed instead: everything emitted within 40 ms of the
+	// burst's first packet. Under load -- the race detector, or another test
+	// binary on the machine -- the pump could stall past that window between
+	// the first packet and the rest, and the flight read as one packet:
+	// 1,452 bytes where libutp's window, read directly, was 16,534.
+	pumpMu.Lock()
+	defer pumpMu.Unlock()
+	// Where the build can read the window itself, it is read as libutp first
+	// asks whether a packet of the burst fits.
+	direct = drv.EnableWindowLog()
+	drv.ClearWindowLog()
 	probe := make([]byte, 512*1024)
 	if _, err := drv.Write(probe); err != nil {
 		t.Fatalf("libutp probe write: %v", err)
 	}
-	// Measure the flight from its first packet, not from the call that asked
-	// for it.
-	//
-	// This used to open a 40ms window at the moment of the write. Run on its
-	// own that was fine; run inside the full package it returned zero, because
-	// under load the driver's pump goroutine can be descheduled past the whole
-	// window and the test then compared a real number against nothing. The
-	// window now starts when the first packet actually goes out, and a flight
-	// that never starts is a failure rather than a zero.
-	var first burst
-	select {
-	case first = <-sent:
-	case <-time.After(20 * time.Second):
-		t.Fatal("libutp emitted nothing after the probe write; there is no first flight to measure")
-	}
-
-	total := first.bytes
-	deadline := time.After(40 * time.Millisecond)
-	for {
-		select {
-		case s := <-sent:
-			if s.at.Sub(first.at) > 40*time.Millisecond {
-				return total
-			}
-			total += s.bytes
-		case <-deadline:
-			return total
+	if direct {
+		if log := drv.WindowLog(); len(log) > 0 {
+			window = log[0]
+		} else {
+			direct = false
 		}
 	}
-}
-
-func drainBursts[T any](ch chan T) {
-	for {
-		select {
-		case <-ch:
-		default:
-			return
+	for _, pkt := range drv.Emitted() {
+		// Only data packets count towards a flight.
+		if len(pkt) > 20 {
+			flight += len(pkt) - 20
 		}
 	}
+	if flight == 0 {
+		t.Fatal("libutp emitted nothing for the probe write; there is no first flight to measure")
+	}
+	return flight, window, direct
 }
 
 // receivingEndpoint is one of our sockets accepting a connection and reading
