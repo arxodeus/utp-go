@@ -36,6 +36,17 @@ import (
 // disabled here, so the only way a byte can move between these two clients is
 // through this library.
 func TestTorrentTransferOverUtp(t *testing.T) {
+	transferTorrent(t, func(t *testing.T, dir string, seed bool) *torrent.Client {
+		cl, _ := newUtpOnlyClient(t, dir, seed)
+		return cl
+	})
+}
+
+// transferTorrent moves a generated 4 MiB torrent from a seeding client to a
+// leeching one, each made by newClient, and checks what arrived against the
+// torrent's own piece hashes and the payload's.
+func transferTorrent(t *testing.T, newClient func(t *testing.T, dir string, seed bool) *torrent.Client) {
+	t.Helper()
 	const (
 		fileSize    = 4 << 20 // 4 MiB, 128 pieces
 		pieceLength = 32 << 10
@@ -69,8 +80,8 @@ func TestTorrentTransferOverUtp(t *testing.T) {
 	mi := metainfo.MetaInfo{InfoBytes: infoBytes}
 	t.Logf("torrent: %d bytes in %d pieces of %d", info.TotalLength(), info.NumPieces(), info.PieceLength)
 
-	seeder, seederSock := newUtpOnlyClient(t, seedDir, true)
-	leecher, _ := newUtpOnlyClient(t, leechDir, false)
+	seeder := newClient(t, seedDir, true)
+	leecher := newClient(t, leechDir, false)
 
 	st, err := seeder.AddTorrent(&mi)
 	if err != nil {
@@ -87,7 +98,7 @@ func TestTorrentTransferOverUtp(t *testing.T) {
 	<-lt.GotInfo()
 
 	if n := lt.AddClientPeer(seeder); n == 0 {
-		t.Fatalf("the leecher was given no peers; the seeder is listening on %v", seederSock.Addr())
+		t.Fatalf("the leecher was given no peers; the seeder is listening on %v", seeder.ListenAddrs())
 	}
 
 	start := time.Now()

@@ -568,6 +568,30 @@ func (s *UtpStream) CloseRead() error {
 	return nil
 }
 
+// Done is closed once the connection has ended and holds nothing more: its
+// close handshake finished or gave up, it was reset or timed out, or the
+// socket closed under it. libutp's UTP_STATE_DESTROYING. Data it delivered
+// before then can still be read.
+func (s *UtpStream) Done() <-chan struct{} {
+	return s.ended
+}
+
+// SetWindowSize sets the ceiling on this connection's congestion window, in
+// bytes: ConnectionConfig.WindowSize for one connection, after it has been
+// made. It is libutp's utp_setsockopt(UTP_SNDBUF) -- libutp's "send buffer"
+// is this ceiling, not a buffer (utp_internal.cpp:936, :1710) -- and takes
+// effect at once: nothing more is sent past it, and a window above it is cut
+// to it. Zero restores the default.
+func (s *UtpStream) SetWindowSize(bytes uint32) {
+	s.conn.setWindowCeiling(bytes)
+}
+
+// WindowSize reports the ceiling SetWindowSize or the connection's config
+// set: libutp's utp_getsockopt(UTP_SNDBUF).
+func (s *UtpStream) WindowSize() uint32 {
+	return s.conn.windowCeilingSetting()
+}
+
 // Close ends the stream and returns at once. What has been written goes on
 // being delivered in the background, the FIN after it, until the peer has
 // acknowledged everything or stopped answering; closing the socket waits for

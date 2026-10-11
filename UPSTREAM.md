@@ -1897,6 +1897,28 @@ to a loss-based flow unchanged, and a fifth of the spurious resends on a
 lightly reordering
 link. See DEVIATIONS.md, "RACK loss detection (opt-in)".
 
+## PR 70 — what a go-libutp drop-in needs of the library
+
+Four small additions to the core, each libutp's:
+
+- `UtpStream.SetWindowSize` and `WindowSize`, libutp's
+  `utp_setsockopt`/`utp_getsockopt(UTP_SNDBUF)`: the window ceiling of a live
+  connection, with effect at once (`TestSetWindowSizeCapsALiveConnection`,
+  which fails with the setter disabled).
+- `UtpStream.Done`, closed when the connection has ended: libutp's
+  `UTP_STATE_DESTROYING`.
+- `UtpSocket.AcceptBacklog`, the SYNs waiting for an Accept.
+- `WithAcceptConfig`, so that an Accept given a nil config takes the socket's
+  as it stands when the SYN arrives, as libutp copies its context's options
+  into a new socket.
+
+In `utpnet` (PR 16): `NewSocketFromPacketConn`, for any `net.PacketConn`,
+with `DialAddr` for the PacketConn's own address type; `SetConnectionConfig`;
+and `Options.OnWriteError`, which go-libutp's sendto callback has.
+
+`compat/golibutp`, go-libutp's API on these, is optional for upstream and
+the obvious thing to offer anacrolix/torrent's users.
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

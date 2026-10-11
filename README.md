@@ -18,6 +18,7 @@ do. See:
 | [HARNESS.md](HARNESS.md) | The emulated network harness: what it models, what it measures, and the numbers proving it is sound. |
 | [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) | **Read this first.** Root cause of every defect fixed, what has and has not been measured, and everything found but not fixed. |
 | [integration/anacrolix/README.md](integration/anacrolix/README.md) | Using this library with `anacrolix/torrent`: what is checked, and how to wire it in. |
+| [compat/golibutp/README.md](compat/golibutp/README.md) | A drop-in replacement for `anacrolix/go-libutp`: one `replace` line in an application's go.mod, and everything that imports go-libutp -- `anacrolix/torrent` included -- runs on this library. |
 | [FUZZING.md](FUZZING.md) | The fuzz targets and soak tests: what each asserts, what they found, and what they do not cover. |
 | [BENCHMARKS.md](BENCHMARKS.md) | Congestion-control measurements: LEDBAT against LEDBAT++, the latecomer experiment, and what the numbers do not prove. |
 | [REFERENCE.md](REFERENCE.md) | Which copy of libutp is normative, and proof the copy used for differential testing is protocol-identical to it. |

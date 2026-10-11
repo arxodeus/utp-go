@@ -485,6 +485,29 @@ func (c *defaultController) BytesInFlight() uint32 {
 	return c.windowSizeBytes
 }
 
+// setWindowCeiling moves the ceiling on the congestion window of a live
+// connection: libutp's utp_setsockopt(UTP_SNDBUF), which sets the socket's
+// opt_sndbuf (utp_internal.cpp:2699-2702). libutp sends no more than it from
+// then on -- is_full takes the least of it and the window (:936) -- and
+// clamps the window to it at the next acknowledgement (:1710); clamping now
+// sends the same. The slow-start threshold is left where it is, as libutp
+// leaves ssthresh. Zero restores the default, and a ceiling below the floor
+// is raised to it, as the constructor does.
+func (c *defaultController) setWindowCeiling(bytes uint32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if bytes == 0 {
+		bytes = DefaultWindowSize
+	}
+	if bytes < c.minWindowSizeBytes {
+		bytes = c.minWindowSizeBytes
+	}
+	c.maxWindowUpperBytes = bytes
+	if c.maxWindowSizeBytes > bytes {
+		c.maxWindowSizeBytes = bytes
+	}
+}
+
 func (c *defaultController) CongestionWindow() uint32 {
 	c.mu.Lock()
 	defer c.mu.Unlock()

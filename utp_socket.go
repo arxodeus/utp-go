@@ -415,6 +415,8 @@ type UtpSocket struct {
 	// Reporting true refuses the connection. Set once at construction and
 	// only read afterwards.
 	firewall func(ConnectionPeer) bool
+	// acceptConfig is WithAcceptConfig's function, or nil.
+	acceptConfig func() *ConnectionConfig
 	// maxConns is the incoming-connection cap: a new incoming connection is
 	// refused while the socket already holds more than this many. Zero or
 	// less means no cap. See WithMaxConnections.
@@ -511,6 +513,28 @@ type SocketOption func(*UtpSocket)
 // not call back into the socket.
 func WithFirewall(refuse func(peer ConnectionPeer) bool) SocketOption {
 	return func(s *UtpSocket) { s.firewall = refuse }
+}
+
+// WithAcceptConfig supplies the configuration of an incoming connection
+// accepted with a nil config, read when the connection is made rather than
+// when Accept was called. An Accept already waiting then gives the next
+// connection whatever the function returns by the time its SYN arrives,
+// as libutp gives a new socket the context's options as they stand
+// (utp_internal.cpp:2616-2621).
+func WithAcceptConfig(config func() *ConnectionConfig) SocketOption {
+	return func(s *UtpSocket) { s.acceptConfig = config }
+}
+
+// configForAccept is the configuration an accepted connection gets.
+func (s *UtpSocket) configForAccept(accept *Accept, peer ConnectionPeer) *ConnectionConfig {
+	config := accept.config
+	if config == nil && s.acceptConfig != nil {
+		config = s.acceptConfig()
+	}
+	if config == nil {
+		config = NewConnectionConfig()
+	}
+	return s.configForPeer(config, peer)
 }
 
 // clock is this socket's clock, never nil.
@@ -1143,7 +1167,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 		connected := make(chan error, 1)
 		newConnStream := make(chan *streamEvent, connEventQueueLen)
 		s.putConnStream(cidHash, newConnStream)
-		stream := NewUtpStream(s.ctx, s.logger, cid, s.configForPeer(accept.config, cid.Peer), packetPtr, nil, s.sendEvent, newConnStream, connected, s.retransmitTimers)
+		stream := NewUtpStream(s.ctx, s.logger, cid, s.configForAccept(accept, cid.Peer), packetPtr, nil, s.sendEvent, newConnStream, connected, s.retransmitTimers)
 		s.attachInline(cidHash, newConnStream, stream.conn)
 		stream.linger = s.linger
 		go s.awaitConnected(stream, accept, connected)
@@ -1392,6 +1416,12 @@ func (s *UtpSocket) nextIncomingConn() *IncomingPacket {
 		s.removeIncomingConn(cidHash)
 	}
 	return incomingAccept
+}
+
+// AcceptBacklog reports how many incoming connections are waiting for an
+// Accept to take them.
+func (s *UtpSocket) AcceptBacklog() int {
+	return s.incomingConns.len()
 }
 
 // LocalAddr returns the address the underlying socket is bound to, or nil if
@@ -1783,7 +1813,7 @@ func (s *UtpSocket) selectAcceptHelper(
 		s.ctx,
 		s.logger,
 		cid,
-		s.configForPeer(accept.config, cid.Peer),
+		s.configForAccept(accept, cid.Peer),
 		syn,
 		nil,
 		s.sendEvent,

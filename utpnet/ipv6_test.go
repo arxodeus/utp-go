@@ -348,7 +348,7 @@ func TestIPv6PeersDifferingOnlyInAddressAreDistinct(t *testing.T) {
 				// needs a retransmission is the failure.
 				dialCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				cid := utp.NewConnectionId(utp.NewUdpPeer(serverAddr), 7000, 7001)
-				stream, err := client.sock.ConnectWithCid(dialCtx, cid, client.config)
+				stream, err := client.sock.ConnectWithCid(dialCtx, cid, client.config.Load())
 				cancel()
 				if err != nil {
 					t.Fatalf("dialling from %s while the other peer's connection is open: %v", addr, err)

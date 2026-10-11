@@ -31,7 +31,7 @@ func newConn(sock *Socket, stream *utp.UtpStream) *Conn {
 	var remote net.Addr
 	if cid := stream.Cid(); cid != nil {
 		if addr, err := peerUDPAddr(cid.Peer); err == nil {
-			remote = addr
+			remote = sock.nativeAddr(addr)
 		}
 	}
 	return &Conn{

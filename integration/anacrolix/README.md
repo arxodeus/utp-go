@@ -48,6 +48,23 @@ could see it.
 
 ## Wiring it into a torrent client
 
+**The one-line way:** replace go-libutp, which torrent's default build uses,
+with [compat/golibutp](../../compat/golibutp), its API on this library:
+
+```
+replace github.com/anacrolix/go-libutp => github.com/zen-eth/utp-go/compat/golibutp <version>
+```
+
+in the application's go.mod. Nothing else changes: no fork, no build tag, and
+torrent's own socket layer makes the socket, installs its firewall on it and
+runs its DHT on it. This module does exactly that (its go.mod), and
+`TestTorrentOverTheGoLibutpDropIn` checks it: torrent's uTP listener is the
+drop-in's socket with torrent's firewall installed, a 4 MiB torrent transfers
+and hash-verifies, and one client's DHT answers the other's ping over the same
+socket. With the line removed, so that real go-libutp is used, it fails.
+
+The rest of this section is how it was done before the drop-in existed.
+
 torrent chooses its uTP implementation at **build time**, not at run time:
 `utp_go.go` (`//go:build !cgo`) uses `github.com/anacrolix/utp`, and
 `utp_libutp.go` (`//go:build cgo`) uses `github.com/anacrolix/go-libutp`.

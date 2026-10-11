@@ -19,6 +19,9 @@ type demuxConn struct {
 
 	incoming chan inbound
 
+	// onWriteError is Options.OnWriteError, if set.
+	onWriteError func(to *net.UDPAddr, err error)
+
 	closeOnce sync.Once
 	closed    chan struct{}
 }
@@ -81,7 +84,11 @@ func (c *demuxConn) WriteTo(b []byte, dst utp.ConnectionPeer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return c.udp.WriteToUDP(b, addr)
+	n, err := c.udp.WriteToUDP(b, addr)
+	if err != nil && c.onWriteError != nil {
+		c.onWriteError(addr, err)
+	}
+	return n, err
 }
 
 // Close does nothing to the UDP socket. The Socket owns that and closes it

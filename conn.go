@@ -255,6 +255,43 @@ func fromConnConfig(config *ConnectionConfig) *ctrlConfig {
 	return ctrlConfigPtr
 }
 
+// controllerConfig is the congestion controller's configuration for this
+// connection: the connection config's, with a window ceiling set on the
+// stream before the controller existed in place of the configured one.
+func (c *connection) controllerConfig() *ctrlConfig {
+	cfg := fromConnConfig(c.config)
+	if c.windowCeiling != 0 {
+		cfg.WindowSize = c.windowCeiling
+	}
+	return cfg
+}
+
+// setWindowCeiling is UtpStream.SetWindowSize.
+func (c *connection) setWindowCeiling(bytes uint32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.windowCeiling = bytes
+	if c.state == nil || c.state.SentPackets == nil {
+		return // the controller is made with it (controllerConfig)
+	}
+	if ctrl, ok := c.state.SentPackets.congestionCtrl.(*defaultController); ok {
+		ctrl.setWindowCeiling(bytes)
+	}
+}
+
+// windowCeilingSetting is UtpStream.WindowSize.
+func (c *connection) windowCeilingSetting() uint32 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.windowCeiling != 0 {
+		return c.windowCeiling
+	}
+	if c.config.WindowSize != 0 {
+		return c.config.WindowSize
+	}
+	return DefaultWindowSize
+}
+
 type queuedWrite struct {
 	data     []byte
 	written  int
@@ -306,11 +343,16 @@ func (r *readOrWriteResult) release() {
 }
 
 type connection struct {
-	ctx            context.Context
-	logger         log.Logger
-	state          *ConnState
-	cid            *ConnectionId
-	config         *ConnectionConfig
+	ctx    context.Context
+	logger log.Logger
+	state  *ConnState
+	cid    *ConnectionId
+	config *ConnectionConfig
+	// windowCeiling, when set, replaces config.WindowSize for this
+	// connection: UtpStream.SetWindowSize, libutp's per-socket
+	// utp_setsockopt(UTP_SNDBUF). config may be shared with other
+	// connections, so it is not written. Guarded by mu.
+	windowCeiling  uint32
 	endpoint       *Endpoint
 	peerTsDiff     time.Duration
 	peerRecvWindow uint32
@@ -862,7 +904,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 
 		recvBuf := newReceiveBufferWithLogger(c.config.BufferSize, syn, c.logger)
 		sendBuf := newSendBuffer(c.config.BufferSize)
-		congestionCtrl := newDefaultController(fromConnConfig(c.config))
+		congestionCtrl := newDefaultController(c.controllerConfig())
 		sentPacketsHolder := newSentPackets(synAck-1, congestionCtrl, c.logger) // wrapping subtraction
 		sentPacketsHolder.rack.active = c.config.RACK
 
@@ -4131,7 +4173,7 @@ func (c *connection) onState(seqNum, ackNum uint16) {
 		recvBuf := newReceiveBufferWithLogger(c.config.BufferSize, seqNum-1, c.logger) // wrapping subtraction for uint16
 		sendBuf := newSendBuffer(c.config.BufferSize)
 
-		congestionCtrl := newDefaultController(fromConnConfig(c.config))
+		congestionCtrl := newDefaultController(c.controllerConfig())
 		// The SYN's round trip is the first RTT sample, as it is in libutp:
 		// the SYN sits in its outgoing buffer like any packet, and the
 		// SYN-ACK acknowledges it through the same ack_packet, which samples

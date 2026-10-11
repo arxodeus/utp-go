@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
@@ -82,8 +83,13 @@ type Socket struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// config is used for every accepted and dialled stream.
-	config *utp.ConnectionConfig
+	// config is used for every stream accepted or dialled from now on; see
+	// SetConnectionConfig.
+	config atomic.Pointer[utp.ConnectionConfig]
+
+	// generic is the adapter when the Socket was made on a net.PacketConn
+	// that is not a UDP socket (NewSocketFromPacketConn), and nil otherwise.
+	generic *packetConn
 
 	passthrough chan datagram
 
@@ -120,6 +126,16 @@ type Options struct {
 	// It runs on the socket's receive path: it must not block, and must not
 	// call back into the socket.
 	Firewall func(net.Addr) bool
+	// OnWriteError, when set, hears of every datagram the uTP machinery
+	// failed to send, with the address it was for. The machinery carries on
+	// regardless -- a lost datagram is retransmitted like any other -- so
+	// this is for a caller that wants to give up sooner on an error it
+	// knows will not clear, or to count them. go-libutp's sendto callback
+	// draws the same line.
+	//
+	// It is called on the sending goroutine: it must not block, and must not
+	// call back into the socket.
+	OnWriteError func(to net.Addr, err error)
 	// MaxConnections caps the connections this socket holds before it
 	// refuses a new incoming one, silently, as libutp does past 3000
 	// (utp_internal.cpp:2967-2974). Zero means utp.DefaultMaxConnections,
@@ -183,13 +199,17 @@ func newSocket(ctx context.Context, conn udpPacketConn, opts *Options) (*Socket,
 		logger:        logger,
 		ctx:           ctx,
 		cancel:        cancel,
-		config:        config,
 		passthrough:   make(chan datagram, passthroughDepth),
 		readDeadline:  newDeadline(),
 		writeDeadline: newDeadline(),
 		closed:        make(chan struct{}),
 	}
+	s.config.Store(config)
+	s.generic, _ = conn.(*packetConn)
 	s.inner = newDemuxConn(conn)
+	if f := opts.OnWriteError; f != nil {
+		s.inner.onWriteError = func(to *net.UDPAddr, err error) { f(s.nativeAddr(to), err) }
+	}
 	var sockOpts []utp.SocketOption
 	if opts.Firewall != nil {
 		refuse := opts.Firewall
@@ -209,6 +229,7 @@ func newSocket(ctx context.Context, conn udpPacketConn, opts *Options) (*Socket,
 		}))
 	}
 	sockOpts = append(sockOpts, utp.WithMaxConnections(opts.MaxConnections))
+	sockOpts = append(sockOpts, utp.WithAcceptConfig(s.config.Load))
 	s.sock = utp.WithSocket(ctx, s.inner, logger, sockOpts...)
 
 	s.readLoop.Add(1)
@@ -298,7 +319,7 @@ func (s *Socket) ReadFrom(p []byte) (int, net.Addr, error) {
 		case d := <-s.passthrough:
 			stop()
 			n := copy(p, d.payload)
-			return n, d.from, nil
+			return n, s.nativeAddr(d.from), nil
 		case <-timeout:
 			// The deadline may have been moved rather than reached; the loop
 			// re-checks it. stop() here too: the next pass starts its own
@@ -323,6 +344,11 @@ func (s *Socket) WriteTo(p []byte, addr net.Addr) (int, error) {
 	if s.writeDeadline.expired() {
 		return 0, timeoutError{}
 	}
+	if s.generic != nil {
+		// The caller's address goes to the PacketConn as it is: it is of
+		// the PacketConn's own kind, or one it can write to.
+		return s.generic.pc.WriteTo(p, addr)
+	}
 	udpAddr, err := toUDPAddr(addr)
 	if err != nil {
 		return 0, err
@@ -332,7 +358,9 @@ func (s *Socket) WriteTo(p []byte, addr net.Addr) (int, error) {
 
 // Accept waits for the next incoming uTP connection.
 func (s *Socket) Accept() (net.Conn, error) {
-	stream, err := s.sock.Accept(s.ctx, s.config)
+	// A nil config: the connection takes s.config as it stands when its
+	// SYN arrives (utp.WithAcceptConfig), not as it stood now.
+	stream, err := s.sock.Accept(s.ctx, nil)
 	if err != nil {
 		select {
 		case <-s.closed:
@@ -361,11 +389,67 @@ func (s *Socket) DialContext(ctx context.Context, network, addr string) (net.Con
 	if err != nil {
 		return nil, fmt.Errorf("utpnet: resolving %q: %w", addr, err)
 	}
-	stream, err := s.sock.Connect(ctx, utp.NewUdpPeer(udpAddr), s.config)
+	return s.DialAddr(ctx, udpAddr)
+}
+
+// DialAddr opens a uTP connection to an address already resolved. It takes
+// any address with a host and port; on a Socket made on a PacketConn of its
+// own (NewSocketFromPacketConn), that is how to dial an address of the
+// PacketConn's own type, which DialContext's resolver does not know.
+func (s *Socket) DialAddr(ctx context.Context, addr net.Addr) (net.Conn, error) {
+	select {
+	case <-s.closed:
+		return nil, ErrSocketClosed
+	default:
+	}
+	var udpAddr *net.UDPAddr
+	if s.generic != nil {
+		var ok bool
+		if udpAddr, ok = s.generic.udpForm(addr); !ok {
+			return nil, fmt.Errorf("utpnet: %v has no host and port", addr)
+		}
+	} else {
+		var err error
+		if udpAddr, err = toUDPAddr(addr); err != nil {
+			return nil, err
+		}
+	}
+	stream, err := s.sock.Connect(ctx, utp.NewUdpPeer(udpAddr), s.config.Load())
 	if err != nil {
 		return nil, err
 	}
 	return newConn(s, stream), nil
+}
+
+// AcceptBacklog reports how many incoming connections are waiting for an
+// Accept to take them.
+func (s *Socket) AcceptBacklog() int {
+	return s.sock.AcceptBacklog()
+}
+
+// SetConnectionConfig replaces the configuration given to streams accepted
+// or dialled from now on; streams already open keep theirs. A nil config is
+// utp.NewConnectionConfig(). The config is not copied, and must not be
+// changed once handed over.
+func (s *Socket) SetConnectionConfig(config *utp.ConnectionConfig) {
+	if config == nil {
+		config = utp.NewConnectionConfig()
+	}
+	s.config.Store(config)
+}
+
+// ConnectionConfig is the configuration streams accepted or dialled now get.
+func (s *Socket) ConnectionConfig() *utp.ConnectionConfig {
+	return s.config.Load()
+}
+
+// nativeAddr is a UDP address as the caller knows it: on a Socket made on a
+// PacketConn of its own, the address of that PacketConn's type it came from.
+func (s *Socket) nativeAddr(udp *net.UDPAddr) net.Addr {
+	if s.generic != nil && udp != nil {
+		return s.generic.nativeOf(udp)
+	}
+	return udp
 }
 
 // Dial is DialContext with a background context.
@@ -445,6 +529,12 @@ func (s *Socket) Close() error {
 		s.cancel()
 		s.inner.close()
 		_ = s.udp.SetReadDeadline(time.Now())
+		if s.generic != nil {
+			// See NewSocketFromPacketConn: closing it is what stops the
+			// reader, and waiting first could wait for ever.
+			_ = s.udp.Close()
+			return
+		}
 		s.readLoop.Wait()
 		_ = s.udp.Close()
 	})

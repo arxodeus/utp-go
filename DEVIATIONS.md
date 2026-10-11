@@ -233,6 +233,14 @@ consequence, or equivalent on the wire.
   measured. See KNOWN-LIMITATIONS.md, "Acknowledgement latency: what is
   left".
 
+**Worse than libutp, open.**
+
+- *A SYN is answered when an Accept takes it* (`UtpSocket.Accept`,
+  `utpnet.Socket.Accept`): libutp answers at once. A dial to a socket whose
+  application is not waiting in Accept waits for it, and fails after 21 s if
+  none comes. Not in the go-libutp drop-in, which accepts continuously as
+  libutp's embedder does.
+
 ## Intentional deviations
 
 ### 1. Larger default UDP socket buffers
@@ -387,6 +395,42 @@ changes. It is also why `FuzzDifferentialResponder` primes both implementations
 with one data packet before feeding them generated input: without that, every
 sequence not starting with data reports this divergence instead of finding a
 new one.
+
+## A SYN is answered when an Accept takes it
+
+**libutp answers a SYN at once. `UtpSocket.Accept` -- and `utpnet.Socket`'s,
+which is built on it -- answers it once an Accept takes it.**
+
+`utp_process_udp` creates the socket and sends the SYN-ACK as the SYN arrives
+(`utp_internal.cpp:2984-2990`), and hands it to the embedder's accept
+callback; what the embedder does with it is its own business. Here a SYN that
+arrives with no Accept waiting is parked, unanswered, for up to
+`AWAITING_CONNECTION_TIMEOUT` (20 s), and answered when an Accept claims it.
+The dialler retransmits its SYN meanwhile, so the connection completes if an
+Accept comes within the dialler's 21 s, late by however long it took.
+
+It is a consequence of the API rather than a choice: the Accept call carries
+the connection's configuration, and `AcceptWithCid` names the connection it
+wants before its SYN arrives -- the Portal network's pattern, which an
+acceptor that took every SYN would break.
+
+A server with an accept loop, which is what anacrolix/torrent and every other
+listener has, never sees it. A caller that dials and then accepts on the same
+socket, or accepts only after some other work, does: go-libutp's own
+`TestSocketConnsAfterConnClosed` timed out its dial after 21 s against this
+until the go-libutp drop-in (compat/golibutp) took every connection as it
+arrived and queued it for Accept, as go-libutp's embedder does with libutp's
+callback. That test, and `TestDialCompletesBeforeAccept` there, which fails
+without the loop, pin it.
+
+Two smaller pieces of this were changed along the way: an Accept given a nil
+config takes the socket's (`utp.WithAcceptConfig`) as it stands when the SYN
+arrives, as libutp copies the context's options into a socket at that moment
+(`:2616-2621`); `utpnet.Socket` uses that, so `SetConnectionConfig` reaches a
+connection whose Accept was already waiting.
+
+Open: the same continuous accept could be offered by `utpnet.Socket`, opt-in
+for `UtpSocket.Accept`.
 
 ## Reaching the end of the peer's stream does not time out what is in flight
 
