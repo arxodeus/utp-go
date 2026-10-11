@@ -1561,14 +1561,17 @@ moved more than 1.5%:
 | LEDBAT++, 5% loss (20 seeds) | 0.54 Mbps | 0.70 | 4.18 |
 | Classic LEDBAT, 1% loss (20 seeds) | 5.48 Mbps | 5.52 | 0.20 |
 | LEDBAT++, 1% loss (20 seeds) | 1.85 Mbps | 1.94 | 0.81 |
-| Deference, classic: competitor keeps (10 runs) | 61.5% | 67.0% | 2.87 |
+| Deference, classic: competitor keeps (15 runs, interleaved; see below) | 65.0% | 63.0% | -0.25 |
 | Deference, LEDBAT++: competitor keeps (10 runs) | 79.5% | 81.0% | 1.59 |
 | Latecomer's share, classic / LEDBAT++ (10 runs) | 22.5% / 71.4% | 22.8% / 72.0% | 1.66 / -0.08 |
 
 Every other profile within 1.5% in five runs, or not significant over twenty
 (LEDBAT++ on the 16 KB queue, bimodal on whether a timeout falls in the run,
-1.83 against 3.34 Mbps median, z = 0.73). A loss-based competitor keeps more
-of its own rate against classic LEDBAT with RACK, not less. Resends on a
+1.83 against 3.34 Mbps median, z = 0.73). A first ten-run
+measurement had a loss-based competitor keeping more of its rate against
+classic LEDBAT with RACK, 67.0% against 61.5% (z = 2.87); fifteen more,
+interleaved, gave 63.0% against 65.0% (z = -0.25). Deference is unchanged,
+and the first figure was the spread of ten runs. Resends on a
 link that reorders 2% of packets by 5 ms and loses none, 2 MB:
 23-24 with libutp's rule, 3 with RACK (`netem.TestRackResendsLessUnderReordering`).
 The benchmark suite's reordering profile displaces packets by 20 ms, more
