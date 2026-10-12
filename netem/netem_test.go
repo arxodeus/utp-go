@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -210,29 +211,27 @@ func TestGateDelayIsHonoured(t *testing.T) {
 				observed = append(observed, time.Since(sent))
 			}
 
-			var sum time.Duration
-			min, max := observed[0], observed[0]
-			for _, d := range observed {
-				sum += d
-				if d < min {
-					min = d
-				}
-				if d > max {
-					max = d
-				}
-			}
-			mean := sum / time.Duration(len(observed))
-			t.Logf("configured %v: observed mean %v (min %v, max %v over %d samples)",
-				want, mean.Round(time.Microsecond), min.Round(time.Microsecond), max.Round(time.Microsecond), samples)
+			sorted := append([]time.Duration(nil), observed...)
+			slices.Sort(sorted)
+			min, max := sorted[0], sorted[len(sorted)-1]
+			median := sorted[len(sorted)/2]
+			t.Logf("configured %v: observed median %v (min %v, max %v over %d samples)",
+				want, median.Round(time.Microsecond), min.Round(time.Microsecond), max.Round(time.Microsecond), samples)
 
-			// The emulator can only add delay, never remove it, so the mean
-			// must sit just above the configured value. Scheduler wake-up
-			// latency is the only source of the excess.
-			if mean < want {
-				t.Errorf("observed mean %v is below the configured %v -- the delay is not being applied", mean, want)
+			// The emulator can only add delay, never remove it, so every
+			// sample must be at least the configured value.
+			if min < want {
+				t.Errorf("a sample took %v, below the configured %v -- the delay is not being applied", min, want)
 			}
-			if slack := mean - want; slack > 5*time.Millisecond {
-				t.Errorf("observed mean %v exceeds configured %v by %v, more than the 5ms scheduler allowance", mean, want, slack)
+			// Scheduler wake-up latency is the only source of the excess.
+			// The median, not the mean: this checks the delay the emulator
+			// applies, and a mean let one sample the operating system held
+			// up fail it -- 69 ms of 20 lifted the mean to 25.2 ms for a
+			// 20 ms link, with every package's tests running at once. An
+			// emulator that adds a few milliseconds too many moves the
+			// median as surely as the mean.
+			if slack := median - want; slack > 5*time.Millisecond {
+				t.Errorf("observed median %v exceeds configured %v by %v, more than the 5ms scheduler allowance", median, want, slack)
 			}
 		})
 	}

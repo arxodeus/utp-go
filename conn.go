@@ -4740,6 +4740,20 @@ func (c *connection) transmit(packet *packet, now time.Time, firstTransmission b
 	c.bytesSent += uint64(len(packet.Body))
 	if !firstTransmission {
 		c.noteResend(packet)
+		// A probe sent again goes without the don't-fragment bit, and
+		// fragmented if it has to be, so its acknowledgement no longer says
+		// the size fits: forget the probe and let the search send another.
+		// libutp's only resends of a probe come after it has been judged
+		// or cleared -- the third duplicate acknowledgement
+		// (utp_internal.cpp:1927-1938), the timeout (:1152-1167) -- and so
+		// did ours until the loss probe, which resends the oldest packet
+		// outstanding and can pick the probe. Its fragmented copy was
+		// acknowledged and the search settled on 1402 bytes for a path that
+		// had just dropped a 1402-byte probe
+		// (netem.TestDontFragmentBringsTheSearchWithinThePath, under load).
+		if c.mtu.probeOutstanding(packet.Header.SeqNum) {
+			c.mtu.clearProbe()
+		}
 	}
 
 	// Use this packet as an MTU probe if the search wants one.

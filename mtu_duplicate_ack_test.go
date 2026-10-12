@@ -292,3 +292,26 @@ func TestDuplicateRunJudgesOnce(t *testing.T) {
 		t.Errorf("a second run judged %d probes in all, want 2", conn.mtuProbesLostToDuplicateAcks)
 	}
 }
+
+// A probe sent again is no longer a probe: it goes without the
+// don't-fragment bit, so its acknowledgement says nothing about whether the
+// size fits, and must not raise the floor. The loss probe resends the oldest
+// packet outstanding, which can be the probe.
+func TestAResentProbeIsNotJudged(t *testing.T) {
+	conn, _ := dupAckConn(t)
+	probeSeq := conn.mtu.probeSeq
+	floorBefore := conn.mtu.floor
+
+	resend := NewPacketBuilder(st_data, conn.cid.Send, 0, 0, probeSeq).WithPayload(make([]byte, 1000)).Build()
+	conn.transmit(resend, time.Now(), false)
+
+	if conn.mtu.onAck(probeSeq, time.Now()) {
+		t.Fatal("the acknowledgement of a resent probe was taken as the probe's")
+	}
+	if conn.mtu.floor != floorBefore {
+		t.Fatalf("the floor rose to %d on a resent probe's acknowledgement", conn.mtu.floor)
+	}
+	if conn.mtu.probing {
+		t.Fatal("the resent probe is still the probe")
+	}
+}

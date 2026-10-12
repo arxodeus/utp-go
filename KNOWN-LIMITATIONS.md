@@ -5351,3 +5351,35 @@ receiver nobody reads from, so some of it is still in the receive buffer,
 and then resets it. With the old rule it reads all 917,504 bytes and then
 fails with "reset"; with the new one it reaches a clean end, and a write
 returns `ErrReset`. `TestUdpTransfer` under the same load: 0 failures in 100.
+
+## A resent MTU probe was judged as the probe
+
+**Fixed.** `netem.TestDontFragmentBringsTheSearchWithinThePath` failed once in
+a full-suite run with every package competing for the CPU. Its log:
+
+- the probe search had settled at 1402 bytes, on a path that had just
+  dropped a 1402-byte probe sent with the don't-fragment bit;
+- no probe had been judged by duplicate acknowledgements.
+
+The search raises its floor when the probe's sequence number is
+acknowledged, as libutp's does (`utp_internal.cpp:1968-1974`). libutp only
+ever resends a probe after the probe has been judged or cleared: by the
+third duplicate acknowledgement (`:1927-1938`) or by the timeout
+(`:1152-1167`). Ours had one more route. The loss probe (DEVIATIONS.md, "A
+loss probe resends before the retransmission timeout") resends the oldest
+packet outstanding, and that can be the probe. The resend goes without the
+bit, so it is fragmented and acknowledged, and the floor rose to a size
+that only fragmentation carried.
+
+Now any resend of the packet under test forgets the probe without a
+verdict, as libutp's timeout does, and the search sends another.
+`TestAResentProbeIsNotJudged` fails without it. The end-to-end failure did
+not recur in eight more runs of each commit under CPU load. The trace and
+the code path are the evidence for the cause, not a reproduction.
+
+In the same run `netem.TestGateDelayIsHonoured`, a check on the emulator
+rather than this library, failed on one sample. One of 20 took 69 ms on a
+20 ms link and lifted the mean to 25.2 ms, past its 5 ms allowance. It now
+requires every sample to be at least the configured delay, and the median
+excess to be under 5 ms. A link given 6 ms more than it claims fails it,
+and so does one given 2 ms less.
