@@ -1680,8 +1680,20 @@ and the first figure was the spread of ten runs. Resends on a
 link that reorders 2% of packets by 5 ms and loses none, 2 MB:
 23-24 with libutp's rule, 3 with RACK (`netem.TestRackResendsLessUnderReordering`).
 The benchmark suite's reordering profile displaces packets by 20 ms, more
-than the window on its 40 ms path, and there RACK resends as libutp's rule
-does (6 against 7). Against real libutp over real sockets,
+than the window on its 40 ms path, and there RACK resent as libutp's rule
+does (6 against 7) until a loss shown to be spurious was also taken as
+reordering. RACK's only evidence of reordering had been an original
+transmission acknowledged below a later one. On a path that reorders past
+three packets, each is declared lost and resent before its original
+arrives, so in about one run in ten of
+`netem.TestRackResendsLessUnderReordering` no original ever counted and RACK
+resent 25 packets, as libutp's rule does, against 3. The undo's detection,
+the stand-in for DSACK here, now marks reordering as well as widening the
+window: 30 of 30 runs resend 1. Twenty seeds each, interleaved, with and
+without that: the reordering profile 4.86 against 4.52 Mbps under classic
+LEDBAT (z = 4.71) and 2 resends against 7, under LEDBAT++ 2.96 against 2.73
+(z = 0.85) and 2 against 6; at 1% and 5% loss unchanged under either
+(|z| below 0.25). Against real libutp over real sockets,
 `native/libutp.TestInteropUnderAdverseConditionsWithRACK` sends through the
 relay's four damaging profiles, three seeds each, all verified.
 
