@@ -2750,11 +2750,11 @@ const (
 	// acknowledgements once it has climbed twice in a row: three windows of
 	// ackQueueWindow samples, ackQueueSampleEvery apart and the starts of
 	// consecutive windows ackQueueSpan samples apart, each window's least
-	// above the greatest of the one before by ackQueueClimb -- over 500 ms.
+	// above the greatest of the one before by ackQueueClimb -- over 400 ms.
 	// See ackPathSelfQueued.
 	ackQueueSampleEvery = 25 * time.Millisecond
 	ackQueueWindow      = 4
-	ackQueueSpan        = 8
+	ackQueueSpan        = 6
 	ackQueueClimb       = 2 * time.Millisecond
 )
 
@@ -2865,7 +2865,12 @@ func (c *connection) ackEvery() int {
 // libutp's 0.97, which yields less. A step is one climb and then level; a
 // queue of acknowledgements climbs the whole time. Under the same load the
 // two-climb rule fired in none of ten
-// (netem.TestReceiverDoesNotCoalesceBehindAnotherFlow).
+// (netem.TestReceiverDoesNotCoalesceBehindAnotherFlow). It sees a real
+// queue later, and costs a little where coalescing pays: 4 MB from libutp
+// over a 64 kb/s return path in 2.53 s against the one-climb rule's 2.47,
+// over 160 kb/s 2.09 against 2.03, at 320 kb/s the same (ten interleaved
+// runs each; libutp's own receiver takes 7.32 and 3.0 s). Windows eight
+// samples apart rather than six took 2.62 and 2.12.
 //
 // Four simpler tests were tried before the one-climb rule and failed:
 // whether coalescing halved the queue (those swings halve on their own),

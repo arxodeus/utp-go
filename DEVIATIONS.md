@@ -94,7 +94,9 @@ worse.
   return path can carry; ours does the same until its acknowledgements are
   seen queueing on the way back. Measured against libutp, 20 runs each: 2.03 s
   against 2.99 s for 4 MB over a 160 kb/s return path, 2.43 s against 7.33 s
-  over 64 kb/s; libutp's rule, built here, took 3.01 s and 7.33 s. Elsewhere
+  over 64 kb/s; libutp's rule, built here, took 3.01 s and 7.33 s. (Those
+  with a self-queue detector since made to need two climbs, so that a busy
+  host does not fire it: 2.09 s and 2.53 s, ten interleaved runs.) Elsewhere
   the same times and as many acknowledgements as libutp's -- including behind
   another flow's queue, where coalescing had cost the sender's yielding to a
   loss-based flow (65.0% of its rate kept against libutp's 67.0%) until it was
@@ -712,14 +714,22 @@ against 0.97). Acknowledging as libutp does, it yielded as libutp does
 (67.5% against 67.5%, 30 runs each).
 
 So coalescing now waits until the way back climbs as only this receiver's
-own acknowledgements make it climb (`connection.ackPathSelfQueued`): the
-least of its four newest 25 ms samples above the greatest of the four taken
-200 ms before, by 2 ms. A path that cannot carry the acknowledgements climbs
+own acknowledgements make it climb (`connection.ackPathSelfQueued`): twice
+in a row, three windows of four 25 ms samples, 150 ms apart, the least of
+each above the greatest of the one before by 2 ms. A path that cannot carry
+the acknowledgements climbs
 steadily -- over 160 kb/s from nothing to 43 ms in 1.2 s, about 2 ms a
 sample -- and another flow's queue swings: here between nothing and 50-80 ms
 from one sample to the next. Once seen climbing, the rule above applies for
 10 s; otherwise one acknowledgement per read, libutp's. Four simpler tests
 failed first and are recorded at `ackPathSelfQueued`.
+
+Twice, because a busy host steps the delay too. The rule first required one
+climb, and with every package's tests running at once a single step of 2.7
+to 7.7 ms fired it in four runs of ten behind the loss-based flow: 0.28-0.36
+acknowledgements per data packet for the next 10 s, against libutp's 0.97.
+A step is one climb and then level; a queue of acknowledgements climbs the
+whole time. Under the same load the two-climb rule fired in none of ten.
 
 Measured, thirty runs each, interleaved, libutp in every run as a control:
 the competitor keeps 67.0% against this receiver now, 63.5% before it,
@@ -727,9 +737,12 @@ the competitor keeps 67.0% against this receiver now, 63.5% before it,
 uTP flow's own goodput rose with it, 5.84 to 6.22 Mbps (z = 3.26). Behind
 the competitor's queue the receiver sends 0.97-0.98 acknowledgements per
 data packet (`netem.TestReceiverDoesNotCoalesceBehindAnotherFlow`, which
-fails on the old rule at 0.34). Where the acknowledgements are the queue,
-the gain stands: 2.48 s against libutp's 7.32 over 64 kb/s, 2.04 against
-3.0 over 160 kb/s, the same as libutp over 320 kb/s.
+fails on the old rule at 0.34). Those figures were taken with the one-climb
+rule and not retaken; without load neither rule fired behind the
+competitor. Where the acknowledgements are the queue, the gain stands, a
+little smaller for waiting for the second climb: 2.53 s against libutp's
+7.32 over 64 kb/s (2.47 with one climb), 2.09 against 3.0 over 160 kb/s
+(2.03), the same as libutp over 320 kb/s -- ten interleaved runs each.
 
 *Earlier versions of this entry* applied the rate term on every path. It
 measured as a trade-off -- 1.43 s against libutp's best of 1.51 s at 100
