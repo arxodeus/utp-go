@@ -621,7 +621,7 @@ type connection struct {
 	// is when it was last seen climbing as only this receiver's own
 	// acknowledgements make it climb. See ackPathSelfQueued.
 	ackQueueSampledAt time.Time
-	ackQueueSamples   [ackQueueSpan + ackQueueWindow]time.Duration
+	ackQueueSamples   [2*ackQueueSpan + ackQueueWindow]time.Duration
 	ackQueueNext      int
 	ackSelfQueuedAt   time.Time
 	// armProbeTimer wakes the event loop when a closed window has gone
@@ -2747,10 +2747,11 @@ const (
 	ackRateGate   = 10 * time.Millisecond
 	ackRateMemory = 10 * time.Second
 	// A queue on the way back is taken for this receiver's own
-	// acknowledgements once the least of its newest ackQueueWindow samples,
-	// ackQueueSampleEvery apart, exceeds the greatest of the ackQueueWindow
-	// before the ackQueueSpan before them by ackQueueClimb: a climb out of
-	// its own noise over 300 ms. See ackPathSelfQueued.
+	// acknowledgements once it has climbed twice in a row: three windows of
+	// ackQueueWindow samples, ackQueueSampleEvery apart and the starts of
+	// consecutive windows ackQueueSpan samples apart, each window's least
+	// above the greatest of the one before by ackQueueClimb -- over 500 ms.
+	// See ackPathSelfQueued.
 	ackQueueSampleEvery = 25 * time.Millisecond
 	ackQueueWindow      = 4
 	ackQueueSpan        = 8
@@ -2840,10 +2841,12 @@ func (c *connection) ackEvery() int {
 
 // ackPathSelfQueued reports whether the queue on the way back is this
 // receiver's own acknowledgements, as far as can be told: it has been seen,
-// within ackRateMemory, climbing out of its own noise. The delay is sampled
-// every ackQueueSampleEvery; it is climbing when the least of the newest
-// ackQueueWindow samples exceeds the greatest of the ackQueueWindow taken
-// ackQueueSpan earlier by ackQueueClimb or more. See ackEvery.
+// within ackRateMemory, climbing steadily out of its own noise. The delay is
+// sampled every ackQueueSampleEvery; it is climbing steadily when it has
+// climbed twice in a row: the least of a window of ackQueueWindow samples
+// above the greatest of the window ackQueueSpan samples before it by
+// ackQueueClimb or more, and that window likewise above the one before it.
+// See ackEvery.
 //
 // Acknowledgements a return path cannot carry pile up steadily: over a
 // 160 kb/s return path, with a 20 Mb/s flow in slow start, the delay read
@@ -2852,26 +2855,46 @@ func (c *connection) ackEvery() int {
 // under this one's acknowledgements: with a loss-based flow sharing the
 // bottleneck, the delay swung between nothing and 50-80 ms from one 50 ms
 // sample to the next, and a window of those holds a sample near nothing.
-// Four simpler tests were tried first and failed: whether coalescing halved
-// the queue (those swings halve on their own), whether the queue came back
-// while coalescing, whether it fell between the halves of a second of
-// coalescing (over 64 kb/s the sender is still in slow start, its
-// acknowledgements growing faster than coalescing takes them), and whether
-// it rose by 5 ms in each of four samples (it rises by about 2).
+//
+// Twice in a row, because the delay also steps when a host is busy. Every
+// timestamp it is read from is taken by a process that may be waiting for
+// a CPU, and with every package's tests running at once one climb -- one
+// window 2.7 to 7.7 ms above the one before -- was seen in four runs of ten
+// behind a loss-based flow. Each made this receiver coalesce for
+// ackRateMemory: 0.28-0.36 acknowledgements per data packet against
+// libutp's 0.97, which yields less. A step is one climb and then level; a
+// queue of acknowledgements climbs the whole time. Under the same load the
+// two-climb rule fired in none of ten
+// (netem.TestReceiverDoesNotCoalesceBehindAnotherFlow).
+//
+// Four simpler tests were tried before the one-climb rule and failed:
+// whether coalescing halved the queue (those swings halve on their own),
+// whether the queue came back while coalescing, whether it fell between the
+// halves of a second of coalescing (over 64 kb/s the sender is still in slow
+// start, its acknowledgements growing faster than coalescing takes them),
+// and whether it rose by 5 ms in each of four samples (it rises by about 2).
 func (c *connection) ackPathSelfQueued(q time.Duration, now time.Time) bool {
 	if c.ackQueueSampledAt.IsZero() || now.Sub(c.ackQueueSampledAt) >= ackQueueSampleEvery {
 		c.ackQueueSampledAt = now
-		c.ackQueueSamples[c.ackQueueNext%len(c.ackQueueSamples)] = q
+		n := len(c.ackQueueSamples)
+		c.ackQueueSamples[c.ackQueueNext%n] = q
 		c.ackQueueNext++
-		if c.ackQueueNext >= len(c.ackQueueSamples) {
-			n := len(c.ackQueueSamples)
+		if c.ackQueueNext >= n {
 			oldest := c.ackQueueNext - n
-			olderMax, newerMin := time.Duration(0), time.Duration(math.MaxInt64)
-			for i := 0; i < ackQueueWindow; i++ {
-				olderMax = max(olderMax, c.ackQueueSamples[(oldest+i)%n])
-				newerMin = min(newerMin, c.ackQueueSamples[(c.ackQueueNext-1-i)%n])
+			// window returns the least and greatest of the ackQueueWindow
+			// samples starting k spans after the oldest.
+			window := func(k int) (lo, hi time.Duration) {
+				lo = time.Duration(math.MaxInt64)
+				for i := 0; i < ackQueueWindow; i++ {
+					v := c.ackQueueSamples[(oldest+k*ackQueueSpan+i)%n]
+					lo, hi = min(lo, v), max(hi, v)
+				}
+				return lo, hi
 			}
-			if newerMin-olderMax >= ackQueueClimb {
+			_, aHi := window(0)
+			bLo, bHi := window(1)
+			cLo, _ := window(2)
+			if bLo-aHi >= ackQueueClimb && cLo-bHi >= ackQueueClimb {
 				c.ackSelfQueuedAt = now
 			}
 		}
