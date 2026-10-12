@@ -144,11 +144,21 @@ func (s *sentPackets) rackOnAckNum(ackNum uint16) {
 }
 
 // rackOnSpuriousLoss widens the reordering window, as RFC 8985 does on a
-// DSACK (section 6.2, step 4).
+// DSACK (section 6.2, step 4), and records that the path reorders: a loss
+// shown to be spurious is a packet that arrived after later ones.
+//
+// Without the second, RACK could go a whole transfer without a window. Its
+// other evidence of reordering is an original transmission acknowledged
+// below one sent after it (rackOnDelivered), and on a path that reorders
+// every packet past three others, each was declared lost and resent before
+// its original arrived, so no original ever counted: one run in ten of
+// netem.TestRackResendsLessUnderReordering resent 25 packets, as libutp's
+// rule does, against 3 in the others.
 func (s *sentPackets) rackOnSpuriousLoss() {
 	if !s.rack.active {
 		return
 	}
+	s.rack.reorderingSeen = true
 	s.rack.reoWndMult++
 	s.rack.reoWndPersist = rackReoWndPersist
 }

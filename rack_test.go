@@ -164,7 +164,11 @@ func TestRackSpuriousLossWidensTheWindow(t *testing.T) {
 	h := newRackHarness(t, true)
 	h.send(0)
 	h.ack(20, 1) // minimum round trip 20 ms
-	h.sp.rack.reorderingSeen = true
+	require.False(t, h.sp.rack.reorderingSeen)
+	require.Zero(t, h.sp.rackReoWnd(LossThreshold), "no window before reordering is seen")
+	h.sp.rackOnSpuriousLoss()
+	require.True(t, h.sp.rack.reorderingSeen, "a spurious loss is reordering")
+	h.sp.rack.reoWndMult = 1
 	require.Equal(t, 5*time.Millisecond, h.sp.rackReoWnd(0))
 	h.sp.rackOnSpuriousLoss()
 	require.Equal(t, 10*time.Millisecond, h.sp.rackReoWnd(0))
