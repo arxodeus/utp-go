@@ -65,6 +65,14 @@ type UtpStream struct {
 	ended chan struct{}
 }
 
+// readQueueLen is how many chunks of received data, a packet's worth each at
+// most, wait for the application to read them. More stay in the receive
+// buffer, where they count against the advertised window as libutp's unread
+// bytes do (utp_call_get_read_buffer_size, utp_internal.cpp:590-596); queued
+// here they no longer do. It was 100, 800 bytes allocated whole per
+// connection and up to 140 KB of data past the window.
+const readQueueLen = 16
+
 // writeQueueLen is how many writes can wait for a connection to take them.
 // A Write blocks until its bytes are accepted, so more than one is waiting
 // only when several goroutines write to one stream at once, and those wait
@@ -96,7 +104,7 @@ func NewUtpStream(
 		streamCancel: cancel,
 		logger:       logger,
 		cid:          cid,
-		reads:        make(chan *readOrWriteResult, 100),
+		reads:        make(chan *readOrWriteResult, readQueueLen),
 		writes:       make(chan *queuedWrite, writeQueueLen),
 		streamEvents: streamEvents,
 		connHandle:   connHandle,

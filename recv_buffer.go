@@ -124,6 +124,17 @@ func (rb *receiveBuffer) appendInOrder(data []byte) {
 	rb.offset = need
 }
 
+// releaseStorage frees the in-order storage when it holds nothing, so an idle
+// connection keeps none of what a busy one grew to. The next in-order data
+// allocates it again from minRecvBufAlloc. libutp keeps no bytes once it has
+// delivered them: each packet is its own allocation, freed when its payload
+// is handed to the embedder (utp_internal.cpp:2339-2343, :2407-2417).
+func (rb *receiveBuffer) releaseStorage() {
+	if rb.offset == 0 {
+		rb.buf, rb.head = nil, 0
+	}
+}
+
 // Window is the receive window to advertise to the peer: the capacity, less
 // the bytes already delivered in order and not yet handed up.
 //

@@ -112,3 +112,47 @@ func TestReceiveBufferMatchesModel(t *testing.T) {
 		}
 	}
 }
+
+// A buffer that grew while busy keeps nothing once it is drained and the
+// connection goes quiet: releaseStorage drops the storage when it holds no
+// unread bytes, and leaves it when it does. What arrives next is delivered
+// as before.
+func TestReceiveBufferReleasesStorageWhenEmpty(t *testing.T) {
+	rb := newReceiveBuffer(1<<20, 99)
+	seq := uint16(100)
+	payload := bytes.Repeat([]byte("x"), 1000)
+	for i := 0; i < 200; i++ {
+		if err := rb.Write(payload, seq); err != nil {
+			t.Fatal(err)
+		}
+		seq++
+	}
+	grown := len(rb.buf)
+	if grown < 128*1024 {
+		t.Fatalf("200 KB buffered grew the buffer to only %d bytes", grown)
+	}
+
+	rb.releaseStorage()
+	if len(rb.buf) != grown {
+		t.Fatal("storage holding unread bytes was released")
+	}
+
+	out := make([]byte, 64*1024)
+	for rb.Readable() > 0 {
+		rb.Read(out)
+	}
+	rb.releaseStorage()
+	if rb.buf != nil {
+		t.Fatalf("a drained buffer still holds %d bytes", len(rb.buf))
+	}
+
+	if err := rb.Write([]byte("after"), seq); err != nil {
+		t.Fatal(err)
+	}
+	if n := rb.Read(out); string(out[:n]) != "after" {
+		t.Fatalf("read %q after the release", out[:n])
+	}
+	if len(rb.buf) > minRecvBufAlloc {
+		t.Fatalf("the next data allocated %d bytes, want at most %d", len(rb.buf), minRecvBufAlloc)
+	}
+}

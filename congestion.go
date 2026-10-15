@@ -48,7 +48,15 @@ const (
 	// ten kilobytes of window per second -- a 20 Mbps link needs 500 KB.
 	defaultMaxWindowSizeIncBytes = 3000
 	defaultGain                  = 1.0
-	defaultDelayWindow           = 120 * time.Second
+	// defaultDelayWindow is how far back the base delay reaches: libutp's
+	// thirteen one-minute buckets (DELAY_BASE_HISTORY, utp_internal.cpp:50).
+	// It was two minutes, a sliding minimum, chosen to bound clock drift
+	// before this library had libutp's correction for it; see baseDelayHist.
+	defaultDelayWindow = 13 * time.Minute
+	// ppRTTWindow is how far back LEDBAT++'s minimum round trip reaches. A
+	// round trip is measured on one clock and cannot drift, so it keeps the
+	// two minutes it was tuned with.
+	ppRTTWindow = 2 * time.Minute
 )
 
 const (
@@ -281,7 +289,7 @@ type defaultController struct {
 	spuriousLossesUndone uint64
 	fineRTT              time.Duration // see ControllerStats.FineRTT
 	minFineRTT           time.Duration // see ControllerStats.MinFineRTT
-	delayAcc             *delayAccumulator
+	delayAcc             *baseDelayHist
 	// curDelayHist is libutp's cur_delay_hist: the last curDelaySize
 	// queueing-delay samples, each taken against the base as it stood when
 	// it arrived, zero until filled (DelayHist, utp_internal.cpp:247-248,
@@ -391,8 +399,8 @@ func newDefaultController(config *ctrlConfig) *defaultController {
 		rttVarianceMicros: (800 * time.Millisecond).Microseconds(),
 		transmissions:     make(map[uint16]*packetRecord),
 		clk:               clk,
-		delayAcc:          newDelayAccumulatorWithClock(config.DelayWindow, clk),
-		ppRTTBase:         newDelayAccumulatorWithClock(config.DelayWindow, clk),
+		delayAcc:          newBaseDelayHist(config.DelayWindow, clk),
+		ppRTTBase:         newDelayAccumulatorWithClock(ppRTTWindow, clk),
 		peerDelayHist:     newPeerDelayHist(config.DelayWindow),
 		// libutp starts the first averaging slot five seconds after the
 		// socket is created, not after the first sample arrives
@@ -1364,6 +1372,112 @@ func (h *peerDelayHist) addSample(sample uint32, now time.Time) (prev, current u
 		}
 	}
 	return prev, h.base, true
+}
+
+// baseDelayHist is libutp's DelayHist for this sender's own delay samples,
+// our_hist (utp_internal.cpp:260-381): the base delay is the least of
+// thirteen buckets, the newest taking each sample that is lower than it,
+// rotated onto a fresh bucket when a sample arrives a bucket's length after
+// the last rotation. With the default window a bucket is a minute, so the base
+// remembers twelve to thirteen minutes, as libutp's does, and an idle
+// connection's history does not age, since only a sample rotates it.
+//
+// It was a sliding minimum over two minutes. That held every sample that
+// could still become the least, and under clock drift every sample can: the
+// delays climb at the drift rate. At 1000 ppm and a thousand acknowledgements
+// a second it held 120,001 samples, 3.75 MB, with no jitter, and 69 KB with
+// 5 ms of it, per connection; over thirteen minutes, six and a half times
+// that. Thirteen buckets are 104 bytes.
+//
+// Two minutes was chosen because drift inflates the base by the drift rate
+// times the window, before this library had libutp's correction for it
+// (OnPeerDelay). With the correction, phantom queueing delay from drift is
+// 0.3-0.5% of what it was (netem.TestClockSkewCorrectionCancelsThePhantomQueue),
+// and libutp's length is libutp's behaviour: a queue that stands for longer
+// than two minutes is no longer taken for the empty path.
+type baseDelayHist struct {
+	buckets   [delayBaseHistory]time.Duration
+	idx       int
+	base      time.Duration
+	rotatedAt time.Time
+	bucketLen time.Duration
+	init      bool
+	// skew is the total of every shift, for ControllerStats. The shifts
+	// themselves live in the buckets and age out with them.
+	skew time.Duration
+}
+
+// delayBaseHistory is libutp's DELAY_BASE_HISTORY (utp_internal.cpp:50).
+const delayBaseHistory = 13
+
+// newBaseDelayHist starts the history at now, as libutp's DelayHist::clear
+// does when the socket is made (utp_internal.cpp:262-271), so the first
+// rotation is a bucket's length after the connection began.
+func newBaseDelayHist(window time.Duration, clk Clock) *baseDelayHist {
+	bucketLen := window / delayBaseHistory
+	if bucketLen <= 0 {
+		bucketLen = time.Second
+	}
+	if clk == nil {
+		clk = RealClock
+	}
+	return &baseDelayHist{bucketLen: bucketLen, rotatedAt: clk.Now()}
+}
+
+// Push records a sample taken at now: DelayHist::add_sample
+// (utp_internal.cpp:291-381).
+func (h *baseDelayHist) Push(sample time.Duration, now time.Time) {
+	if !h.init {
+		for i := range h.buckets {
+			h.buckets[i] = sample
+		}
+		h.base = sample
+		h.init = true
+	}
+	if sample < h.buckets[h.idx] {
+		h.buckets[h.idx] = sample
+	}
+	if sample < h.base {
+		h.base = sample
+	}
+	if now.Sub(h.rotatedAt) > h.bucketLen {
+		h.rotatedAt = now
+		h.idx = (h.idx + 1) % delayBaseHistory
+		h.buckets[h.idx] = sample
+		h.base = h.buckets[0]
+		for _, b := range h.buckets {
+			if b < h.base {
+				h.base = b
+			}
+		}
+	}
+}
+
+// BaseDelay is the least delay in the history, never below zero.
+func (h *baseDelayHist) BaseDelay() time.Duration {
+	if !h.init || h.base < 0 {
+		return 0
+	}
+	return h.base
+}
+
+// shift raises the base delay, cancelling drift that has inflated every
+// sample in it: libutp's DelayHist::shift, which adds the offset to every
+// bucket and to the base (utp_internal.cpp:277-289). Each bucket is replaced
+// by a fresh, unshifted sample when the history rotates onto it, so a
+// correction lasts only as long as the history does -- which is what keeps
+// shifts that arrive for as long as the drift lasts from adding up without
+// bound. (An unbounded correction was measured once: a drifted flow saw 4 ms
+// of queue against its neighbour's 40 ms and took 56.6% of a shared link.)
+func (h *baseDelayHist) shift(offset time.Duration) {
+	if offset <= 0 {
+		return
+	}
+	for i := range h.buckets {
+		h.buckets[i] += offset
+	}
+	h.base += offset
+	h.skew += offset
 }
 
 // maxSkewAdjustment bounds a single clock-drift correction.

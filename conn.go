@@ -145,9 +145,10 @@ type ConnectionConfig struct {
 	// base delay -- the lowest one-way delay it has seen, which it treats as
 	// the path with an empty queue.
 	//
-	// libutp's equivalent is a compile-time thirteen one-minute buckets
-	// (DELAY_BASE_HISTORY, utp_internal.cpp:50), so about thirteen minutes.
-	// This is a sliding-window minimum over two.
+	// It is libutp's: thirteen buckets (DELAY_BASE_HISTORY,
+	// utp_internal.cpp:50), each a thirteenth of this, so the default of
+	// thirteen minutes is libutp's thirteen one-minute buckets exactly. See
+	// baseDelayHist.
 	//
 	// Configurable because the window is what bounds the damage clock drift
 	// does: a sender whose clock loses time sees its measured delay grow
@@ -253,6 +254,52 @@ func fromConnConfig(config *ConnectionConfig) *ctrlConfig {
 	}
 	ctrlConfigPtr.Algorithm = config.CongestionAlgorithm
 	return ctrlConfigPtr
+}
+
+// lazyTimer is a Timer made the first time it is armed. Until then its
+// channel is nil, which a select never takes.
+//
+// A connection used to make all seven of its timers at the start, stopped,
+// whether it would ever arm them or not: the RACK timer without RACK, the
+// idle timeout without one configured, the zero-window probe without a
+// closed window. About 240 bytes each, held for the connection's life.
+type lazyTimer struct {
+	clk Clock
+	t   Timer
+}
+
+func (c *connection) newLazyTimer() *lazyTimer {
+	return &lazyTimer{clk: c.timeSource()}
+}
+
+// C is the timer's channel, or nil before it is first armed.
+func (l *lazyTimer) C() <-chan time.Time {
+	if l.t == nil {
+		return nil
+	}
+	return l.t.C()
+}
+
+// arm sets the timer to fire after d, dropping a fire not yet received.
+func (l *lazyTimer) arm(d time.Duration) {
+	if l.t == nil {
+		l.t = l.clk.NewTimer(d)
+		return
+	}
+	if !l.t.Stop() {
+		select {
+		case <-l.t.C():
+		default:
+		}
+	}
+	l.t.Reset(d)
+}
+
+// stop stops the timer, if it has been made.
+func (l *lazyTimer) stop() {
+	if l.t != nil {
+		l.t.Stop()
+	}
 }
 
 // controllerConfig is the congestion controller's configuration for this
@@ -927,16 +974,15 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		c.state.SentPackets = sentPacketsHolder
 	}
 
-	// No idle timeout unless one is configured: the timer is made stopped,
-	// as the probe timer below is, and never re-armed.
-	var idleTimer Timer
+	// No idle timeout unless one is configured, and no timer for it either:
+	// this and the other timers below that most connections never use are
+	// made when first armed (lazyTimer).
+	idleTimer := c.newLazyTimer()
 	if c.config.MaxIdleTimeout > 0 {
-		idleTimer = c.timeSource().NewTimer(c.config.MaxIdleTimeout)
-	} else if idleTimer = c.timeSource().NewTimer(time.Hour); !idleTimer.Stop() {
-		<-idleTimer.C()
+		idleTimer.arm(c.config.MaxIdleTimeout)
 	}
 	c.lastActivity = c.now()
-	defer idleTimer.Stop()
+	defer idleTimer.stop()
 
 	// The zero-window probe needs a wake-up of its own.
 	//
@@ -983,36 +1029,19 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			next = interval
 		}
 		keepAliveTimer.Reset(next)
+		// The connection has been silent for the interval: whatever the
+		// receive buffer grew to while it was busy is held for nothing.
+		if c.state.RecvBuf != nil {
+			c.state.RecvBuf.releaseStorage()
+		}
 	}
 
-	probeTimer := c.timeSource().NewTimer(time.Hour)
-	if !probeTimer.Stop() {
-		<-probeTimer.C()
-	}
-	defer probeTimer.Stop()
-	ackHoldTimer := c.timeSource().NewTimer(time.Hour)
-	if !ackHoldTimer.Stop() {
-		<-ackHoldTimer.C()
-	}
-	defer ackHoldTimer.Stop()
-	c.armAckHold = func(d time.Duration) {
-		if !ackHoldTimer.Stop() {
-			select {
-			case <-ackHoldTimer.C():
-			default:
-			}
-		}
-		ackHoldTimer.Reset(d)
-	}
-	c.armProbeTimer = func(d time.Duration) {
-		if !probeTimer.Stop() {
-			select {
-			case <-probeTimer.C():
-			default:
-			}
-		}
-		probeTimer.Reset(d)
-	}
+	probeTimer := c.newLazyTimer()
+	defer probeTimer.stop()
+	ackHoldTimer := c.newLazyTimer()
+	defer ackHoldTimer.stop()
+	c.armAckHold = ackHoldTimer.arm
+	c.armProbeTimer = probeTimer.arm
 	// An idle connection's window has to decay, and nothing else here would
 	// wake the loop to do it.
 	//
@@ -1033,50 +1062,21 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	// at one, three and seven RTOs. Ours was unchanged at 55375, so it would
 	// have put a window it last measured 8 seconds ago straight back onto a
 	// path it has not probed since. See netem.TestLibutpIdleWindowDecay.
-	idleRtoTimer := c.timeSource().NewTimer(time.Hour)
-	if !idleRtoTimer.Stop() {
-		<-idleRtoTimer.C()
-	}
-	defer idleRtoTimer.Stop()
-	c.armIdleRto = func(d time.Duration) {
-		if !idleRtoTimer.Stop() {
-			select {
-			case <-idleRtoTimer.C():
-			default:
-			}
-		}
-		idleRtoTimer.Reset(d)
-	}
+	idleRtoTimer := c.newLazyTimer()
+	defer idleRtoTimer.stop()
+	c.armIdleRto = idleRtoTimer.arm
 
-	lossProbeTimer := c.timeSource().NewTimer(time.Hour)
-	if !lossProbeTimer.Stop() {
-		<-lossProbeTimer.C()
-	}
-	defer lossProbeTimer.Stop()
-	c.armLossProbe = func(d time.Duration) {
-		if !lossProbeTimer.Stop() {
-			select {
-			case <-lossProbeTimer.C():
-			default:
-			}
-		}
-		lossProbeTimer.Reset(d)
-	}
+	lossProbeTimer := c.newLazyTimer()
+	defer lossProbeTimer.stop()
+	c.armLossProbe = lossProbeTimer.arm
 
-	rackTimer := c.timeSource().NewTimer(time.Hour)
-	if !rackTimer.Stop() {
-		<-rackTimer.C()
-	}
-	defer rackTimer.Stop()
+	rackTimer := c.newLazyTimer()
+	defer rackTimer.stop()
 	c.armRack = func(d time.Duration) {
-		if !rackTimer.Stop() {
-			select {
-			case <-rackTimer.C():
-			default:
-			}
-		}
 		if d > 0 {
-			rackTimer.Reset(d)
+			rackTimer.arm(d)
+		} else {
+			rackTimer.stop()
 		}
 	}
 
@@ -1347,7 +1347,7 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 			// Activity since the timer was set moves the deadline on: arm
 			// for what is left of it. See lastActivity.
 			if left := c.config.MaxIdleTimeout - c.now().Sub(c.lastActivity); left > 0 {
-				idleTimer.Reset(left)
+				idleTimer.arm(left)
 			} else {
 				handleIdleTimeout()
 			}

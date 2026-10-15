@@ -23,6 +23,13 @@ import (
 // mallinfo2 around 500 of its driver's connections that had exchanged 1 KB
 // each way). The bound is loose on purpose: heap figures move with whatever
 // else the runtime holds, and the defect it guards against is fifty times it.
+//
+// It is measured twice: just after the exchange, and once the connections
+// have been quiet for their keep-alive interval, when the receive buffer's
+// storage is released. The heap figure includes this test's own emulated
+// network and bookkeeping, about 1.5 KB an end by a heap profile; the
+// goroutine stacks are reported beside it, since libutp has no thread per
+// connection and an honest comparison counts them.
 func TestIdleConnectionMemory(t *testing.T) {
 	const (
 		conns     = 200
@@ -56,13 +63,13 @@ func TestIdleConnectionMemory(t *testing.T) {
 		iniCid := utp.NewConnectionId(b.Addr(), base, base+1)
 		accepted := make(chan *utp.UtpStream, 1)
 		go func() {
-			s, err := pair.SockB.AcceptWithCid(ctx, accCid, utp.NewConnectionConfig())
+			s, err := pair.SockB.AcceptWithCid(ctx, accCid, idleMemoryConfig())
 			if err != nil {
 				t.Errorf("accept %d: %v", i, err)
 			}
 			accepted <- s
 		}()
-		s, err := pair.SockA.ConnectWithCid(ctx, iniCid, utp.NewConnectionConfig())
+		s, err := pair.SockA.ConnectWithCid(ctx, iniCid, idleMemoryConfig())
 		if err != nil {
 			t.Fatalf("connect %d: %v", i, err)
 		}
@@ -82,13 +89,32 @@ func TestIdleConnectionMemory(t *testing.T) {
 		}
 		streams = append(streams, s, r)
 	}
+	measure := func(when string) {
+		after := heap()
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		perEnd := (int64(after) - int64(before)) / int64(len(streams))
+		t.Logf("%s: %d connection ends that exchanged 1 KB each hold %d bytes of heap apiece, "+
+			"and the process %d bytes of goroutine stack apiece", when, len(streams), perEnd,
+			int64(ms.StackInuse)/int64(len(streams)))
+		if perEnd > perEndMax {
+			t.Errorf("%s: each connection end holds %d bytes of heap, want at most %d", when, perEnd, perEndMax)
+		}
+	}
 	// Let the last acknowledgements settle before measuring.
 	time.Sleep(200 * time.Millisecond)
-	after := heap()
-	perEnd := (int64(after) - int64(before)) / int64(len(streams))
-	t.Logf("%d connection ends that exchanged 1 KB each hold %d bytes of heap apiece", len(streams), perEnd)
-	if perEnd > perEndMax {
-		t.Errorf("each connection end holds %d bytes of heap, want at most %d", perEnd, perEndMax)
-	}
+	measure("just after")
+	time.Sleep(4 * idleMemoryKeepAlive)
+	measure("quiet for the keep-alive interval")
 	runtime.KeepAlive(streams)
+}
+
+// idleMemoryKeepAlive stands in for the 29-second keep-alive interval, after
+// which a quiet connection releases its receive buffer's storage.
+const idleMemoryKeepAlive = 300 * time.Millisecond
+
+func idleMemoryConfig() *utp.ConnectionConfig {
+	c := utp.NewConnectionConfig()
+	c.KeepAliveInterval = idleMemoryKeepAlive
+	return c
 }
