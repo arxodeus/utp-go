@@ -41,6 +41,9 @@ type retransmitTimer struct {
 	packet  *packet
 	deliver chan *packet
 	ctx     context.Context
+	// wake starts the connection's loop if it is resting (dormant.go): a
+	// timeout delivered to a loop that has gone would wait for ever.
+	wake func()
 }
 
 // retransmitTimers is a socket-wide retransmission timer wheel.
@@ -71,6 +74,9 @@ func newRetransmitTimersWithClock(interval time.Duration, slots int, clk Clock) 
 		}
 		select {
 		case t.deliver <- t.packet:
+			if t.wake != nil {
+				t.wake()
+			}
 		case <-t.ctx.Done():
 			if barrier != nil {
 				barrier.TakeHandoff()

@@ -1080,6 +1080,9 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 		packetPtr.own()
 		select {
 		case connStream <- &streamEvent{Type: streamIncoming, Packet: packetPtr}:
+			if c != nil {
+				c.wake()
+			}
 		default:
 			if barrier != nil {
 				barrier.TakeHandoff()
@@ -1962,6 +1965,9 @@ func (s *UtpSocket) attachInline(key string, ch chan *streamEvent, c *connection
 	if s.conns[key] == ch {
 		s.inlineConns[ch] = c
 		s.connsGen.Add(1)
+		// From here the connection may rest: nothing the socket hands it
+		// goes to a loop that is not there. See dormant.go.
+		c.attached.Store(true)
 	}
 }
 
@@ -2120,17 +2126,22 @@ func (s *UtpSocket) sendShutdownEventToConns() {
 	// packet delivery for every other connection on this socket.
 	s.connsMutex.RLock()
 	channels := make([]chan *streamEvent, 0, len(s.conns))
+	conns := make([]*connection, 0, len(s.conns))
 	for _, ch := range s.conns {
 		channels = append(channels, ch)
+		conns = append(conns, s.inlineConns[ch])
 	}
 	s.connsMutex.RUnlock()
 
-	for _, ch := range channels {
+	for i, ch := range channels {
 		select {
 		case ch <- &streamEvent{Type: streamShutdown}:
 		default:
 			// The connection's queue is full; it is already being torn down
 			// by the cancelled socket context.
+		}
+		if conns[i] != nil {
+			conns[i].wake()
 		}
 	}
 }
@@ -2211,6 +2222,12 @@ func (s *UtpSocket) deliverICMP(quoted []byte, peer ConnectionPeer, notice *icmp
 
 	select {
 	case connStream <- &streamEvent{Type: streamICMP, ICMP: notice}:
+		s.connsMutex.RLock()
+		c := s.inlineConns[connStream]
+		s.connsMutex.RUnlock()
+		if c != nil {
+			c.wake()
+		}
 	default:
 		// The connection's queue is full. Dropping the report costs a probe,
 		// not correctness: the fragmentation case is rediscovered by the lost

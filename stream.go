@@ -160,6 +160,15 @@ func (s *UtpStream) notifyRead() {
 	case s.conn.readable <- struct{}{}:
 	default:
 	}
+	s.conn.wake()
+}
+
+// wakeLoop starts the connection's event loop if it is resting, for an event
+// just queued for it. See dormant.go.
+func (s *UtpStream) wakeLoop() {
+	if s.conn != nil {
+		s.conn.wake()
+	}
 }
 
 // terminalErr reports the error the connection recorded when the stream ended,
@@ -239,13 +248,21 @@ func (s *UtpStream) Cid() *ConnectionId {
 }
 
 func (s *UtpStream) start() {
-	defer s.connHandle.Done()
-	defer close(s.ended)
+	if err, final := s.conn.eventLoop(s); final {
+		s.conn.finishLoop()
+		s.loopEnded(err)
+	}
+}
 
-	err := s.conn.eventLoop(s)
+// loopEnded is the end of the connection's event loop, on whichever goroutine
+// ran it last: the one start began, or one a resting connection was resumed
+// on (dormant.go).
+func (s *UtpStream) loopEnded(err error) {
 	if err != nil {
 		s.logger.Error("utp stream evenLoop has error and return", "err", err)
 	}
+	close(s.ended)
+	s.connHandle.Done()
 }
 
 // ReadToEOF reads until the peer ends the stream, leaving everything read in
@@ -460,6 +477,7 @@ func (s *UtpStream) WriteV(ctx context.Context, bufs [][]byte) (int, error) {
 func (s *UtpStream) writeQueued(ctx context.Context, queued []byte, resCh chan *readOrWriteResult) (int, error) {
 	select {
 	case s.writes <- &queuedWrite{queued, 0, resCh}:
+		s.wakeLoop()
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	case <-s.ended:
@@ -541,6 +559,7 @@ func (s *UtpStream) CloseWrite() error {
 	case s.streamEvents <- &streamEvent{Type: streamCloseWrite}:
 	default:
 	}
+	s.wakeLoop()
 	return nil
 }
 
@@ -578,6 +597,7 @@ func (s *UtpStream) CloseRead() error {
 	case s.streamEvents <- &streamEvent{Type: streamCloseRead}:
 	default:
 	}
+	s.wakeLoop()
 	return nil
 }
 
@@ -634,6 +654,7 @@ func (s *UtpStream) Close() {
 			// The queue is full, so the loop has plenty to wake it and will
 			// see the flag on its next pass.
 		}
+		s.wakeLoop()
 		// Return, and let the connection finish in the background: libutp's
 		// utp_close queues the FIN, sets close_requested and returns
 		// (utp_internal.cpp:3358-3380), and the socket goes on sending until

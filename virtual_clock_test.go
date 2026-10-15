@@ -65,6 +65,9 @@ type virtualWaiter struct {
 	stopped  bool
 	repeats  bool
 	clockRef *virtualClock
+	// fn, when set, is run by Advance in place of a send on ch, which is
+	// then nil: a timer made by AfterFunc.
+	fn func()
 }
 
 func newVirtualClock(start time.Time) *virtualClock {
@@ -81,6 +84,16 @@ func (c *virtualClock) Now() time.Time {
 
 func (c *virtualClock) NewTimer(d time.Duration) Timer {
 	return c.add(d, 0)
+}
+
+// AfterFunc implements funcTimerClock. Advance runs f on its own goroutine at
+// the deadline and then waits for the reaction, as it does for a send.
+func (c *virtualClock) AfterFunc(d time.Duration, f func()) Timer {
+	w := c.add(d, 0)
+	c.mu.Lock()
+	w.ch, w.fn = nil, f
+	c.mu.Unlock()
+	return w
 }
 
 func (c *virtualClock) NewTicker(d time.Duration) Ticker {
@@ -299,8 +312,17 @@ func (c *virtualClock) Advance(d time.Duration) {
 		}
 		ch := next.ch
 		wakesBefore := c.wakes
+		fn := next.fn
 		c.mu.Unlock()
 
+		if fn != nil {
+			// A function timer reacts by waking a participant -- a resting
+			// connection's loop starting again -- and is waited for as a
+			// delivered send is.
+			fn()
+			c.awaitReaction(wakesBefore)
+			continue
+		}
 		select {
 		case ch <- fireAt:
 			// Wait for the delivery to be picked up *and* for everything to

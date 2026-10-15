@@ -114,6 +114,12 @@ func (realClock) NewTimer(d time.Duration) Timer {
 	return &realTimer{t: time.NewTimer(d)}
 }
 
+// AfterFunc runs f on a goroutine of its own once d has passed. Its timer's
+// channel is nil. See funcTimerClock.
+func (realClock) AfterFunc(d time.Duration, f func()) Timer {
+	return &realTimer{t: time.AfterFunc(d, f)}
+}
+
 func (realClock) NewTicker(d time.Duration) Ticker {
 	return &realTicker{t: time.NewTicker(d)}
 }

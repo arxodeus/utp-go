@@ -90,6 +90,7 @@ func idleConnectionMemory(t *testing.T, keepAlive, wait time.Duration) int64 {
 		return m.HeapInuse
 	}
 	before := heap()
+	stackBefore, goroutinesBefore := stackInUse(), runtime.NumGoroutine()
 	streams := make([]*utp.UtpStream, 0, 2*conns)
 	payload := make([]byte, 1024)
 	buf := make([]byte, 2048)
@@ -127,17 +128,35 @@ func idleConnectionMemory(t *testing.T, keepAlive, wait time.Duration) int64 {
 	}
 	time.Sleep(wait)
 	after := heap()
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
 	perEnd := (int64(after) - int64(before)) / int64(len(streams))
+	stackPerEnd := (int64(stackInUse()) - int64(stackBefore)) / int64(len(streams))
+	goroutines := runtime.NumGoroutine() - goroutinesBefore
 	t.Logf("%s: %d connection ends that exchanged 1 KB each hold %d bytes of heap apiece, "+
-		"and the process %d bytes of goroutine stack apiece", when, len(streams), perEnd,
-		int64(ms.StackInuse)/int64(len(streams)))
+		"%d bytes of goroutine stack apiece, and %d goroutines between them",
+		when, len(streams), perEnd, stackPerEnd, goroutines)
 	if perEnd > perEndMax {
 		t.Errorf("%s: each connection end holds %d bytes of heap, want at most %d", when, perEnd, perEndMax)
 	}
+	// An idle connection gives its goroutine back (dormant.go): libutp has no
+	// thread per connection, and the parked goroutine's stack was 8 KB an
+	// end. A few may still be on their way out when this looks.
+	if goroutines > len(streams)/20 {
+		t.Errorf("%s: %d idle connection ends hold %d goroutines; an idle connection should hold none",
+			when, len(streams), goroutines)
+	}
 	runtime.KeepAlive(streams)
 	return perEnd
+}
+
+// stackInUse is the process's goroutine stack memory, after a collection has
+// shrunk what it can. Goroutines that have exited leave their stacks cached,
+// counted here, so only the first measurement in a process is clean; the
+// figure is reported, not asserted.
+func stackInUse() uint64 {
+	runtime.GC()
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return m.StackInuse
 }
 
 // idleMemoryKeepAlive stands in for the 29-second keep-alive interval, after

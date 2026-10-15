@@ -267,18 +267,20 @@ func fromConnConfig(config *ConnectionConfig) *ctrlConfig {
 // A timer made while the event loop is parked is one its select is not
 // watching: the loop chose its channels before the timer existed, and the
 // socket's reader arms timers in passes it runs inline. So making one wakes
-// the loop (created), which goes round and selects on it. Without that, the
+// the loop (kickLoop), which goes round and selects on it. Without that, the
 // first fire of a timer the reader made went unseen until something else
 // woke the loop -- on the virtual clock, never:
 // TestTailBurstLossAgainstLibutp hung.
 type lazyTimer struct {
-	clk     Clock
-	t       Timer
-	created func()
+	c *connection
+	t Timer
+	// pending is set while the timer is armed and its fire has not been
+	// taken: a resting connection (dormant.go) must have none of these.
+	pending bool
 }
 
 func (c *connection) newLazyTimer() *lazyTimer {
-	return &lazyTimer{clk: c.timeSource(), created: c.kickLoop}
+	return &lazyTimer{c: c}
 }
 
 // C is the timer's channel, or nil before it is first armed.
@@ -290,12 +292,15 @@ func (l *lazyTimer) C() <-chan time.Time {
 }
 
 // arm sets the timer to fire after d, dropping a fire not yet received.
+//
+// A timer armed while the connection rests has no loop to fire into, so
+// arming one wakes it (wake). A connection that is not resting does nothing
+// for that but a load.
 func (l *lazyTimer) arm(d time.Duration) {
+	l.pending = true
 	if l.t == nil {
-		l.t = l.clk.NewTimer(d)
-		if l.created != nil {
-			l.created()
-		}
+		l.t = l.c.timeSource().NewTimer(d)
+		l.c.kickLoop()
 		return
 	}
 	if !l.t.Stop() {
@@ -305,10 +310,15 @@ func (l *lazyTimer) arm(d time.Duration) {
 		}
 	}
 	l.t.Reset(d)
+	l.c.wake()
 }
+
+// fired records that the event loop has taken the timer's fire.
+func (l *lazyTimer) fired() { l.pending = false }
 
 // stop stops the timer, if it has been made.
 func (l *lazyTimer) stop() {
+	l.pending = false
 	if l.t != nil {
 		l.t.Stop()
 	}
@@ -615,6 +625,24 @@ type connection struct {
 	// kick wakes the event loop when a pass the reader ran inline leaves
 	// something only the loop can do: tear the connection down.
 	kick chan struct{}
+	// loopTimers are the timers the event loop waits on. Guarded by mu.
+	loopTimers loopTimers
+	// barrier is the connection's clock as an IdleBarrier, or nil: a virtual
+	// clock in a test. Resolved once, in newConnection.
+	barrier IdleBarrier
+	// What lets the loop rest: see dormant.go. dormant is the loop's
+	// goroutine having gone, read and cleared without mu; asleep is the same
+	// under mu. restClock is nil for a connection that never rests.
+	// attached is set once the socket delivers this connection's packets
+	// inline (UtpSocket.attachInline). wakeFn is wake, bound once.
+	dormant     atomic.Bool
+	asleep      bool
+	restClock   funcTimerClock
+	restTimer   Timer
+	restAt      time.Time
+	stopCtxWake func() bool
+	attached    atomic.Bool
+	wakeFn      func()
 	// stream is the stream this connection belongs to, for passes run off
 	// the event loop. Set at setup.
 	stream *UtpStream
@@ -797,7 +825,7 @@ func newConnection(
 
 	unackTimeoutCh := make(chan *packet, unackTimeoutQueueLen)
 
-	return &connection{
+	c := &connection{
 		ctx:            ctx,
 		logger:         logger,
 		clk:            clk,
@@ -825,6 +853,9 @@ func newConnection(
 		// See newMtuSearch.
 		mtu: newMtuSearch(uint32(config.MaxPacketSize), clk.Now()),
 	}
+	c.barrier, _ = c.timeSource().(IdleBarrier)
+	c.wakeFn = c.wake
+	return c
 }
 
 // unackTimeoutQueueLen is the capacity of a connection's queue of expired
@@ -854,7 +885,7 @@ func (c *connection) armRetransmit(pkt *packet, delay time.Duration) {
 	c.armed[seq] = struct{}{}
 	c.timers.arm(
 		retransmitKey{scope: c.timerScope, seq: seq},
-		retransmitTimer{packet: pkt, deliver: c.unackTimeoutCh, ctx: c.ctx},
+		retransmitTimer{packet: pkt, deliver: c.unackTimeoutCh, ctx: c.ctx, wake: c.wakeFn},
 		delay,
 	)
 }
@@ -907,39 +938,40 @@ func (c *connection) disarmAll() {
 	clear(c.armed)
 }
 
-func (c *connection) eventLoop(stream *UtpStream) error {
-	defer c.disarmAll()
-	// Report the end of the stream to the reader on every exit.
-	//
-	// Nothing else sends on c.reads by now -- the passes the socket's reader
-	// runs stop once finished is set, before teardown -- so closing it here is
-	// safe, and it is what lets the loop refuse to block: the end-of-stream
-	// marker is best-effort, and a reader that never got it -- because its
-	// queue was full when the connection ended -- learns from the close
-	// instead, with the reason available in terminalErr.
-	//
-	// Without this a reader draining a full queue after the loop had gone
-	// would wait for a marker that no one was left to send.
-	defer func() {
-		if c.terminalErr.Load() == nil {
-			c.terminalErr.Store(&terminalError{err: c.readEndErr()})
-		}
-		c.endErr.Store(&terminalError{err: c.state.Err})
-		close(c.reads)
-	}()
-	// Tell the socket to drop this connection on *every* exit, not only the
-	// one where the state machine reached ConnClosed.
-	//
-	// It used to be reported from that one branch alone, so a connection torn
-	// down by a cancelled context -- which is what an abandoned or failed
-	// connection attempt is -- left its entry in the socket's table forever.
-	// Measured before the fix: 40 attempts to a dead port left 40 tracked
-	// connections behind, permanently. A client dialling unreachable peers,
-	// which is most of them, accumulates one of these per attempt.
-	//
-	// The goroutines were fine; it is the map entry and its channel that
-	// leaked, which is why nothing that counted goroutines noticed.
-	defer c.notifySocketShutdown()
+// loopTimers are the timers the event loop waits on. They are the
+// connection's rather than the loop's locals so that the loop can stop and
+// start again (see dormant.go), and so that the frame it waits in stays small
+// (see wait).
+type loopTimers struct {
+	// keepAlive is made with the loop and always armed while it runs.
+	keepAlive Timer
+	// The rest are made the first time they are armed. See lazyTimer.
+	idle, probe, ackHold, idleRto, lossProbe, rack *lazyTimer
+}
+
+// wakeResult is what the event loop's blocking select received: which case
+// fired, and what it carried.
+type wakeResult struct {
+	kind  wakeKind
+	event *streamEvent
+	write *queuedWrite
+	ok    bool
+	timer *packet
+}
+
+// eventLoop sets the connection up and runs it until it ends or rests. It
+// reports the error the connection ended with, and whether it ended: a
+// connection that rests (dormant.go) returns with final unset, and its loop
+// is started again by whatever next needs it.
+func (c *connection) eventLoop(stream *UtpStream) (error, bool) {
+	c.setupLoop(stream)
+	return c.runLoop()
+}
+
+// setupLoop is everything the event loop does once, before its first pass.
+// Called with mu held, from NewUtpStream; the loop releases it the first time
+// it waits.
+func (c *connection) setupLoop(stream *UtpStream) {
 	if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
 		c.logger.Trace("uTP conn starting", "dst.peer", c.cid.Peer, "cid.Send", c.cid.Send, "cid.Recv", c.cid.Recv)
 	}
@@ -986,15 +1018,15 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 		c.state.SentPackets = sentPacketsHolder
 	}
 
+	t := &c.loopTimers
 	// No idle timeout unless one is configured, and no timer for it either:
 	// this and the other timers below that most connections never use are
 	// made when first armed (lazyTimer).
-	idleTimer := c.newLazyTimer()
+	t.idle = c.newLazyTimer()
 	if c.config.MaxIdleTimeout > 0 {
-		idleTimer.arm(c.config.MaxIdleTimeout)
+		t.idle.arm(c.config.MaxIdleTimeout)
 	}
 	c.lastActivity = c.now()
-	defer idleTimer.stop()
 
 	// The zero-window probe needs a wake-up of its own.
 	//
@@ -1020,40 +1052,12 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	// at the next and waited for the one after -- up to twice the interval,
 	// 58 seconds where libutp's is 29 and a NAT mapping commonly lasts 30.
 	// Measured: 58.21s against 29.70s. See KNOWN-LIMITATIONS.md, section 2e.
-	keepAliveTimer := c.timeSource().NewTimer(c.keepAliveIntervalOrDefault())
-	defer keepAliveTimer.Stop()
-	onKeepAliveTimer := func() {
-		interval := c.keepAliveIntervalOrDefault()
-		now := c.now()
-		// libutp: `if (state >= CS_CONNECTED && !fin_sent)` and the
-		// connection has been silent for the interval
-		// (utp_internal.cpp:1271-1274).
-		if c.state.stateType == ConnConnected &&
-			(c.state.closing == nil || c.state.closing.LocalFin == nil) &&
-			now.Sub(c.lastSentPacket) >= interval {
-			c.emit(c.keepAlivePacket())
-		}
-		// Aim at the moment the silence will reach the interval. Anything
-		// sent since the timer was armed has moved that later; nothing sent,
-		// or nothing sendable in this state, means one interval from now.
-		next := c.lastSentPacket.Add(interval).Sub(now)
-		if next <= 0 {
-			next = interval
-		}
-		keepAliveTimer.Reset(next)
-		// The connection has been silent for the interval: whatever the
-		// receive buffer grew to while it was busy is held for nothing.
-		if c.state.RecvBuf != nil {
-			c.state.RecvBuf.releaseStorage()
-		}
-	}
+	t.keepAlive = c.timeSource().NewTimer(c.keepAliveIntervalOrDefault())
 
-	probeTimer := c.newLazyTimer()
-	defer probeTimer.stop()
-	ackHoldTimer := c.newLazyTimer()
-	defer ackHoldTimer.stop()
-	c.armAckHold = ackHoldTimer.arm
-	c.armProbeTimer = probeTimer.arm
+	t.probe = c.newLazyTimer()
+	t.ackHold = c.newLazyTimer()
+	c.armAckHold = t.ackHold.arm
+	c.armProbeTimer = t.probe.arm
 	// An idle connection's window has to decay, and nothing else here would
 	// wake the loop to do it.
 	//
@@ -1074,337 +1078,473 @@ func (c *connection) eventLoop(stream *UtpStream) error {
 	// at one, three and seven RTOs. Ours was unchanged at 55375, so it would
 	// have put a window it last measured 8 seconds ago straight back onto a
 	// path it has not probed since. See netem.TestLibutpIdleWindowDecay.
-	idleRtoTimer := c.newLazyTimer()
-	defer idleRtoTimer.stop()
-	c.armIdleRto = idleRtoTimer.arm
+	//
+	// A resting connection has no loop to wake: its rest timer is already
+	// set for this deadline (armDormant), and is moved only if a pass the
+	// reader ran has brought the deadline forward -- which nothing does
+	// while there is nothing in flight, but which costs a comparison to be
+	// sure of. Resetting it unconditionally cost a timer operation for every
+	// read batch a resting receiver handled.
+	t.idleRto = c.newLazyTimer()
+	c.armIdleRto = func(d time.Duration) {
+		if c.asleep {
+			if c.rtoDeadline.Before(c.restAt) {
+				c.armDormant()
+			}
+			return
+		}
+		t.idleRto.arm(d)
+	}
 
-	lossProbeTimer := c.newLazyTimer()
-	defer lossProbeTimer.stop()
-	c.armLossProbe = lossProbeTimer.arm
+	t.lossProbe = c.newLazyTimer()
+	c.armLossProbe = t.lossProbe.arm
 
-	rackTimer := c.newLazyTimer()
-	defer rackTimer.stop()
+	t.rack = c.newLazyTimer()
 	c.armRack = func(d time.Duration) {
 		if d > 0 {
-			rackTimer.arm(d)
+			t.rack.arm(d)
 		} else {
-			rackTimer.stop()
-		}
-	}
-
-	handleIncoming := func(event *streamEvent) {
-		if event.Type == streamIncoming {
-			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-				c.logger.Trace("incoming packet",
-					"stream.streamEvents.len", len(stream.streamEvents),
-					"src.peer", c.cid.Peer,
-					"packet.type", event.Packet.Header.PacketType.String(),
-					"packet.seqNum", event.Packet.Header.SeqNum,
-					"packet.ackNum", event.Packet.Header.AckNum,
-					"buf.len", len(event.Packet.Body))
-			}
-			now := c.now()
-			c.lastActivity = now
-			c.onPacket(event.Packet, now)
-		} else if event.Type == streamShutdown {
-			stream.shutdown.Store(true)
-		} else if event.Type == streamICMP {
-			c.onICMP(event.ICMP, c.now())
-		} else if event.Type == streamCloseRead {
-			c.onCloseRead()
-		}
-		// streamCloseWrite needs no handling beyond having woken the loop:
-		// the flag it refers to is already set, and the pass this event ends
-		// will see it and send the FIN.
-	}
-
-	handleWrites := func(write *queuedWrite, ok bool) {
-		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-			c.logger.Trace("get queued write from writes", "dst.peer", c.cid.Peer, "content", len(write.data))
-		}
-		c.lastActivity = c.now()
-		c.onWrite(write)
-	}
-
-	handleTimeout := func(timeoutPkt *packet) {
-		// The wheel has already removed this one; keep the armed set in step.
-		delete(c.armed, timeoutPkt.Header.SeqNum)
-		c.logger.Debug("unack timeout",
-			"seq", timeoutPkt.Header.SeqNum,
-			"ack", timeoutPkt.Header.AckNum,
-			"item.key", timeoutPkt.Header.SeqNum,
-			"type", timeoutPkt.Header.PacketType.String())
-		c.onTimeout(timeoutPkt, c.now())
-	}
-
-	handleIdleTimeout := func() {
-		if c.state.stateType != ConnClosed {
-			c.logger.Trace("idle timeout, closing...")
-			c.state.stateType = ConnClosed
-			c.state.Err = ErrTimedOut
-		}
-	}
-
-	handleCtxDone := func() {
-		if !stream.shutdown.Load() {
-			c.logger.Trace("ctx done, uTP conn initiating shutdown...", "err", c.ctx.Err())
-			stream.shutdown.Store(true)
-		}
-		// The socket was closed under a connection still running: that is
-		// why it ended, and what its reader and writers are told. A stream
-		// whose own context was cancelled -- an abandoned dial -- keeps
-		// whatever it had.
-		if c.state.Err == nil && c.state.stateType != ConnClosed &&
-			stream.socketCtx != nil && stream.socketCtx.Err() != nil {
-			c.state.Err = ErrSocketClosed
+			t.rack.stop()
 		}
 	}
 
 	// A virtual clock needs to know when this loop has finished reacting, so
 	// that it can move time without racing the reaction. Resolved once here
 	// rather than per pass; nil for the real clock. See IdleBarrier.
-	barrier, _ := c.timeSource().(IdleBarrier)
-	if barrier != nil {
-		barrier.Register()
+	if c.barrier != nil {
+		c.barrier.Register()
+	}
+	c.setupDormancy()
+
+	c.stream = stream
+	c.ready = true
+}
+
+// finishLoop is everything the event loop does once it has ended, on
+// whichever goroutine ran its last pass. Called without mu.
+func (c *connection) finishLoop() {
+	if c.barrier != nil {
 		// A connection that ends -- reset by its peer, timed out, closed --
 		// can never park again, and a virtual clock waiting for it would
 		// stop. Found by the initiator corpus: a peer that answers a SYN
 		// with a RESET tore the connection down and hung the clock.
-		defer func() {
-			// Wakes queued for this loop that it will never take: each was
-			// noted as a handoff, and a clock still counting one in flight
-			// never moves again. A loop ended by a RESET the reader
-			// processed inline left the reader's kick behind, and a test
-			// waiting on the clock waited for ever.
-			for queued := true; queued; {
-				select {
-				case <-c.kick:
-					barrier.TakeHandoff()
-				case <-c.unackTimeoutCh:
-					barrier.TakeHandoff()
-				default:
-					queued = false
-				}
+		//
+		// Wakes queued for this loop that it will never take: each was
+		// noted as a handoff, and a clock still counting one in flight
+		// never moves again. A loop ended by a RESET the reader
+		// processed inline left the reader's kick behind, and a test
+		// waiting on the clock waited for ever.
+		for queued := true; queued; {
+			select {
+			case <-c.kick:
+				c.barrier.TakeHandoff()
+			case <-c.unackTimeoutCh:
+				c.barrier.TakeHandoff()
+			default:
+				queued = false
 			}
-			if u, ok := barrier.(interface{ Unregister() }); ok {
-				u.Unregister()
-			}
-		}()
-	}
-
-	// takeIncoming takes the handoff the socket noted when it queued an
-	// inbound packet. Only streamIncoming is noted -- see handleIncomingBuf --
-	// so only streamIncoming is taken. Every receive from streamEvents calls
-	// it: the non-blocking ones at the top of the loop took the packet
-	// without it, and left a virtual clock waiting for ever.
-	takeIncoming := func(event *streamEvent) {
-		if barrier != nil && event != nil && event.Type == streamIncoming {
-			barrier.TakeHandoff()
+		}
+		if u, ok := c.barrier.(interface{ Unregister() }); ok {
+			u.Unregister()
 		}
 	}
+	t := &c.loopTimers
+	t.rack.stop()
+	t.lossProbe.stop()
+	t.idleRto.stop()
+	t.ackHold.stop()
+	t.probe.stop()
+	t.keepAlive.Stop()
+	t.idle.stop()
+	c.endDormancy()
+	// Tell the socket to drop this connection on *every* exit, not only the
+	// one where the state machine reached ConnClosed.
+	//
+	// It used to be reported from that one branch alone, so a connection torn
+	// down by a cancelled context -- which is what an abandoned or failed
+	// connection attempt is -- left its entry in the socket's table forever.
+	// Measured before the fix: 40 attempts to a dead port left 40 tracked
+	// connections behind, permanently. A client dialling unreachable peers,
+	// which is most of them, accumulates one of these per attempt.
+	//
+	// The goroutines were fine; it is the map entry and its channel that
+	// leaked, which is why nothing that counted goroutines noticed.
+	c.notifySocketShutdown()
+	// Report the end of the stream to the reader on every exit.
+	//
+	// Nothing else sends on c.reads by now -- the passes the socket's reader
+	// runs stop once finished is set, before teardown -- so closing it here is
+	// safe, and it is what lets the loop refuse to block: the end-of-stream
+	// marker is best-effort, and a reader that never got it -- because its
+	// queue was full when the connection ended -- learns from the close
+	// instead, with the reason available in terminalErr.
+	//
+	// Without this a reader draining a full queue after the loop had gone
+	// would wait for a marker that no one was left to send.
+	if c.terminalErr.Load() == nil {
+		c.terminalErr.Store(&terminalError{err: c.readEndErr()})
+	}
+	c.endErr.Store(&terminalError{err: c.state.Err})
+	close(c.reads)
+	// The shared wheel outlives the connection, so anything left armed
+	// would linger until it expired and then be delivered to a dead loop.
+	c.disarmAll()
+}
 
-	var maxStreamEventLen int
-	// Declared outside the loop so the fast-path `goto afterSelect` above does
-	// not jump over them. Reset on every pass by the select that assigns them.
-	var (
-		woke       wakeKind
-		markedIdle bool
-		wokeEvent  *streamEvent
-		wokeWrite  *queuedWrite
-		wokeOK     bool
-		wokeTimer  *packet
-	)
-	c.stream = stream
-	c.ready = true
+// runLoop runs passes until the connection ends or rests. Called with mu
+// held; returns without it.
+//
+// It and wait are kept small on purpose: they are the frames a parked loop
+// leaves on its goroutine's stack, and Go's garbage collector halves a stack
+// only while less than a quarter of it is in use. With everything inline, as
+// it was, the parked loop used about 2.2 KB of its stack and kept 8 KB of it;
+// the handling lives in react, which has returned by the time the loop
+// parks.
+func (c *connection) runLoop() (err error, final bool) {
 	for {
-		maxStreamEventLen = max(maxStreamEventLen, len(stream.streamEvents))
-		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-			c.logger.Trace("connection event count",
-				"maxStreamEventLen", maxStreamEventLen,
-				"streamEvents.len", len(stream.streamEvents),
-				"readable.len", len(c.readable),
-				"writeable.len", len(c.writable))
-		}
-		select {
-		case event := <-stream.streamEvents:
-			takeIncoming(event)
-			handleIncoming(event)
-			// Take whatever else has already arrived before answering, so one
-			// acknowledgement covers it rather than one per packet. flushAck
-			// also waits for the rest of the socket read the packets came in
-			// (see there).
-			//
-			// Bounded so that a peer sending continuously cannot keep this
-			// inner loop fed and starve writes and timers; the outer loop
-			// returns here immediately anyway if more are waiting.
-			for drained := 0; drained < maxAckCoalesce; drained++ {
-				select {
-				case more := <-stream.streamEvents:
-					takeIncoming(more)
-					handleIncoming(more)
-				default:
-					drained = maxAckCoalesce
-				}
+		var w wakeResult
+		if c.takeQueued() {
+			w.kind = wakeQueued
+		} else if c.mayRest() {
+			if c.rest() {
+				return nil, false
 			}
-			goto afterSelect
+			w.kind = c.onResume()
+		} else {
+			w = c.wait()
+		}
+		if err, final := c.react(w); final {
+			return err, true
+		}
+	}
+}
+
+// takeQueued handles whatever the socket has already queued for this
+// connection, without blocking, and reports whether there was any.
+func (c *connection) takeQueued() bool {
+	stream := c.stream
+	if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		c.logger.Trace("connection event count",
+			"streamEvents.len", len(stream.streamEvents),
+			"readable.len", len(c.readable),
+			"writeable.len", len(c.writable))
+	}
+	select {
+	case event := <-stream.streamEvents:
+		c.takeIncoming(event)
+		c.handleIncoming(event)
+		// Take whatever else has already arrived before answering, so one
+		// acknowledgement covers it rather than one per packet. flushAck
+		// also waits for the rest of the socket read the packets came in
+		// (see there).
+		//
+		// Bounded so that a peer sending continuously cannot keep this
+		// inner loop fed and starve writes and timers; the outer loop
+		// returns here immediately anyway if more are waiting.
+		for drained := 0; drained < maxAckCoalesce; drained++ {
+			select {
+			case more := <-stream.streamEvents:
+				c.takeIncoming(more)
+				c.handleIncoming(more)
+			default:
+				drained = maxAckCoalesce
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+// wait blocks until the loop has something to do, with mu released, and
+// reports what woke it.
+//
+// The select below only *receives*; every case body runs after it, in react.
+// That shape is what lets a virtual clock be told the loop is running again
+// before any of those bodies can emit a packet -- one MarkBusy, on the one
+// path out, rather than one per case where missing a single one would put
+// the nondeterminism straight back. See IdleBarrier.
+func (c *connection) wait() (w wakeResult) {
+	stream := c.stream
+	t := &c.loopTimers
+	// The channels are read while mu is still held: the socket's reader makes
+	// lazy timers under it.
+	keepAlive, probe, ackHold := t.keepAlive.C(), t.probe.C(), t.ackHold.C()
+	idleRto, lossProbe, rack, idle := t.idleRto.C(), t.lossProbe.C(), t.rack.C(), t.idle.C()
+	// Tell a virtual clock this loop is about to block, so it knows the
+	// reaction to the last instant is complete and time may move. A real
+	// clock has no barrier and this is nil. See IdleBarrier.
+	//
+	// Not while a wake this loop queued for itself is still waiting: an
+	// incoming packet that reopens the peer's window signals writable, and
+	// the data goes out on the next pass. Marked idle with that signal
+	// buffered, the select returned at once, but in between the clock saw
+	// every participant parked and nothing in flight, called the system
+	// quiet, and the packet went out after the step that should have
+	// seen it -- TestInitiatorZeroWindow, about once in 160 runs. Only
+	// this goroutine queues those wakes before reaching here, so their
+	// length is exact; a wake from another goroutine is that goroutine's
+	// to account for.
+	markedIdle := false
+	if c.barrier != nil && len(c.writable) == 0 && len(c.readable) == 0 && len(c.kick) == 0 {
+		c.barrier.MarkIdle()
+		markedIdle = true
+	}
+	// The socket's reader may handle a packet for this connection while
+	// the loop waits. See receiveInline.
+	c.mu.Unlock()
+	select {
+	case w.event = <-stream.streamEvents:
+		w.kind = wakeStreamEvent
+	case w.write, w.ok = <-stream.writes:
+		w.kind = wakeWrite
+	case <-c.readable:
+		w.kind = wakeReadable
+	case <-c.writable:
+		w.kind = wakeWritable
+	case w.timer = <-c.unackTimeoutCh:
+		w.kind = wakeRetransmit
+	case <-keepAlive:
+		w.kind = wakeKeepAlive
+	case <-probe:
+		w.kind = wakeProbe
+	case <-ackHold:
+		w.kind = wakeAckHold
+	case <-idleRto:
+		w.kind = wakeIdleRto
+	case <-lossProbe:
+		w.kind = wakeLossProbe
+	case <-rack:
+		w.kind = wakeRack
+	case <-idle:
+		w.kind = wakeIdleTimeout
+	case <-c.kick:
+		w.kind = wakeKick
+	case <-c.ctx.Done():
+		w.kind = wakeCtxDone
+	}
+	c.mu.Lock()
+	if markedIdle {
+		c.barrier.MarkBusy()
+	}
+	return w
+}
+
+// react handles one wake and ends the pass. It reports whether the
+// connection has ended, and with what; when it has, mu has been released.
+func (c *connection) react(w wakeResult) (err error, final bool) {
+	t := &c.loopTimers
+	switch w.kind {
+	case wakeQueued, wakeResumed:
+		// Already handled, by takeQueued and by onResume.
+	case wakeStreamEvent:
+		c.takeIncoming(w.event)
+		c.handleIncoming(w.event)
+	case wakeWrite:
+		c.handleWrite(w.write)
+	case wakeReadable:
+		// Nothing to do but wake: the drain happens in afterPass, for
+		// every pass, so that it precedes the acknowledgement.
+		//
+		// The wake itself is the point. UtpStream.notifyRead signals this
+		// when the application takes a chunk, which is the only thing
+		// that frees room once the read queue has filled -- without it
+		// processReads gives up and waits for a packet that a blocked
+		// peer will not send.
+	case wakeWritable:
+		c.processWrites(c.now())
+	case wakeRetransmit:
+		// This is the handoff the wheel noted when it queued the timeout.
+		if c.barrier != nil {
+			c.barrier.TakeHandoff()
+		}
+		c.handleTimeout(w.timer)
+	case wakeKeepAlive:
+		c.onKeepAliveTimer()
+	case wakeAckHold:
+		t.ackHold.fired()
+		// Nothing more to do but wake: a held acknowledgement goes out from
+		// flushAck in afterPass.
+	case wakeKick:
+		// The handoff endBatch noted when it kicked. What it wants done
+		// happens in afterPass.
+		if c.barrier != nil {
+			c.barrier.TakeHandoff()
+		}
+	case wakeProbe:
+		t.probe.fired()
+		// The peer's window has been closed for a whole interval. Let one
+		// packet through, so its acknowledgement carries a fresh window.
+		c.processWrites(c.now())
+	case wakeIdleRto:
+		t.idleRto.fired()
+		c.onIdleRto(c.now())
+	case wakeLossProbe:
+		t.lossProbe.fired()
+		c.onLossProbe(c.now())
+	case wakeRack:
+		t.rack.fired()
+		c.onRackTimer(c.now())
+	case wakeIdleTimeout:
+		t.idle.fired()
+		c.checkIdleTimeout()
+	case wakeCtxDone:
+		c.handleCtxDone()
+		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+			c.logger.Trace("stream context done, will force stop...", "c.cid.peer", c.cid.Peer, "c.cid.Send", c.cid.Send, "c.cid.Recv", c.cid.Recv)
+		}
+		c.finished = true
+		c.mu.Unlock()
+		return c.ctx.Err(), true
+	}
+	if c.afterPass() {
+		// More to send than one pass sends: come round again.
+		select {
+		case c.writable <- struct{}{}:
 		default:
 		}
-		// Tell a virtual clock this loop is about to block, so it knows the
-		// reaction to the last instant is complete and time may move. A real
-		// clock has no barrier and this is nil. See IdleBarrier.
-		//
-		// Not while a wake this loop queued for itself is still waiting: an
-		// incoming packet that reopens the peer's window signals writable, and
-		// the data goes out on the next pass. Marked idle with that signal
-		// buffered, the select returned at once, but in between the clock saw
-		// every participant parked and nothing in flight, called the system
-		// quiet, and the packet went out after the step that should have
-		// seen it -- TestInitiatorZeroWindow, about once in 160 runs. Only
-		// this goroutine queues those wakes before reaching here, so their
-		// length is exact; a wake from another goroutine is that goroutine's
-		// to account for.
-		markedIdle = false
-		if barrier != nil && len(c.writable) == 0 && len(c.readable) == 0 && len(c.kick) == 0 {
-			barrier.MarkIdle()
-			markedIdle = true
-		}
-		// The socket's reader may handle a packet for this connection while
-		// the loop waits. See receiveInline.
-		c.mu.Unlock()
-		// The select below only *receives*; every case body runs after it,
-		// through the switch. That shape is what lets a virtual clock be told
-		// the loop is running again before any of those bodies can emit a
-		// packet -- one MarkBusy, on the one path out, rather than one per
-		// case where missing a single one would put the nondeterminism
-		// straight back. See IdleBarrier.
-		select {
-		case wokeEvent = <-stream.streamEvents:
-			woke = wakeStreamEvent
-		case wokeWrite, wokeOK = <-stream.writes:
-			woke = wakeWrite
-		case <-c.readable:
-			woke = wakeReadable
-		case <-c.writable:
-			woke = wakeWritable
-		case wokeTimer = <-c.unackTimeoutCh:
-			woke = wakeRetransmit
-		case <-keepAliveTimer.C():
-			woke = wakeKeepAlive
-		case <-probeTimer.C():
-			woke = wakeProbe
-		case <-ackHoldTimer.C():
-			woke = wakeAckHold
-		case <-idleRtoTimer.C():
-			woke = wakeIdleRto
-		case <-lossProbeTimer.C():
-			woke = wakeLossProbe
-		case <-rackTimer.C():
-			woke = wakeRack
-		case <-idleTimer.C():
-			woke = wakeIdleTimeout
-		case <-c.kick:
-			woke = wakeKick
-		case <-c.ctx.Done():
-			woke = wakeCtxDone
-		}
-		c.mu.Lock()
-		if markedIdle {
-			barrier.MarkBusy()
-		}
-		switch woke {
-		case wakeStreamEvent:
-			takeIncoming(wokeEvent)
-			handleIncoming(wokeEvent)
-		case wakeWrite:
-			handleWrites(wokeWrite, wokeOK)
-		case wakeReadable:
-			// Nothing to do but wake: the drain happens in afterSelect, for
-			// every pass, so that it precedes the acknowledgement.
-			//
-			// The wake itself is the point. UtpStream.notifyRead signals this
-			// when the application takes a chunk, which is the only thing
-			// that frees room once the read queue has filled -- without it
-			// processReads gives up and waits for a packet that a blocked
-			// peer will not send.
-		case wakeWritable:
-			c.processWrites(c.now())
-		case wakeRetransmit:
-			// This is the handoff the wheel noted when it queued the timeout.
-			if barrier != nil {
-				barrier.TakeHandoff()
-			}
-			handleTimeout(wokeTimer)
-		case wakeKeepAlive:
-			onKeepAliveTimer()
-		case wakeAckHold:
-			// Nothing to do but wake: a held acknowledgement goes out from
-			// flushAck in afterSelect.
-		case wakeKick:
-			// The handoff endBatch noted when it kicked. What it wants done
-			// happens in afterSelect.
-			if barrier != nil {
-				barrier.TakeHandoff()
-			}
-		case wakeProbe:
-			// The peer's window has been closed for a whole interval. Let one
-			// packet through, so its acknowledgement carries a fresh window.
-			c.processWrites(c.now())
-		case wakeIdleRto:
-			c.onIdleRto(c.now())
-		case wakeLossProbe:
-			c.onLossProbe(c.now())
-		case wakeRack:
-			c.onRackTimer(c.now())
-		case wakeIdleTimeout:
-			// Activity since the timer was set moves the deadline on: arm
-			// for what is left of it. See lastActivity.
-			if left := c.config.MaxIdleTimeout - c.now().Sub(c.lastActivity); left > 0 {
-				idleTimer.arm(left)
-			} else {
-				handleIdleTimeout()
-			}
-		case wakeCtxDone:
-			handleCtxDone()
-			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-				c.logger.Trace("stream context done, will force stop...", "c.cid.peer", c.cid.Peer, "c.cid.Send", c.cid.Send, "c.cid.Recv", c.cid.Recv)
-			}
-			c.finished = true
-			c.mu.Unlock()
-			return c.ctx.Err()
-		}
-	afterSelect:
-		if c.afterPass() {
-			// More to send than one pass sends: come round again.
-			select {
-			case c.writable <- struct{}{}:
-			default:
-			}
-		}
+	}
 
-		if c.state.stateType == ConnClosed {
-			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
-				c.logger.Trace("uTP conn closing...", "err", c.state.Err, "c.cid.Send", c.cid.Send, "c.cid.Recv", c.cid.Recv)
-			}
-			// No more passes: the reader leaves this connection alone from
-			// here, so the teardown below can block for the application
-			// without holding up the socket.
-			c.finished = true
-			c.mu.Unlock()
-			// Always drain and terminate the read side here. The previous
-			// `if !c.eof()` guard was inverted in effect: eof() is true by
-			// definition once stateType is ConnClosed, so processReads was
-			// never called and the end-of-stream marker was never delivered.
-			// Readers reaching this path blocked in ReadToEOF forever.
-			c.drainReadsForTeardown()
-			c.processWrites(c.now())
-			if c.state.RecvBuf != nil {
-				c.state.RecvBuf.close()
-			}
-			// A final sample, so the last state of a connection is always
-			// observed rather than lost to the throttle.
-			c.sampleMetrics(c.now(), true)
-			return c.state.Err
+	if c.state.stateType == ConnClosed {
+		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+			c.logger.Trace("uTP conn closing...", "err", c.state.Err, "c.cid.Send", c.cid.Send, "c.cid.Recv", c.cid.Recv)
 		}
+		// No more passes: the reader leaves this connection alone from
+		// here, so the teardown below can block for the application
+		// without holding up the socket.
+		c.finished = true
+		c.mu.Unlock()
+		// Always drain and terminate the read side here. The previous
+		// `if !c.eof()` guard was inverted in effect: eof() is true by
+		// definition once stateType is ConnClosed, so processReads was
+		// never called and the end-of-stream marker was never delivered.
+		// Readers reaching this path blocked in ReadToEOF forever.
+		c.drainReadsForTeardown()
+		c.processWrites(c.now())
+		if c.state.RecvBuf != nil {
+			c.state.RecvBuf.close()
+		}
+		// A final sample, so the last state of a connection is always
+		// observed rather than lost to the throttle.
+		c.sampleMetrics(c.now(), true)
+		return c.state.Err, true
+	}
+	return nil, false
+}
+
+// takeIncoming takes the handoff the socket noted when it queued an inbound
+// packet. Only streamIncoming is noted -- see handleIncomingBuf -- so only
+// streamIncoming is taken. Every receive from streamEvents calls it: the
+// non-blocking ones in takeQueued took the packet without it, and left a
+// virtual clock waiting for ever.
+func (c *connection) takeIncoming(event *streamEvent) {
+	if c.barrier != nil && event != nil && event.Type == streamIncoming {
+		c.barrier.TakeHandoff()
+	}
+}
+
+func (c *connection) handleIncoming(event *streamEvent) {
+	stream := c.stream
+	if event.Type == streamIncoming {
+		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+			c.logger.Trace("incoming packet",
+				"stream.streamEvents.len", len(stream.streamEvents),
+				"src.peer", c.cid.Peer,
+				"packet.type", event.Packet.Header.PacketType.String(),
+				"packet.seqNum", event.Packet.Header.SeqNum,
+				"packet.ackNum", event.Packet.Header.AckNum,
+				"buf.len", len(event.Packet.Body))
+		}
+		now := c.now()
+		c.lastActivity = now
+		c.onPacket(event.Packet, now)
+	} else if event.Type == streamShutdown {
+		stream.shutdown.Store(true)
+	} else if event.Type == streamICMP {
+		c.onICMP(event.ICMP, c.now())
+	} else if event.Type == streamCloseRead {
+		c.onCloseRead()
+	}
+	// streamCloseWrite needs no handling beyond having woken the loop:
+	// the flag it refers to is already set, and the pass this event ends
+	// will see it and send the FIN.
+}
+
+func (c *connection) handleWrite(write *queuedWrite) {
+	if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		c.logger.Trace("get queued write from writes", "dst.peer", c.cid.Peer, "content", len(write.data))
+	}
+	c.lastActivity = c.now()
+	c.onWrite(write)
+}
+
+func (c *connection) handleTimeout(timeoutPkt *packet) {
+	// The wheel has already removed this one; keep the armed set in step.
+	delete(c.armed, timeoutPkt.Header.SeqNum)
+	c.logger.Debug("unack timeout",
+		"seq", timeoutPkt.Header.SeqNum,
+		"ack", timeoutPkt.Header.AckNum,
+		"item.key", timeoutPkt.Header.SeqNum,
+		"type", timeoutPkt.Header.PacketType.String())
+	c.onTimeout(timeoutPkt, c.now())
+}
+
+// checkIdleTimeout closes the connection once MaxIdleTimeout has passed since
+// lastActivity. Activity since the timer was set moves the deadline on: it
+// arms for what is left of it. See lastActivity.
+func (c *connection) checkIdleTimeout() {
+	if left := c.config.MaxIdleTimeout - c.now().Sub(c.lastActivity); left > 0 {
+		c.loopTimers.idle.arm(left)
+		return
+	}
+	if c.state.stateType != ConnClosed {
+		c.logger.Trace("idle timeout, closing...")
+		c.state.stateType = ConnClosed
+		c.state.Err = ErrTimedOut
+	}
+}
+
+func (c *connection) handleCtxDone() {
+	stream := c.stream
+	if !stream.shutdown.Load() {
+		c.logger.Trace("ctx done, uTP conn initiating shutdown...", "err", c.ctx.Err())
+		stream.shutdown.Store(true)
+	}
+	// The socket was closed under a connection still running: that is
+	// why it ended, and what its reader and writers are told. A stream
+	// whose own context was cancelled -- an abandoned dial -- keeps
+	// whatever it had.
+	if c.state.Err == nil && c.state.stateType != ConnClosed &&
+		stream.socketCtx != nil && stream.socketCtx.Err() != nil {
+		c.state.Err = ErrSocketClosed
+	}
+}
+
+// onKeepAliveTimer sends a keep-alive if the connection has been silent for
+// the interval, and aims the timer at the moment the silence next will be.
+func (c *connection) onKeepAliveTimer() {
+	interval := c.keepAliveIntervalOrDefault()
+	now := c.now()
+	// libutp: `if (state >= CS_CONNECTED && !fin_sent)` and the
+	// connection has been silent for the interval
+	// (utp_internal.cpp:1271-1274).
+	if c.state.stateType == ConnConnected &&
+		(c.state.closing == nil || c.state.closing.LocalFin == nil) &&
+		now.Sub(c.lastSentPacket) >= interval {
+		c.emit(c.keepAlivePacket())
+	}
+	// Aim at the moment the silence will reach the interval. Anything
+	// sent since the timer was armed has moved that later; nothing sent,
+	// or nothing sendable in this state, means one interval from now.
+	next := c.lastSentPacket.Add(interval).Sub(now)
+	if next <= 0 {
+		next = interval
+	}
+	c.loopTimers.keepAlive.Reset(next)
+	// The connection has been silent for the interval: whatever the
+	// receive buffer grew to while it was busy is held for nothing.
+	if c.state.RecvBuf != nil {
+		c.state.RecvBuf.releaseStorage()
 	}
 }
 
@@ -1563,7 +1703,7 @@ func (c *connection) hasSendWork() bool {
 // kickLoop wakes the event loop from another goroutine, accounting for the
 // wake with a virtual clock. See IdleBarrier.NoteHandoff.
 func (c *connection) kickLoop() {
-	barrier, _ := c.timeSource().(IdleBarrier)
+	barrier := c.barrier
 	if barrier != nil {
 		barrier.NoteHandoff()
 	}
@@ -1575,6 +1715,7 @@ func (c *connection) kickLoop() {
 			barrier.TakeHandoff()
 		}
 	}
+	c.wake()
 }
 
 // wakeKind names which case of the event loop's blocking select fired.
@@ -1599,6 +1740,11 @@ const (
 	wakeKick
 	wakeIdleTimeout
 	wakeCtxDone
+	// wakeQueued is a pass for events takeQueued has already handled, and
+	// wakeResumed one for a connection coming back from rest (dormant.go).
+	// Neither came from the select.
+	wakeQueued
+	wakeResumed
 )
 
 // scheduleIdleRto arms the idle wake-up when there is nothing outstanding, so
