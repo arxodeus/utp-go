@@ -312,6 +312,27 @@ against libutp's 10 KB; what is left is mostly six timers (about 1.5 KB), the
 read queue's 100 slots, and the receive buffer's first 4 KB on an end that has
 received. The goroutine's stack is on top of the heap figure, at least 8 KB.
 
+**Since: about 10 KB of heap, and the stack on top.** Three more changes:
+the timers a connection seldom uses are made when first armed; a connection
+quiet for its keep-alive interval releases its receive buffer's storage, as
+libutp keeps none of what it has delivered (a busy connection's had grown
+up to its megabyte and was kept); and a read queue cut from 100 slots to 16
+was tried and put back, having cost 10% on the long-transfer profile.
+`netem.TestIdleConnectionMemory` now measures two sets of connections: about
+13.0 KB of heap an end within the keep-alive interval and about 9.95 KB once
+quiet past it, five runs each, of which about 1.5 KB is the test's own
+emulated network by a heap profile. **The goroutine stack is about 9.7 KB an
+end on top**, which earlier figures here did not count; libutp has no thread
+per connection (DEVIATIONS.md, "Worse than libutp, accepted").
+`TestQuietConnectionReleasesReceiveStorage` fails without the release.
+
+Making a timer lazily hung a test on the first try:
+`TestTailBurstLossAgainstLibutp` waited for ever. A timer the socket's reader
+made while the event loop was parked was not among the channels the loop's
+select had chosen, so its first fire went unseen until something else woke
+the loop -- on a real clock, a retransmission or a loss probe late by
+however long that took. Making a timer now wakes the loop.
+
 **What it cost: 3% at 100 Mb/s, in a small process.** The benchmark suite
 against the commit before, five runs and then twenty of anything that moved,
 put every profile within noise but classic LEDBAT on the 100 Mb/s LAN link,

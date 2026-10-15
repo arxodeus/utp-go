@@ -24,17 +24,53 @@ import (
 // each way). The bound is loose on purpose: heap figures move with whatever
 // else the runtime holds, and the defect it guards against is fifty times it.
 //
-// It is measured twice: just after the exchange, and once the connections
-// have been quiet for their keep-alive interval, when the receive buffer's
-// storage is released. The heap figure includes this test's own emulated
-// network and bookkeeping, about 1.5 KB an end by a heap profile; the
-// goroutine stacks are reported beside it, since libutp has no thread per
-// connection and an honest comparison counts them.
+// It is measured twice, over two sets of connections: within the keep-alive
+// interval, at libutp's 29 seconds, and once connections given a short one
+// have been quiet past it, when each has released its receive buffer's
+// storage. The heap figure includes this test's own emulated network and
+// bookkeeping, about 1.5 KB an end by a heap profile; the goroutine stacks
+// are reported beside it, since libutp has no thread per connection and an
+// honest comparison counts them.
 func TestIdleConnectionMemory(t *testing.T) {
+	goroutines := runtime.NumGoroutine()
+	busy := idleConnectionMemory(t, 0, 200*time.Millisecond)
+	// The first set's connections end in the background once their sockets
+	// close; measured from before they have, the second baseline holds
+	// their teardown and the second figure reads low.
+	for deadline := time.Now().Add(30 * time.Second); runtime.NumGoroutine() > goroutines; {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d goroutines still running from the first set, %d before it",
+				runtime.NumGoroutine(), goroutines)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	quiet := idleConnectionMemory(t, idleMemoryKeepAlive, 4*idleMemoryKeepAlive)
+	t.Logf("quiet past the keep-alive interval, each end holds %d bytes less", busy-quiet)
+	// About 3 KB less in five separate runs, 2.8-3.3 KB, and 0.9 KB with the
+	// release disabled. Not asserted: in one process the figures move with
+	// what earlier runs left in pools and free lists, by more than that.
+	// TestQuietConnectionReleasesReceiveStorage asserts the release itself.
+}
+
+// idleConnectionMemory sets up 200 connections that exchange 1 KB each, waits,
+// and reports the heap each end holds. A keepAlive of zero is the default.
+func idleConnectionMemory(t *testing.T, keepAlive, wait time.Duration) int64 {
+	t.Helper()
 	const (
 		conns     = 200
 		perEndMax = 64 * 1024
 	)
+	when := "within the keep-alive interval"
+	if keepAlive > 0 {
+		when = "quiet past the keep-alive interval"
+	}
+	config := func() *utp.ConnectionConfig {
+		c := utp.NewConnectionConfig()
+		if keepAlive > 0 {
+			c.KeepAliveInterval = keepAlive
+		}
+		return c
+	}
 	n := NewNetwork(41)
 	defer n.Close()
 	a := n.MustAddEndpoint("a")
@@ -63,13 +99,13 @@ func TestIdleConnectionMemory(t *testing.T) {
 		iniCid := utp.NewConnectionId(b.Addr(), base, base+1)
 		accepted := make(chan *utp.UtpStream, 1)
 		go func() {
-			s, err := pair.SockB.AcceptWithCid(ctx, accCid, idleMemoryConfig())
+			s, err := pair.SockB.AcceptWithCid(ctx, accCid, config())
 			if err != nil {
 				t.Errorf("accept %d: %v", i, err)
 			}
 			accepted <- s
 		}()
-		s, err := pair.SockA.ConnectWithCid(ctx, iniCid, idleMemoryConfig())
+		s, err := pair.SockA.ConnectWithCid(ctx, iniCid, config())
 		if err != nil {
 			t.Fatalf("connect %d: %v", i, err)
 		}
@@ -89,32 +125,21 @@ func TestIdleConnectionMemory(t *testing.T) {
 		}
 		streams = append(streams, s, r)
 	}
-	measure := func(when string) {
-		after := heap()
-		var ms runtime.MemStats
-		runtime.ReadMemStats(&ms)
-		perEnd := (int64(after) - int64(before)) / int64(len(streams))
-		t.Logf("%s: %d connection ends that exchanged 1 KB each hold %d bytes of heap apiece, "+
-			"and the process %d bytes of goroutine stack apiece", when, len(streams), perEnd,
-			int64(ms.StackInuse)/int64(len(streams)))
-		if perEnd > perEndMax {
-			t.Errorf("%s: each connection end holds %d bytes of heap, want at most %d", when, perEnd, perEndMax)
-		}
+	time.Sleep(wait)
+	after := heap()
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	perEnd := (int64(after) - int64(before)) / int64(len(streams))
+	t.Logf("%s: %d connection ends that exchanged 1 KB each hold %d bytes of heap apiece, "+
+		"and the process %d bytes of goroutine stack apiece", when, len(streams), perEnd,
+		int64(ms.StackInuse)/int64(len(streams)))
+	if perEnd > perEndMax {
+		t.Errorf("%s: each connection end holds %d bytes of heap, want at most %d", when, perEnd, perEndMax)
 	}
-	// Let the last acknowledgements settle before measuring.
-	time.Sleep(200 * time.Millisecond)
-	measure("just after")
-	time.Sleep(4 * idleMemoryKeepAlive)
-	measure("quiet for the keep-alive interval")
 	runtime.KeepAlive(streams)
+	return perEnd
 }
 
 // idleMemoryKeepAlive stands in for the 29-second keep-alive interval, after
 // which a quiet connection releases its receive buffer's storage.
 const idleMemoryKeepAlive = 300 * time.Millisecond
-
-func idleMemoryConfig() *utp.ConnectionConfig {
-	c := utp.NewConnectionConfig()
-	c.KeepAliveInterval = idleMemoryKeepAlive
-	return c
-}

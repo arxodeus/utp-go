@@ -214,14 +214,16 @@ consequence, or equivalent on the wire.
   high-BDP path, 60-75% less on lossy ones. (It used to be credited with 7
   times less standing queue; that was the one-way-delay version, and a lone
   LEDBAT++ flow now leaves as much as classic LEDBAT.)
-- *The base delay is the lowest over two minutes, not about thirteen.* A
-  clock drift's phantom queue grows with the window, measured linear, so
-  libutp's is 6.5 times ours. The cost -- a queue that stands for two
-  minutes is taken for the empty path -- measured against a Reno flow
-  holding a queue for five minutes: 5.31 Mbps to the 13-minute window's
-  4.96, 7% less yielding, within the run-to-run spread of three runs each.
 
 **Worse than libutp, accepted.** Each has a stated reason for being carried.
+
+- *A connection has a goroutine of its own, and its stack:* about 9.7 KB an
+  idle connection end, beside about 8.5 KB of heap (10 KB in
+  `netem.TestIdleConnectionMemory`, which counts its own emulated network
+  too). libutp's sockets are about 10 KB each and have no thread: its
+  embedder drives them all. Each connection's event loop is what owns its
+  timers and its teardown here; driving connections from the socket's
+  goroutines instead would remove the stack, and is not done.
 
 - *An acknowledgement leaves about 40 us later than libutp's:* at 10 Mb/s,
   where both acknowledge every packet, the time from a data packet reaching
@@ -1043,44 +1045,70 @@ deadline; at 1472 libutp sends nothing in 40 seconds and ours probes at 15s.
 The test asserts libutp's failure as well as our success, so a change in the
 vendored libutp shows.
 
-## The base delay is the lowest over two minutes, not about thirteen
+## ~~The base delay is the lowest over two minutes, not about thirteen~~ — closed
 
-libutp's base delay is the minimum over thirteen one-minute buckets
-(`DELAY_BASE_HISTORY`, `utp_internal.cpp:50`; rotated at `:367-380`), so it
-remembers between twelve and thirteen minutes. This library's is a sliding
-minimum over `ConnectionConfig.DelayWindow`, two minutes by default. This was
-recorded in COMPATIBILITY.md ("Delay base history") and KNOWN-LIMITATIONS.md
-but not here, which this file's own rule makes a defect in the file; the
-line-by-line audit found it.
+The base delay is now libutp's DelayHist (`baseDelayHist`): thirteen
+buckets, rotated by samples, a minute each by default, so it remembers
+twelve to thirteen minutes as libutp's does, and an idle connection's
+history does not age. `TestBaseDelayRemembersThirteenMinutes`, which fails
+with the old two minutes, `TestBaseDelayDoesNotAgeWhileIdle` and
+`TestBaseDelayShiftAgesOut` pin it; the drift and conformance suites pass
+on it.
 
-The reason is clock drift. Two clocks running at different rates make every
-sample drift, and the base lags the drift by up to the window's length, so the
-phantom queue a drifting pair sees is the drift rate times the window --
-measured linear in the product (KNOWN-LIMITATIONS.md, "`their_hist` is a missing mechanism -- implemented"). At
-1000 ppm, which an oversubscribed virtual machine reaches, two minutes is
-120 ms of phantom queue, above the 100 ms target; thirteen would be about
-780 ms. libutp leans on its `their_hist` correction for this; so does this
-library (`OnPeerDelay`), with the shorter window as well.
+Two minutes had been chosen to bound clock drift, whose phantom queue grows
+with the window, before this library had libutp's correction for it. With
+the correction (`OnPeerDelay`), drift's phantom queue is 0.3-0.5% of what it
+was, and the shorter memory's cost stands alone: a queue that stands for
+two minutes taken for the empty path, which against a Reno flow holding a
+queue for five minutes yielded about 7% less (5.31 Mbps against 4.96 with
+thirteen minutes, three runs each).
 
-The cost is the other side of the same memory. A queue that stands for longer
-than the window becomes the base, after which the controller reads it as an
-empty path and adds its own queue on top: LEDBAT's latecomer problem, which a
-longer memory postpones. Setting `DelayWindow` to 13 minutes recovers libutp's
-length, though not its bucket granularity.
+The sliding minimum it replaces also held every sample that could still
+become the least, and under clock drift every one can, the delays climbing
+at the drift rate: at 1000 ppm and a thousand acknowledgements a second,
+120,001 samples, 3.75 MB a connection, with no jitter, and 69 KB with 5 ms
+of it. Thirteen buckets are 104 bytes. LEDBAT++'s minimum round trip, which
+one clock measures and nothing can drift, keeps its two-minute sliding
+minimum.
 
-Measured: a uTP flow learns the empty path alone for 20 seconds on a 10 Mbps
-link with a 256 KB queue, then a Reno flow joins and keeps the queue standing
-for five minutes. Over the last three minutes, three runs of each, the uTP
-flow averaged 5.31 Mbps with the two-minute window (per run 5.25, 5.28, 5.42)
-and 4.96 with a 13-minute one (4.24, 4.99, 5.64): the shorter memory yields
-about 7% less, which is the direction the argument above predicts, by about
-one standard error. Both take about half the link from Reno; deferring to a
-loss-based flow on a queue deeper than the target is LEDBAT's weakness either
-way. (The first attempt at this measurement ran the Reno emulator with a
-payload too large for its 32-bit byte offsets and found, instead, a defect of
-this library's own: KNOWN-LIMITATIONS.md, "A connection stopped after 65,535
-packets".)
-
+*The entry it replaces read:*
+>
+> libutp's base delay is the minimum over thirteen one-minute buckets
+> (`DELAY_BASE_HISTORY`, `utp_internal.cpp:50`; rotated at `:367-380`), so it
+> remembers between twelve and thirteen minutes. This library's is a sliding
+> minimum over `ConnectionConfig.DelayWindow`, two minutes by default. This was
+> recorded in COMPATIBILITY.md ("Delay base history") and KNOWN-LIMITATIONS.md
+> but not here, which this file's own rule makes a defect in the file; the
+> line-by-line audit found it.
+>
+> The reason is clock drift. Two clocks running at different rates make every
+> sample drift, and the base lags the drift by up to the window's length, so the
+> phantom queue a drifting pair sees is the drift rate times the window --
+> measured linear in the product (KNOWN-LIMITATIONS.md, "`their_hist` is a missing mechanism -- implemented"). At
+> 1000 ppm, which an oversubscribed virtual machine reaches, two minutes is
+> 120 ms of phantom queue, above the 100 ms target; thirteen would be about
+> 780 ms. libutp leans on its `their_hist` correction for this; so does this
+> library (`OnPeerDelay`), with the shorter window as well.
+>
+> The cost is the other side of the same memory. A queue that stands for longer
+> than the window becomes the base, after which the controller reads it as an
+> empty path and adds its own queue on top: LEDBAT's latecomer problem, which a
+> longer memory postpones. Setting `DelayWindow` to 13 minutes recovers libutp's
+> length, though not its bucket granularity.
+>
+> Measured: a uTP flow learns the empty path alone for 20 seconds on a 10 Mbps
+> link with a 256 KB queue, then a Reno flow joins and keeps the queue standing
+> for five minutes. Over the last three minutes, three runs of each, the uTP
+> flow averaged 5.31 Mbps with the two-minute window (per run 5.25, 5.28, 5.42)
+> and 4.96 with a 13-minute one (4.24, 4.99, 5.64): the shorter memory yields
+> about 7% less, which is the direction the argument above predicts, by about
+> one standard error. Both take about half the link from Reno; deferring to a
+> loss-based flow on a queue deeper than the target is LEDBAT's weakness either
+> way. (The first attempt at this measurement ran the Reno emulator with a
+> payload too large for its 32-bit byte offsets and found, instead, a defect of
+> this library's own: KNOWN-LIMITATIONS.md, "A connection stopped after 65,535
+> packets".)
+>
 ## ~~A connection whose peer falls silent is closed after `MaxIdleTimeout`~~ — closed
 
 libutp has no idle timeout. A connection with nothing in flight is only ever
