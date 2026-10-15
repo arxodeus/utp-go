@@ -66,12 +66,14 @@ type UtpStream struct {
 }
 
 // readQueueLen is how many chunks of received data, a packet's worth each at
-// most, wait for the application to read them. More stay in the receive
-// buffer, where they count against the advertised window as libutp's unread
-// bytes do (utp_call_get_read_buffer_size, utp_internal.cpp:590-596); queued
-// here they no longer do. It was 100, 800 bytes allocated whole per
-// connection and up to 140 KB of data past the window.
-const readQueueLen = 16
+// most, wait for the application to read them; more stay in the receive
+// buffer.
+//
+// Sixteen was tried, to save the 670 bytes a connection the larger queue
+// costs, and cost about 10% on the long-transfer benchmark profile: 8.11
+// against 9.07 Mbps median over ten seeds each (z = -3.02), the other
+// profiles unchanged. It stays at 100.
+const readQueueLen = 100
 
 // writeQueueLen is how many writes can wait for a connection to take them.
 // A Write blocks until its bytes are accepted, so more than one is waiting
