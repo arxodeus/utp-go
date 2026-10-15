@@ -52,7 +52,7 @@ could see it.
 with [compat/golibutp](../../compat/golibutp), its API on this library:
 
 ```
-replace github.com/anacrolix/go-libutp => github.com/zen-eth/utp-go/compat/golibutp <version>
+replace github.com/anacrolix/go-libutp => github.com/arxodeus/utp/compat/golibutp <version>
 ```
 
 in the application's go.mod. Nothing else changes: no fork, no build tag, and

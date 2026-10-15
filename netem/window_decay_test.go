@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // One burst of loss must halve the window once, not once per lost packet.

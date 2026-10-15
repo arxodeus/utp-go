@@ -1,6 +1,6 @@
 //go:build cgo
 
-package utp_go
+package utp
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zen-eth/utp-go/native/libutp"
+	"github.com/arxodeus/utp/native/libutp"
 )
 
 // The initiator corpus.

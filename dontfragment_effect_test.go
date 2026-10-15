@@ -1,6 +1,6 @@
 //go:build linux || darwin || freebsd || windows
 
-package utp_go
+package utp
 
 import (
 	"errors"

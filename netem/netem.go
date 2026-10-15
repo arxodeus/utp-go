@@ -5,8 +5,8 @@
 // transport; too timid and it gets near-zero throughput. Against loopback both
 // look like "it works". This package makes the difference measurable.
 //
-// An Endpoint satisfies the utp_go.Conn interface (ReadFrom/WriteTo/Close), so
-// it drops straight into utp_go.WithSocket in place of a UDP socket. No root,
+// An Endpoint satisfies the utp.Conn interface (ReadFrom/WriteTo/Close), so
+// it drops straight into utp.WithSocket in place of a UDP socket. No root,
 // no network namespaces, no external tooling.
 //
 // # Determinism
@@ -36,7 +36,7 @@ import (
 	"sync"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // Endpoint must be usable anywhere a real UDP socket is.
@@ -183,7 +183,7 @@ const (
 	inboxCapacity = 4096
 )
 
-// Peer identifies an Endpoint. It satisfies utp_go.ConnectionPeer.
+// Peer identifies an Endpoint. It satisfies utp.ConnectionPeer.
 type Peer struct {
 	name string
 }
@@ -202,7 +202,7 @@ type inboundPacket struct {
 	from    *Peer
 }
 
-// Endpoint is one host on the emulated network. It satisfies utp_go.Conn.
+// Endpoint is one host on the emulated network. It satisfies utp.Conn.
 type Endpoint struct {
 	net   *Network
 	peer  *Peer
@@ -216,13 +216,13 @@ type Endpoint struct {
 	received uint64
 	rxBytes  uint64
 	// pathMTU, when non-zero, is the datagram size this endpoint reports
-	// through utp_go.PathMTUProvider. Zero means it declines to answer,
+	// through utp.PathMTUProvider. Zero means it declines to answer,
 	// which is the default and what every test written before the provider
 	// existed relies on.
 	pathMTU int
 }
 
-// ReportPathMTU makes this endpoint answer utp_go.PathMTUProvider with
+// ReportPathMTU makes this endpoint answer utp.PathMTUProvider with
 // datagramSize, as a host whose local interface is that narrow would.
 //
 // Opt-in, deliberately. An endpoint that always reported its link's MTU would
@@ -240,7 +240,7 @@ func (e *Endpoint) ReportPathMTU(datagramSize int) {
 	e.mu.Unlock()
 }
 
-// PathMTU implements utp_go.PathMTUProvider. It reports the same figure
+// PathMTU implements utp.PathMTUProvider. It reports the same figure
 // whatever the peer, because ReportPathMTU models a local interface rather
 // than a route.
 func (e *Endpoint) PathMTU(utp.ConnectionPeer) (int, bool) {
@@ -258,7 +258,7 @@ func (e *Endpoint) Addr() *Peer { return e.peer }
 // Name returns this endpoint's name.
 func (e *Endpoint) Name() string { return e.peer.name }
 
-// ReadFrom blocks until a packet arrives, and satisfies utp_go.Conn.
+// ReadFrom blocks until a packet arrives, and satisfies utp.Conn.
 func (e *Endpoint) ReadFrom(b []byte) (int, utp.ConnectionPeer, error) {
 	select {
 	case pkt, ok := <-e.inbox:
@@ -275,13 +275,13 @@ func (e *Endpoint) ReadFrom(b []byte) (int, utp.ConnectionPeer, error) {
 	}
 }
 
-// Endpoint does not implement utp_go.QueuedReader, so a socket on it treats
+// Endpoint does not implement utp.QueuedReader, so a socket on it treats
 // each datagram as a read batch of its own and acknowledges it alone (unless
 // the acknowledgement-rate hold defers it), which is what its measurements
 // were taken with. A test that wants a receiver batching as a real socket
 // does wraps it; see batchedReader in dont_fragment_test.go.
 
-// WriteTo sends a packet towards dst, and satisfies utp_go.Conn.
+// WriteTo sends a packet towards dst, and satisfies utp.Conn.
 //
 // It never blocks: the packet is handed to the link, which decides whether it
 // is dropped, queued or delivered. The return value reports bytes accepted for

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // What Close waits for, measured on a link whose conditions can be changed.

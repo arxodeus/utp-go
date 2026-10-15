@@ -6,8 +6,8 @@ import (
 	"net"
 	"time"
 
-	utpgo "github.com/zen-eth/utp-go"
-	"github.com/zen-eth/utp-go/utpnet"
+	utpgo "github.com/arxodeus/utp"
+	"github.com/arxodeus/utp/utpnet"
 )
 
 var (

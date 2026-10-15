@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
+	utp "github.com/arxodeus/utp"
+	"github.com/arxodeus/utp/native/libutp"
 	"github.com/ethereum/go-ethereum/log"
-	utp "github.com/zen-eth/utp-go"
-	"github.com/zen-eth/utp-go/native/libutp"
 )
 
 // The M7 interoperability gate.

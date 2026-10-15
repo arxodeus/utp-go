@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // Data both ways at once over a lossy path.

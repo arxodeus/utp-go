@@ -1,6 +1,6 @@
 //go:build linux || darwin || freebsd || netbsd || openbsd || dragonfly
 
-package utp_go
+package utp
 
 import (
 	"bytes"

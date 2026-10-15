@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/anacrolix/go-utp/purego"
+	utp "github.com/arxodeus/utp"
 	"github.com/ethereum/go-ethereum/log"
-	utp "github.com/zen-eth/utp-go"
 )
 
 // quietLogger is ours, quiet below critical.

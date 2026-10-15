@@ -9,7 +9,7 @@ same package API, on this library instead of libutp. No cgo, no C++.
 One line in the go.mod of the program being built:
 
 ```
-replace github.com/anacrolix/go-libutp => github.com/zen-eth/utp-go/compat/golibutp <version>
+replace github.com/anacrolix/go-libutp => github.com/arxodeus/utp/compat/golibutp <version>
 ```
 
 Nothing else changes: not the imports, not the code, not the build flags.
@@ -124,11 +124,11 @@ where it differs the difference is recorded and measured: see the repository's
 
 ## Publishing
 
-This module requires `github.com/zen-eth/utp-go`, and for development it uses
+This module requires `github.com/arxodeus/utp`, and for development it uses
 the checkout it sits in (the `replace` in its go.mod). A `replace` in a
 dependency is ignored, so for a downloaded copy to build, the version it
-requires has to exist. That means a tagged release of the module path this
-repository declares.
+requires has to exist: a tagged release of `github.com/arxodeus/utp`, and a
+`compat/golibutp/vX.Y.Z` tag for this module, which lives in a subdirectory.
 
 ## Licence
 

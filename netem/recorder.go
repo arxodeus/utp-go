@@ -6,12 +6,12 @@ import (
 	"sync"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // Recorder collects a connection's metric snapshots into a time series.
 //
-// Use its Observe method as a utp_go.ConnectionConfig.Metrics observer. It
+// Use its Observe method as a utp.ConnectionConfig.Metrics observer. It
 // only appends under a mutex, so it satisfies the requirement that an
 // observer must not block the connection's event loop.
 type Recorder struct {
@@ -28,7 +28,7 @@ const DefaultRecorderLimit = 200_000
 // NewRecorder returns a recorder with the default sample limit.
 func NewRecorder() *Recorder { return &Recorder{limit: DefaultRecorderLimit} }
 
-// Observe records one snapshot. It satisfies utp_go.MetricsObserver.
+// Observe records one snapshot. It satisfies utp.MetricsObserver.
 func (r *Recorder) Observe(m utp.ConnectionMetrics) {
 	r.mu.Lock()
 	if r.limit > 0 && len(r.samples) >= r.limit {

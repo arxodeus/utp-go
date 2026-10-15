@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // driftResult is what one drifted transfer observed from the sender's side.

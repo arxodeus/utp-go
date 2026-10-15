@@ -1,4 +1,4 @@
-module github.com/zen-eth/utp-go/integration/anacrolix
+module github.com/arxodeus/utp/integration/anacrolix
 
 go 1.24.2
 
@@ -6,7 +6,7 @@ require (
 	github.com/anacrolix/dht/v2 v2.23.0
 	github.com/anacrolix/log v0.17.1-0.20251118025802-918f1157b7bb
 	github.com/anacrolix/torrent v1.61.0
-	github.com/zen-eth/utp-go v0.0.0
+	github.com/arxodeus/utp v0.0.0
 )
 
 require (
@@ -95,7 +95,7 @@ require (
 	zombiezen.com/go/sqlite v0.13.1 // indirect
 )
 
-replace github.com/zen-eth/utp-go => ../..
+replace github.com/arxodeus/utp => ../..
 
 // torrent's default build uses go-libutp; this makes it the drop-in, as an
 // application would. See dropin_test.go.

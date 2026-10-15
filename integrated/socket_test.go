@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
+	utp "github.com/arxodeus/utp"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	utp "github.com/zen-eth/utp-go"
 )
 
 const (

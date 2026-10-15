@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
+	utp "github.com/arxodeus/utp"
 	"github.com/ethereum/go-ethereum/log"
-	utp "github.com/zen-eth/utp-go"
 )
 
 // Regression tests for the transfer-path defects fixed in this fork.

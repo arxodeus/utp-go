@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // mtuTransfer runs one transfer over a link with the given config and returns
@@ -199,7 +199,7 @@ func TestMtuSearchCannotRecoverFromAPathLimitBelowItsChoice(t *testing.T) {
 // The way out is to never adopt that size, which is what libutp's
 // UTP_GET_UDP_MTU callback is for -- it sets the ceiling from the local
 // interface before the first packet goes out. This library had no equivalent
-// until utp_go.PathMTUProvider; here the endpoint answers it, as a host
+// until utp.PathMTUProvider; here the endpoint answers it, as a host
 // behind a tunnel would.
 func TestPathMTUReportPreventsTheStall(t *testing.T) {
 	const linkMTU = 1100

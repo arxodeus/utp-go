@@ -4,7 +4,7 @@
 // A program -- or anything it depends on, anacrolix/torrent included -- that
 // imports go-libutp uses this instead with one line in its go.mod:
 //
-//	replace github.com/anacrolix/go-libutp => github.com/zen-eth/utp-go/compat/golibutp <version>
+//	replace github.com/anacrolix/go-libutp => github.com/arxodeus/utp/compat/golibutp <version>
 //
 // Every exported name go-libutp v1.5.1 has is here, with its signature:
 // NewSocket, NewSocketFromPacketConn, WithLogger, Socket, Conn, Option and

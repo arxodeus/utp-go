@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"sync/atomic"
 
+	utp "github.com/arxodeus/utp"
 	"github.com/ethereum/go-ethereum/log"
-	utp "github.com/zen-eth/utp-go"
 )
 
 var (

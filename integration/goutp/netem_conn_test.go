@@ -5,7 +5,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/zen-eth/utp-go/netem"
+	"github.com/arxodeus/utp/netem"
 )
 
 // netemAddr is a netem peer as a net.Addr.

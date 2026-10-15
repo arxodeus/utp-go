@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // The latecomer experiment: the failure classic LEDBAT is known for, and the

@@ -1,6 +1,6 @@
 //go:build netbsd || openbsd
 
-package utp_go
+package utp
 
 import (
 	"net"

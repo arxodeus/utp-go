@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
-	"github.com/zen-eth/utp-go/native/libutp"
+	utp "github.com/arxodeus/utp"
+	"github.com/arxodeus/utp/native/libutp"
 )
 
 // What a peer's half-close actually costs, measured rather than assumed.

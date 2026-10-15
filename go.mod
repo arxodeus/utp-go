@@ -1,4 +1,4 @@
-module github.com/zen-eth/utp-go
+module github.com/arxodeus/utp
 
 go 1.24.2
 

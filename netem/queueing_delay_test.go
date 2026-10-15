@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // ConnectionMetrics.QueueingDelay must measure a queue, on the path this

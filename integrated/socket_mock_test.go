@@ -12,7 +12,7 @@ package integrated
 import (
 	reflect "reflect"
 
-	utp_go "github.com/zen-eth/utp-go"
+	utp_go "github.com/arxodeus/utp"
 	gomock "go.uber.org/mock/gomock"
 )
 

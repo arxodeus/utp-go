@@ -1,6 +1,6 @@
 //go:build !(linux || darwin || freebsd || netbsd || openbsd || dragonfly)
 
-package utp_go
+package utp
 
 // readBatch is unsupported here; UtpSocket.readLoop falls back to one
 // datagram per read, each its own batch.

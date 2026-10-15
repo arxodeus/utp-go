@@ -1,7 +1,7 @@
 package anacrolix
 
 import (
-	"github.com/zen-eth/utp-go/utpnet"
+	"github.com/arxodeus/utp/utpnet"
 )
 
 // The claim this module exists to check: a utpnet.Socket satisfies the

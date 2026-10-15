@@ -1,4 +1,4 @@
-package utp_go
+package utp
 
 // The scripted transport and helpers the conformance harness drives our side
 // with. None of it needs libutp, so it builds without cgo, and so do the

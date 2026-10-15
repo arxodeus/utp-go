@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // requireIPv6Loopback skips the test when the host has no IPv6 stack.

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // The M5 benchmark suite: one fixed set of link profiles, run the same way

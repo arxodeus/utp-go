@@ -12,9 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	utp "github.com/arxodeus/utp"
+	"github.com/arxodeus/utp/native/libutp"
 	"github.com/ethereum/go-ethereum/log"
-	utp "github.com/zen-eth/utp-go"
-	"github.com/zen-eth/utp-go/native/libutp"
 )
 
 // Real libutp, running as an endpoint on the emulated network.

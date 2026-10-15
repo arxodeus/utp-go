@@ -15,7 +15,7 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
-	"github.com/zen-eth/utp-go/utpnet"
+	"github.com/arxodeus/utp/utpnet"
 )
 
 // A real torrent, transferred over this library and hash-verified by the

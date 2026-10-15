@@ -8,7 +8,7 @@ import (
 	"math"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // A loss-based, Reno-shaped competing flow.

@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
+	utp "github.com/arxodeus/utp"
 	"github.com/ethereum/go-ethereum/log"
-	utp "github.com/zen-eth/utp-go"
 )
 
 // UtpPair is two uTP sockets joined by an emulated network, ready to carry

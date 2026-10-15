@@ -1,6 +1,6 @@
 //go:build linux
 
-package utp_go
+package utp
 
 import (
 	"testing"

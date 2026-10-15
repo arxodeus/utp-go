@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // ErrNilPeer is returned when a write names no destination.

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
+	utp "github.com/arxodeus/utp"
 	"github.com/ethereum/go-ethereum/log"
-	utp "github.com/zen-eth/utp-go"
 )
 
 func quiet() log.Logger {

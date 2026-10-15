@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // failingConn is an Endpoint whose reads fail on demand: the next pending

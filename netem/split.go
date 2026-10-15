@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // DeliverySample is a flow's cumulative delivered byte count at a moment.

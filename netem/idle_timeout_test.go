@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	utp "github.com/arxodeus/utp"
 	elog "github.com/ethereum/go-ethereum/log"
-	utp "github.com/zen-eth/utp-go"
 )
 
 // A connection that goes quiet must not time out.

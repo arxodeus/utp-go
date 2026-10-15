@@ -1,6 +1,6 @@
 //go:build cgo
 
-package utp_go
+package utp
 
 import (
 	"encoding/binary"

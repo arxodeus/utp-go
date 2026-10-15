@@ -1,11 +1,11 @@
 //go:build cgo
 
-package utp_go
+package utp
 
 import (
 	"fmt"
 
-	"github.com/zen-eth/utp-go/native/libutp"
+	"github.com/arxodeus/utp/native/libutp"
 )
 
 // The M2 conformance harness.

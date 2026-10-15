@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/anacrolix/go-utp/purego"
-	utp "github.com/zen-eth/utp-go"
-	"github.com/zen-eth/utp-go/netem"
+	utp "github.com/arxodeus/utp"
+	"github.com/arxodeus/utp/netem"
 )
 
 // netemPair is a pair on an emulated network whose link, both ways, is cfg:

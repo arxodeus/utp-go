@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // The other half-close: this end has finished reading, the peer has not

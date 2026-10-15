@@ -1,11 +1,11 @@
-module github.com/zen-eth/utp-go/integration/goutp
+module github.com/arxodeus/utp/integration/goutp
 
 go 1.24.2
 
 require (
 	github.com/anacrolix/go-utp v0.0.0-20260908033909-9f1664acf866
+	github.com/arxodeus/utp v0.0.0
 	github.com/ethereum/go-ethereum v1.14.11
-	github.com/zen-eth/utp-go v0.0.0
 )
 
 require (
@@ -16,4 +16,4 @@ require (
 	golang.org/x/sys v0.28.0 // indirect
 )
 
-replace github.com/zen-eth/utp-go => ../..
+replace github.com/arxodeus/utp => ../..

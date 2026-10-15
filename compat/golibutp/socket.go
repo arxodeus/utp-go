@@ -14,7 +14,7 @@ import (
 	"github.com/anacrolix/log"
 	"github.com/anacrolix/missinggo/inproc"
 
-	"github.com/zen-eth/utp-go/utpnet"
+	"github.com/arxodeus/utp/utpnet"
 )
 
 var (

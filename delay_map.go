@@ -1,4 +1,4 @@
-package utp_go
+package utp
 
 import (
 	"sync"

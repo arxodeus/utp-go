@@ -1,4 +1,4 @@
-module github.com/zen-eth/utp-go/compat/golibutp
+module github.com/arxodeus/utp/compat/golibutp
 
 go 1.24.2
 
@@ -6,11 +6,11 @@ require (
 	github.com/anacrolix/envpprof v1.1.0
 	github.com/anacrolix/log v0.17.1-0.20251118025802-918f1157b7bb
 	github.com/anacrolix/missinggo v1.3.0
+	github.com/arxodeus/utp v0.0.0
 	github.com/bradfitz/iter v0.0.0-20191230175014-e8f45d346db8
 	github.com/ethereum/go-ethereum v1.14.11
 	github.com/frankban/quicktest v1.14.4
 	github.com/stretchr/testify v1.9.0
-	github.com/zen-eth/utp-go v0.0.0
 	golang.org/x/net v0.24.0
 )
 
@@ -32,4 +32,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/zen-eth/utp-go => ../..
+replace github.com/arxodeus/utp => ../..

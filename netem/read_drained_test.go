@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // utp_read_drained, end to end (utp_internal.cpp:3242-3261).

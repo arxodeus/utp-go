@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
-	"github.com/zen-eth/utp-go/native/libutp"
+	utp "github.com/arxodeus/utp"
+	"github.com/arxodeus/utp/native/libutp"
 )
 
 // spinUntil waits for t without sleeping past it: Go timers wake about 1.1 ms

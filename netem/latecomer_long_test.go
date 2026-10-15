@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // TestLatecomerShareOverTime is the latecomer experiment over 16 MB a flow,

@@ -5,7 +5,7 @@ import (
 	"net"
 
 	alog "github.com/anacrolix/log"
-	"github.com/zen-eth/utp-go/utpnet"
+	"github.com/arxodeus/utp/utpnet"
 )
 
 // UtpSocket is the interface github.com/anacrolix/torrent requires of a uTP

@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
-	"github.com/zen-eth/utp-go/native/libutp"
+	utp "github.com/arxodeus/utp"
+	"github.com/arxodeus/utp/native/libutp"
 )
 
 // TestAckTurnaround measures how long each implementation's receiver takes to

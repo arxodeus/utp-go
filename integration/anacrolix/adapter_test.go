@@ -13,7 +13,7 @@ import (
 
 	alog "github.com/anacrolix/log"
 	"github.com/anacrolix/torrent"
-	"github.com/zen-eth/utp-go/utpnet"
+	"github.com/arxodeus/utp/utpnet"
 )
 
 // The check this module exists for, made against torrent's own interface

@@ -1,4 +1,4 @@
-package utp_go
+package utp
 
 // circularRangeInclusive represents a range bounded inclusively below and above that supports wrapping arithmetic.
 type circularRangeInclusive struct {

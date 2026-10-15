@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // The experiment uTP is actually judged on: does it get out of the way of a

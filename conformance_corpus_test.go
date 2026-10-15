@@ -1,6 +1,6 @@
 //go:build cgo
 
-package utp_go
+package utp
 
 import (
 	"bytes"
@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zen-eth/utp-go/native/libutp"
+	"github.com/arxodeus/utp/native/libutp"
 )
 
 // The M2 corpus.

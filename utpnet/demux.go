@@ -4,7 +4,7 @@ import (
 	"net"
 	"sync"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // demuxConn is the utp.Conn the uTP socket reads from.

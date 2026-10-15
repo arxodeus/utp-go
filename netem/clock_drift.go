@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // DriftingClock wraps a Conn so that the packets leaving it carry timestamps

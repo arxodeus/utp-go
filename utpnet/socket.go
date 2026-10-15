@@ -37,8 +37,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	utp "github.com/arxodeus/utp"
 	"github.com/ethereum/go-ethereum/log"
-	utp "github.com/zen-eth/utp-go"
 )
 
 // ErrSocketClosed is returned by operations on a closed Socket.

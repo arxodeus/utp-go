@@ -1,12 +1,28 @@
-# utp-go
+# utp
 
-A Go implementation of the µTorrent Transport Protocol (uTP).
+A pure-Go implementation of the µTorrent Transport Protocol (uTP). No cgo.
+It behaves as libutp, the reference implementation, does, and every place it
+differs is recorded and measured in [DEVIATIONS.md](DEVIATIONS.md).
 
-## About this fork
+```
+go get github.com/arxodeus/utp
+```
 
-This is a fork of [`zen-eth/utp-go`](https://github.com/zen-eth/utp-go), aimed
-at a uTP implementation a BitTorrent client can rely on and that builds with
-`CGO_ENABLED=0`.
+```go
+import "github.com/arxodeus/utp"            // the protocol: UtpSocket, UtpStream
+import "github.com/arxodeus/utp/utpnet"     // as net.PacketConn and net.Conn
+```
+
+For a program that uses `anacrolix/go-libutp`, `compat/golibutp` is go-libutp's
+API on this library; see [compat/golibutp/README.md](compat/golibutp/README.md).
+
+## Where it came from
+
+It began as a fork of [`zen-eth/utp-go`](https://github.com/zen-eth/utp-go),
+aimed at a uTP implementation a BitTorrent client can rely on and that builds
+with `CGO_ENABLED=0`. So little of that remains unchanged that it is now its
+own library, under its own module path; [UPSTREAM.md](UPSTREAM.md) records
+what could still go back.
 
 Upstream's own integration tests could not pass on a clean checkout. They now
 do. See:

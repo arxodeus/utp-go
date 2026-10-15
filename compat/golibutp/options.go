@@ -3,7 +3,7 @@ package utp
 import (
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // Option names a libutp context or socket option, for Socket.SetOption. The

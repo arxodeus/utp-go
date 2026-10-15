@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // What each sender puts on the wire at a retransmission timeout.

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arxodeus/utp/utpnet"
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/zen-eth/utp-go/utpnet"
 	"golang.org/x/net/nettest"
 )
 

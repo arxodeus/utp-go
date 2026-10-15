@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	utp "github.com/zen-eth/utp-go"
+	utp "github.com/arxodeus/utp"
 )
 
 // A connection that sends more than 65,536 packets, so that its sequence

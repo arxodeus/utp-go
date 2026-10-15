@@ -1,13 +1,13 @@
 //go:build cgo
 
-package utp_go
+package utp
 
 import (
 	"context"
 	"testing"
 	"time"
 
-	"github.com/zen-eth/utp-go/native/libutp"
+	"github.com/arxodeus/utp/native/libutp"
 )
 
 // emissionInstants reads the instant each packet was built from the packet
