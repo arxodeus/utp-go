@@ -103,7 +103,10 @@ type Socket struct {
 
 type datagram struct {
 	payload []byte
-	from    *net.UDPAddr
+	// pooled is payload's buffer if it came from datagramPool, to go back
+	// once ReadFrom has copied it out.
+	pooled *[]byte
+	from   *net.UDPAddr
 }
 
 // Options configures a Socket.
@@ -265,20 +268,57 @@ func (s *Socket) run() {
 			return
 		}
 
-		payload := make([]byte, n)
-		copy(payload, buf[:n])
+		payload, pooled := copyDatagram(buf[:n])
 
 		if isUtpPacket(payload) {
-			s.inner.deliver(payload, from)
+			s.inner.deliver(payload, pooled, from)
 			continue
 		}
 
 		select {
-		case s.passthrough <- datagram{payload: payload, from: from}:
+		case s.passthrough <- datagram{payload: payload, pooled: pooled, from: from}:
 		default:
 			// The caller is not draining ReadFrom. Drop, as a UDP socket
 			// does, rather than stalling uTP behind it.
+			releaseDatagram(pooled)
 		}
+	}
+}
+
+// pooledDatagram is the size of datagramPool's buffers: room for any uTP
+// packet, which libutp keeps under 1402 bytes and this library under its
+// own ceiling, and for most of what shares a port with it. A larger datagram
+// gets a buffer of its own.
+const pooledDatagram = 2048
+
+// datagramPool holds the buffers each datagram is copied into between the
+// socket's reader and whoever takes it. Both consumers copy it out at once
+// -- the uTP socket into its own read buffer, ReadFrom into its caller's --
+// so a buffer is free again as soon as it has been taken, and copying every
+// datagram into a new one was most of what a go-libutp transfer allocated:
+// 39% of the bytes in compat/golibutp's 100 MB benchmark.
+var datagramPool = sync.Pool{New: func() any {
+	b := make([]byte, pooledDatagram)
+	return &b
+}}
+
+// copyDatagram copies b out of the read buffer, into a pooled buffer if it
+// fits one, and returns the pooled buffer to release, or nil.
+func copyDatagram(b []byte) (payload []byte, pooled *[]byte) {
+	if len(b) > pooledDatagram {
+		return append([]byte(nil), b...), nil
+	}
+	pooled = datagramPool.Get().(*[]byte)
+	payload = (*pooled)[:len(b)]
+	copy(payload, b)
+	return payload, pooled
+}
+
+// releaseDatagram returns a pooled buffer once its datagram has been copied
+// out. It must not be used after.
+func releaseDatagram(pooled *[]byte) {
+	if pooled != nil {
+		datagramPool.Put(pooled)
 	}
 }
 
@@ -319,6 +359,7 @@ func (s *Socket) ReadFrom(p []byte) (int, net.Addr, error) {
 		case d := <-s.passthrough:
 			stop()
 			n := copy(p, d.payload)
+			releaseDatagram(d.pooled)
 			return n, s.nativeAddr(d.from), nil
 		case <-timeout:
 			// The deadline may have been moved rather than reached; the loop

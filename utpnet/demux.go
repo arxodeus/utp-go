@@ -28,6 +28,7 @@ type demuxConn struct {
 
 type inbound struct {
 	payload []byte
+	pooled  *[]byte // see datagram.pooled
 	from    *net.UDPAddr
 }
 
@@ -50,11 +51,13 @@ func newDemuxConn(udp udpPacketConn) *demuxConn {
 // deliver hands a uTP datagram to the uTP socket. It never blocks: a full
 // queue means the uTP socket is not keeping up, and stalling the single UDP
 // reader would hold up every other connection on the port as well.
-func (c *demuxConn) deliver(payload []byte, from *net.UDPAddr) {
+func (c *demuxConn) deliver(payload []byte, pooled *[]byte, from *net.UDPAddr) {
 	select {
-	case c.incoming <- inbound{payload: payload, from: from}:
+	case c.incoming <- inbound{payload: payload, pooled: pooled, from: from}:
 	case <-c.closed:
+		releaseDatagram(pooled)
 	default:
+		releaseDatagram(pooled)
 	}
 }
 
@@ -62,6 +65,7 @@ func (c *demuxConn) ReadFrom(b []byte) (int, utp.ConnectionPeer, error) {
 	select {
 	case pkt := <-c.incoming:
 		n := copy(b, pkt.payload)
+		releaseDatagram(pkt.pooled)
 		return n, utp.NewUdpPeer(pkt.from), nil
 	case <-c.closed:
 		return 0, nil, ErrSocketClosed
