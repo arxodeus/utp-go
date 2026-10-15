@@ -73,7 +73,7 @@ transfers each, on one machine:
 | --- | --- | --- | --- |
 | 10 MB | 15.2 MB/s median (6.8-17.0) | 184.2 MB/s (163.7-201.2) | 3.78 |
 | 100 MB | 19.7 MB/s (13.9-21.8) | 207.3 MB/s (87.6-214.6) | 3.78 |
-| Bytes allocated per 100 MB | 39.6 MB | 272 MB | |
+| Bytes allocated per 100 MB | 39.6 MB | 168 MB (272 MB before the read pool) | |
 
 This is loopback, where nothing is queued and nothing is lost, so it measures
 how fast each implementation turns packets around, not how it behaves on a
@@ -83,11 +83,17 @@ network. The repository's emulated-network comparisons
 The allocation figures are not like for like. go-libutp's counts only the
 Go heap; libutp allocates each packet it builds or holds out of order with
 `malloc`, which Go's counter never sees. Of this package's 2.7 bytes per byte
-moved, a memory profile of the 100 MB benchmark puts 39% in the copy
+moved, a memory profile of the 100 MB benchmark put 39% in the copy
 `utpnet` makes of every datagram it reads, so that it can route it to uTP or
 to `ReadFrom`, and 38% in the copy a `Write` makes so that it can return
 before its bytes are sent (the send buffer's, KNOWN-LIMITATIONS.md, "The send
-buffer retained the caller's slice"). The first could be pooled; it is open.
+buffer retained the caller's slice"). The first now goes into pooled
+buffers, released as soon as the datagram is copied out: 168 MB allocated
+per 100 MB against 272 before, 1.7 bytes per byte moved, and faster for it --
+153.9 against 144.9 MB/s at 100 MB, 150.4 against 129.4 at 10 MB (ten
+interleaved rounds each, z = 2.27 and 2.12; a different day from the table's
+figures, which is why the comparison is interleaved). The second is the
+cost of a write that returns before its bytes are sent, and stays.
 
 ## What differs from go-libutp
 
