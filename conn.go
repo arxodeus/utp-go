@@ -263,13 +263,22 @@ func fromConnConfig(config *ConnectionConfig) *ctrlConfig {
 // whether it would ever arm them or not: the RACK timer without RACK, the
 // idle timeout without one configured, the zero-window probe without a
 // closed window. About 240 bytes each, held for the connection's life.
+//
+// A timer made while the event loop is parked is one its select is not
+// watching: the loop chose its channels before the timer existed, and the
+// socket's reader arms timers in passes it runs inline. So making one wakes
+// the loop (created), which goes round and selects on it. Without that, the
+// first fire of a timer the reader made went unseen until something else
+// woke the loop -- on the virtual clock, never:
+// TestTailBurstLossAgainstLibutp hung.
 type lazyTimer struct {
-	clk Clock
-	t   Timer
+	clk     Clock
+	t       Timer
+	created func()
 }
 
 func (c *connection) newLazyTimer() *lazyTimer {
-	return &lazyTimer{clk: c.timeSource()}
+	return &lazyTimer{clk: c.timeSource(), created: c.kickLoop}
 }
 
 // C is the timer's channel, or nil before it is first armed.
@@ -284,6 +293,9 @@ func (l *lazyTimer) C() <-chan time.Time {
 func (l *lazyTimer) arm(d time.Duration) {
 	if l.t == nil {
 		l.t = l.clk.NewTimer(d)
+		if l.created != nil {
+			l.created()
+		}
 		return
 	}
 	if !l.t.Stop() {
