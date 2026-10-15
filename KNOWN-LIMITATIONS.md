@@ -323,7 +323,10 @@ was tried and put back, having cost 10% on the long-transfer profile.
 quiet past it, five runs each, of which about 1.5 KB is the test's own
 emulated network by a heap profile. **The goroutine stack is about 9.7 KB an
 end on top**, which earlier figures here did not count; libutp has no thread
-per connection (DEVIATIONS.md, "Worse than libutp, accepted").
+per connection. (Since removed for an idle connection: see "An idle
+connection held a goroutine" below. The 9.7 KB was the process's stack
+memory divided by the connection ends; the difference across them, measured
+since, is 8.3 KB.)
 `TestQuietConnectionReleasesReceiveStorage` fails without the release.
 
 Making a timer lazily hung a test on the first try:
@@ -355,6 +358,99 @@ not the ballast back.
 profile measure 90.28 Mbps median against 86.27 for the commit before,
 +4.6%, Mann-Whitney z = 3.14: above the 89.9 the link measured before the
 memory change.
+
+## An idle connection held a goroutine
+
+**Fixed.** Each connection's event loop ran on a goroutine of its own, parked
+in its select whenever there was nothing to do. A parked goroutine keeps its
+stack, and this one's had grown to 8 KB on the first packets and stayed
+there: measured as the difference in the runtime's stack memory across 400
+connection ends that had exchanged 1 KB and gone quiet, 8.3-8.4 KB an end,
+one goroutine each. Counted with the heap, an idle connection held about
+18 KB against libutp's 10; libutp has no thread per connection at all.
+
+Two changes, measured one at a time.
+
+**The parked stack halves.** Go's collector halves a goroutine's stack only
+while less than a quarter of it is in use, and the parked loop's own frame
+was 1,760 bytes (the compiler's figure for `eventLoop`): with the frames
+beneath it, more than a quarter of 8 KB. The loop is now split so that what
+a parked loop leaves on its stack is small -- `runLoop` and `wait`, about
+0.7 KB of frames between them; setting up, handling a wake and tearing down
+are functions that have returned by then (`setupLoop`, `react`,
+`finishLoop`). Measured the same way: 4.1-4.3 KB an end. A stand-alone
+program parking goroutines under a large frame and a small one showed the
+floor first: 8 KB and 4 KB, and no further, since halving again would need
+less than a quarter of 4 KB in use.
+
+**An idle connection gives its goroutine back.** An established connection
+with nothing in flight, nothing queued and no timer armed but the ones every
+quiet connection keeps lets its loop return (`dormant.go`): it rests.
+Whatever needs the loop again starts it -- a write, a read that frees room
+for bytes held back, a close, an event the socket queues, a retransmission
+timer delivered, a timer armed by a pass the socket's reader runs inline,
+the socket's context ending -- and one function timer covers the deadlines
+a quiet connection keeps: the keep-alive (`utp_internal.cpp:1271-1274`), the
+idle timeout when one is set, and the idle window decay, which libutp
+re-arms for ever at a doubling interval (`:1204`, `:1216-1222`). A packet
+for a resting connection is handled by the socket's reader, as it was for a
+parked one; only what the reader leaves to the loop starts it. Measured:
+no goroutines and no stack an idle end. `netem.TestIdleConnectionMemory` now
+fails if idle connections hold goroutines (400 of them for 400 ends with
+resting switched off).
+
+Each wake has a test that fails without it (`dormant_test.go`, and
+`TestProcessICMPMatchesAnAcceptedConnection` for ICMP): a write at either
+end, the idle timeout falling due, the socket closing and its context being
+cancelled -- each within 300 ms, inside the second at which the connection's
+own idle-decay deadline would have woken it anyway -- a reader freeing room,
+and a timer the reader arms. Two existing tests now run on the resting path
+and fail if its deadlines are wrong: the keep-alive leaves at exactly 29
+seconds on the virtual clock (`TestKeepAliveLeavesOneIntervalAfterTheLastPacket`),
+and the idle window decays three times in 8 seconds as libutp's does
+(`netem.TestLibutpIdleWindowDecay`: 3.00 decays against libutp's 3.06; 1.00
+with the decay deadline left out of the rest timer).
+
+**What it found on the way.** A resumed connection whose context had ended
+ran an ordinary pass first, as a parked loop would have only if its select
+happened to pick another ready case; in the responder corpus that pass called
+a test's clock after the test had freed it. A resumed connection now ends at
+once if its context has. And `context.AfterFunc` on each stream's context,
+the first way of noticing a cancelled socket, cost about 480 bytes of heap a
+connection (eight interleaved runs a side; level again once it was gone):
+the socket now wakes its connections itself when its context ends, and an
+abandoned dial wakes its own.
+
+**What it costs.** Heap, ten interleaved runs a side against the commit
+before: 10.1 KB an end quiet past the keep-alive interval, as before, and
+12.1 KB within it against 13.0 (not profiled to say why). About 1.5 KB of either is the test's own emulated
+network, so an idle connection holds about 8.5 KB, against libutp's 10 KB,
+and no stack.
+
+Throughput, ten interleaved rounds a side: the sixteen emulated-network
+profiles (`netem.TestBenchmarkSuite`), acknowledgement turnaround against
+libutp (`TestAckTurnaround`: medians unchanged at 80 and 50 us with libutp
+sending, 70 and 50 between our own, 30 runs each), and a thousand
+concurrent transfers (10.0 s against 10.0) are all level, every |z| below
+2. The rows that moved by more than 1.5%, and LEDBAT++ on the LAN at
+z = -2.00, were run twenty times again: LEDBAT on the LAN +0.6% (z = 0.97),
+LEDBAT++ on the LAN -0.6% (z = -0.89), both at 5% loss level. go-libutp's
+loopback benchmark swings from session to session -- 100 MB read -0.4%,
++2.5% and -3.7% (z = -2.33) in three sessions with no change on the
+transfer path between them -- so it was taken over all three, fifty
+interleaved pairs: 10 MB -1.3% (z = -0.15), 100 MB -1.6% (z = -1.02).
+Within noise, and stated as measured rather than as nothing.
+
+One cost was found on the way and removed. A reader slower than the
+network -- that benchmark, where the application rather than the path is
+the bottleneck -- had its connection started and rested again for every
+read. A connection holding bytes back for its reader no longer rests, and a
+read wakes a resting one only if bytes are held back, the only case in
+which a read changes the advertised window.
+
+What is left on a connection that is not idle: a goroutine with a 4 KB
+stack once the collector has shrunk it, for as long as something is in
+flight or a timer other than those three is armed.
 
 ## What a two-hour soak found
 

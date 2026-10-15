@@ -217,13 +217,14 @@ consequence, or equivalent on the wire.
 
 **Worse than libutp, accepted.** Each has a stated reason for being carried.
 
-- *A connection has a goroutine of its own, and its stack:* about 9.7 KB an
-  idle connection end, beside about 8.5 KB of heap (10 KB in
-  `netem.TestIdleConnectionMemory`, which counts its own emulated network
-  too). libutp's sockets are about 10 KB each and have no thread: its
-  embedder drives them all. Each connection's event loop is what owns its
-  timers and its teardown here; driving connections from the socket's
-  goroutines instead would remove the stack, and is not done.
+- ~~*A connection has a goroutine of its own, and its stack*~~ -- closed.
+  It was 8.3 KB of stack an idle connection end, beside the heap, where
+  libutp has no thread per connection. An idle connection now gives its
+  goroutine back and is started again by whatever needs it (`dormant.go`),
+  so it holds its heap and nothing else: about 8.5 KB, against libutp's
+  10 KB. A connection with something in flight keeps a goroutine, whose
+  parked stack now shrinks to 4 KB. See KNOWN-LIMITATIONS.md, "An idle
+  connection held a goroutine".
 
 - *An acknowledgement leaves about 40 us later than libutp's:* at 10 Mb/s,
   where both acknowledge every packet, the time from a data packet reaching
@@ -442,6 +443,15 @@ configuration), `TestAcceptWithCidTakesAnAnsweredConnection` and
 `utpnet.TestDialCompletesWithNoAcceptWaiting`, which fail with the answering
 removed, and by `TestSynWaitsForAcceptWithoutASocketConfig` for the bare
 socket.
+
+An answered connection is held from the moment its SYN is answered, under
+the lock an Accept takes it under. It used to be held once its handshake
+reported, from another goroutine, by which time the dialler could already
+have its answer: `utpnet.TestDialCompletesWithNoAcceptWaiting` found
+`AcceptBacklog` at 0 after a completed dial in 9 runs of 200, and passes
+1,000 of 1,000 since. libutp hands its embedder the connection from inside
+the call that received the SYN (`utp_call_on_accept`,
+`utp_internal.cpp:3001`).
 
 An Accept given a nil config takes the socket's configuration as it stands
 when the SYN arrives, so `utpnet.Socket.SetConnectionConfig` reaches a
@@ -1140,11 +1150,14 @@ What it costs is what it cost before, and the embedder now chooses it.
 **Measured since**, over the emulated network: an idle connection through a
 90-second outage resumes, its next write delivered 11 ms after the path came
 back, where the 60-second timeout had closed it; and a connection whose peer
-vanished holds about 13 KB of heap and one goroutine for as long as nobody
-closes it. That was 1.08 MB when this default changed -- the receive buffer
-was allocated at its full megabyte up front (KNOWN-LIMITATIONS.md, "An idle
-connection held a megabyte") -- against libutp's roughly 10 KB, which it
-likewise holds for good.
+vanished holds about 10 KB of heap for as long as nobody closes it (about
+1.5 KB of that the test's own emulated network). That was 1.08 MB when this
+default changed -- the receive buffer was allocated at its full megabyte up
+front (KNOWN-LIMITATIONS.md, "An idle connection held a megabyte") --
+against libutp's roughly 10 KB, which it likewise holds for good. It also
+held a goroutine with an 8 KB stack until an idle connection gave its
+goroutine back (KNOWN-LIMITATIONS.md, "An idle connection held a
+goroutine"); it holds none now.
 
 Not previously listed here; found by the line-by-line audit while settling
 the half-open acceptor (LIBUTP-AUDIT.md, N5 and N26).
