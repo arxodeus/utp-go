@@ -6,13 +6,13 @@
 //	mockgen -source=utp_socket.go -destination=integrated/socket_mock_test.go
 //
 
-// Package mock_utp_go is a generated GoMock package.
+// Package mock_utp is a generated GoMock package.
 package integrated
 
 import (
 	reflect "reflect"
 
-	utp_go "github.com/arxodeus/utp"
+	utp "github.com/arxodeus/utp"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -93,11 +93,11 @@ func (mr *MockConnMockRecorder) Close() *gomock.Call {
 }
 
 // ReadFrom mocks base method.
-func (m *MockConn) ReadFrom(b []byte) (int, utp_go.ConnectionPeer, error) {
+func (m *MockConn) ReadFrom(b []byte) (int, utp.ConnectionPeer, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ReadFrom", b)
 	ret0, _ := ret[0].(int)
-	ret1, _ := ret[1].(utp_go.ConnectionPeer)
+	ret1, _ := ret[1].(utp.ConnectionPeer)
 	ret2, _ := ret[2].(error)
 	return ret0, ret1, ret2
 }
@@ -109,7 +109,7 @@ func (mr *MockConnMockRecorder) ReadFrom(b any) *gomock.Call {
 }
 
 // WriteTo mocks base method.
-func (m *MockConn) WriteTo(b []byte, dst utp_go.ConnectionPeer) (int, error) {
+func (m *MockConn) WriteTo(b []byte, dst utp.ConnectionPeer) (int, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "WriteTo", b, dst)
 	ret0, _ := ret[0].(int)
