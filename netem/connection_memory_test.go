@@ -28,9 +28,10 @@ import (
 // interval, at libutp's 29 seconds, and once connections given a short one
 // have been quiet past it, when each has released its receive buffer's
 // storage. The heap figure includes this test's own emulated network and
-// bookkeeping, about 1.5 KB an end by a heap profile; the goroutine stacks
+// bookkeeping, about 1.5 KB an end by a heap profile. The goroutine stacks
 // are reported beside it, since libutp has no thread per connection and an
-// honest comparison counts them.
+// honest comparison counts them; an idle connection holds none now, and
+// this fails if it holds a goroutine (dormant.go).
 func TestIdleConnectionMemory(t *testing.T) {
 	goroutines := runtime.NumGoroutine()
 	busy := idleConnectionMemory(t, 0, 200*time.Millisecond)

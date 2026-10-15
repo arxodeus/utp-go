@@ -1,9 +1,6 @@
 package utp
 
-import (
-	"context"
-	"time"
-)
+import "time"
 
 // A connection with nothing to do gives its goroutine back.
 //
@@ -20,8 +17,9 @@ import (
 // loop return: it rests. Everything that can need the loop again restarts it
 // (wake): a write, a read freeing room in the read queue, a close, an event
 // the socket queues, a timer armed by a pass the socket's reader runs inline,
-// the stream's context ending, and a timer of its own -- one function timer,
-// set for the earliest of the deadlines a quiet connection keeps:
+// the socket's context ending (UtpSocket.wakeConns) or a dial being abandoned,
+// and a timer of its own -- one function timer, set for the earliest of the
+// deadlines a quiet connection keeps:
 //
 //   - the keep-alive, one interval after the last packet sent
 //     (utp_internal.cpp:1271-1274);
@@ -62,19 +60,12 @@ func (c *connection) setupDormancy() {
 		return
 	}
 	c.restClock = clk
-	// A resting connection whose stream or socket is closed has no loop to
-	// see the context end. Registered once: it costs one entry in the
-	// context's list, and a goroutine only once the context ends.
-	c.stopCtxWake = context.AfterFunc(c.ctx, c.wakeFn)
 }
 
 // endDormancy undoes setupDormancy, once the loop has ended.
 func (c *connection) endDormancy() {
 	if c.restTimer != nil {
 		c.restTimer.Stop()
-	}
-	if c.stopCtxWake != nil {
-		c.stopCtxWake()
 	}
 }
 
@@ -95,8 +86,13 @@ func (c *connection) mayRest() bool {
 		stream.shutdown.Load() || stream.writeClosed.Load() {
 		return false
 	}
+	// Nor one holding bytes back for a reader whose queue is full: that
+	// reader is the bottleneck, every read it makes needs a pass, and resting
+	// between them started a goroutine and set two timers per read. Measured
+	// on go-libutp's loopback benchmark, where the reader is slower than the
+	// network: 2.6% off 100 MB (40 interleaved runs, z = -2.35).
 	if len(c.armed) != 0 || c.wantWrite || c.ackPending || c.inBatch ||
-		len(c.pendingWrites) != 0 ||
+		c.readsHeld.Load() || len(c.pendingWrites) != 0 ||
 		(c.state.SendBuf != nil && c.state.SendBuf.Pending() > 0) {
 		return false
 	}

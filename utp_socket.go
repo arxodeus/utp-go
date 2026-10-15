@@ -1006,6 +1006,9 @@ func (s *UtpSocket) eventLoop() {
 		case gotAcceptCid = <-s.acceptsWithCidCh:
 		case gotAccept = <-s.accepts:
 		case <-s.ctx.Done():
+			// Every connection's context ends with this one, and a resting
+			// connection has no loop to see it.
+			s.wakeConns()
 			return
 		}
 		if barrier != nil {
@@ -1213,11 +1216,22 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 	} else if s.acceptConfig != nil {
 		// Nobody is waiting, and the socket has a configuration of its own:
 		// answer now, as libutp does, and hold the connection for an Accept.
-		s.selectAcceptHelper(cid, packetPtr, &Accept{
+		//
+		// Held from here, under the lock an Accept takes it under, not once
+		// its handshake reports from another goroutine: by then the dialler
+		// can have the answer, and an AcceptBacklog asked of this socket
+		// found nothing -- TestDialCompletesWithNoAcceptWaiting, 9 runs in
+		// 200. libutp hands its embedder the connection from inside the call
+		// that received the SYN (utp_call_on_accept, utp_internal.cpp:3001).
+		if st := s.selectAcceptHelper(cid, packetPtr, &Accept{
 			ctx:    s.ctx,
 			stream: make(chan *StreamResult, 1),
-			onHand: s.holdAnswered,
-		})
+			// Already held. A connection that fails ends, and is dropped
+			// from answered once it has.
+			onHand: func(*StreamResult) {},
+		}); st != nil {
+			s.holdAnswered(st)
+		}
 	} else {
 		s.logger.Debug("put a new syn packet to incomingConns...")
 		s.putIncomingConn(cidHash, &IncomingPacket{pkt: packetPtr, cid: cid})
@@ -1225,26 +1239,11 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 	return nil
 }
 
-// holdAnswered takes a connection the socket answered with nobody waiting,
-// once its handshake is done: to an Accept that has come for it meanwhile,
-// or into answered until one does. A connection that failed is dropped; it
-// has already ended.
-func (s *UtpSocket) holdAnswered(res *StreamResult) {
-	if res == nil || res.err != nil || res.stream == nil {
-		return
-	}
-	key := res.stream.Cid().Hash()
-	s.dispatchMu.Lock()
-	defer s.dispatchMu.Unlock()
-	if accept, ok := s.getAwaiting(key); ok {
-		s.removeAwaiting(key)
-		accept.hand(res)
-		return
-	}
-	if accept := s.takePendingAccept(); accept != nil {
-		accept.hand(res)
-		return
-	}
+// holdAnswered keeps a connection the socket answered with nobody waiting,
+// until an Accept takes it (takeAnswered). Called with dispatchMu held, as
+// the SYN is answered: no Accept is waiting then, or it would have had the
+// connection, and any that comes later looks here first.
+func (s *UtpSocket) holdAnswered(st *UtpStream) {
 	// Those that ended while waiting -- reset, timed out, closed by the
 	// peer -- go now: they are no longer counted as connections, and kept
 	// here they would pile up behind a socket nobody accepts on.
@@ -1257,7 +1256,7 @@ func (s *UtpSocket) holdAnswered(res *StreamResult) {
 		}
 	}
 	clear(s.answered[len(live):])
-	s.answered = append(live, res.stream)
+	s.answered = append(live, st)
 }
 
 // takeAnswered removes and returns the oldest answered connection still
@@ -1909,10 +1908,10 @@ func (s *UtpSocket) selectAcceptHelper(
 	cid *ConnectionId,
 	syn *packet,
 	accept *Accept,
-) {
+) *UtpStream {
 	if _, exists := s.getConnStream(cid.Hash()); exists {
 		accept.hand(&StreamResult{err: fmt.Errorf("connection ID unavailable")})
-		return
+		return nil
 	}
 
 	connected := make(chan error, 1)
@@ -1939,6 +1938,7 @@ func (s *UtpSocket) selectAcceptHelper(
 	stream.linger = s.linger
 
 	go s.awaitConnected(stream, accept, connected)
+	return stream
 }
 
 func (s *UtpSocket) removeConnStream(key string) {
@@ -2118,6 +2118,20 @@ func (s *UtpSocket) putConnStream(key string, streamCh chan *streamEvent) {
 	}
 	s.conns[key] = streamCh
 	s.connsGen.Add(1)
+}
+
+// wakeConns starts the event loop of every resting connection on the socket.
+// See dormant.go.
+func (s *UtpSocket) wakeConns() {
+	s.connsMutex.RLock()
+	conns := make([]*connection, 0, len(s.inlineConns))
+	for _, c := range s.inlineConns {
+		conns = append(conns, c)
+	}
+	s.connsMutex.RUnlock()
+	for _, c := range conns {
+		c.wake()
+	}
 }
 
 func (s *UtpSocket) sendShutdownEventToConns() {

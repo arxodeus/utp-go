@@ -150,10 +150,22 @@ func NewUtpStream(
 func (s *UtpStream) abandonDial() {
 	s.shutdown.Store(true)
 	s.streamCancel()
+	// Nothing watches the context of a resting connection. A dial is never
+	// resting -- its SYN is in flight -- but it costs nothing to be sure.
+	s.wakeLoop()
 }
 
 func (s *UtpStream) notifyRead() {
 	if s.conn == nil {
+		return
+	}
+	// A resting connection is woken only if the read has something to
+	// release: bytes held back for want of room in the read queue, the only
+	// case in which the receive window grows with a read (recvWindow counts
+	// what has been handed over as read). Otherwise a receiver at rest during
+	// a bulk transfer, its packets handled by the socket's reader, would have
+	// its loop started for every read, to do nothing.
+	if s.conn.dormant.Load() && !s.conn.readsHeld.Load() {
 		return
 	}
 	select {

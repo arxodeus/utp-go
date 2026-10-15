@@ -133,21 +133,25 @@ func TestRestingConnectionEndsWithItsSocket(t *testing.T) {
 	}
 }
 
-// The stream's own context ending -- an abandoned connection, cancelled --
-// ends a resting connection at once, with no event queued to wake it.
+// Cancelling the context the socket was made with ends a resting connection
+// at once, as it ended a parked one: there is no Close, so no event is queued,
+// and no loop is waiting on the context to notice.
 func TestRestingConnectionEndsWithItsContext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, _, client, server := restingPair(t, ctx, NewConnectionConfig())
-	defer server.Close()
+	sockCtx, sockCancel := context.WithCancel(ctx)
+	defer sockCancel()
+	_, _, client, server := restingPair(t, sockCtx, NewConnectionConfig())
 
 	exchange(t, ctx, client, server, 1024)
 	awaitRest(t, 2*time.Second, client, server)
-	client.streamCancel()
-	select {
-	case <-client.Done():
-	case <-time.After(300 * time.Millisecond):
-		t.Fatal("a resting connection outlived its context by 300ms")
+	sockCancel()
+	for _, s := range []*UtpStream{client, server} {
+		select {
+		case <-s.Done():
+		case <-time.After(300 * time.Millisecond):
+			t.Fatal("a resting connection outlived its socket's context by 300ms")
+		}
 	}
 }
 
@@ -175,7 +179,21 @@ func TestRestingReceiverWokenByRead(t *testing.T) {
 	readCtx, readCancel := context.WithTimeout(ctx, 2*time.Second)
 	defer readCancel()
 	buf := make([]byte, 64*1024)
-	for got := 0; got < n; {
+	got, err := server.Read(readCtx, buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Woken, and with bytes still held back it stays: a reader slower than
+	// the network would otherwise have its connection started and rested
+	// again for every read.
+	time.Sleep(50 * time.Millisecond)
+	if !server.conn.readsHeld.Load() {
+		t.Fatal("nothing is held back after one read; nothing to test")
+	}
+	if server.conn.dormant.Load() {
+		t.Fatal("a connection holding bytes back for its reader rested")
+	}
+	for got < n {
 		k, err := server.Read(readCtx, buf)
 		if err != nil {
 			t.Fatalf("read %d of %d bytes, then: %v", got, n, err)

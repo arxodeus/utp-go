@@ -635,14 +635,17 @@ type connection struct {
 	// under mu. restClock is nil for a connection that never rests.
 	// attached is set once the socket delivers this connection's packets
 	// inline (UtpSocket.attachInline). wakeFn is wake, bound once.
-	dormant     atomic.Bool
-	asleep      bool
-	restClock   funcTimerClock
-	restTimer   Timer
-	restAt      time.Time
-	stopCtxWake func() bool
-	attached    atomic.Bool
-	wakeFn      func()
+	dormant   atomic.Bool
+	asleep    bool
+	restClock funcTimerClock
+	restTimer Timer
+	restAt    time.Time
+	attached  atomic.Bool
+	wakeFn    func()
+	// readsHeld is set while the receive buffer holds bytes the reader's
+	// full queue has no room for. Written under mu, read without it by
+	// UtpStream.notifyRead.
+	readsHeld atomic.Bool
 	// stream is the stream this connection belongs to, for passes run off
 	// the event loop. Set at setup.
 	stream *UtpStream
@@ -1197,9 +1200,11 @@ func (c *connection) finishLoop() {
 // It and wait are kept small on purpose: they are the frames a parked loop
 // leaves on its goroutine's stack, and Go's garbage collector halves a stack
 // only while less than a quarter of it is in use. With everything inline, as
-// it was, the parked loop used about 2.2 KB of its stack and kept 8 KB of it;
-// the handling lives in react, which has returned by the time the loop
-// parks.
+// it was, the parked loop's own frame was 1,760 bytes, and with the frames
+// beneath it more than a quarter of the 8 KB it kept: 8.3 KB a connection
+// end, measured. Split, it is 4.1-4.3 KB; the handling lives in react, which
+// has returned by the time the loop parks. See KNOWN-LIMITATIONS.md, "An
+// idle connection held a goroutine".
 func (c *connection) runLoop() (err error, final bool) {
 	for {
 		var w wakeResult
@@ -2367,6 +2372,10 @@ func (c *connection) processReads() {
 	if drained && c.eof() {
 		c.deliverTerminalRead()
 	}
+	// Bytes ready for a reader whose queue is full wait for it to make room,
+	// and only then can a read change anything here: it is what reopens the
+	// receive window. See UtpStream.notifyRead.
+	c.readsHeld.Store(recvBuf != nil && recvBuf.Readable() > 0)
 
 	c.onReadDrained()
 }
