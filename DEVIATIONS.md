@@ -737,9 +737,10 @@ the competitor keeps 67.0% against this receiver now, 63.5% before it,
 uTP flow's own goodput rose with it, 5.84 to 6.22 Mbps (z = 3.26). Behind
 the competitor's queue the receiver sends 0.97-0.98 acknowledgements per
 data packet (`netem.TestReceiverDoesNotCoalesceBehindAnotherFlow`, which
-fails on the old rule at 0.34). Those figures were taken with the one-climb
-rule and not retaken; without load neither rule fired behind the
-competitor. Where the acknowledgements are the queue, the gain stands, a
+fails on the old rule at 0.34). Retaken with the two-climb rule, thirty
+runs each, interleaved, libutp in every run: the competitor keeps 66.1%
+against this receiver and 67.4% against libutp's (z = -1.14, not
+distinguishable), and our flow's goodput is 6.33 Mbps against libutp's 6.05. Where the acknowledgements are the queue, the gain stands, a
 little smaller for waiting for the second climb: 2.53 s against libutp's
 7.32 over 64 kb/s (2.47 with one climb), 2.09 against 3.0 over 160 kb/s
 (2.03), the same as libutp over 320 kb/s -- ten interleaved runs each.

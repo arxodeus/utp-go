@@ -232,7 +232,9 @@ worse: its receiver coalesced acknowledgements that were queueing behind the
 competitor's data, and any LEDBAT sender, libutp's included, took more for
 it -- the competitor kept 65.0% against 67.0% (70 and 120 runs). Confined to
 queues of the receiver's own making, 67.0% against libutp's 66.0% (thirty
-runs each, z = 0.16). DEVIATIONS.md, "Acknowledgements: one per read".
+runs each, z = 0.16), and with the rule since made robust to a busy host,
+66.1% against 67.4% (thirty more, z = -1.14). DEVIATIONS.md,
+"Acknowledgements: one per read".
 
 ### The latecomer experiment
 
