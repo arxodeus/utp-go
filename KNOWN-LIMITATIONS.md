@@ -5398,6 +5398,31 @@ it; the execution trace showed the reader itself stranded on the global
 queue for 0.5-0.9 ms after its yield. Neither cost is one the network poller
 has.
 
+**The handling, and why it is left as it is.** Four cuts were looked at,
+each meant to skip work that a pure receiver does for nothing, and each was
+read to see whether skipping it would leave the wire and the state as they
+are. None would, so none was made; a slower acknowledgement is the price of
+not risking either:
+
+- *The acknowledgement path for an acknowledgement that names nothing new*
+  (about 1.2 us) already returns early from everything with nothing in
+  flight. What it does do is take the delay sample libutp takes from every
+  packet (`our_hist`, `utp_internal.cpp:2116-2127`, via
+  `onAckOfNothingNew`), which the controller needs.
+- *The write pass with nothing to send* (part of the 1.4 us before the
+  flush) starts with the controller's tick (`SentPackets.OnTick`), so
+  skipping it would move what the controller does over time.
+- *Building the acknowledgement into a reused buffer* (part of 1.3-1.5 us):
+  every acknowledgement sent is kept as `lastStateSent`, for the socket to
+  repeat once the connection is gone, so a reused one would change under it.
+- *Pooling decoded packets* (part of decoding's 1.0-1.2 us): decoding is one
+  allocation already, and a packet can outlive the read that brought it --
+  queued for a connection still being set up, or kept (`packet.own`) --
+  which a pool would have to track.
+
+What would close the gap is touching less memory per packet, which is a
+different receive path rather than a trim of this one.
+
 ### Three things it took to get there
 
 - **The reader must not send bulk data.** It did at first, as libutp does
