@@ -226,24 +226,23 @@ consequence, or equivalent on the wire.
   parked stack now shrinks to 4 KB. See KNOWN-LIMITATIONS.md, "An idle
   connection held a goroutine".
 
-- *An acknowledgement leaves about 40 us later than libutp's:* at 10 Mb/s,
-  where both acknowledge every packet, the time from a data packet reaching
-  the receiver's socket to its acknowledgement reaching the relay is 90 us
-  here and 50 us in libutp at the median, and 1.1 ms for both at the 90th
-  percentile (`TestAckTurnaround`, 45 runs each, libutp sending; the relay
-  runs in a process of its own and timestamps each acknowledgement in the
-  kernel). Our sender is not in it: libutp's receiver answers ours as fast
-  as its own. It is the receiver, and mostly its wake: from the kernel's
-  arrival timestamp to just before the acknowledgement's sendto is 45-55 us
-  in libutp's thread and 79-94 us here, of which the handling is about 10
-  (`BenchmarkReceivePathCold`); the rest is Go's network poller waking the
-  socket's reader in a runtime with nothing else running. Isolated on this
-  machine, with nothing but a sender in another process, a C thread blocked
-  in `select` sees a datagram 72-79 us after the kernel stamped it, a Go
-  goroutine on the network poller 89-98 us. A reader blocked in `poll` on
-  its own thread was tried and was no faster. No throughput cost has been
-  measured. See KNOWN-LIMITATIONS.md, "Acknowledgement latency: what is
-  left".
+- *An acknowledgement leaves about 20 us later than libutp's:* at 10 Mb/s,
+  where both acknowledge every packet, the time from the relay writing a
+  data packet to the receiver's socket to its acknowledgement reaching the
+  relay is 70-80 us here and 50-60 us in libutp at the median, 170 us
+  against 140-145 at the 90th percentile; at 100 Mb/s 40 against 30
+  (`TestAckTurnaround`, 12 runs each; the relay runs in a process of its own
+  and timestamps each acknowledgement in the kernel). It was recorded here
+  as 40 us: the relay stamped deliveries after its write, and threw away
+  acknowledgements quicker than that. Our sender is not in it: libutp's
+  receiver answers ours as fast as its own. It is the receiver. Timed from
+  the kernel's arrival stamp in both: 30-35 us to libutp's read and 35-46
+  to ours, the wake; then about 3 us of handling in libutp and about 13
+  here, spread across a dozen stages, each slow for a cold cache. A reader
+  that waits in poll(2) instead of on Go's network poller was tried: no
+  faster in the library, and a worse tail. No throughput cost has been
+  measured. See KNOWN-LIMITATIONS.md, "Measured again: the relay stamped
+  deliveries late".
 
 ## Intentional deviations
 
@@ -682,11 +681,12 @@ out a timeout for them. With the relay's queue at 2 MB, deeper than that
 target at 100 Mb/s, none of 42 runs did, and the two receivers' medians are
 1.393 s each (9,370 acknowledgements against libutp's 10,207).
 
-The acknowledgement leaves when libutp's would, but for the runtime's wake:
-the median from a data packet reaching our socket to its acknowledgement
-reaching the relay is 70 us against libutp's 40 at 10 Mb/s and 50 against 30
-at 100 Mb/s (`TestAckTurnaround`, 20 runs each); see "An acknowledgement
-leaves about 40 us later than libutp's" above.
+The acknowledgement leaves when libutp's would, but for the runtime's wake
+and a slower turn-round: the median from the relay writing a data packet to
+our socket to its acknowledgement reaching the relay is 70-80 us against
+libutp's 50-60 at 10 Mb/s and 40 against 30 at 100 Mb/s
+(`TestAckTurnaround`, 12 runs each); see "An acknowledgement leaves about
+20 us later than libutp's" above.
 
 Over the emulated network, where this receiver now acknowledges about every
 packet on a symmetric path, the benchmark suite against the previous rule

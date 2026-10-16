@@ -212,10 +212,17 @@ func (p *relayPath) deliver(done <-chan struct{}) {
 		p.mu.Unlock()
 
 		for _, b := range due {
+			// Stamped before the write, not after: on loopback the datagram
+			// is in the receiver's socket before WriteToUDP returns, and a
+			// receiver quick enough could acknowledge it before an
+			// after-the-write stamp. turnaround then skipped that
+			// acknowledgement as earlier than the delivery and paired the
+			// packet with the next one, a packet interval later.
+			at := time.Now()
 			_, _ = p.out.WriteToUDP(b, p.dst)
 			if p.delivered != nil && len(b) >= 20 {
 				p.mu.Lock()
-				*p.delivered = append(*p.delivered, parseRelayEvent(b, time.Now()))
+				*p.delivered = append(*p.delivered, parseRelayEvent(b, at))
 				p.mu.Unlock()
 			}
 		}

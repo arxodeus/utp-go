@@ -5327,6 +5327,77 @@ times each -- LEDBAT LAN 86.91 against 86.44 Mbps, LEDBAT at 5% loss 2.54
 against 2.48, LEDBAT++ at 5% loss 0.56 against 0.55, LEDBAT++ with
 reordering 2.34 against 2.35, medians.
 
+### Measured again: the relay stamped deliveries late
+
+**The gap is about 20 us at 10 Mb/s, not 40.** The relay stamped each
+datagram's delivery after `WriteToUDP` returned. On loopback the datagram is
+in the receiver's socket before that, and a receiver that answered within the
+write had its acknowledgement thrown away as earlier than the delivery:
+`turnaround` paired the packet with the next acknowledgement, a packet
+interval later. Every receiver lost some -- 11-20% of packets at 10 Mb/s were
+counted over 500 us late, libutp's receiver included, the 90th percentile about
+1.1 ms for every pairing -- and a faster receiver lost more. Printed out, the
+covering acknowledgement of a "late" packet had reached the relay 4-32 us
+before its delivery stamp. The relay now stamps before the write, which no
+receiver can beat. Since: 2-5% over 500 us in every pairing.
+
+Twelve runs each, medians of the runs' medians and 90th percentiles:
+
+| path | libutp -> libutp | go -> libutp | libutp -> go | go -> go |
+|---|---|---|---|---|
+| 10 Mb/s, median | 60 us | 50 us | 80 us | 70 us |
+| 10 Mb/s, 90th percentile | 140 us | 145 us | 170 us | 170 us |
+| 100 Mb/s, median | 30 us | 30 us | 40 us | 40 us |
+| 100 Mb/s, 90th percentile | 170 us | 205 us | 200 us | 190 us |
+
+Each figure now includes the relay's write, which the old stamp left out.
+
+**Where the 20 us goes.** Both receivers were instrumented the same way for
+this, with the kernel's arrival stamp on each datagram (`SO_TIMESTAMPNS`) and
+the time to the read and to the acknowledgement's `sendto` -- libutp's in the
+test's embedder (`bridge.cpp`), ours in the reader -- at 10 Mb/s, libutp
+sending:
+
+| | libutp | this library |
+|---|---|---|
+| kernel stamp to read | 30-35 us | 35-46 us |
+| kernel stamp to the acknowledgement's write | 33-39 us | 50-61 us |
+
+So about 6-8 us is the wake and about 10 the handling: libutp turns a
+packet round in about 3 us, this library in about 13. Timed stage by stage
+in the live receiver (medians of three runs): copying the batch out and the
+read that finds the socket empty, 2.8-2.9 us; decoding, 1.0-1.2; routing,
+0.75; the packet's handling, 3.7-4.0, of which the acknowledgement path for
+an acknowledgement that names nothing new is the largest part, about 1.2;
+the batch's end up to the flush, about 1.4; building the acknowledgement,
+1.3-1.5; encoding and the write, about 1. No stage stands out. Each is slow
+for the same reason, a cache cold after 1.1 ms of other work: the same path
+with 4 MB evicted between packets is about 6 us
+(`BenchmarkReceivePathCold`), and warm 2.2-2.8.
+
+**A faster wait was tried, and is not used.** In a small stand-alone
+program -- a sender in another process pacing datagrams as at 10 Mb/s, six
+interleaved runs -- a goroutine on Go's network poller saw a datagram 82.4
+us after the kernel stamped it, against 55.4 for a C thread blocked in
+`recvmsg`. A goroutine blocked in the system call was 75.3; the difference
+from C is the runtime taking the processor away from a goroutine that has
+gone 10 ms without being scheduled (`retake`, `forcePreemptNS`), which
+every wake then had to get back. The same goroutine yielding once before
+each wait was 55.4, C's figure.
+
+In the library it bought nothing. The reader waited in poll(2) on the
+socket and an eventfd that Close signalled, yielding first: the read came
+no sooner inside the real test (37-46 us from the kernel stamp, against
+35-46 on the network poller -- the stand-alone program's poller figure does
+not carry over to a process with work in it), and the tail was worse,
+interleaved against the commit before: our receiver's 90th percentile 185
+against 220 us with libutp sending at 10 Mb/s (z = 3.81), 250 against 305
+between our own at 100 Mb/s (z = 3.53). A goroutine blocked in a system
+call keeps its processor, and goroutines it has just woken can wait behind
+it; the execution trace showed the reader itself stranded on the global
+queue for 0.5-0.9 ms after its yield. Neither cost is one the network poller
+has.
+
 ### Three things it took to get there
 
 - **The reader must not send bulk data.** It did at first, as libutp does

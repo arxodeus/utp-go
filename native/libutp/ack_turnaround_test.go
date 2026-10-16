@@ -143,9 +143,10 @@ func bestP50(runs []turnaroundStats) time.Duration {
 }
 
 // ackTurnaroundSlack is how much slower than libutp's our receiver's median
-// may be. With the relay in its own process, ours is 20-30 us slower at both
-// rates (20 runs each: 60-80 us against 40 at 10 Mb/s, 40-50 against 20-30 at
-// 100 Mb/s), the Go runtime waking the socket's reader. When an
+// may be. With the relay in its own process, and stamping deliveries before
+// its write (relayPath.deliver), ours is 10-20 us slower (12 runs each: 70-80
+// us against 50-60 at 10 Mb/s, 40 against 30 at 100 Mb/s), the Go runtime
+// waking the socket's reader and a slower turn-round. When an
 // acknowledgement waited for up to four packets at 100 Mb/s whatever the
 // return path, ours was 220-240 us against 30, which this fails.
 const ackTurnaroundSlack = 150 * time.Microsecond
