@@ -1915,7 +1915,7 @@ func (c *connection) shutdown() {
 				seqNum := c.state.SentPackets.NextSeqNum()
 				ackNum := c.state.RecvBuf.AckNum()
 
-				// No selective ack: see dataPacketsCarryNoSelectiveAck.
+				// No selective ack: see statePacket.
 				fin := NewPacketBuilder(
 					st_fin,
 					c.cid.Send,
@@ -1938,7 +1938,7 @@ func (c *connection) shutdown() {
 				seqNum := c.state.SentPackets.NextSeqNum()
 				ackNum := c.state.RecvBuf.AckNum()
 
-				// No selective ack: see dataPacketsCarryNoSelectiveAck.
+				// No selective ack: see statePacket.
 				fin := NewPacketBuilder(
 					st_fin,
 					c.cid.Send,
@@ -2244,7 +2244,7 @@ func (c *connection) processWrites(now time.Time) {
 	ackNum := c.state.RecvBuf.AckNum()
 
 	for _, payload := range payloads {
-		// No selective ack: see dataPacketsCarryNoSelectiveAck.
+		// No selective ack: see statePacket.
 		packetInst := NewPacketBuilder(
 			st_data,
 			c.cid.Send,
@@ -3124,7 +3124,7 @@ func (c *connection) retransmit(originPacket *packet, now time.Time) {
 		Header: &PacketHeaderV1{
 			PacketType: originPacket.Header.PacketType,
 			Version:    originPacket.Header.Version,
-			// No selective ack: see dataPacketsCarryNoSelectiveAck.
+			// No selective ack: see statePacket.
 			Extension:     0,
 			ConnectionId:  originPacket.Header.ConnectionId,
 			SeqNum:        originPacket.Header.SeqNum,
@@ -3206,7 +3206,7 @@ func (c *connection) resendSentPacket(pkt *sentPacket, now time.Time) *packet {
 	if pkt.data != nil {
 		builder.WithPayload(pkt.data)
 	}
-	// No selective ack: see dataPacketsCarryNoSelectiveAck.
+	// No selective ack: see statePacket.
 	resend := builder.
 		WithTsDiffMicros(uint32(c.peerTsDiff.Microseconds())).
 		WithAckNum(c.state.RecvBuf.AckNum()).
@@ -4782,12 +4782,11 @@ func (c *connection) synPacket(seqNum uint16) *packet {
 	).Build()
 }
 
-// dataPacketsCarryNoSelectiveAck documents a rule rather than implementing
-// one: only an ST_STATE carries a selective ack. libutp attaches the extension
-// in send_ack alone (`pfa.pf.ext = 1`, utp_internal.cpp:795); a data packet,
-// a FIN and every resend go out with `ext = 0` (:1080, :2781), and its
-// packet size leaves room for the 20-byte header and nothing else (:1757-
-// 1761). This library used to attach the receive buffer's selective ack to
+// statePacket builds an ST_STATE, the only packet that carries a selective
+// ack. libutp attaches the extension in send_ack alone (`pfa.pf.ext = 1`,
+// utp_internal.cpp:795); a data packet, a FIN and every resend go out with
+// `ext = 0` (:1080, :2781), and its packet size leaves room for the 20-byte
+// header and nothing else (:1757-1761). This library used to attach the receive buffer's selective ack to
 // all of them, and to reserve room for it in every packet.
 //
 // On a connection carrying data both ways, that means the peer hears about a
@@ -4795,8 +4794,6 @@ func (c *connection) synPacket(seqNum uint16) *packet {
 // out carrying the same acknowledgement number cancels the pending one
 // (send_data, :768; transmit here). libutp lives with that, and so does this
 // library now.
-const dataPacketsCarryNoSelectiveAck = true
-
 func (c *connection) statePacket() *packet {
 	now := int64(c.nowMicros())
 	tsDiffMicros := uint32(c.peerTsDiff.Microseconds())
@@ -4874,7 +4871,7 @@ func (c *connection) retransmitLostPackets(now time.Time) {
 			builder.WithPayload(payload)
 		}
 
-		// No selective ack: see dataPacketsCarryNoSelectiveAck.
+		// No selective ack: see statePacket.
 		packetInst := builder.
 			WithTsDiffMicros(tsDiffMicros).
 			WithAckNum(c.state.RecvBuf.AckNum()).

@@ -176,18 +176,10 @@ func (a *Accept) wait(ctx context.Context) (*UtpStream, error) {
 
 type UdpConn struct {
 	base *net.UDPConn
-	// readScratch is readBatch's receive buffer. Only the socket's read loop
-	// reads, so one is enough.
-	readScratch []byte
-	// peers caches the peer for each source address the read loop has seen.
-	// See peerFor.
-	peers map[peerKey]*UdpPeer
-	// mmsg is what readBatch receives into where recvmmsg exists.
-	mmsg *recvmmsgSlots
-	// arena holds the datagrams of the last batch read, and batch the list of
-	// them: both are reused by the next. See lend.
-	arena []byte
-	batch []datagram
+	// udpConnReader is what batched reads keep between reads, which differs
+	// by platform (batch_read_unix.go, batch_read_other.go). Only the
+	// socket's read loop reads, so one is enough.
+	udpConnReader
 	// dfUnsupported records that this platform has no per-packet
 	// don't-fragment option, so the MTU search stops asking. See
 	// WriteToDontFragment.
@@ -268,19 +260,6 @@ func (c *UdpConn) WriteToDontFragment(b []byte, dst ConnectionPeer) (int, error)
 func (c *UdpConn) Close() error {
 	return c.base.Close()
 }
-
-// peerKey is a source address as recvfrom reports it, comparable so it can
-// key the reader's peer cache (UdpConn.peerFor).
-type peerKey struct {
-	ip   [16]byte
-	port int
-	zone uint32
-	v6   bool
-}
-
-// maxCachedPeers bounds UdpConn.peers. Past it the cache starts again, which
-// costs one address formatting per peer that sends again.
-const maxCachedPeers = 4096
 
 // LocalAddr returns the address this connection is bound to.
 func (c *UdpConn) LocalAddr() net.Addr {

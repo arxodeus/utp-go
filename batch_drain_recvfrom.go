@@ -7,16 +7,18 @@ import (
 	"syscall"
 )
 
-// recvmmsgSlots is what Linux's drain uses; here there is no recvmmsg.
-type recvmmsgSlots struct{}
+// drainState is drain's receive buffer.
+type drainState struct {
+	scratch []byte
+}
 
 // drain appends what the socket holds to out, waiting for the first datagram
 // if there is none: recvfrom until it would block, as libutp's embedder does.
 func (c *UdpConn) drain(rc syscall.RawConn, out *[]datagram) error {
-	if c.readScratch == nil {
-		c.readScratch = make([]byte, 65536)
+	if c.scratch == nil {
+		c.scratch = make([]byte, 65536)
 	}
-	scratch := c.readScratch
+	scratch := c.scratch
 	var readErr error
 	err := rc.Read(func(fd uintptr) bool {
 		for len(*out) < maxReadBatch {
@@ -45,4 +47,20 @@ func (c *UdpConn) drain(rc syscall.RawConn, out *[]datagram) error {
 		return err
 	}
 	return readErr
+}
+
+// peerFor returns the peer a datagram came from, as recvfrom reports its
+// address. See peerForKey.
+func (c *UdpConn) peerFor(sa syscall.Sockaddr) *UdpPeer {
+	var k peerKey
+	switch a := sa.(type) {
+	case *syscall.SockaddrInet4:
+		copy(k.ip[:], a.Addr[:])
+		k.port = a.Port
+	case *syscall.SockaddrInet6:
+		k.ip, k.port, k.zone, k.v6 = a.Addr, a.Port, a.ZoneId, true
+	default:
+		return nil
+	}
+	return c.peerForKey(k)
 }

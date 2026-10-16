@@ -27,6 +27,11 @@ type mmsghdr struct {
 	n   uint32
 }
 
+// drainState is what drain receives into.
+type drainState struct {
+	mmsg *recvmmsgSlots
+}
+
 // recvmmsgSlots is what drain receives into, made once per UdpConn. Only the
 // socket's read loop reads, so one set is enough.
 type recvmmsgSlots struct {

@@ -5,7 +5,6 @@ package utp
 import (
 	"net"
 	"sync"
-	"syscall"
 )
 
 // maxReadBatch bounds one batch. libutp's embedders read until the socket
@@ -20,6 +19,32 @@ const maxReadBatch = 4096
 // native/libutp/bridge.cpp). See UtpSocket.readLoop. drain does the reading:
 // recvmmsg on Linux (batch_drain_linux.go), recvfrom elsewhere
 // (batch_drain_recvfrom.go).
+// udpConnReader is what UdpConn's batched reads keep between reads.
+type udpConnReader struct {
+	// peers caches the peer for each source address the read loop has seen.
+	// See peerForKey.
+	peers map[peerKey]*UdpPeer
+	// arena holds the datagrams of the last batch read, and batch the list of
+	// them: both are reused by the next. See lend.
+	arena []byte
+	batch []datagram
+	// drainState is what this platform's drain reads into.
+	drainState
+}
+
+// peerKey is a source address as the kernel reports it, comparable so it can
+// key the reader's peer cache (UdpConn.peerForKey).
+type peerKey struct {
+	ip   [16]byte
+	port int
+	zone uint32
+	v6   bool
+}
+
+// maxCachedPeers bounds the peer cache. Past it the cache starts again, which
+// costs one address formatting per peer that sends again.
+const maxCachedPeers = 4096
+
 func (c *UdpConn) readBatch() ([]datagram, error) {
 	rc, err := c.base.SyscallConn()
 	if err != nil {
@@ -46,27 +71,12 @@ func (c *UdpConn) lend(b []byte) []byte {
 	return c.arena[start:len(c.arena):len(c.arena)]
 }
 
-// peerFor returns the peer a datagram came from, reusing the one made for
-// the last datagram from the same address. Making one per datagram converted
-// the address and formatted it as text -- the key every packet is routed by
-// -- for every packet: the largest single cost of routing one, measured on a
-// reader just woken. Only the read loop calls this, so the cache needs no
-// lock.
-func (c *UdpConn) peerFor(sa syscall.Sockaddr) *UdpPeer {
-	var k peerKey
-	switch a := sa.(type) {
-	case *syscall.SockaddrInet4:
-		copy(k.ip[:], a.Addr[:])
-		k.port = a.Port
-	case *syscall.SockaddrInet6:
-		k.ip, k.port, k.zone, k.v6 = a.Addr, a.Port, a.ZoneId, true
-	default:
-		return nil
-	}
-	return c.peerForKey(k)
-}
-
-// peerForKey is peerFor from the address's key.
+// peerForKey returns the peer a datagram came from, by its address's key,
+// reusing the one made for the last datagram from the same address. Making one
+// per datagram converted the address and formatted it as text -- the key
+// every packet is routed by -- for every packet: the largest single cost of
+// routing one, measured on a reader just woken. Only the read loop calls
+// this, so the cache needs no lock.
 func (c *UdpConn) peerForKey(k peerKey) *UdpPeer {
 	if p, ok := c.peers[k]; ok {
 		return p

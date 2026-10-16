@@ -70,7 +70,7 @@ const (
 	//
 	// It used to reserve room for a selective-ack extension as well, because
 	// this library attached one to data packets. libutp never does, and now
-	// neither does this library (conn.go, dataPacketsCarryNoSelectiveAck), so
+	// neither does this library (conn.go, statePacket), so
 	// a packet carrying payload is never longer than the header plus it.
 	mtuHeaderOverhead uint32 = MINIMAL_HEADER_SIZE
 )
