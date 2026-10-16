@@ -1101,7 +1101,7 @@ func (c *defaultController) applyCongestionControl(
 	// to describe the path.
 	//
 	// This is the second of libutp's two clock-drift mechanisms and does a
-	// different job from the first. delayAccumulator's shift corrects the
+	// different job from the first. baseDelayHist's shift corrects the
 	// measurement for ordinary drift between honest clocks, bounded and aged
 	// out. This one does not correct anything: past 40,000 ppm, which is
 	// three orders of magnitude beyond crystal drift, it inflates the delay
@@ -1251,30 +1251,6 @@ func (c *defaultController) applyTimeoutAdjustment() {
 		rto = c.minTimeout
 	}
 	c.timeout = capTimeout(rto, c.maxTimeout)
-}
-
-// computeMaxWindowSizeAdjustment returns the adjustment in bytes to the maximum window (i.e. congestion window) size
-// based on the delta between the packet delay and the target delay and on the portion of the total
-// in-flight bytes that the packet corresponds to.
-func computeMaxWindowSizeAdjustment(
-	targetDelayMicros uint32,
-	baseDelayMicros uint32,
-	packetDelayMicros uint32,
-	windowSizeBytes uint32,
-	packetSizeBytes uint32,
-	maxWindowSizeIncBytes uint32,
-	gain float32,
-) int64 {
-	// Adjust the delay based on the base delay.
-	delayMicros := int64(packetDelayMicros) - int64(baseDelayMicros)
-
-	offTargetMicros := int64(targetDelayMicros) - delayMicros
-	delayFactor := float64(offTargetMicros) / float64(targetDelayMicros)
-	windowFactor := float64(packetSizeBytes) / float64(windowSizeBytes)
-
-	scaledGain := float64(gain) * float64(maxWindowSizeIncBytes) * delayFactor * windowFactor
-
-	return int64(scaledGain)
 }
 
 // wrappingLessThanUint32 is libutp's wrapping_compare_less over the 32-bit
@@ -1582,15 +1558,6 @@ type delayAccumulator struct {
 	// clk decides when a sample has aged out of the window. Nil means the
 	// real clock; read it through now().
 	clk Clock
-	// skew is the total correction applied so far, to cancel clock drift.
-	// See shift. Zero unless a correction has been applied, and every path
-	// through this type is a no-op while it is zero.
-	//
-	// Samples are stored with the correction *as it stood when they were
-	// pushed* already subtracted, so reading them back with the current
-	// total gives each one only the correction accumulated since it entered
-	// the window. That is what stops the correction running away; see shift.
-	skew time.Duration
 }
 
 func newDelayAccumulator(window time.Duration) *delayAccumulator {
@@ -1618,62 +1585,9 @@ func (da *delayAccumulator) now() time.Time {
 
 func (da *delayAccumulator) Push(delayTime time.Duration, receivedAt time.Time) {
 	da.delays.push(delay{
-		Value:    delayTime - da.skew,
+		Value:    delayTime,
 		Deadline: receivedAt.Add(da.window),
 	})
-}
-
-// shift raises the base delay, cancelling drift that has inflated every
-// sample in it.
-//
-// libutp:
-//
-//	void shift(const uint32 offset)
-//	{
-//	    // increase all of our base delays by this amount
-//	    // this is used to take clock skew into account
-//	    // by observing the other side's changes in its base_delay
-//	    for (size_t i = 0; i < DELAY_BASE_HISTORY; i++) delay_base_hist[i] += offset;
-//	    delay_base += offset;
-//	}
-//	                                        (utp_internal.cpp:277-289)
-//
-// Raising the base lowers the reported queueing delay by the same amount,
-// which is the point: the samples were inflated by a clock running slow, and
-// the queue they appear to show is not there.
-//
-// # Why the correction must age out, and how
-//
-// libutp shifts a *stored* base and thirteen stored history buckets, and
-// rotates one of those buckets onto a fresh, unshifted sample every minute
-// (utp_internal.cpp:367-380). So a correction only ever survives as long as
-// the bucket carrying it, and the history re-bases itself continuously.
-//
-// That bound is not decoration. Shifts arrive for as long as the peer's base
-// keeps falling, which under sustained drift is forever, and they accumulate
-// at the full drift rate -- while the error they exist to cancel is only the
-// window multiplied by that rate, a constant. A correction that never ages
-// out overshoots by however many windows the connection has been open, drives
-// the base past every sample, and leaves the controller reading zero queueing
-// delay whatever the path is doing.
-//
-// **That was measured, not reasoned about.** With an unbounded correction a
-// drifted flow stopped seeing the bottleneck at all -- 4ms of perceived queue
-// against its undrifted neighbour's 40ms -- and took 56.6% of a shared link
-// instead of the 35% it took with no correction at all. Delay-blind, and
-// winning because of it.
-//
-// Here the samples are stored net of the correction that stood when they were
-// pushed, so reading them back against the current total gives each sample
-// only what has accumulated since it entered the window. Old samples age out
-// and take their share of the correction with them, which is libutp's bucket
-// rotation expressed continuously, and the steady state is exactly the error
-// to be cancelled rather than an unbounded multiple of it.
-func (da *delayAccumulator) shift(offset time.Duration) {
-	if offset <= 0 {
-		return
-	}
-	da.skew += offset
 }
 
 func (da *delayAccumulator) BaseDelay() time.Duration {
@@ -1684,18 +1598,7 @@ func (da *delayAccumulator) BaseDelay() time.Duration {
 			da.delays.popFront()
 			continue
 		}
-		// Each stored sample carries the correction that stood when it was
-		// pushed already subtracted, so adding the current total gives it
-		// only what has accumulated since. libutp's equivalent bound --
-		// `if (sample < delay_base) delay_base = sample`
-		// (utp_internal.cpp:351-355) -- falls out of that: the newest sample
-		// is in this window too, so the minimum cannot sit more than one
-		// packet's worth of correction above it.
-		base := min.Value + da.skew
-		if base < 0 {
-			base = 0
-		}
-		return base
+		return max(min.Value, 0)
 	}
 	return time.Duration(0)
 }

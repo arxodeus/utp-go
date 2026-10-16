@@ -8,7 +8,6 @@ package utp
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"runtime"
 	"strings"
@@ -241,12 +240,6 @@ func describePackets(pkts [][]byte) string {
 		return " (none)"
 	}
 	return b.String()
-}
-
-// loopbackAddr is the peer address our socket sees. The scripted transport
-// never touches a socket, so it only has to be stable.
-func loopbackAddr() *net.UDPAddr {
-	return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 23456}
 }
 
 // Pinning the random source while something draws from it is safe. A socket's

@@ -118,13 +118,8 @@ func newLink(src, dst *Endpoint, cfg Config, seed int64) *Link {
 // datagram, so a report quoting a *link* MTU has to add them back.
 const icmpHeaderOverhead = 28
 
-// enqueue applies the link model to a packet and schedules its delivery.
-// It never blocks.
-func (l *Link) enqueue(payload []byte, src, dst *Endpoint) {
-	l.enqueueWithFlags(payload, src, dst, false)
-}
-
-// enqueueWithFlags is enqueue, plus whether the sender forbade fragmentation.
+// enqueueWithFlags applies the link model to a packet and schedules its
+// delivery, given whether the sender forbade fragmentation. It never blocks.
 func (l *Link) enqueueWithFlags(payload []byte, src, dst *Endpoint, dontFragment bool) {
 	now := time.Now()
 	size := len(payload)

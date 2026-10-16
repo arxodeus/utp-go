@@ -404,9 +404,8 @@ func libutpFirstFlightAfterIdle(t *testing.T, idle time.Duration) (flight int, w
 // receivingEndpoint is one of our sockets accepting a connection and reading
 // continuously, used as the far end for a libutp sender.
 type receivingEndpoint struct {
-	sock   *utp.UtpSocket
-	got    atomic.Int64
-	cancel context.CancelFunc
+	sock *utp.UtpSocket
+	got  atomic.Int64
 }
 
 func newReceivingEndpoint(t *testing.T, ctx context.Context, ep *Endpoint) *receivingEndpoint {

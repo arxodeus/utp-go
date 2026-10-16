@@ -2096,13 +2096,6 @@ func (s *UtpSocket) recvIdTakenLocked(recv uint16, peerKey string) bool {
 	return false
 }
 
-// inlineConn returns the connection that takes packets on ch inline, if any.
-func (s *UtpSocket) inlineConn(ch chan *streamEvent) *connection {
-	s.connsMutex.RLock()
-	defer s.connsMutex.RUnlock()
-	return s.inlineConns[ch]
-}
-
 func (s *UtpSocket) getConnStream(key string) (chan *streamEvent, bool) {
 	s.connsMutex.RLock()
 	defer s.connsMutex.RUnlock()
@@ -2325,19 +2318,6 @@ func (s *UtpSocket) getConnStreamForQuotedId(id uint16, peer ConnectionPeer) cha
 			return ch
 		}
 	}
-	return nil
-}
-
-func (s *UtpSocket) getConnStreamWithCids(cid *ConnectionId, idType IdType) chan *streamEvent {
-	s.connsMutex.RLock()
-	defer s.connsMutex.RUnlock()
-	if ch, exist := s.conns[cid.Hash()]; exist {
-		if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
-			s.logger.Debug("get conn stream", "accInitCidKey", cid.Hash(), "accCid.Send", cid.Send, "accCid.Recv", cid.Recv)
-		}
-		return ch
-	}
-
 	return nil
 }
 

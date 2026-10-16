@@ -443,15 +443,6 @@ func (p *packet) appendEncoded(bytes []byte) []byte {
 	return bytes
 }
 
-// extensionByte is the extension this packet actually carries first, as
-// opposed to the one its header claims.
-func (p *packet) extensionByte() byte {
-	if exts := p.wireExtensions(); len(exts) > 0 {
-		return exts[0].extension
-	}
-	return 0
-}
-
 // DecodePacket decodes one datagram. The packet's body is a slice of b.
 func DecodePacket(b []byte) (*packet, error) {
 	return decodePacket(b, false)

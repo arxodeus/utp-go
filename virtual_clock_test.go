@@ -1,7 +1,6 @@
 package utp
 
 import (
-	"sort"
 	"sync"
 	"time"
 )
@@ -340,18 +339,4 @@ func (c *virtualClock) Advance(d time.Duration) {
 			// for.
 		}
 	}
-}
-
-// sortedDeadlines is a debugging aid: what is armed, in order.
-func (c *virtualClock) sortedDeadlines() []time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	var out []time.Time
-	for _, w := range c.waiters {
-		if !w.stopped {
-			out = append(out, w.at)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Before(out[j]) })
-	return out
 }

@@ -17,8 +17,6 @@ type dfConn struct {
 	// unsupported makes WriteToDontFragment refuse, as a platform with no
 	// such socket option does.
 	unsupported bool
-	// omitInterface drops the DontFragmentWriter implementation entirely.
-	omitInterface bool
 }
 
 func (c *dfConn) ReadFrom(b []byte) (int, ConnectionPeer, error) {

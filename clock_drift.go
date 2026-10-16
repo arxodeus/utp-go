@@ -32,7 +32,7 @@ const driftPenaltyDivisor = 7
 // substitutes for the other:
 //
 //   - The delay-base shift (utp_internal.cpp:2009-2015, implemented in
-//     delayAccumulator) corrects the delay *measurement* when the peer's base
+//     baseDelayHist) corrects the delay *measurement* when the peer's base
 //     delay falls, which is what ordinary drift between two honest clocks
 //     looks like. It is bounded to 10ms per adjustment and ages out.
 //   - This one does not correct anything. It watches the long-run slope and,
