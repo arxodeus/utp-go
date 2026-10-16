@@ -624,18 +624,8 @@ func NewPacketBuilder(
 	}
 }
 
-func (b *PacketBuilder) WithTsMicros(tsMicros uint32) *PacketBuilder {
-	b.tsMicros = tsMicros
-	return b
-}
-
 func (b *PacketBuilder) WithTsDiffMicros(tsDiffMicros uint32) *PacketBuilder {
 	b.tsDiffMicros = tsDiffMicros
-	return b
-}
-
-func (b *PacketBuilder) WithWindowSize(windowSize uint32) *PacketBuilder {
-	b.windowSize = windowSize
 	return b
 }
 

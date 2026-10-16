@@ -146,9 +146,6 @@ func (p *Peer) Read(b []byte) (int, error) {
 	return int(n), nil
 }
 
-// BytesReceived reports the total delivered to this peer, read out or not.
-func (p *Peer) BytesReceived() uint64 { return uint64(C.libutp_peer_bytes_received(p.c)) }
-
 // CloseStream closes the uTP connection once everything queued has been handed
 // to libutp. The peer itself stays alive until Shutdown.
 func (p *Peer) CloseStream() { C.libutp_peer_close(p.c) }

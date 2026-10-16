@@ -74,9 +74,6 @@ func (d *Driver) CCLog() []string {
 	return out
 }
 
-// ClearCCLog discards the captured lines.
-func (d *Driver) ClearCCLog() { C.libutp_driver_cc_log_clear(d.c) }
-
 // EnableWindowLog starts capturing libutp's congestion window, max_window,
 // each time libutp asks whether a packet fits (is_full,
 // utp_internal.cpp:950-953). libutp keeps the window private and

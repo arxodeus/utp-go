@@ -111,7 +111,6 @@ struct libutp_peer {
 	int want_close;
 	int close_sent;
 
-	uint64_t bytes_received;
 	uint64_t last_timeout_check_ms;
 
 	byte_buf rx;
@@ -163,7 +162,6 @@ static uint64 cb_sendto(utp_callback_arguments *a) {
 static uint64 cb_on_read(utp_callback_arguments *a) {
 	libutp_peer *p = peer_of(a);
 	buf_append(&p->rx, a->buf, a->len);
-	p->bytes_received += a->len;
 	// Tell libutp the data is out of its buffer, so its receive window reopens.
 	utp_read_drained(a->socket);
 	return 0;
@@ -501,13 +499,6 @@ long libutp_peer_read(libutp_peer *p, void *buf, size_t len) {
 	}
 	PEER_UNLOCK(p);
 	return (long)n;
-}
-
-uint64_t libutp_peer_bytes_received(libutp_peer *p) {
-	PEER_LOCK(p);
-	uint64_t n = p->bytes_received;
-	PEER_UNLOCK(p);
-	return n;
 }
 
 void libutp_peer_close(libutp_peer *p) {

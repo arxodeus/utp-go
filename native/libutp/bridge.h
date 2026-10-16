@@ -60,9 +60,6 @@ long libutp_peer_pending_write(libutp_peer *p);
 // buffered yet.
 long libutp_peer_read(libutp_peer *p, void *buf, size_t len);
 
-// Bytes received in total, whether or not they have been read out.
-uint64_t libutp_peer_bytes_received(libutp_peer *p);
-
 // Close once everything queued has been handed to libutp.
 void libutp_peer_close(libutp_peer *p);
 

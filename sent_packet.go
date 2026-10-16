@@ -59,19 +59,6 @@ func (s *sentPacket) rtt(now time.Time) time.Duration {
 	return now.Sub(lastTransmission)
 }
 
-type LostPacketSeqNums []uint16
-
-func (l LostPacketSeqNums) Remove(seq uint16) LostPacketSeqNums {
-	var n []uint16
-	for i, seqNum := range l {
-		if seqNum == seq {
-			n = append((l)[:i], (l)[i+1:]...)
-			break
-		}
-	}
-	return n
-}
-
 type sentPackets struct {
 	logger log.Logger
 	// packets is the send window: packets[0] is sequence number base, and

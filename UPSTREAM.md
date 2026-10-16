@@ -1728,7 +1728,7 @@ Found by `TestConformanceLedbatRules`, which captures the line libutp logs for
 each `apply_ccontrol` (a runtime log level; nothing in libutp is changed),
 replays the inputs into our controller, and compares the resulting window to
 the byte. Three traces, every update matching after the fix. The driver gained
-`EnableCCLog` / `CCLog` / `ClearCCLog` for it.
+`EnableCCLog` / `CCLog` for it.
 
 ## PR 60 — two unbounded growths, and fewer allocations per packet
 

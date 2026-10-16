@@ -78,11 +78,6 @@ func (p *UtpPair) RunTransfer(ctx context.Context, data []byte, opts FlowOptions
 	return runFlow(ctx, p.SockA, p.A, p.SockB, p.B, data, opts)
 }
 
-// RunTransferBToA is RunTransfer in the opposite direction.
-func (p *UtpPair) RunTransferBToA(ctx context.Context, data []byte, opts FlowOptions) (*TransferResult, error) {
-	return runFlow(ctx, p.SockB, p.B, p.SockA, p.A, data, opts)
-}
-
 func runFlow(
 	ctx context.Context,
 	senderSock *utp.UtpSocket, senderEp *Endpoint,

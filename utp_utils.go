@@ -28,16 +28,6 @@ func maxInt64(a, b int64) int64 {
 	return b
 }
 
-func ClampUint32(value, min, max uint32) uint32 {
-	if value < min {
-		return min
-	}
-	if value > max {
-		return max
-	}
-	return value
-}
-
 // NowMicro is the timestamp uTP puts on the wire: microseconds, truncated to
 // 32 bits, from a clock that never jumps.
 //
