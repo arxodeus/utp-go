@@ -15,10 +15,10 @@ Highest value, no API change, no judgement calls.
 | Fix | File |
 | --- | --- |
 | Acceptor answers a retransmitted SYN by re-sending the SYN-ACK. Nothing else retransmits it, so one lost SYN-ACK stranded the connection until the initiator gave up. | `conn.go` |
-| Deliver the end-of-stream marker on every close path. The `if !c.eof()` guard was inverted in effect — `eof()` is true by definition once state is `ConnClosed` — so readers on any connection that closed by idle timeout, RESET or local close blocked in `ReadToEOF` forever. | `conn.go` |
+| Deliver the end-of-stream marker on every close path. The `if !c.eof()` guard was inverted in effect — `eof()` is true by definition once state is `connClosed` — so readers on any connection that closed by idle timeout, RESET or local close blocked in `ReadToEOF` forever. | `conn.go` |
 | `UtpSocket.Close()` made idempotent; `timeWheel.stop()` likewise. The second call panicked closing a closed channel. | `utp_socket.go`, `delay_set.go` |
 | `UtpSocket.Close()` closes the socket it opened. It previously leaked the fd and left `readLoop` parked in `ReadFrom`, which a cancelled context does not interrupt. | `utp_socket.go` |
-| Expired accepts report `ErrAcceptTimedOut` instead of being dropped silently; both accept paths propagate `StreamResult.err`, which they previously discarded. | `utp_socket.go` |
+| Expired accepts report `ErrAcceptTimedOut` instead of being dropped silently; both accept paths propagate `streamResult.err`, which they previously discarded. | `utp_socket.go` |
 | `ConnectionId.Hash()` computes the hash when the cached one is empty. The type is exported with exported fields, so a struct literal — which upstream's own tests use — hashed to `""` and collided with every other literal-built id. | `cid.go` |
 | Time wheel dispatches expiries with its lock released. The callback hands a packet to the connection event loop, and that loop calls `put`/`remove`, which need the same lock. | `delay_set.go` |
 | Socket shutdown fan-out snapshots the channel list instead of sending under `connsMutex`. | `utp_socket.go` |
@@ -40,7 +40,7 @@ control at all. The acceptor's SYN path has the same `int64`/`uint32` mixing.
 
 Fixed as a `uint32` wrapping subtraction of the packet's timestamp from the
 current time, matching libutp's `reply_micro`, via a named
-`wrappingSubUint32` helper with wrap-boundary tests. `DurationBetween` is also
+`wrappingSubUint32` helper with wrap-boundary tests. `durationBetween` is also
 corrected — it was off by one on the wrapping branch and returned a
 nanosecond-typed `Duration` holding a microsecond count.
 
@@ -372,7 +372,7 @@ that expects standard library types, and it is what found PRs 14 and 15.
 Both found by tests of a kind this repository did not have.
 
 - The socket was told to forget a connection only from the branch of the
-  event loop where the state machine reached `ConnClosed`. A connection torn
+  event loop where the state machine reached `connClosed`. A connection torn
   down by a cancelled context left its table entry forever: 40 attempts to a
   dead port left 40 tracked connections. Goroutines were unaffected, which is
   why goroutine-counting caught nothing.
@@ -521,7 +521,7 @@ sends one per batch: `schedule_ack()` sets a flag
 batch of datagrams (`utp.h:512-517`, `utp_internal.cpp:3796-3808`).
 
 `connection.ackPending` and `flushAck()` do the same. The socket reads the way
-libutp's embedder does, every datagram the kernel holds (`UdpConn.readBatch`),
+libutp's embedder does, every datagram the kernel holds (`udpConn.readBatch`),
 and each connection that received data acknowledges once the whole read has
 been handed out.
 
@@ -666,7 +666,7 @@ The smallest diff here and, for anyone embedding this library behind a
 `net.Conn`, the one that decides whether it works at all.
 
 `UtpSocket.Connect` and `ConnectWithCid` passed the caller's context to
-`NewUtpStream`, which made it the connection's lifetime. `net.Dialer`
+`newUtpStream`, which made it the connection's lifetime. `net.Dialer`
 documents the opposite -- "Canceling ctx does not affect the connection after
 it is established" -- and the standard Go shape relies on it:
 
@@ -847,7 +847,7 @@ which are PR 31 and PR 32.
 | Timeout, in-flight branch (`:1223-1228`) | `netem.TestTimeoutWithDataInFlightCollapsesWindow` | window to one packet with slow start on; 43560 against 44233 bytes delivered in recovery |
 | Delay clamp to RTT (`:1615-1621`) | `TestDelayClampedToRTT` | 20 acknowledgements claiming 30s of delay leave the window intact; unclamped they take it to the floor |
 
-`ControllerStats` and `ConnectionMetrics` gain `SlowStart` and
+`controllerStats` and `ConnectionMetrics` gain `SlowStart` and
 `AppLimitedSince`, without which two of these cannot be measured at all: a
 window growing while the application is idle is correct in slow start and a
 defect after it, and nothing outside the controller could tell which.
@@ -868,7 +868,7 @@ The one capability libutp had that this library did not.
 
 libutp holds a socket in `CS_GOT_FIN` when the peer closes its sending side and
 keeps delivering to its application, and offers `utp_shutdown(s, SHUT_WR)`
-(`utp.h:176`) for the other direction. This library moved to `ConnClosed` as
+(`utp.h:176`) for the other direction. This library moved to `connClosed` as
 soon as the remote FIN was reached, so a peer closing its sending side took the
 whole connection with it, and whatever it was still sending back was lost.
 
@@ -969,7 +969,7 @@ wrapped so `errors.Is` finds either.
 
 ## PR 37 — an unmatched acknowledgement killed the connection
 
-`sentPackets.onAck` returned `ErrInvalidAckNum` for an acknowledgement number
+`sentPackets.onAck` returned `errInvalidAckNum` for an acknowledgement number
 outside the range it tracked, and `processAck` turned that into a reset.
 libutp discards the count and carries on: `if (acks > cur_window_packets) acks
 = 0;` (`utp_internal.cpp:1907`), commented "this happens when we receive an
@@ -1030,7 +1030,7 @@ one (`their_delay`, `:2000-2001`). The difference between two directions is not
 a queue in either; on an asymmetric path it is the asymmetry with the real
 queue buried in it.
 
-`ControllerStats` now carries `CurrentDelay`, the newest sample of the same
+`controllerStats` now carries `CurrentDelay`, the newest sample of the same
 series `BaseDelay` is the minimum of, and the metric is their difference. Both
 halves are tested: a 10ms/100ms path with no bottleneck (1.9ms corrected
 against 90.7ms uncorrected, both computed from the same samples so the
@@ -1053,9 +1053,9 @@ stall in KNOWN-LIMITATIONS.md, which neither implementation can recover from
 once the size is adopted.
 
 `utp.PathMTUProvider` is an **optional** interface — `PathMTU(ConnectionPeer)
-(int, bool)` — implemented by `UdpConn` and by netem's `Endpoint`. The `Conn`
+(int, bool)` — implemented by `udpConn` and by netem's `Endpoint`. The `Conn`
 interface is untouched, so the libutp driver and any other implementation are
-unaffected and keep the configured ceiling. `UdpConn` finds it by asking the
+unaffected and keep the configured ceiling. `udpConn` finds it by asking the
 routing table which local address a datagram to that peer would leave from (a
 UDP "dial", which sends nothing) and reading the MTU of the interface that
 owns it; per peer rather than per socket, because split tunnelling sends two
@@ -1196,7 +1196,7 @@ recorded as still open.
 
 ## PR 44 — virtual timers
 
-`Clock` and `IdleBarrier`. Every deadline the connection compares, its four
+`Clock` and `idleBarrier`. Every deadline the connection compares, its four
 event-loop timers and the socket's retransmission wheel come from an
 injectable clock; `RealClock` is the default and the production path is
 unchanged.
@@ -1364,7 +1364,7 @@ event, and `UtpSocket.writeLoop` asks the `Conn` to honour it. A `Conn` that
 cannot answers `ErrDontFragmentUnsupported` and the datagram goes out
 normally, so nothing can turn a missing socket option into a lost packet.
 
-`UdpConn` implements it by setting the option, sending one datagram and
+`udpConn` implements it by setting the option, sending one datagram and
 clearing it again. That is only sound because every datagram this library
 sends leaves through one goroutine, so no other write can land between the
 two — worth knowing before anyone adds a second write path.
@@ -1932,6 +1932,24 @@ behaviour on the wire -- turned about one 16 MB loopback transfer in ten
 under load into "read: reset" after every byte had arrived.
 `TestResetAfterTheFinTakesNothingBack`. KNOWN-LIMITATIONS.md, "A reset after
 the peer's FIN turned a complete transfer into an error".
+
+## PR 72 — the exported API is what a caller can use
+
+Of the root package's 131 exported names, 78 could not be reached from any
+function or type a caller can get hold of: the packet codec, the congestion
+controller, connection state, wire-format constants, internal errors. They
+are unexported (ALL_CAPS constants become camelCase), except `DecodePacket`,
+which wrapped the unexported decoder and is deleted; 10 sentinel errors
+nothing returned are deleted too. Of `UtpSocket`'s methods, `GenerateCid`
+is unexported and `Cid`, which only called it, is deleted. The 43 that remain, with `IsPacket`, are
+the socket, the stream, their configuration, the peer and clock interfaces,
+and the errors a caller can receive. `IsPacket` is new: the one thing outside
+the package that needed the codec, `utpnet`'s multiplexing of uTP with other
+UDP traffic, needed only to ask whether a datagram is a uTP header, with
+libutp's test (`utp_internal.cpp:2481`, `:2834`).
+
+Breaking for anyone using the removed names; none of them do anything a
+caller of the remaining API needs.
 
 ## Not for upstream
 

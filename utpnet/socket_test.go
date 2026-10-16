@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	utp "github.com/arxodeus/utp"
 	"github.com/ethereum/go-ethereum/log"
 )
 
@@ -221,7 +221,14 @@ func TestUtpPacketsDoNotLeakToReadFrom(t *testing.T) {
 // The sniff decides what the uTP machinery ever sees, so it is tested on its
 // own rather than only through a transfer.
 func TestIsUtpPacket(t *testing.T) {
-	valid := utp.NewPacketBuilder(0, 1234, 200000, 1048576, 42).Build().Encode()
+	// An ST_DATA header, version 1, no extension: connection id 1234,
+	// timestamp 200000, window 1 MiB, sequence number 42 (BEP 29).
+	valid := make([]byte, 20)
+	valid[0] = 0<<4 | 1
+	binary.BigEndian.PutUint16(valid[2:], 1234)
+	binary.BigEndian.PutUint32(valid[4:], 200000)
+	binary.BigEndian.PutUint32(valid[12:], 1048576)
+	binary.BigEndian.PutUint16(valid[16:], 42)
 
 	cases := []struct {
 		name string

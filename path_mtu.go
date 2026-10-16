@@ -60,7 +60,7 @@ const pathMTUCacheTTL = time.Minute
 // make golang.org/x/sys a direct dependency -- and the point of this fork is
 // that it builds anywhere with CGO_ENABLED=0. Feeding ICMP in directly is the
 // portable route to the same information; see ProcessICMPFragmentation.
-func (c *UdpConn) PathMTU(peer ConnectionPeer) (int, bool) {
+func (c *udpConn) PathMTU(peer ConnectionPeer) (int, bool) {
 	addr, ok := udpAddrForPeer(peer)
 	if !ok {
 		return 0, false

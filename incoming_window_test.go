@@ -10,12 +10,12 @@ func incomingWindowConn(t *testing.T) (*connection, time.Time) {
 	t.Helper()
 	const syn = uint16(100)
 	const synAck = uint16(101)
-	conn := CreateTestConnection(Endpoint{Type: Acceptor, SynNum: syn, SynAck: synAck})
+	conn := CreateTestConnection(endpointInfo{Type: acceptor, SynNum: syn, SynAck: synAck})
 	sentPackets := newSentPacketsWithoutLogger(synAck, newDefaultController(fromConnConfig(conn.config)))
 	now := time.Now()
 	sentPackets.OnTransmit(synAck+1, st_data, []byte{0xef}, 64, now)
-	conn.state = &ConnState{
-		stateType:   ConnConnected,
+	conn.state = &connState{
+		stateType:   connConnected,
 		SentPackets: sentPackets,
 		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
 		RecvBuf:     newReceiveBuffer(TEST_BUFFER_SIZE, syn),
@@ -33,7 +33,7 @@ func TestDiscardedPacketDoesNotSetThePeerWindow(t *testing.T) {
 	conn, now := incomingWindowConn(t)
 	const syn = uint16(100)
 	// Acknowledges a packet never sent: libutp drops it (:1794-1807).
-	forged := NewPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()), 0, syn+1).
+	forged := newPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()), 0, syn+1).
 		WithAckNum(101 + 50).Build()
 	if !conn.invalidAckNum(forged) {
 		t.Fatal("the pre-filter accepts this packet, so the test does not reach the case")
@@ -47,7 +47,7 @@ func TestDiscardedPacketDoesNotSetThePeerWindow(t *testing.T) {
 	}
 
 	// The same window on a packet that passes is taken.
-	good := NewPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()), 0, syn+1).
+	good := newPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()), 0, syn+1).
 		WithAckNum(101).Build()
 	conn.onPacket(good, now)
 	if conn.peerRecvWindow != 0 {
@@ -62,7 +62,7 @@ func TestZeroWindowProbeDeadlineRestartsOnEachZeroWindow(t *testing.T) {
 	conn, now := incomingWindowConn(t)
 	const syn = uint16(100)
 	zero := func(at time.Time) {
-		conn.onPacket(NewPacketBuilder(st_state, conn.cid.Send, uint32(at.UnixMicro()), 0, syn+1).
+		conn.onPacket(newPacketBuilder(st_state, conn.cid.Send, uint32(at.UnixMicro()), 0, syn+1).
 			WithAckNum(101).Build(), at)
 	}
 	zero(now)
@@ -84,7 +84,7 @@ func TestZeroWindowProbeDeadlineRestartsOnEachZeroWindow(t *testing.T) {
 func TestFinWaitsForRoomInTheWindow(t *testing.T) {
 	const syn = uint16(100)
 	const synAck = uint16(101)
-	conn := CreateTestConnection(Endpoint{Type: Acceptor, SynNum: syn, SynAck: synAck})
+	conn := CreateTestConnection(endpointInfo{Type: acceptor, SynNum: syn, SynAck: synAck})
 	ctrl := newDefaultController(fromConnConfig(conn.config))
 	ctrl.maxWindowSizeBytes = 1 << 20
 	sentPackets := newSentPacketsWithoutLogger(synAck, ctrl)
@@ -92,8 +92,8 @@ func TestFinWaitsForRoomInTheWindow(t *testing.T) {
 	for i := uint16(1); i <= 3; i++ {
 		sentPackets.OnTransmit(synAck+i, st_data, make([]byte, 1000), 1000, now)
 	}
-	conn.state = &ConnState{
-		stateType:   ConnConnected,
+	conn.state = &connState{
+		stateType:   connConnected,
 		SentPackets: sentPackets,
 		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
 		RecvBuf:     newReceiveBuffer(TEST_BUFFER_SIZE, syn),
@@ -126,13 +126,13 @@ func TestFinWaitsForRoomInTheWindow(t *testing.T) {
 // timer ran: about 36 s instead of 5 for 1 MB each way at 5% loss, in 3 runs
 // of 15.
 func TestAcknowledgementOnADataPacketWakesTheWriter(t *testing.T) {
-	for _, pt := range []PacketType{st_state, st_data} {
+	for _, pt := range []packetType{st_state, st_data} {
 		t.Run(pt.String(), func(t *testing.T) {
 			conn, now := incomingWindowConn(t)
 			const syn = uint16(100)
 			// Clear any wake left over from setting up.
 			conn.wantWrite = false
-			b := NewPacketBuilder(pt, conn.cid.Send, uint32(now.UnixMicro()), 1<<20, syn+1).WithAckNum(102)
+			b := newPacketBuilder(pt, conn.cid.Send, uint32(now.UnixMicro()), 1<<20, syn+1).WithAckNum(102)
 			if pt == st_data {
 				b = b.WithPayload([]byte("the peer's own data"))
 			}
@@ -183,7 +183,7 @@ func TestClosedConnectionAnswersEachWriteOnce(t *testing.T) {
 	conn, now := incomingWindowConn(t)
 	resultCh := make(chan *readOrWriteResult, 1)
 	conn.pendingWrites = []*queuedWrite{{data: []byte("unsent"), resultCh: resultCh}}
-	conn.state.stateType = ConnClosed
+	conn.state.stateType = connClosed
 	conn.state.Err = ErrReset
 
 	done := make(chan struct{})

@@ -9,15 +9,15 @@ import (
 	"testing"
 )
 
-// batchPair is a UdpConn and a socket sending to it.
-func batchPair(t *testing.T, network string, ip net.IP) (*UdpConn, *net.UDPConn) {
+// batchPair is a udpConn and a socket sending to it.
+func batchPair(t *testing.T, network string, ip net.IP) (*udpConn, *net.UDPConn) {
 	t.Helper()
 	base, err := net.ListenUDP(network, &net.UDPAddr{IP: ip})
 	if err != nil {
 		t.Skipf("no %s loopback: %v", network, err)
 	}
 	_ = base.SetReadBuffer(8 << 20)
-	c := &UdpConn{base: base}
+	c := &udpConn{base: base}
 	t.Cleanup(func() { _ = c.Close() })
 	src, err := net.DialUDP(network, nil, base.LocalAddr().(*net.UDPAddr))
 	if err != nil {

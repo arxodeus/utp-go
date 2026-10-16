@@ -20,15 +20,15 @@ func icmpQuietLog() log.Logger {
 // this side sent, carrying connId in its header. Routers quote the front of
 // the offending datagram, so 20 bytes of header is all a caller can rely on
 // having.
-func quotedDatagram(t *testing.T, pktType PacketType, connId uint16) []byte {
+func quotedDatagram(t *testing.T, pktType packetType, connId uint16) []byte {
 	t.Helper()
-	p := NewPacketBuilder(pktType, connId, uint32(time.Now().UnixMicro()), 1024*1024, 1).Build()
+	p := newPacketBuilder(pktType, connId, uint32(time.Now().UnixMicro()), 1024*1024, 1).Build()
 	encoded := p.Encode()
-	if len(encoded) < MINIMAL_HEADER_SIZE {
+	if len(encoded) < minimalHeaderSize {
 		t.Fatalf("encoded packet is %d bytes, shorter than a header", len(encoded))
 	}
 	// Quote only the header, which is the least a router will send.
-	return encoded[:MINIMAL_HEADER_SIZE]
+	return encoded[:minimalHeaderSize]
 }
 
 // icmpPair brings up a connected pair over loopback UDP and returns the
@@ -304,7 +304,7 @@ func TestProcessICMPIgnoresWhatItCannotMatch(t *testing.T) {
 
 	good := quotedDatagram(t, st_data, p.cidA.Send)
 
-	runt := good[:MINIMAL_HEADER_SIZE-1]
+	runt := good[:minimalHeaderSize-1]
 	badVersion := append([]byte(nil), good...)
 	badVersion[0] = (badVersion[0] & 0xF0) | 2
 	badType := append([]byte(nil), good...)

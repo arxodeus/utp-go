@@ -110,7 +110,7 @@ func ackBatchPackets(batch int) [][]byte {
 	pkts := make([][]byte, 0, batch)
 	for i := 0; i < batch; i++ {
 		seq := corpusSynSeq + 2 + uint16(i)
-		pkts = append(pkts, NewPacketBuilder(st_data, corpusSynConnID+1, 200000+uint32(i),
+		pkts = append(pkts, newPacketBuilder(st_data, corpusSynConnID+1, 200000+uint32(i),
 			corpusWindow, seq).WithAckNum(corpusPinnedSeq-1).
 			WithPayload([]byte("x")).Build().Encode())
 	}

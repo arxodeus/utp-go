@@ -100,7 +100,7 @@ func (c *scriptedConn) settleQuick() {
 // The divergence itself is pinned by TestConformanceFinBeforeAnyData, so
 // removing it here does not hide it.
 func fuzzPrimingPacket() []byte {
-	return NewPacketBuilder(st_data, corpusSynConnID+1, 190000, corpusWindow, corpusSynSeq+1).
+	return newPacketBuilder(st_data, corpusSynConnID+1, 190000, corpusWindow, corpusSynSeq+1).
 		WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("prime")).Build().Encode()
 }
 
@@ -144,8 +144,8 @@ func seedDifferentialCorpus(f *testing.F, connID uint16) {
 		firstInOrder = corpusSynSeq + 2
 	}
 
-	mk := func(typ PacketType, seqOffset uint16, ts uint32, body []byte) []byte {
-		b := NewPacketBuilder(typ, connID, ts, corpusWindow, firstInOrder+seqOffset).WithAckNum(ack)
+	mk := func(typ packetType, seqOffset uint16, ts uint32, body []byte) []byte {
+		b := newPacketBuilder(typ, connID, ts, corpusWindow, firstInOrder+seqOffset).WithAckNum(ack)
 		if len(body) > 0 {
 			b = b.WithPayload(body)
 		}
@@ -449,7 +449,7 @@ func (r *differentialRun) compare(step int, injected [][]byte) {
 // initiatorSynAck is the peer's answer to our SYN: a STATE addressed to our
 // receive id, acknowledging the SYN's sequence number.
 func initiatorSynAck() []byte {
-	return NewPacketBuilder(st_state, initiatorConnSeed, 150000, corpusWindow, 900).
+	return newPacketBuilder(st_state, initiatorConnSeed, 150000, corpusWindow, 900).
 		WithAckNum(initiatorConnSeed).Build().Encode()
 }
 
@@ -459,7 +459,7 @@ func groupByConnection(t *testing.T, raws [][]byte) map[uint16][]*packet {
 	t.Helper()
 	out := make(map[uint16][]*packet)
 	for _, raw := range raws {
-		pkt, err := DecodePacket(raw)
+		pkt, err := decodePacket(raw, false)
 		if err != nil {
 			// Either side emitting something this decoder rejects is a real
 			// finding: our own output must be parseable by us, and libutp's
@@ -486,13 +486,13 @@ func TestDifferentialHarnessIsLive(t *testing.T) {
 		{
 			name: "responder",
 			role: differentialResponder,
-			probe: NewPacketBuilder(st_data, corpusSynConnID+1, 250000, corpusWindow, corpusSynSeq+2).
+			probe: newPacketBuilder(st_data, corpusSynConnID+1, 250000, corpusWindow, corpusSynSeq+2).
 				WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("probe")).Build().Encode(),
 		},
 		{
 			name: "initiator",
 			role: differentialInitiator,
-			probe: NewPacketBuilder(st_data, initiatorConnSeed, 250000, corpusWindow, 900).
+			probe: newPacketBuilder(st_data, initiatorConnSeed, 250000, corpusWindow, 900).
 				WithAckNum(initiatorConnSeed).WithPayload([]byte("probe")).Build().Encode(),
 		},
 	} {
@@ -538,11 +538,11 @@ func TestDifferentialHandshakeIsEmitted(t *testing.T) {
 			t.Fatal("libutp emitted no SYN when connecting")
 		}
 
-		ours, err := DecodePacket(ourSyn[0])
+		ours, err := decodePacket(ourSyn[0], false)
 		if err != nil {
 			t.Fatalf("our SYN does not decode: %v", err)
 		}
-		theirs, err := DecodePacket(theirSyn[0])
+		theirs, err := decodePacket(theirSyn[0], false)
 		if err != nil {
 			t.Fatalf("libutp's SYN does not decode: %v", err)
 		}

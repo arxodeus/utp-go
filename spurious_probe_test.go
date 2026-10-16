@@ -62,7 +62,7 @@ func spuriousProbe(t *testing.T, stall bool) {
 	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(NewPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+		conn.inject(newPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
 	})
 	stream := <-accepted
 	if stream == nil {
@@ -95,7 +95,7 @@ func spuriousProbe(t *testing.T, stall bool) {
 		if noDelay {
 			diff = 0
 		}
-		return NewPacketBuilder(st_state, peerID+1, peerNow, 1<<20, peerSeq+1).
+		return newPacketBuilder(st_state, peerID+1, peerNow, 1<<20, peerSeq+1).
 			WithAckNum(cum).WithTsDiffMicros(diff).Build().Encode()
 	}
 	type sent struct {
@@ -108,7 +108,7 @@ func spuriousProbe(t *testing.T, stall bool) {
 	drain := func() []sent {
 		var out []sent
 		for _, raw := range conn.takeEmitted() {
-			p, err := DecodePacket(raw)
+			p, err := decodePacket(raw, false)
 			if err != nil || p.Header.PacketType != st_data {
 				continue
 			}

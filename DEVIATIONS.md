@@ -179,7 +179,7 @@ consequence, or equivalent on the wire.
   link-local peers on different interfaces can collide),
   *larger default UDP socket buffers* (this library owns the socket; libutp
   does not), *a packet that does not fit the receive buffer is dropped*
-  (this library owns that buffer; libutp has none), *`ReadToEOF` returns nil*, *`Controller.Stats()`*,
+  (this library owns that buffer; libutp has none), *`ReadToEOF` returns nil*, *congestion state is observable*,
   *`MaxConnAttempts` counts transmissions*, *the selective-ack window* (always
   30 entries), *read-side half-close discards what is buffered* (libutp has no
   buffer to discard), *ICMP: no CS_IDLE state*, *`WriteV` blocks*.
@@ -267,10 +267,12 @@ Not a wire behaviour — a Go API choice, matching `io.ReadAll`. Abnormal
 closes still return their error. Noted because the previous behaviour was
 inconsistent between code paths rather than a considered deviation.
 
-### 3. `Controller` exposes a `Stats()` snapshot
+### 3. Congestion state is observable: `ConnectionMetrics`
 
-The `Controller` interface gained `Stats() ControllerStats`, and
-`ConnectionConfig` gained an optional `Metrics` observer. libutp has no
+`ConnectionConfig` has an optional `Metrics` observer that receives a
+`ConnectionMetrics` snapshot of the congestion controller (window, delay,
+RTT, slow start) at a fixed interval; internally the controller exposes
+`Stats() controllerStats` for it. libutp has no
 equivalent; it exposes state through `utp_get_stats` and its logging callback.
 
 **Reason:** a controller that can only be observed through its effect on
@@ -305,7 +307,7 @@ extension (`utp_internal.cpp:1844` — `case 1: selack_ptr = data; break;`); the
 only check applied is the generic one that the extension's length fits inside
 the datagram. A 1, 3, 5 or 7-byte bitfield is read and acted on.
 
-`DecodeSelectiveAck` requires a whole number of 4-byte words and fails the
+`decodeSelectiveAck` requires a whole number of 4-byte words and fails the
 packet otherwise.
 
 Reason: a bitfield that is not a whole number of words is truncated, and there
@@ -429,7 +431,7 @@ have run on the wrong controller, unrecorded. So:
   `utpnet.Socket` always sets it, so torrent, every other `utpnet` user and
   the go-libutp drop-in accept this way.
 - **Without it**, a SYN that arrives with no Accept waiting is parked,
-  unanswered, for up to `AWAITING_CONNECTION_TIMEOUT` (20 s), and answered
+  unanswered, for up to `awaitingConnectionTimeout` (20 s), and answered
   when an Accept claims it. The dialler retransmits its SYN meanwhile, so
   the connection completes if an Accept comes within the dialler's 21 s,
   late by however long it took.
@@ -621,7 +623,7 @@ embedder flushes it once per read batch via `utp_issue_deferred_acks()`
 (`utp.h:512-517`, `utp_internal.cpp:3796-3808`): it reads until the socket
 would block, then acknowledges.
 
-The socket here does the same. `UdpConn.readBatch` reads every datagram the
+The socket here does the same. `udpConn.readBatch` reads every datagram the
 kernel already holds, waiting only for the first (`batch_read_unix.go`; on
 Linux with recvmmsg, up to sixteen a system call, `batch_drain_linux.go`), and
 each connection that received data in the batch acknowledges once the whole
@@ -1349,7 +1351,7 @@ reason libutp gives for ignoring it ("don't pass on errors for idle/closed
 connections") applies to a connection that has already finished, and
 `onICMPUnreachable` skips those.
 
-`CS_DESTROY` and `CS_RESET` both become `ConnClosed`. libutp uses the
+`CS_DESTROY` and `CS_RESET` both become `connClosed`. libutp uses the
 difference to decide how soon the socket object is freed, not what the
 application is told: both branches fall through to the same
 `utp_call_on_error`, so the error is reported either way, which is what

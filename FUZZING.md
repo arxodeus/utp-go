@@ -208,20 +208,21 @@ silently.
 ### `Encode` could produce a packet this decoder rejects
 
 **Fixed.** `packet.Encode` took the header's extension byte from `p.Header`,
-which is only right for packets built by `PacketBuilder`. A *decoded* packet
+which is only right for packets built by `packetBuilder`. A *decoded* packet
 keeps whatever extension byte the peer sent, while `Eack` is nil unless a
 selective ack was retained — so a packet that arrived carrying a zero-length
 selective ack, or the extension-bits extension, or a chain continuing past the
 selective ack, re-encoded to a header claiming an extension with no extension
 bytes after it. This library's own decoder rejects that.
 
-`Encode` now derives the byte from what it is writing, and `DecodePacket`
+`Encode` now derives the byte from what it is writing, and the decoder
 normalises the header to describe what was actually retained, so the struct no
 longer claims to hold something it discarded.
 
 Nothing on the live path re-encodes a decoded packet, so this was latent. But
-`DecodePacket` is exported and its result has exported methods, so an external
-caller can reach it, and a proxy or relay built on this library would have
+the decoder was then exported (as `DecodePacket`, unexported since)
+and its result had exported methods, so an external caller could reach
+it, and a proxy or relay built on this library would have
 emitted unparseable packets.
 
 Both minimised inputs are in `testdata/fuzz/FuzzDecodePacket/`.
@@ -301,7 +302,7 @@ STATE carried a number libutp's never would.
 
 **Fixed.** The socket was told to forget a connection from exactly one place:
 the branch of the connection's event loop where the state machine reached
-`ConnClosed`. A connection torn down by a cancelled context — which is what an
+`connClosed`. A connection torn down by a cancelled context — which is what an
 abandoned or failed connection attempt *is* — exited by a different path and
 left its entry in the socket's connection table forever.
 

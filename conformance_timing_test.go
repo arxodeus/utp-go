@@ -286,7 +286,7 @@ func ourRetransmitSchedule(t *testing.T, cfg *ConnectionConfig, afterHandshake b
 	var haveFirst bool
 	collect := func(match func(*packet) bool) {
 		for _, raw := range conn.takeEmitted() {
-			pkt, err := DecodePacket(raw)
+			pkt, err := decodePacket(raw, false)
 			if err != nil || !match(pkt) {
 				continue
 			}

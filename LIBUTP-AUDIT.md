@@ -89,7 +89,7 @@ libutp it was, and the tests named are what stands behind each verdict.
 | `OUTGOING_BUFFER_MAX_SIZE` 1024 | `maxOutstandingPackets` | Fixed (N1) |
 | `PACKET_SIZE` 1435 | zero-window probe | Deviation: "The zero-window probe fits a packet at any MTU" |
 | `MIN_WINDOW_SIZE` 10 | two packets | Deviation: "The congestion window starts at, and never falls below, two packets" |
-| `DUPLICATE_ACKS_BEFORE_RESEND` 3 | `LossThreshold`, `duplicateAcksBeforeResend` | Matched, measured |
+| `DUPLICATE_ACKS_BEFORE_RESEND` 3 | `lossThreshold`, `duplicateAcksBeforeResend` | Matched, measured |
 | `ACK_NR_ALLOWED_WINDOW` 3 | `ackNrAllowedWindow` | Matched, differential |
 | `RST_INFO_TIMEOUT`, `RST_INFO_LIMIT` | `utp_socket.go` | Matched, flood corpus |
 | `KEEPALIVE_INTERVAL` 29000 | `conn.go` | Matched, measured |
@@ -191,10 +191,10 @@ libutp it was, and the tests named are what stands behind each verdict.
 
 | libutp | Ours | Verdict |
 | --- | --- | --- |
-| type past `ST_NUM_STATES` dropped | `DecodePacketHeader` | Matched |
+| type past `ST_NUM_STATES` dropped | `decodePacketHeader` | Matched |
 | acknowledgement number outside `[seq_nr - 1 - max(cur_window_packets + 3, 3), seq_nr - 1]` dropped, SYN in `CS_SYN_RECV` excepted (`:1794-1807`) | `invalidAckNum` | Matched, differential (`TestStaleAckIsIgnoredNotFatal`, corpus) |
-| header shorter than its size dropped | `DecodePacket` | Matched |
-| extension chain: truncated chain dropped; last selective ack wins; type 2 must be 8 bytes; other types skipped | `DecodeRawExtensions`, `malformedExtensionBits` | Matched; type 2's length was N14. A first extension of 3 or more is rejected by both (DEVIATIONS.md, "Unknown extension types") |
+| header shorter than its size dropped | `decodePacket` | Matched |
+| extension chain: truncated chain dropped; last selective ack wins; type 2 must be 8 bytes; other types skipped | `decodeRawExtensions`, `malformedExtensionBits` | Matched; type 2's length was N14. A first extension of 3 or more is rejected by both (DEVIATIONS.md, "Unknown extension types") |
 | `CS_SYN_SENT`: `ack_nr` from the SYN-ACK | `onState` | Matched (initiator corpus) |
 | reorder window: 1024 ahead; an old packet re-acknowledged unless ST_STATE (`:1886-1899`) | `outsideReorderWindow` | Matched, differential |
 | acknowledged count, old acknowledgements count none (`:1904-1907`) | `onAck` | Matched |
@@ -229,14 +229,14 @@ libutp it was, and the tests named are what stands behind each verdict.
 
 | libutp | Ours | Verdict |
 | --- | --- | --- |
-| `UTP_Version`: type below `ST_NUM_STATES`, first extension below 3, version 1 | `DecodePacketHeader` | Matched (DEVIATIONS.md, "Unknown extension types") |
+| `UTP_Version`: type below `ST_NUM_STATES`, first extension below 3, version 1 | `decodePacketHeader` | Matched (DEVIATIONS.md, "Unknown extension types") |
 | `~UTPSocket`: off the ack list, buffers freed | connection teardown | N/A (storage) |
 | `utp_initialize_socket`: connection id avoiding ids in use; `average_sample_time` now + 5 s; `last_rwin_decay` allows an immediate decay; window one packet; MTU search from the ceiling | `GenerateCid`, `newDriftEstimator`, `decayOnLoss`, controller defaults, `mtuSearch` | Matched, except the initial window and the search's start (both recorded deviations) |
 | `last_measured_delay` | none | N/A: written, never read |
 | `utp_create_socket`: `rto` 3000; `rtt_var` 800; `max_window_user` 255 x 1435; `ssthresh` = `opt_sndbuf`; `fast_resend_seq_nr` = 1 | controller and connection defaults | `rto` matched (measured: both first resend at 3.1 s, `TestPeerFinDoesNotTimeOutWhatIsInFlight`); `rtt_var` is overwritten by the first sample, N/A; `max_window_user` matters only before the SYN-ACK, when nothing can be sent, N/A; `ssthresh` matched (`TestConformanceLedbatRules`); `fast_resend_seq_nr` is the recorded initiator deviation |
 | context and socket options: target delay, send and receive buffers | `ConnectionConfig` | Matched (KNOWN-LIMITATIONS.md, "The libutp API surface, audited function by function") |
 | `utp_connect`: random id and sequence number, SYN with no extension and our window, first timeout 3000 ms | `ConnectWithCid`, SYN path | Matched (initiator corpus); the attempt count is a recorded deviation |
-| `utp_process_udp`: short or non-version-1 datagram dropped | `DecodePacket` | Matched |
+| `utp_process_udp`: short or non-version-1 datagram dropped | `decodePacket` | Matched |
 | RESET looked up by id, id + 1 or id - 1 with a matching send id; `ECONNREFUSED` while connecting | `utp_socket.go` | Matched (corpus) |
 | unknown non-SYN answered with a rate-limited RESET (`RST_INFO_*`) | `utp_socket.go` | Matched, flood corpus |
 | SYN for an existing connection ignored (`:2955-2958`) | SYN-ACK repeated | Deviation (N27) |
@@ -254,10 +254,10 @@ libutp it was, and the tests named are what stands behind each verdict.
 | --- | --- | --- |
 | `utp_writev`: refused outside `CS_CONNECTED` or after the FIN; queued while `!is_full(size)`; small writes join the last unsent packet; `CS_CONNECTED_FULL` when full | `Write`, `WriteV`, send buffer, `processWrites` | Matched in effect: what goes on the wire follows `flush_packets`, which needs a whole packet of room (`TestNothingIsSentIntoLessThanAPacketOfRoom`). Small writes did not join: the send buffer gave each packet one write at most, found when the Nagle rule changed nothing; fixed (`TestSendBufferReadSpansWrites`, `TestInitiatorNagle`). `WriteV`'s blocking and the 1024-buffer limit are recorded deviations |
 | `utp_read_drained` | `onReadDrained` | Matched, measured (KNOWN-LIMITATIONS.md, "The M4b sweep") |
-| `utp_issue_deferred_acks` | `flushAck` once the socket read that brought the data has been handed out (`UdpConn.readBatch` reads until the socket would block, as libutp's embedder does) | Matched; letting an acknowledgement wait for more packets is a recorded deviation |
+| `utp_issue_deferred_acks` | `flushAck` once the socket read that brought the data has been handed out (`udpConn.readBatch` reads until the socket would block, as libutp's embedder does) | Matched; letting an acknowledgement wait for more packets is a recorded deviation |
 | `utp_check_timeouts`: 500 ms pass, `RST_INFO_TIMEOUT` expiry, sockets destroyed | timers, `utp_socket.go` | Deviation: "Timeouts act when due"; reset bookkeeping matched (flood corpus) |
 | `utp_getpeername`, `utp_get_context`, user data | `Cid().Peer`, Go values | N/A (API shape) |
-| `utp_get_delays`: our filtered delay, the peer's, and an age | `ControllerStats` | N/A: a diagnostic. Ours reports the base and the latest raw sample, not the filtered value |
+| `utp_get_delays`: our filtered delay, the peer's, and an age | `controllerStats` | N/A: a diagnostic. Ours reports the base and the latest raw sample, not the filtered value |
 | `utp_close`: read side shut, FIN queued, destroyed once it is acknowledged; destroyed at once if still connecting | `Close` | Matched: returns at once, and the connection goes on delivering. `UtpSocket.Close` waits for closed streams while their peers answer, where destroying a libutp context discards them (DEVIATIONS.md, "Closing a stream returns at once") |
 | `utp_shutdown(SHUT_RD / SHUT_WR)` | `CloseRead`, `CloseWrite` | Matched (KNOWN-LIMITATIONS.md, "`utp_shutdown(SHUT_RD)`") |
 | logging, `utp_get_stats` | `slog`, `ConnectionMetrics` | N/A |
@@ -267,10 +267,10 @@ libutp it was, and the tests named are what stands behind each verdict.
 | libutp | Ours | Verdict |
 | --- | --- | --- |
 | `utp_api.cpp`: context defaults -- target delay `CCONTROL_TARGET` 100 ms, `opt_sndbuf` and `opt_rcvbuf` 1 MB, default callbacks | `defaultTargetMicros`, `DefaultWindowSize`, `DefaultBufferSize` | Matched |
-| `utp_utils.cpp`: microsecond clock from CLOCK_MONOTONIC, never backwards | `NowMicro` | Fixed (N29) |
+| `utp_utils.cpp`: microsecond clock from CLOCK_MONOTONIC, never backwards | `nowMicro` | Fixed (N29) |
 | `utp_utils.cpp`: default UDP MTU 1402 on IPv4 and 1232 on IPv6, assuming Teredo | `defaultMaxPacketSizeBytes`, `ipv6Ceiling` | IPv4 fixed (N31); IPv6 matched |
 | `utp_utils.cpp`: UDP overhead 28 or 76 bytes | none | N/A (statistics) |
-| `utp_utils.cpp`: `rand()` for ids and sequence numbers | `RandomUint16` | Matched in effect: any uniform source |
+| `utp_utils.cpp`: `rand()` for ids and sequence numbers | `randomUint16` | Matched in effect: any uniform source |
 | `utp_callbacks.cpp`: each callback a no-op or 0 when unset; `get_read_buffer_size` 0, so the window is the whole `opt_rcvbuf` | the receive buffer | Matched (the advertised window is what the buffer has free) |
 | `utp_packedsockaddr.cpp`: IPv4 stored IPv4-mapped, compared with port; the IPv6 zone dropped | `UdpPeer.Hash` | IPv4 and mapped forms matched; the zone is N30 |
 | `utp_internal.h`: `RST_Info`; sockets keyed by address and receive id; the context | `utp_socket.go` | Matched (flood corpus; connection lookup corpus) |

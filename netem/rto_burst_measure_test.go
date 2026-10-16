@@ -4,6 +4,7 @@ package netem
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"sort"
@@ -11,8 +12,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	utp "github.com/arxodeus/utp"
 )
 
 // What each sender puts on the wire at a retransmission timeout.
@@ -72,17 +71,18 @@ func measureRTOBursts(t *testing.T, mode string) {
 	seen := map[uint16]bool{}
 	fwd := base
 	fwd.OnOffered = func(p []byte, at time.Time) {
-		h, err := utp.DecodePacketHeader(p)
-		if err != nil || h.PacketType.String() != "st_data" {
+		// An ST_DATA: type 0 in the high nibble, version 1 (BEP 29).
+		if len(p) < 20 || p[0] != 0<<4|1 {
 			return
 		}
+		seq := binary.BigEndian.Uint16(p[16:])
 		mu.Lock()
 		defer mu.Unlock()
 		if start.IsZero() {
 			start = at
 		}
-		log = append(log, offered{at: at.Sub(start), seq: h.SeqNum, retx: seen[h.SeqNum], bytes: len(p)})
-		seen[h.SeqNum] = true
+		log = append(log, offered{at: at.Sub(start), seq: seq, retx: seen[seq], bytes: len(p)})
+		seen[seq] = true
 	}
 	n.ConnectAsymmetric(a, b, fwd, base)
 

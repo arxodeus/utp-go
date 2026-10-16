@@ -229,7 +229,7 @@ const initiatorFirstInOrder = 900
 // initiatorData builds a data packet from the peer, offset packets past the
 // first one expected, acking our SYN.
 func initiatorData(offset uint16, tsMicros uint32, body []byte) *packet {
-	return NewPacketBuilder(st_data, initiatorConnSeed, tsMicros, corpusWindow,
+	return newPacketBuilder(st_data, initiatorConnSeed, tsMicros, corpusWindow,
 		initiatorFirstInOrder+offset).
 		WithAckNum(initiatorConnSeed).WithPayload(body).Build()
 }
@@ -241,7 +241,7 @@ func TestInitiatorHandshake(t *testing.T) {
 		{
 			name:   "peer answers the SYN",
 			inject: nil,
-			injectRaw: NewPacketBuilder(st_state, initiatorConnSeed, 150000, corpusWindow, 900).
+			injectRaw: newPacketBuilder(st_state, initiatorConnSeed, 150000, corpusWindow, 900).
 				WithAckNum(initiatorConnSeed).Build().Encode(),
 			// Neither side answers a bare acknowledgement of its SYN: there
 			// is nothing to acknowledge and nothing to send.
@@ -306,7 +306,7 @@ func TestInitiatorResetInsteadOfSynAck(t *testing.T) {
 	compareStep(t, -1, step{name: "our SYN"}, ourSyn, libutpSyn)
 	r.step(0, step{
 		name: "peer resets instead of answering",
-		injectRaw: NewPacketBuilder(st_reset, initiatorConnSeed, 150000, corpusWindow, 900).
+		injectRaw: newPacketBuilder(st_reset, initiatorConnSeed, 150000, corpusWindow, 900).
 			WithAckNum(initiatorConnSeed).Build().Encode(),
 		// A reset is never answered with a reset; both sides go quiet.
 		wantNoEmission: true,
@@ -328,7 +328,7 @@ func TestInitiatorIncomingFin(t *testing.T) {
 		{name: "data", inject: initiatorData(0, 200000, []byte("one")), wantAck: ackNum(initiatorFirstInOrder)},
 		{
 			name: "peer's FIN",
-			inject: NewPacketBuilder(st_fin, initiatorConnSeed, 210000, corpusWindow,
+			inject: newPacketBuilder(st_fin, initiatorConnSeed, 210000, corpusWindow,
 				initiatorFirstInOrder+1).
 				WithAckNum(initiatorConnSeed).Build(),
 			// On reaching a FIN libutp acknowledges twice: once immediately
@@ -348,7 +348,7 @@ func TestInitiatorIncomingFin(t *testing.T) {
 // A peer that advertises no receive window on a connection we opened.
 // initiatorState builds a bare ST_STATE from the peer advertising wnd.
 func initiatorState(tsMicros uint32, wnd uint32) []byte {
-	return NewPacketBuilder(st_state, initiatorConnSeed, tsMicros, wnd, initiatorFirstInOrder).
+	return newPacketBuilder(st_state, initiatorConnSeed, tsMicros, wnd, initiatorFirstInOrder).
 		WithAckNum(initiatorConnSeed).Build().Encode()
 }
 
@@ -401,7 +401,7 @@ func TestInitiatorWriteFlowsWithoutZeroWindow(t *testing.T) {
 // initiatorAckOf builds a bare ST_STATE from the peer acknowledging our
 // packets up to seq.
 func initiatorAckOf(tsMicros uint32, seq uint16) []byte {
-	return NewPacketBuilder(st_state, initiatorConnSeed, tsMicros, corpusWindow, initiatorFirstInOrder).
+	return newPacketBuilder(st_state, initiatorConnSeed, tsMicros, corpusWindow, initiatorFirstInOrder).
 		WithAckNum(seq).Build().Encode()
 }
 

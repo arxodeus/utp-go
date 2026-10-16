@@ -171,11 +171,11 @@ func (s *sentPackets) rackOnSpuriousLoss() {
 // more than the smoothed round trip.
 func (s *sentPackets) rackReoWnd(sacked int) time.Duration {
 	r := &s.rack
-	if !r.reorderingSeen && (r.inRecovery || sacked >= LossThreshold) {
+	if !r.reorderingSeen && (r.inRecovery || sacked >= lossThreshold) {
 		return 0
 	}
 	w := r.minRTT / 4 * time.Duration(r.reoWndMult)
-	if srtt := s.ControllerStats().FineRTT; srtt > 0 && w > srtt {
+	if srtt := s.controllerStats().FineRTT; srtt > 0 && w > srtt {
 		w = srtt
 	}
 	return w
@@ -272,8 +272,8 @@ func (s *sentPackets) rackDetectAndMark(now time.Time) bool {
 
 // rackTakeLost is TakeLostPackets under RACK: the packets declared lost,
 // oldest first, at most maxFastResendsPerAck, retransmissions included.
-func (s *sentPackets) rackTakeLost() []*LostPacket {
-	var result []*LostPacket
+func (s *sentPackets) rackTakeLost() []*lostPacket {
+	var result []*lostPacket
 	for _, p := range s.packets {
 		if s.rack.pending == 0 || len(result) >= maxFastResendsPerAck {
 			break
@@ -286,7 +286,7 @@ func (s *sentPackets) rackTakeLost() []*LostPacket {
 		if p.acked {
 			continue
 		}
-		result = append(result, &LostPacket{p.seqNum, p.packetType, p.data})
+		result = append(result, &lostPacket{p.seqNum, p.packetType, p.data})
 		if wrappingLessThan(s.fastResendSeqNum, p.seqNum+1) {
 			s.fastResendSeqNum = p.seqNum + 1
 		}
@@ -295,7 +295,7 @@ func (s *sentPackets) rackTakeLost() []*LostPacket {
 }
 
 // rackOnAck notes how far an acknowledgement reports: see coverEnd.
-func (s *sentPackets) rackOnAck(ackNum uint16, sack *SelectiveAck) {
+func (s *sentPackets) rackOnAck(ackNum uint16, sack *selectiveAck) {
 	s.rack.coverEnd = ackNum
 	if sack == nil {
 		return

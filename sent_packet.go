@@ -12,22 +12,22 @@ import (
 // shares, as the receive buffers' reorder trees do (pendingFreeList).
 var lostFreeList = btree.NewFreeListG[uint16](btree.DefaultFreeListSize)
 
-const LossThreshold = 3
+const lossThreshold = 3
 
-var ErrInvalidAckNum = errors.New("invalid ack number")
-var ErrNoneAckNum = errors.New("none ack number")
-var ErrCannotFindLostPacket = errors.New("cannot mark unsent packet lost")
-var ErrSentPacketMarkLost = errors.New("lost packet was previously sent")
+var errInvalidAckNum = errors.New("invalid ack number")
+var errNoneAckNum = errors.New("none ack number")
+var errCannotFindLostPacket = errors.New("cannot mark unsent packet lost")
+var errSentPacketMarkLost = errors.New("lost packet was previously sent")
 
-type LostPacket struct {
+type lostPacket struct {
 	SeqNum     uint16
-	PacketType PacketType
+	PacketType packetType
 	Data       []byte
 }
 
 type sentPacket struct {
 	seqNum         uint16
-	packetType     PacketType
+	packetType     packetType
 	data           []byte
 	transmission   time.Time
 	retransmission time.Time
@@ -107,7 +107,7 @@ type sentPackets struct {
 	// retransmissions for 7 distinct lost packets, one packet sent 16 extra
 	// times.
 	fastResendSeqNum uint16
-	congestionCtrl   Controller
+	congestionCtrl   controller
 	// rack is RFC 8985's loss detection, used in place of the rule above
 	// when rack.active. See rack.go.
 	rack rackState
@@ -116,7 +116,7 @@ type sentPackets struct {
 	transmissions uint64
 }
 
-func newSentPackets(initSeqNum uint16, congestionCtrl Controller, logger log.Logger) *sentPackets {
+func newSentPackets(initSeqNum uint16, congestionCtrl controller, logger log.Logger) *sentPackets {
 	return &sentPackets{
 		logger:      logger,
 		packets:     make([]*sentPacket, 0),
@@ -136,7 +136,7 @@ func newSentPackets(initSeqNum uint16, congestionCtrl Controller, logger log.Log
 	}
 }
 
-func newSentPacketsWithoutLogger(initSeqNum uint16, congestionCtrl Controller) *sentPackets {
+func newSentPacketsWithoutLogger(initSeqNum uint16, congestionCtrl controller) *sentPackets {
 	return newSentPackets(initSeqNum, congestionCtrl, nil)
 }
 
@@ -198,12 +198,12 @@ func (s *sentPackets) Timeout() time.Duration {
 	return s.congestionCtrl.Timeout()
 }
 
-// ControllerStats returns a snapshot of the congestion controller's state.
-func (s *sentPackets) ControllerStats() ControllerStats {
+// controllerStats returns a snapshot of the congestion controller's state.
+func (s *sentPackets) controllerStats() controllerStats {
 	return s.congestionCtrl.Stats()
 }
 
-// QueueingDelay is ControllerStats().FilteredQueueingDelay, from the
+// QueueingDelay is controllerStats().FilteredQueueingDelay, from the
 // controller directly when it offers it.
 func (s *sentPackets) QueueingDelay() time.Duration {
 	if q, ok := s.congestionCtrl.(interface{ QueueingDelay() time.Duration }); ok {
@@ -295,11 +295,11 @@ const maxFastResendsPerAck = 4
 // It mutates, unlike an ordinary getter, because taking a packet and marking
 // it taken cannot be separated without reintroducing the duplicate-resend bug
 // this exists to prevent.
-func (s *sentPackets) TakeLostPackets() []*LostPacket {
+func (s *sentPackets) TakeLostPackets() []*lostPacket {
 	if s.rack.active {
 		return s.rackTakeLost()
 	}
-	var result []*LostPacket
+	var result []*lostPacket
 	var stale []uint16
 
 	// In window order, oldest first. The set is ordered by raw sequence
@@ -322,7 +322,7 @@ func (s *sentPackets) TakeLostPackets() []*LostPacket {
 		if !s.lostPackets.Has(packetInst.seqNum) {
 			continue
 		}
-		result = append(result, &LostPacket{
+		result = append(result, &lostPacket{
 			packetInst.seqNum,
 			packetInst.packetType,
 			packetInst.data,
@@ -335,7 +335,7 @@ func (s *sentPackets) TakeLostPackets() []*LostPacket {
 
 func (s *sentPackets) OnTransmit(
 	seqNum uint16,
-	packetType PacketType,
+	packetType packetType,
 	data []byte,
 	dataLen uint32,
 	now time.Time,
@@ -389,11 +389,11 @@ func (s *sentPackets) OnTransmit(
 		s.packets = append(s.packets, sent)
 	}
 
-	var transmit Transmit
+	var transmit transmitKind
 	if isRetransmission {
-		transmit = Retransmission
+		transmit = transmitRetransmission
 	} else {
-		transmit = Initial
+		transmit = transmitInitial
 	}
 
 	if err := s.congestionCtrl.OnTransmit(seqNum, transmit, dataLen); err != nil {
@@ -410,7 +410,7 @@ func (s *sentPackets) onAckOfNothingNew(delay time.Duration, now time.Time) {
 
 func (s *sentPackets) onAck(
 	ackNum uint16,
-	selectiveAck *SelectiveAck,
+	selectiveAck *selectiveAck,
 	delay time.Duration,
 	now time.Time,
 ) (*circularRangeInclusive, []uint16, error) {
@@ -432,10 +432,10 @@ func (s *sentPackets) onAck(
 		if len(s.packets) != 0 && seqRange.end == seqRange.start {
 			seqRange = newCircularRangeInclusive(seqRange.start, seqRange.end-1)
 			if !seqRange.Contains(ackNum) {
-				return nil, nil, ErrInvalidAckNum
+				return nil, nil, errInvalidAckNum
 			}
 		} else {
-			return nil, nil, ErrInvalidAckNum
+			return nil, nil, errInvalidAckNum
 		}
 	}
 
@@ -486,7 +486,7 @@ func (s *sentPackets) onAck(
 
 func (s *sentPackets) OnAckNum(
 	ackNum uint16,
-	selectiveAck *SelectiveAck,
+	selectiveAck *selectiveAck,
 	delay time.Duration,
 	now time.Time,
 ) error {
@@ -517,7 +517,7 @@ func (s *sentPackets) OnAckNum(
 		if err = s.AckPriorUnacked(ackNum, firstUnacked, delay, now); err != nil {
 			return err
 		}
-	case !errors.Is(err, ErrNoneAckNum):
+	case !errors.Is(err, errNoneAckNum):
 		return err
 	}
 
@@ -558,7 +558,7 @@ func (s *sentPackets) detectAndRecordLosses(now time.Time) error {
 
 func (s *sentPackets) OnSelectiveAck(
 	ackNum uint16,
-	selectiveAck *SelectiveAck,
+	selectiveAck *selectiveAck,
 	delay time.Duration,
 	now time.Time,
 ) error {
@@ -572,7 +572,7 @@ func (s *sentPackets) OnSelectiveAck(
 // bitfield, without touching ackNum itself.
 func (s *sentPackets) applySelectiveAckBits(
 	ackNum uint16,
-	selectiveAck *SelectiveAck,
+	selectiveAck *selectiveAck,
 	delay time.Duration,
 	now time.Time,
 ) error {
@@ -611,7 +611,7 @@ func (s *sentPackets) DetectLostPackets(firstUnacked uint16) []uint16 {
 	for i := len(packets) - 1; i >= 0; i-- {
 		packetInst := packets[i]
 
-		if !packetInst.acked && acked >= LossThreshold &&
+		if !packetInst.acked && acked >= lossThreshold &&
 			!wrappingLessThan(packetInst.seqNum, s.fastResendSeqNum) {
 			// The fastResendSeqNum test is libutp's, at
 			// utp_internal.cpp:1537: a packet already fast retransmitted once
@@ -634,7 +634,7 @@ func (s *sentPackets) Ack(seqNum uint16, delay time.Duration, now time.Time) err
 		return nil
 	}
 	packetInst := s.packets[index]
-	ack := Ack{
+	ack := ackSample{
 		Delay:      delay,
 		RTT:        packetInst.rtt(now),
 		ReceivedAt: now,
@@ -643,7 +643,7 @@ func (s *sentPackets) Ack(seqNum uint16, delay time.Duration, now time.Time) err
 	if err := s.congestionCtrl.OnAck(packetInst.seqNum, ack); err != nil {
 		return err
 	}
-	if s.logger != nil && s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if s.logger != nil && s.logger.Enabled(baseContext, log.LevelTrace) {
 		log.Trace("record Acks", "seqNum", packetInst.seqNum, "acked", packetInst.acked)
 	}
 	if !packetInst.acked {
@@ -662,11 +662,11 @@ func (s *sentPackets) AckPriorUnacked(seqNum uint16, firstUnacked uint16, delay 
 	if start >= end {
 		return nil
 	}
-	if s.logger != nil && s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if s.logger != nil && s.logger.Enabled(baseContext, log.LevelTrace) {
 		s.logger.Trace("AckPriorUnacked", "sentPackets.len", len(s.packets), "start", start, "end", end)
 	}
 	for _, packetInst := range s.packets[start:end] {
-		if s.logger != nil && s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		if s.logger != nil && s.logger.Enabled(baseContext, log.LevelTrace) {
 			s.logger.Trace("record Ack", "seqNum", packetInst.seqNum)
 		}
 		if err := s.Ack(packetInst.seqNum, delay, now); err != nil {
@@ -694,12 +694,12 @@ func (s *sentPackets) LastAckNum() (uint16, bool) {
 
 func (s *sentPackets) OnLost(seqNum uint16, retransmitting bool, now time.Time) error {
 	if !s.SeqNumRange().Contains(seqNum) {
-		return ErrCannotFindLostPacket
+		return errCannotFindLostPacket
 	}
 
 	err := s.congestionCtrl.OnLostPacket(seqNum, retransmitting, now)
 	if err != nil {
-		return ErrSentPacketMarkLost
+		return errSentPacketMarkLost
 	}
 	return nil
 }
@@ -786,12 +786,12 @@ func (s *sentPackets) OldestOutstanding() (*sentPacket, bool) {
 
 func (s *sentPackets) FirstUnackedSeqNum() (uint16, error) {
 	if len(s.packets) == 0 {
-		return 0, ErrNoneAckNum
+		return 0, errNoneAckNum
 	}
 
 	var seqNum uint16
 	lastAckNum, isNone := s.LastAckNum()
-	if s.logger != nil && s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if s.logger != nil && s.logger.Enabled(baseContext, log.LevelTrace) {
 		s.logger.Trace("get last innerMap num",
 			"lastAckNum", lastAckNum, "isNone", isNone)
 	}
@@ -799,7 +799,7 @@ func (s *sentPackets) FirstUnackedSeqNum() (uint16, error) {
 		seqNum = s.base
 	} else {
 		if s.packets[len(s.packets)-1].seqNum == lastAckNum {
-			return 0, ErrNoneAckNum
+			return 0, errNoneAckNum
 		}
 		seqNum = lastAckNum + 1 // wrapping addition for uint16
 	}

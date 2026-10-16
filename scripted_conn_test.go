@@ -201,7 +201,7 @@ func pinRandom(v uint16) func() {
 func describePackets(pkts [][]byte) string {
 	var b strings.Builder
 	for i, raw := range pkts {
-		p, err := DecodePacket(raw)
+		p, err := decodePacket(raw, false)
 		if err != nil {
 			fmt.Fprintf(&b, "\n  [%d] undecodable (%d bytes): %v", i, len(raw), err)
 			continue
@@ -235,7 +235,7 @@ func TestRandomSourcePinnedWhileInUse(t *testing.T) {
 			case <-done:
 				return
 			default:
-				RandomUint16()
+				randomUint16()
 				drawing.Store(true)
 			}
 		}

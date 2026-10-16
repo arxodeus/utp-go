@@ -32,7 +32,7 @@ type drainState struct {
 	mmsg *recvmmsgSlots
 }
 
-// recvmmsgSlots is what drain receives into, made once per UdpConn. Only the
+// recvmmsgSlots is what drain receives into, made once per udpConn. Only the
 // socket's read loop reads, so one set is enough.
 type recvmmsgSlots struct {
 	hdrs  [recvmmsgSlotCount]mmsghdr
@@ -65,7 +65,7 @@ func newRecvmmsgSlots() *recvmmsgSlots {
 // so under load batches were smaller than libutp's (TestManyConcurrentTransfers:
 // 18.7-24.5 datagrams against 22.9-29.6), and every batch ends with an
 // acknowledgement for each connection it reached.
-func (c *UdpConn) drain(rc syscall.RawConn, out *[]datagram) error {
+func (c *udpConn) drain(rc syscall.RawConn, out *[]datagram) error {
 	if c.mmsg == nil {
 		c.mmsg = newRecvmmsgSlots()
 	}

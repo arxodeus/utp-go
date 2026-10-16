@@ -27,7 +27,7 @@ func dupAckConnN(t *testing.T, n uint16) (*connection, uint16) {
 	const syn = uint16(100)
 	const synAck = uint16(101)
 
-	conn := CreateTestConnection(Endpoint{Type: Acceptor, SynNum: syn, SynAck: synAck})
+	conn := CreateTestConnection(endpointInfo{Type: acceptor, SynNum: syn, SynAck: synAck})
 	congestionCtrl := newDefaultController(fromConnConfig(conn.config))
 	sentPackets := newSentPacketsWithoutLogger(synAck, congestionCtrl)
 
@@ -35,8 +35,8 @@ func dupAckConnN(t *testing.T, n uint16) (*connection, uint16) {
 	for i := uint16(1); i <= n; i++ {
 		sentPackets.OnTransmit(synAck+i, st_data, []byte{byte(i)}, 64, now)
 	}
-	conn.state = &ConnState{
-		stateType:   ConnConnected,
+	conn.state = &connState{
+		stateType:   connConnected,
 		SentPackets: sentPackets,
 		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
 		RecvBuf:     newReceiveBuffer(TEST_BUFFER_SIZE, syn),
@@ -89,7 +89,7 @@ func TestDuplicateAckLowersTheMtuCeiling(t *testing.T) {
 // Counting those would give three "duplicates" immediately after every payload
 // packet on a bidirectional connection.
 func TestDuplicateAckIgnoresDataPackets(t *testing.T) {
-	for _, pt := range []PacketType{st_data, st_fin} {
+	for _, pt := range []packetType{st_data, st_fin} {
 		t.Run(pt.String(), func(t *testing.T) {
 			conn, dup := dupAckConn(t)
 			ceilingBefore := conn.mtu.ceiling
@@ -192,7 +192,7 @@ func TestSelectiveAckSetsTheDuplicateCount(t *testing.T) {
 	conn, dup := dupAckConn(t)
 	ceilingBefore := conn.mtu.ceiling
 	// Bits 0 and 1 are dup+2 and dup+3: the two packets after the probe.
-	sack := NewSelectiveAck([]bool{true, true})
+	sack := newSelectiveAck([]bool{true, true})
 
 	conn.noteDuplicateAck(st_state, dup)
 	conn.noteSelectiveAckCount(dup, sack)
@@ -212,7 +212,7 @@ func TestSelectiveAckSetsTheDuplicateCount(t *testing.T) {
 	conn2, dup2 := dupAckConn(t)
 	far := make([]bool, 32)
 	far[5] = true // dup2+7: never sent
-	conn2.noteSelectiveAckCount(dup2, NewSelectiveAck(far))
+	conn2.noteSelectiveAckCount(dup2, newSelectiveAck(far))
 	if conn2.duplicateAcks != 0 {
 		t.Errorf("a bit for a packet never sent was counted: %d", conn2.duplicateAcks)
 	}
@@ -227,14 +227,14 @@ func TestSelectiveAckSetsTheDuplicateCountOnArrival(t *testing.T) {
 	bits := make([]bool, 32)
 	bits[0], bits[1] = true, true // dup+2 and dup+3, the packets after the probe
 
-	withSack := NewPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()),
-		DefaultWindowSize, syn+1).WithAckNum(dup).WithSelectiveAck(NewSelectiveAck(bits)).Build()
+	withSack := newPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()),
+		DefaultWindowSize, syn+1).WithAckNum(dup).WithSelectiveAck(newSelectiveAck(bits)).Build()
 	conn.onPacket(withSack, now)
 	if conn.duplicateAcks != 2 {
 		t.Fatalf("after a duplicate carrying a selective ack for two packets the count is %d; "+
 			"libutp's is 2 (utp_internal.cpp:1612)", conn.duplicateAcks)
 	}
-	bare := NewPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()),
+	bare := newPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()),
 		DefaultWindowSize, syn+1).WithAckNum(dup).Build()
 	conn.onPacket(bare, now.Add(time.Millisecond))
 	if conn.mtu.ceiling != 1200-1 {
@@ -252,7 +252,7 @@ func TestSelectiveAckSetsTheDuplicateCountOnArrival(t *testing.T) {
 func TestSelectiveAckPastThreeJudgesTheProbe(t *testing.T) {
 	conn, dup := dupAckConnN(t, 8)
 	// dup+2 .. dup+6: five packets after the probe.
-	sack := NewSelectiveAck([]bool{true, true, true, true, true})
+	sack := newSelectiveAck([]bool{true, true, true, true, true})
 	conn.noteSelectiveAckCount(dup, sack)
 	if conn.duplicateAcks != 5 {
 		t.Fatalf("a selective ack naming five packets in the window set the count to %d", conn.duplicateAcks)
@@ -275,7 +275,7 @@ func TestDuplicateRunJudgesOnce(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		conn.noteDuplicateAck(st_state, dup)
 	}
-	conn.noteSelectiveAckCount(dup, NewSelectiveAck([]bool{true, true, true, true}))
+	conn.noteSelectiveAckCount(dup, newSelectiveAck([]bool{true, true, true, true}))
 	conn.noteDuplicateAck(st_state, dup)
 	if conn.mtuProbesLostToDuplicateAcks != 1 {
 		t.Fatalf("one run of duplicates judged the probe %d times", conn.mtuProbesLostToDuplicateAcks)
@@ -302,7 +302,7 @@ func TestAResentProbeIsNotJudged(t *testing.T) {
 	probeSeq := conn.mtu.probeSeq
 	floorBefore := conn.mtu.floor
 
-	resend := NewPacketBuilder(st_data, conn.cid.Send, 0, 0, probeSeq).WithPayload(make([]byte, 1000)).Build()
+	resend := newPacketBuilder(st_data, conn.cid.Send, 0, 0, probeSeq).WithPayload(make([]byte, 1000)).Build()
 	conn.transmit(resend, time.Now(), false)
 
 	if conn.mtu.onAck(probeSeq, time.Now()) {

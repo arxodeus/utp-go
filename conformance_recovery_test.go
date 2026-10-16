@@ -75,7 +75,7 @@ func (rr *recoveryRun) data(raws [][]byte, sent map[uint16]bool, high *uint16) [
 	rr.t.Helper()
 	var out []sentData
 	for _, raw := range raws {
-		p, err := DecodePacket(raw)
+		p, err := decodePacket(raw, false)
 		if err != nil {
 			rr.t.Fatalf("emitted packet does not decode: %v", err)
 		}
@@ -147,10 +147,10 @@ func (rr *recoveryRun) writeBoth(b []byte) {
 // an optional selective ack. The receive timestamp difference is small and
 // constant, so neither side reads any queueing delay into it.
 func ackFor(tsMicros uint32, seq uint16, sack []bool) []byte {
-	b := NewPacketBuilder(st_state, initiatorConnSeed, tsMicros, corpusWindow, initiatorFirstInOrder).
+	b := newPacketBuilder(st_state, initiatorConnSeed, tsMicros, corpusWindow, initiatorFirstInOrder).
 		WithAckNum(seq).WithTsDiffMicros(1000)
 	if sack != nil {
-		b = b.WithSelectiveAck(NewSelectiveAck(sack))
+		b = b.WithSelectiveAck(newSelectiveAck(sack))
 	}
 	return b.Build().Encode()
 }
@@ -201,7 +201,7 @@ func libutpRTO(t *testing.T, samples []time.Duration, step time.Duration) time.D
 			drv.IssueAcks()
 			var out []sentData
 			for _, raw := range drv.Emitted() {
-				if p, err := DecodePacket(raw); err == nil && p.Header.PacketType == st_data {
+				if p, err := decodePacket(raw, false); err == nil && p.Header.PacketType == st_data {
 					out = append(out, sentData{seq: p.Header.SeqNum})
 				}
 			}
@@ -654,7 +654,7 @@ func libutpCCTrace(t *testing.T, initialWrite int, phases []ccPhase) []ccEntry {
 	take := func() {
 		drv.IssueAcks()
 		for _, raw := range drv.Emitted() {
-			p, err := DecodePacket(raw)
+			p, err := decodePacket(raw, false)
 			if err != nil || p.Header.PacketType != st_data || sent[p.Header.SeqNum] {
 				continue
 			}
@@ -687,7 +687,7 @@ func libutpCCTrace(t *testing.T, initialWrite int, phases []ccPhase) []ccEntry {
 			ts += uint32(ph.gap.Microseconds())
 			seq := outstanding[0]
 			outstanding = outstanding[1:]
-			drv.Inject(NewPacketBuilder(st_state, initiatorConnSeed, ts, corpusWindow, initiatorFirstInOrder).
+			drv.Inject(newPacketBuilder(st_state, initiatorConnSeed, ts, corpusWindow, initiatorFirstInOrder).
 				WithAckNum(seq).WithTsDiffMicros(baseMicros + ph.delayMs*1000).Build().Encode())
 			take()
 		}

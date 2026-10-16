@@ -1,9 +1,9 @@
 package utp
 
-type StreamEventType int
+type streamEventType int
 
 const (
-	streamIncoming StreamEventType = iota
+	streamIncoming streamEventType = iota
 	streamShutdown
 	// streamCloseWrite wakes the event loop for a half-close. It is separate
 	// from streamShutdown because that one means "finished entirely" and sets
@@ -52,7 +52,7 @@ const (
 )
 
 type streamEvent struct {
-	Type   StreamEventType
+	Type   streamEventType
 	Packet *packet
 	// ICMP is set on streamICMP events and nil otherwise.
 	ICMP *icmpNotice

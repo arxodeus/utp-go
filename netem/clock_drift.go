@@ -74,7 +74,7 @@ func NewDriftingClock(conn utp.Conn, ppm float64) *DriftingClock {
 
 // utpTimestampOffset is where a uTP v1 header carries the sender's clock, in
 // microseconds: after the type/version byte, the extension byte and the
-// two-byte connection id (packet.go, PacketHeaderV1.EncodeToBytes).
+// two-byte connection id (packet.go, packetHeaderV1.EncodeToBytes).
 const utpTimestampOffset = 4
 
 // skewNow is the error this clock has accumulated since the connection began.

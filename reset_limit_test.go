@@ -55,7 +55,7 @@ func (c *recordingConn) ReadFrom(b []byte) (int, ConnectionPeer, error) {
 }
 
 func (c *recordingConn) WriteTo(b []byte, _ ConnectionPeer) (int, error) {
-	pkt, err := DecodePacket(append([]byte(nil), b...))
+	pkt, err := decodePacket(append([]byte(nil), b...), false)
 	if err == nil {
 		c.mu.Lock()
 		c.sent = append(c.sent, pkt)
@@ -72,7 +72,7 @@ func (c *recordingConn) Close() error {
 
 func (c *recordingConn) inject(p *packet) { c.inbox <- p.Encode() }
 
-func (c *recordingConn) countType(t PacketType) int {
+func (c *recordingConn) countType(t packetType) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	n := 0
@@ -85,7 +85,7 @@ func (c *recordingConn) countType(t PacketType) int {
 }
 
 // stampsOfType returns when each packet of the given type was written.
-func (c *recordingConn) stampsOfType(t PacketType) []time.Time {
+func (c *recordingConn) stampsOfType(t packetType) []time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var out []time.Time
@@ -104,7 +104,7 @@ func testSocketLogger() log.Logger {
 // dataPacketFor builds an ST_DATA packet addressed to a connection id that no
 // socket in the test has, which is what provokes a RESET.
 func dataPacketFor(connID, seqNum uint16) *packet {
-	return NewPacketBuilder(st_data, connID, uint32(time.Now().UnixMicro()), 100_000, seqNum).
+	return newPacketBuilder(st_data, connID, uint32(time.Now().UnixMicro()), 100_000, seqNum).
 		WithAckNum(1).
 		WithPayload([]byte("x")).
 		Build()
@@ -167,7 +167,7 @@ func TestResetIsNeverSentInReplyToAReset(t *testing.T) {
 	// libutp handles ST_RESET in its own branch and returns without
 	// responding (utp_internal.cpp:2850-2881).
 	for i := 0; i < 20; i++ {
-		conn.inject(NewPacketBuilder(st_reset, 4242, uint32(time.Now().UnixMicro()), 100_000, uint16(i)).Build())
+		conn.inject(newPacketBuilder(st_reset, 4242, uint32(time.Now().UnixMicro()), 100_000, uint16(i)).Build())
 	}
 
 	time.Sleep(500 * time.Millisecond)

@@ -20,7 +20,7 @@ func capTestSocket(t *testing.T, opts ...SocketOption) (*UtpSocket, *scriptedCon
 	sock := WithSocket(ctx, conn, conformanceLogger(), opts...)
 	t.Cleanup(sock.Close)
 	syn := func(id uint16) {
-		conn.inject(NewPacketBuilder(st_syn, id, 100000, 1<<20, 900).Build().Encode())
+		conn.inject(newPacketBuilder(st_syn, id, 100000, 1<<20, 900).Build().Encode())
 	}
 	return sock, conn, syn
 }
@@ -102,7 +102,7 @@ func TestConnectionCapFreesAsConnectionsGo(t *testing.T) {
 	}
 
 	var key string
-	sock.incomingConns.Range(func(k any, _ *IncomingPacket) bool {
+	sock.incomingConns.Range(func(k any, _ *incomingPacket) bool {
 		key = k.(string)
 		return false
 	})

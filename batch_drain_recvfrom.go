@@ -14,7 +14,7 @@ type drainState struct {
 
 // drain appends what the socket holds to out, waiting for the first datagram
 // if there is none: recvfrom until it would block, as libutp's embedder does.
-func (c *UdpConn) drain(rc syscall.RawConn, out *[]datagram) error {
+func (c *udpConn) drain(rc syscall.RawConn, out *[]datagram) error {
 	if c.scratch == nil {
 		c.scratch = make([]byte, 65536)
 	}
@@ -51,7 +51,7 @@ func (c *UdpConn) drain(rc syscall.RawConn, out *[]datagram) error {
 
 // peerFor returns the peer a datagram came from, as recvfrom reports its
 // address. See peerForKey.
-func (c *UdpConn) peerFor(sa syscall.Sockaddr) *UdpPeer {
+func (c *udpConn) peerFor(sa syscall.Sockaddr) *UdpPeer {
 	var k peerKey
 	switch a := sa.(type) {
 	case *syscall.SockaddrInet4:

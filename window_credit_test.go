@@ -37,14 +37,14 @@ func TestWindowGrowthDoesNotDependOnHowAcksAreSplit(t *testing.T) {
 			c.OnAckDelay(baseDelay, now)
 		}
 		for s := uint16(1); s <= packets; s++ {
-			require.NoError(t, c.OnTransmit(s, Initial, size))
+			require.NoError(t, c.OnTransmit(s, transmitInitial, size))
 		}
 		for i := 0; i < 3; i++ {
 			c.OnAckDelay(baseDelay+queueDelay, now)
 		}
 		before := int(c.maxWindowSizeBytes)
 		for s := uint16(1); s <= packets; s++ {
-			require.NoError(t, c.OnAck(s, Ack{Delay: baseDelay + queueDelay, RTT: rtt, ReceivedAt: now}))
+			require.NoError(t, c.OnAck(s, ackSample{Delay: baseDelay + queueDelay, RTT: rtt, ReceivedAt: now}))
 			if int(s)%perAck == 0 {
 				c.ApplyAck()
 			}

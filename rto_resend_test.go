@@ -93,7 +93,7 @@ func rtoResendCase(t *testing.T, ackWindow uint32, belowOnePacket bool) {
 	// The acknowledgement for the oldest brings the next oldest back first,
 	// ahead of anything new: fast-timeout retry, then flush_packets in order.
 	clk.AwaitReactionTo(func() {
-		conn.inject(NewPacketBuilder(st_state, peerID+1, 250000, ackWindow, peerSeq+2).
+		conn.inject(newPacketBuilder(st_state, peerID+1, 250000, ackWindow, peerSeq+2).
 			WithAckNum(oldest).Build().Encode())
 	})
 	clk.Advance(step)
@@ -136,7 +136,7 @@ func dataPackets(t *testing.T, emitted [][]byte) [][]byte {
 	t.Helper()
 	var out [][]byte
 	for _, b := range emitted {
-		pkt, err := DecodePacket(b)
+		pkt, err := decodePacket(b, false)
 		if err != nil {
 			t.Fatalf("emitted packet does not decode: %v", err)
 		}
@@ -149,7 +149,7 @@ func dataPackets(t *testing.T, emitted [][]byte) [][]byte {
 
 func seqOf(t *testing.T, b []byte) uint16 {
 	t.Helper()
-	pkt, err := DecodePacket(b)
+	pkt, err := decodePacket(b, false)
 	if err != nil {
 		t.Fatalf("packet does not decode: %v", err)
 	}
@@ -205,7 +205,7 @@ func newVirtualAccepted(t *testing.T, maxPacket uint16) *virtualAccepted {
 	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(NewPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+		conn.inject(newPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
 	})
 	var stream *UtpStream
 	select {
@@ -218,7 +218,7 @@ func newVirtualAccepted(t *testing.T, maxPacket uint16) *virtualAccepted {
 	// Complete the handshake as a peer would, with data that acknowledges our
 	// SYN-ACK.
 	clk.AwaitReactionTo(func() {
-		conn.inject(NewPacketBuilder(st_data, peerID+1, 150000, 1<<20, peerSeq+1).
+		conn.inject(newPacketBuilder(st_data, peerID+1, 150000, 1<<20, peerSeq+1).
 			WithAckNum(ourSeq - 1).WithPayload([]byte("hi")).Build().Encode())
 	})
 	conn.takeEmitted()
@@ -261,7 +261,7 @@ func TestAckRetiringEverythingRestartsTheDeadline(t *testing.T) {
 	}
 	vc.clk.Advance(100 * time.Millisecond)
 	vc.clk.AwaitReactionTo(func() {
-		vc.conn.inject(NewPacketBuilder(st_state, peerID+1, 250000, 1<<20, peerSeq+2).
+		vc.conn.inject(newPacketBuilder(st_state, peerID+1, 250000, 1<<20, peerSeq+2).
 			WithAckNum(seqOf(t, first[0])).Build().Encode())
 	})
 	vc.conn.takeEmitted()

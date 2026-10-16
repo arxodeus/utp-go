@@ -43,7 +43,7 @@ type Ticker interface {
 	Stop()
 }
 
-// IdleBarrier is implemented by a Clock that needs to know when the
+// idleBarrier is implemented by a Clock that needs to know when the
 // connection has finished reacting, so that it can advance time safely.
 //
 // Advancing a virtual clock is trivial; knowing that the connection has
@@ -73,7 +73,7 @@ type Ticker interface {
 //
 // The real clock does not implement this, and the cost there is a nil check
 // per pass against an interface resolved once when the loop starts.
-type IdleBarrier interface {
+type idleBarrier interface {
 	// Register announces a participant whose parking matters. Called once,
 	// when the loop starts.
 	Register()

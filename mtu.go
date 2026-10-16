@@ -72,7 +72,7 @@ const (
 	// this library attached one to data packets. libutp never does, and now
 	// neither does this library (conn.go, statePacket), so
 	// a packet carrying payload is never longer than the header plus it.
-	mtuHeaderOverhead uint32 = MINIMAL_HEADER_SIZE
+	mtuHeaderOverhead uint32 = minimalHeaderSize
 )
 
 // mtuSearch is one connection's path-MTU state.

@@ -66,9 +66,9 @@ func newRetransmitTimers(interval time.Duration, slots int) *retransmitTimers {
 // given clock. See newTimeWheelWithClock.
 func newRetransmitTimersWithClock(interval time.Duration, slots int, clk Clock) *retransmitTimers {
 	r := &retransmitTimers{}
-	barrier, _ := clk.(IdleBarrier)
+	barrier, _ := clk.(idleBarrier)
 	r.wheel = newTimeWheelWithClock(interval, slots, clk, func(key retransmitKey, t retransmitTimer) {
-		// The connection has not taken this yet. See IdleBarrier.NoteHandoff.
+		// The connection has not taken this yet. See idleBarrier.NoteHandoff.
 		if barrier != nil {
 			barrier.NoteHandoff()
 		}

@@ -15,15 +15,15 @@ func TestWireClockIsMonotonic(t *testing.T) {
 	if !strings.Contains(wireClockEpoch.String(), "m=") {
 		t.Fatal("the wire clock's epoch has no monotonic reading, so time.Since would follow the wall clock")
 	}
-	got := NowMicro()
+	got := nowMicro()
 	want := uint32(time.Now().UnixMicro())
 	if d := int32(got - want); d < -50_000 || d > 50_000 {
 		t.Errorf("the wire clock reads %d against the wall clock's %d, %dus apart", got, want, d)
 	}
 	// Strictly not backwards across consecutive reads.
-	prev := NowMicro()
+	prev := nowMicro()
 	for i := 0; i < 1000; i++ {
-		now := NowMicro()
+		now := nowMicro()
 		if int32(now-prev) < 0 {
 			t.Fatalf("the wire clock went backwards: %d after %d", now, prev)
 		}

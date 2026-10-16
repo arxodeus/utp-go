@@ -706,7 +706,7 @@ connection whose loop ended for a reason of its own -- here a RESET the
 socket's reader had processed inline -- left the reader's wake-up for it
 queued, counted as a handoff in flight, and a clock waiting for the system to
 go quiet waited for ever. The loop now takes every wake still queued for it
-as it ends. It touches only a clock that implements `IdleBarrier`; the real
+as it ends. It touches only a clock that implements `idleBarrier`; the real
 clock does not.
 
 libutp's `utp_writev` returns at once on a socket that is not connected
@@ -877,7 +877,7 @@ what its name suggests but not what it did. It has been rewritten to transfer
 
 2. **Readers were never told the stream had ended.** The event loop's close
    path guarded its final drain with `if !c.eof()`, but `eof()` returns true by
-   definition once the state is `ConnClosed`, so the drain never ran. The
+   definition once the state is `connClosed`, so the drain never ran. The
    end-of-stream marker was only ever delivered from one other path — remote
    FIN fully received. Any connection that closed by idle timeout, RESET, or a
    local close left its reader blocked in `ReadToEOF` forever. This is why
@@ -1107,7 +1107,7 @@ against `utp_internal.cpp` in this fork.
 
 libutp keeps the socket in `CS_GOT_FIN` when the peer closes its sending side,
 goes on delivering to its application, and offers `utp_shutdown(s, SHUT_WR)`
-for the other direction. This library moved straight to `ConnClosed` once the
+for the other direction. This library moved straight to `connClosed` once the
 remote FIN was reached, so a peer that closed its sending side took the whole
 connection with it and whatever it was still sending back was lost.
 
@@ -1652,7 +1652,7 @@ these alone. See [FUZZING.md](FUZZING.md).
 
 **Fixed.** The socket was told to forget a connection from exactly one place:
 the branch of the connection's event loop where the state machine reached
-`ConnClosed`. A connection torn down by a cancelled context — which is what an
+`connClosed`. A connection torn down by a cancelled context — which is what an
 abandoned or failed connection attempt *is* — exited by a different path and
 left its entry in the socket's connection table forever.
 
@@ -1670,7 +1670,7 @@ Found by `TestSoakAbandonedConnections`; see [FUZZING.md](FUZZING.md).
 ## packet.Encode could produce a packet this decoder rejects
 
 **Fixed.** `Encode` took the header's extension byte from `p.Header`, which is
-only correct for packets built by `PacketBuilder`. A *decoded* packet keeps
+only correct for packets built by `packetBuilder`. A *decoded* packet keeps
 whatever extension byte the peer sent, while `Eack` is nil unless a selective
 ack was retained — so a packet carrying a zero-length selective ack, the
 extension-bits extension, or a chain continuing past the selective ack,
@@ -1679,8 +1679,9 @@ This library's own decoder rejects that, with "insufficient length for
 extension".
 
 Latent: nothing on the live path re-encodes a decoded packet. But
-`DecodePacket` is exported and its result has exported methods, so an external
-caller can reach it, and a proxy or relay built on this library would have
+the decoder was then exported (as `DecodePacket`, unexported since)
+and its result had exported methods, so an external caller could reach
+it, and a proxy or relay built on this library would have
 emitted unparseable packets.
 
 Found by `FuzzDecodePacket`; both minimised inputs are kept as regression
@@ -1770,7 +1771,7 @@ The claim being made here is only that it did not regress.
 
 The pass boundary left the count to the scheduler. The socket now reads the
 way libutp's embedder does -- every datagram the kernel holds, then the
-acknowledgements (`UdpConn.readBatch`, `streamBatchEnd`) -- and
+acknowledgements (`udpConn.readBatch`, `streamBatchEnd`) -- and
 `connection.ackEvery` lets an acknowledgement cover up to four packets arriving
 under 1 ms apart, more while ours queue on the way back. Over the emulated
 network the ratios became 0.63-0.70 at 20 Mbps, 0.22 at 100 Mbps and 0.10-0.12
@@ -2184,12 +2185,12 @@ than a protocol rule.
 
 **~~The MTU ceiling is a fixed 1400 rather than `UTP_GET_UDP_MTU`.~~ Closed.**
 `utp.PathMTUProvider` is the optional interface this section proposed:
-`PathMTU(ConnectionPeer) (int, bool)`, implemented by `UdpConn` and by
+`PathMTU(ConnectionPeer) (int, bool)`, implemented by `udpConn` and by
 netem's `Endpoint`, and ignored by any other `Conn`. The `Conn` interface
 itself is untouched, so the libutp driver and every other implementation are
 unaffected and keep the configured ceiling.
 
-`UdpConn` discovers it by asking the routing table which local address a
+`udpConn` discovers it by asking the routing table which local address a
 datagram to that peer would leave from — a UDP "dial", which sends nothing —
 and then reading the MTU of the interface that owns that address. Per peer
 rather than per socket, because split tunnelling routes two peers on one
@@ -2286,7 +2287,7 @@ only when the harness says so, which means the retransmit wheel and the event
 loop running on the virtual clock too. The old text is kept below because the
 reason still stands for that half.
 
-**~~No virtual timers.~~ Implemented.** `Clock` and `IdleBarrier`: the
+**~~No virtual timers.~~ Implemented.** `Clock` and `idleBarrier`: the
 connection's deadlines, its four event-loop timers and the socket's
 retransmission wheel all come from an injectable clock, and `virtualClock`
 moves only when a test says so.
@@ -2620,7 +2621,7 @@ an asymmetric one it is the whole asymmetry:
 same samples — 1.9ms from the corrected metric, 90.7ms from the old one, on a
 path with no queue.
 
-`ControllerStats` now carries `CurrentDelay`, the newest sample of the same
+`controllerStats` now carries `CurrentDelay`, the newest sample of the same
 series `BaseDelay` is the minimum of, and the metric is their difference.
 `netem.TestQueueingDelayTracksARealQueue` checks the other half against the
 emulated link's own measurement at the bottleneck: 78.9ms reported against
@@ -2646,7 +2647,7 @@ about one run in eight, reporting "invalid ack number" where the test expects
 the idle timeout. On the tree before those tests it still failed 1 run in 8;
 under the load of a full run, 2 in 4.
 
-`sentPackets.onAck` returned `ErrInvalidAckNum` for an acknowledgement number
+`sentPackets.onAck` returned `errInvalidAckNum` for an acknowledgement number
 outside the range it was tracking, and `processAck` turned that into
 `connection.reset`. libutp does no such thing:
 
@@ -2927,7 +2928,7 @@ passes -- 5 runs of 16 peers, and the whole package clean under `-race`.
 
 ## A packet to a peer type we did not define was dropped and reported as sent
 
-**Fixed.** `UdpConn.WriteTo` switched on `*UdpPeer` and `*ConnectionId` and
+**Fixed.** `udpConn.WriteTo` switched on `*UdpPeer` and `*ConnectionId` and
 ended in `return 0, nil` for anything else. `ConnectionPeer` is an exported
 interface with one method, so a caller can implement it -- and a connection
 built on such a peer would have every packet discarded while each send
@@ -2946,7 +2947,7 @@ code with "wrote 0 bytes, want 32".
 common dialling idiom in Go.**
 
 `UtpSocket.Connect` and `ConnectWithCid` passed the caller's context straight
-to `NewUtpStream`, where it became the connection's lifetime. `net.Dialer`
+to `newUtpStream`, where it became the connection's lifetime. `net.Dialer`
 documents the opposite -- "Canceling ctx does not affect the connection after
 it is established" -- and the standard shape relies on that:
 
@@ -3223,7 +3224,7 @@ zeroes `scaled_gain`, but in slow start libutp takes
 `max_window = max(ss_cwnd, ledbat_cwnd)` (`:1699`) and `ss_cwnd` is not gated.
 A connection still in slow start therefore grows while the application sends
 nothing, correctly. The test could not see which phase it was in, so
-`ControllerStats` and `ConnectionMetrics` now carry `SlowStart` and
+`controllerStats` and `ConnectionMetrics` now carry `SlowStart` and
 `AppLimitedSince` — the whole point of those structs being that a controller
 observable only through its throughput cannot be told from one doing nothing.
 The link also needed a queue small enough (8 KB) to end slow start with a loss;
@@ -4286,7 +4287,7 @@ the changed branch at all: counted directly in
 
 libutp refuses a new incoming connection when the context already holds more
 than 3000 sockets (`:2967-2974`). This library has no count bound. The
-pending-SYN map is bounded only by time — `AWAITING_CONNECTION_TIMEOUT` is 20
+pending-SYN map is bounded only by time — `awaitingConnectionTimeout` is 20
 seconds — so a SYN flood at rate R leaves R×20 entries where libutp holds at
 most 3000.
 
@@ -5039,7 +5040,7 @@ risks making things worse.
   closes still carry their error (`ErrTimedOut`, `ErrReset`).
 - `Accept`/`AcceptWithCid` can now return `ErrAcceptTimedOut`. Callers that
   previously blocked forever will now see an error.
-- `AWAITING_CONNECTION_TIMEOUT` is a fixed 20 s and is not configurable.
+- `awaitingConnectionTimeout` is a fixed 20 s and is not configurable.
 
 ## ~~A lone LEDBAT++ flow leaves a fraction of classic LEDBAT's queue~~ — no longer true
 

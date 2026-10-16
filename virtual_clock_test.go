@@ -52,7 +52,7 @@ type virtualClock struct {
 	// ever retransmitted.
 	wakes uint64
 	// inflight counts things handed to a participant that has not yet woken
-	// to take them. See IdleBarrier.NoteHandoff.
+	// to take them. See idleBarrier.NoteHandoff.
 	inflight int
 	cond     *sync.Cond
 }
@@ -143,7 +143,7 @@ func (w *virtualWaiter) Reset(d time.Duration) bool {
 	return was
 }
 
-// Register implements IdleBarrier.
+// Register implements idleBarrier.
 func (c *virtualClock) Register() {
 	c.mu.Lock()
 	c.registered++
@@ -172,7 +172,7 @@ func (c *virtualClock) Participants() int {
 	return c.registered
 }
 
-// MarkIdle implements IdleBarrier: the caller is about to block.
+// MarkIdle implements idleBarrier: the caller is about to block.
 func (c *virtualClock) MarkIdle() {
 	c.mu.Lock()
 	c.parked++
@@ -180,7 +180,7 @@ func (c *virtualClock) MarkIdle() {
 	c.mu.Unlock()
 }
 
-// MarkBusy implements IdleBarrier: the caller has woken.
+// MarkBusy implements idleBarrier: the caller has woken.
 func (c *virtualClock) MarkBusy() {
 	c.mu.Lock()
 	if c.parked > 0 {
@@ -191,7 +191,7 @@ func (c *virtualClock) MarkBusy() {
 	c.mu.Unlock()
 }
 
-// NoteHandoff implements IdleBarrier: the caller is about to queue something
+// NoteHandoff implements idleBarrier: the caller is about to queue something
 // for another participant.
 func (c *virtualClock) NoteHandoff() {
 	c.mu.Lock()
@@ -199,7 +199,7 @@ func (c *virtualClock) NoteHandoff() {
 	c.mu.Unlock()
 }
 
-// TakeHandoff implements IdleBarrier: the caller now holds the item, or the
+// TakeHandoff implements idleBarrier: the caller now holds the item, or the
 // sender is cancelling a handoff that did not happen.
 //
 // Deliberately not folded into MarkBusy. A participant wakes for reasons that

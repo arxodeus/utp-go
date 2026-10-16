@@ -12,9 +12,9 @@ import (
 // the buffer is overwritten after own, as the next read would, and the packet
 // must be unchanged.
 func TestDecodedPacketOutlivesItsBuffer(t *testing.T) {
-	sack := NewSelectiveAck([]bool{true, false, true, false, false, true})
+	sack := newSelectiveAck([]bool{true, false, true, false, false, true})
 	body := []byte("payload bytes")
-	wire := NewPacketBuilder(st_data, 7, 1234, 5678, 99).WithAckNum(42).
+	wire := newPacketBuilder(st_data, 7, 1234, 5678, 99).WithAckNum(42).
 		WithSelectiveAck(sack).WithPayload(body).Build().Encode()
 
 	buf := append([]byte(nil), wire...)

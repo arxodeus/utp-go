@@ -16,7 +16,7 @@ func takeData(t *testing.T, conn *scriptedConn) []dataSent {
 	t.Helper()
 	var out []dataSent
 	for _, raw := range conn.takeEmitted() {
-		p, err := DecodePacket(raw)
+		p, err := decodePacket(raw, false)
 		if err != nil {
 			t.Fatalf("undecodable packet: %v", err)
 		}
@@ -31,9 +31,9 @@ func takeData(t *testing.T, conn *scriptedConn) []dataSent {
 // given selective ack, echoing echo as the timestamp of the packet that drew
 // it: the receiver reports the difference between its clock and that
 // timestamp, and the sender subtracts it from the STATE's own.
-func peerAck(ackNum uint16, sack *SelectiveAck, echo uint32) []byte {
+func peerAck(ackNum uint16, sack *selectiveAck, echo uint32) []byte {
 	const peerClock = 500_000_000
-	b := NewPacketBuilder(st_state, 6000+1, peerClock, 1<<20, 900+2).
+	b := newPacketBuilder(st_state, 6000+1, peerClock, 1<<20, 900+2).
 		WithAckNum(ackNum).WithTsDiffMicros(peerClock - echo)
 	if sack != nil {
 		b = b.WithSelectiveAck(sack)
@@ -101,7 +101,7 @@ func TestSpuriousLossCutIsUndone(t *testing.T) {
 			clk.Advance(10 * time.Millisecond)
 			lost := flight[0]
 			before := ctrl.Stats().MaxWindowSizeBytes
-			sack := NewSelectiveAck([]bool{true, true, true})
+			sack := newSelectiveAck([]bool{true, true, true})
 			clk.AwaitReactionTo(func() { conn.inject(peerAck(lost.seq-1, sack, flight[3].ts)) })
 			clk.AwaitQuiet()
 			cut := ctrl.Stats().MaxWindowSizeBytes

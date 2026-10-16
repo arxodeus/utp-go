@@ -83,7 +83,7 @@ func TestConnectionIdHashDistinguishesIPv6Peers(t *testing.T) {
 
 // A peer type this package did not create must still receive packets.
 //
-// UdpConn.WriteTo switches on *UdpPeer and *ConnectionId and used to end in
+// udpConn.WriteTo switches on *UdpPeer and *ConnectionId and used to end in
 // `return 0, nil` for anything else: the packet was dropped and the caller was
 // told it had been sent. A connection built on such a peer would then time out
 // with nothing anywhere to say why. Neither half of that is acceptable -- a
@@ -103,7 +103,7 @@ func TestUdpConnWritesToForeignPeerTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sender.Close()
-	conn := &UdpConn{base: sender}
+	conn := &udpConn{base: sender}
 
 	msg := []byte("to a peer type we did not define")
 	n, err := conn.WriteTo(msg, addressOnlyPeer(listener.LocalAddr().String()))
@@ -133,7 +133,7 @@ func TestUdpConnWritesToForeignPeerTypes(t *testing.T) {
 }
 
 // addressOnlyPeer implements ConnectionPeer without being any of the types
-// UdpConn.WriteTo knows about.
+// udpConn.WriteTo knows about.
 type addressOnlyPeer string
 
 func (p addressOnlyPeer) Hash() string { return string(p) }

@@ -51,7 +51,7 @@ func TestSilentPeerDoesNotCloseAnIdleConnectionByDefault(t *testing.T) {
 	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(NewPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+		conn.inject(newPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
 	})
 	stream := <-accepted
 	if stream == nil {
@@ -67,7 +67,7 @@ func TestSilentPeerDoesNotCloseAnIdleConnectionByDefault(t *testing.T) {
 	for elapsed := time.Duration(0); elapsed+interval <= silence; elapsed += interval {
 		clk.Advance(interval)
 		for _, raw := range conn.takeEmitted() {
-			pkt, err := DecodePacket(raw)
+			pkt, err := decodePacket(raw, false)
 			if err != nil {
 				t.Fatalf("after %v of silence: undecodable packet: %v", elapsed+interval, err)
 			}
@@ -87,7 +87,7 @@ func TestSilentPeerDoesNotCloseAnIdleConnectionByDefault(t *testing.T) {
 
 	// The peer comes back.
 	clk.AwaitReactionTo(func() {
-		conn.inject(NewPacketBuilder(st_data, peerID+1, 200000, 1<<20, peerSeq+1).
+		conn.inject(newPacketBuilder(st_data, peerID+1, 200000, 1<<20, peerSeq+1).
 			WithAckNum(ourSeq - 1).WithPayload([]byte("back")).Build().Encode())
 	})
 	emitted := conn.takeEmitted()
@@ -95,7 +95,7 @@ func TestSilentPeerDoesNotCloseAnIdleConnectionByDefault(t *testing.T) {
 		t.Fatalf("the peer's data after %v drew %d packets, expected one acknowledgement",
 			silence, len(emitted))
 	}
-	if pkt, err := DecodePacket(emitted[0]); err != nil || pkt.Header.PacketType != st_state ||
+	if pkt, err := decodePacket(emitted[0], false); err != nil || pkt.Header.PacketType != st_state ||
 		pkt.Header.AckNum != peerSeq+1 {
 		t.Fatalf("the peer's data after %v drew %s, expected a STATE acknowledging %d",
 			silence, describePackets(emitted), peerSeq+1)

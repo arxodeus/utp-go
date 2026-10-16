@@ -15,7 +15,7 @@ func TestOnTransmit(t *testing.T) {
 	seqNum := uint16(1)
 	packetOneSizeBytes := uint32(32)
 
-	err := ctrl.OnTransmit(seqNum, Initial, packetOneSizeBytes)
+	err := ctrl.OnTransmit(seqNum, transmitInitial, packetOneSizeBytes)
 	require.NoError(t, err, "transmission registration failed")
 
 	transmissionRecord, exists := ctrl.transmissions[seqNum]
@@ -32,7 +32,7 @@ func TestOnTransmit(t *testing.T) {
 	seqNum = 2
 	packetTwoSizeBytes := uint32(128)
 
-	err = ctrl.OnTransmit(seqNum, Initial, packetTwoSizeBytes)
+	err = ctrl.OnTransmit(seqNum, transmitInitial, packetTwoSizeBytes)
 	require.NoError(t, err, "transmission registration failed")
 
 	transmissionRecord, exists = ctrl.transmissions[seqNum]
@@ -46,7 +46,7 @@ func TestOnTransmit(t *testing.T) {
 		"expected window size %d, got %d", packetOneSizeBytes+packetTwoSizeBytes, ctrl.windowSizeBytes)
 
 	// Register the retransmission of the packet with sequence number 2
-	err = ctrl.OnTransmit(seqNum, Retransmission, 0)
+	err = ctrl.OnTransmit(seqNum, transmitRetransmission, 0)
 	require.NoError(t, err, "transmission registration failed")
 
 	transmissionRecord, exists = ctrl.transmissions[seqNum]
@@ -71,14 +71,14 @@ func TestOnTransmitDuplicateTransmission(t *testing.T) {
 	seqNum := uint16(1)
 	bytes := uint32(32)
 
-	err := ctrl.OnTransmit(seqNum, Initial, bytes)
+	err := ctrl.OnTransmit(seqNum, transmitInitial, bytes)
 	require.NoError(t, err, "transmission registration failed")
 	require.Equal(t, bytes, ctrl.windowSizeBytes,
 		"expected window size %d, got %d", bytes, ctrl.windowSizeBytes)
 
 	// Register the initial transmission of the SAME packet
-	err = ctrl.OnTransmit(seqNum, Initial, bytes)
-	require.ErrorIs(t, err, ErrDuplicateTransmission, "expected ErrDuplicateTransmission, got %v", err)
+	err = ctrl.OnTransmit(seqNum, transmitInitial, bytes)
+	require.ErrorIs(t, err, errDuplicateTransmission, "expected errDuplicateTransmission, got %v", err)
 	require.Equal(t, bytes, ctrl.windowSizeBytes,
 		"expected window size %d, got %d", bytes, ctrl.windowSizeBytes)
 }
@@ -88,8 +88,8 @@ func TestOnTransmitUnknownSeqNum(t *testing.T) {
 
 	// Register the retransmission of the packet with sequence number 1
 	seqNum := uint16(1)
-	err := ctrl.OnTransmit(seqNum, Retransmission, 0)
-	require.ErrorIs(t, err, ErrUnknownSeqNum, "expected ErrUnknownSeqNum, got %v", err)
+	err := ctrl.OnTransmit(seqNum, transmitRetransmission, 0)
+	require.ErrorIs(t, err, errUnknownSeqNum, "expected errUnknownSeqNum, got %v", err)
 	require.Equal(t, uint32(0), ctrl.windowSizeBytes, "expected window size 0, got %d", ctrl.windowSizeBytes)
 }
 
@@ -100,9 +100,9 @@ func TestOnTransmitInsufficientWindowSize(t *testing.T) {
 	seqNum := uint16(1)
 	bytes := ctrl.maxWindowSizeBytes + 1
 
-	err := ctrl.OnTransmit(seqNum, Initial, bytes)
-	require.ErrorIs(t, err, ErrInsufficientWindowSize,
-		"expected ErrInsufficientWindowSize, got %v", err)
+	err := ctrl.OnTransmit(seqNum, transmitInitial, bytes)
+	require.ErrorIs(t, err, errInsufficientWindowSize,
+		"expected errInsufficientWindowSize, got %v", err)
 
 	require.Equal(t, uint32(0), ctrl.windowSizeBytes,
 		"expected window size 0, got %d", ctrl.windowSizeBytes)
@@ -115,14 +115,14 @@ func TestOnAck(t *testing.T) {
 	seqNum := uint16(1)
 	bytes := uint32(32)
 
-	err := ctrl.OnTransmit(seqNum, Initial, bytes)
+	err := ctrl.OnTransmit(seqNum, transmitInitial, bytes)
 	require.NoError(t, err, "transmission registration failed")
 
 	// Register the acknowledgement
 	ackDelay := 150 * time.Millisecond
 	ackRTT := 300 * time.Millisecond
 	ackReceivedAt := time.Now()
-	ack := Ack{
+	ack := ackSample{
 		Delay:      ackDelay,
 		RTT:        ackRTT,
 		ReceivedAt: ackReceivedAt,
@@ -144,7 +144,7 @@ func TestOnAck(t *testing.T) {
 // ackOne delivers one acknowledgement covering one packet the way
 // sentPackets.onAck does: its delay sample, the packet, then the window
 // update.
-func ackOne(ctrl *defaultController, seq uint16, ack Ack) error {
+func ackOne(ctrl *defaultController, seq uint16, ack ackSample) error {
 	ctrl.OnAckDelay(ack.Delay, ack.ReceivedAt)
 	defer ctrl.ApplyAck()
 	return ctrl.OnAck(seq, ack)
@@ -155,14 +155,14 @@ func TestOnAckUnknownSeqNum(t *testing.T) {
 
 	// Register the acknowledgement for packet with sequence number 1
 	seqNum := uint16(1)
-	ack := Ack{
+	ack := ackSample{
 		Delay:      150 * time.Millisecond,
 		RTT:        300 * time.Millisecond,
 		ReceivedAt: time.Now(),
 	}
 
 	err := ctrl.OnAck(seqNum, ack)
-	require.ErrorIs(t, err, ErrUnknownSeqNum, "expected ErrUnknownSeqNum, got %v", err)
+	require.ErrorIs(t, err, errUnknownSeqNum, "expected errUnknownSeqNum, got %v", err)
 }
 
 func TestOnLostPacketRetransmitting(t *testing.T) {
@@ -175,7 +175,7 @@ func TestOnLostPacketRetransmitting(t *testing.T) {
 	seqNum := uint16(1)
 	bytes := uint32(32)
 
-	err := ctrl.OnTransmit(seqNum, Initial, bytes)
+	err := ctrl.OnTransmit(seqNum, transmitInitial, bytes)
 	require.NoError(t, err, "transmission registration failed")
 	require.Equal(t, bytes, ctrl.windowSizeBytes,
 		"expected window size %d, got %d", bytes, ctrl.windowSizeBytes)
@@ -206,7 +206,7 @@ func TestOnLostPacketUnknownSeqNum(t *testing.T) {
 	seqNum := uint16(1)
 	err := ctrl.OnLostPacket(seqNum, false, time.Now())
 	// Check error
-	require.ErrorIs(t, err, ErrUnknownSeqNum, "lost packet registration failed")
+	require.ErrorIs(t, err, errUnknownSeqNum, "lost packet registration failed")
 
 	// Verify window sizes unchanged
 	require.Equal(t, uint32(0), ctrl.windowSizeBytes, "expected window size 0, got %d", ctrl.windowSizeBytes)
@@ -342,7 +342,7 @@ func TestWindowDecaysAtMostOncePerInterval(t *testing.T) {
 
 	now := time.Now()
 	for seqNum := uint16(1); seqNum <= 4; seqNum++ {
-		require.NoError(t, ctrl.OnTransmit(seqNum, Initial, 32))
+		require.NoError(t, ctrl.OnTransmit(seqNum, transmitInitial, 32))
 	}
 
 	// Four losses in the same instant.
@@ -360,13 +360,13 @@ func TestWindowDecaysAtMostOncePerInterval(t *testing.T) {
 		}())
 
 	// Still inside the interval: no further decay.
-	require.NoError(t, ctrl.OnTransmit(uint16(5), Initial, 32))
+	require.NoError(t, ctrl.OnTransmit(uint16(5), transmitInitial, 32))
 	require.NoError(t, ctrl.OnLostPacket(uint16(5), true, now.Add(maxWindowDecayInterval-time.Millisecond)))
 	require.Equal(t, initial/2, ctrl.maxWindowSizeBytes,
 		"a loss inside the decay interval halved the window again")
 
 	// Past the interval: decay again.
-	require.NoError(t, ctrl.OnTransmit(uint16(6), Initial, 32))
+	require.NoError(t, ctrl.OnTransmit(uint16(6), transmitInitial, 32))
 	require.NoError(t, ctrl.OnLostPacket(uint16(6), true, now.Add(maxWindowDecayInterval)))
 	require.Equal(t, initial/4, ctrl.maxWindowSizeBytes,
 		"a loss past the decay interval did not halve the window")
@@ -406,10 +406,10 @@ func TestDelayClampedToRTT(t *testing.T) {
 
 	// grow drives one honest transmit-and-acknowledge cycle.
 	grow := func(ctrl *defaultController, seq uint16, delay time.Duration, at time.Time) {
-		if err := ctrl.OnTransmit(seq, Initial, packetSize); err != nil {
+		if err := ctrl.OnTransmit(seq, transmitInitial, packetSize); err != nil {
 			t.Fatalf("transmit %d: %v", seq, err)
 		}
-		if err := ackOne(ctrl, seq, Ack{Delay: delay, RTT: rtt, ReceivedAt: at}); err != nil {
+		if err := ackOne(ctrl, seq, ackSample{Delay: delay, RTT: rtt, ReceivedAt: at}); err != nil {
 			t.Fatalf("ack %d: %v", seq, err)
 		}
 	}
@@ -490,13 +490,13 @@ func TestOneWindowUpdatePerAcknowledgement(t *testing.T) {
 		c.slowStart = slowStart
 		now := time.Now()
 		for s := uint16(1); s <= packets; s++ {
-			require.NoError(t, c.OnTransmit(s, Initial, size))
+			require.NoError(t, c.OnTransmit(s, transmitInitial, size))
 		}
 		for i := 0; i < 3; i++ {
 			c.OnAckDelay(baseDelay+queueDelay, now)
 		}
 		for s := uint16(1); s <= packets; s++ {
-			require.NoError(t, c.OnAck(s, Ack{Delay: baseDelay + queueDelay, RTT: rtt, ReceivedAt: now}))
+			require.NoError(t, c.OnAck(s, ackSample{Delay: baseDelay + queueDelay, RTT: rtt, ReceivedAt: now}))
 		}
 		c.ApplyAck()
 
@@ -530,8 +530,8 @@ func TestDelayOverTheRoundTripRaisesTheBase(t *testing.T) {
 	var seq uint16
 	ack := func(reported time.Duration) {
 		seq++
-		require.NoError(t, c.OnTransmit(seq, Initial, 1000))
-		require.NoError(t, ackOne(c, seq, Ack{Delay: reported, RTT: rtt, ReceivedAt: now}))
+		require.NoError(t, c.OnTransmit(seq, transmitInitial, 1000))
+		require.NoError(t, ackOne(c, seq, ackSample{Delay: reported, RTT: rtt, ReceivedAt: now}))
 	}
 	// Three acknowledgements 100ms over the base: the filter reads 100ms,
 	// 80ms more than the round trip allows.

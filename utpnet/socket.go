@@ -323,21 +323,10 @@ func releaseDatagram(pooled *[]byte) {
 }
 
 // isUtpPacket reports whether a datagram is a uTP packet for this
-// implementation.
-//
-// The test is the packet decoder's own header validation, which checks the
-// length, the packet type, the version nibble and the first extension byte --
-// the same four things libutp checks before it will look at a packet at all
-// (utp_internal.cpp:2481, :2834). Reusing it means the sniff cannot drift
-// away from what the socket will actually accept: a datagram this says is
-// uTP is one the socket can parse, and one it rejects is one the socket
-// would have dropped.
+// implementation, by the packet decoder's own header validation (utp.IsPacket):
+// the sniff cannot drift away from what the socket will actually accept.
 func isUtpPacket(b []byte) bool {
-	if len(b) < utp.MINIMAL_HEADER_SIZE {
-		return false
-	}
-	_, err := utp.DecodePacketHeader(b[:utp.MINIMAL_HEADER_SIZE])
-	return err == nil
+	return utp.IsPacket(b)
 }
 
 // ReadFrom returns the next datagram that was not a uTP packet.

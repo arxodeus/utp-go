@@ -20,8 +20,8 @@ func TestRouteCacheFollowsTheTables(t *testing.T) {
 	defer sock.Close()
 
 	const id = 700
-	pkt, err := DecodePacket(NewPacketBuilder(st_data, id, 0, 1<<20, 1).
-		WithPayload([]byte("x")).Build().Encode())
+	pkt, err := decodePacket(newPacketBuilder(st_data, id, 0, 1<<20, 1).
+		WithPayload([]byte("x")).Build().Encode(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestReceiverRetiresTheSynTimer(t *testing.T) {
 		}
 	}()
 	waitFor(t, 2*time.Second, func() bool { return conn.emittedCount() > 0 })
-	conn.inject(NewPacketBuilder(st_state, 4200, 150000, 1<<20, 900).
+	conn.inject(newPacketBuilder(st_state, 4200, 150000, 1<<20, 900).
 		WithAckNum(4200).Build().Encode())
 	var stream *UtpStream
 	select {
@@ -99,7 +99,7 @@ func TestReceiverRetiresTheSynTimer(t *testing.T) {
 		t.Fatal("connect never completed")
 	}
 
-	conn.inject(NewPacketBuilder(st_data, 4200, 160000, 1<<20, 900).
+	conn.inject(newPacketBuilder(st_data, 4200, 160000, 1<<20, 900).
 		WithAckNum(4200).WithPayload([]byte("data")).Build().Encode())
 	conn.settle()
 

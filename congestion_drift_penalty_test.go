@@ -32,11 +32,11 @@ func TestDriftPenaltyReachesTheWindow(t *testing.T) {
 		// region where the window grows.
 		for i := 1; i <= 400; i++ {
 			seq := uint16(i)
-			if err := ctrl.OnTransmit(seq, Initial, packetBytes); err != nil {
+			if err := ctrl.OnTransmit(seq, transmitInitial, packetBytes); err != nil {
 				t.Fatalf("transmit %d: %v", i, err)
 			}
 			now = now.Add(time.Millisecond)
-			if err := ackOne(ctrl, seq, Ack{
+			if err := ackOne(ctrl, seq, ackSample{
 				Delay:      20 * time.Millisecond,
 				RTT:        50 * time.Millisecond,
 				ReceivedAt: now,
@@ -84,11 +84,11 @@ func TestDriftPenaltyIgnoresTheHarmlessDirection(t *testing.T) {
 		now := time.Now()
 		for i := 1; i <= 200; i++ {
 			seq := uint16(i)
-			if err := ctrl.OnTransmit(seq, Initial, 1000); err != nil {
+			if err := ctrl.OnTransmit(seq, transmitInitial, 1000); err != nil {
 				t.Fatalf("transmit %d: %v", i, err)
 			}
 			now = now.Add(time.Millisecond)
-			if err := ackOne(ctrl, seq, Ack{
+			if err := ackOne(ctrl, seq, ackSample{
 				Delay:      20 * time.Millisecond,
 				RTT:        50 * time.Millisecond,
 				ReceivedAt: now,

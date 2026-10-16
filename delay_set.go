@@ -54,7 +54,7 @@ type timeWheel[K comparable, P any] struct {
 	current          int
 	slotNum          int
 	handleExpireFunc expireFunc[K, P]
-	barrier          IdleBarrier
+	barrier          idleBarrier
 	mu               sync.RWMutex
 	stopOnce         sync.Once
 }
@@ -94,7 +94,7 @@ func newTimeWheelWithClock[K comparable, P any](interval time.Duration, slotNum 
 	// Most ticks expire nothing and so never reach a connection, which is
 	// exactly why the wheel has to report for itself: a clock that fired this
 	// ticker and then waited for a *connection* to react would wait forever.
-	tw.barrier, _ = clk.(IdleBarrier)
+	tw.barrier, _ = clk.(idleBarrier)
 	if tw.barrier != nil {
 		tw.barrier.Register()
 	}

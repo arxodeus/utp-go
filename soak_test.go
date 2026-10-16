@@ -256,7 +256,7 @@ func TestSoakUnknownConnectionFlood(t *testing.T) {
 	runtime.ReadMemStats(&baseMem)
 
 	for i := 0; i < packets; i++ {
-		pkt := NewPacketBuilder(st_data, uint16(i), 1000, 1024, uint16(i)).
+		pkt := newPacketBuilder(st_data, uint16(i), 1000, 1024, uint16(i)).
 			WithAckNum(uint16(i)).WithPayload([]byte("x")).Build()
 		conn.inject(pkt.Encode())
 	}

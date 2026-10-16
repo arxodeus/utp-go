@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	// SELECTIVE_ACK_WINDOW is how many sequence numbers past `ack_nr + 1` a
+	// selectiveAckWindow is how many sequence numbers past `ack_nr + 1` a
 	// selective ack reports on, and so how wide the bitfield is.
 	//
 	// libutp scans `min(14+16, inbuf.size())` entries and always writes
@@ -17,7 +17,7 @@ const (
 	// of -- our pending set is a btree with no fixed capacity -- so we always
 	// use 30. That makes our window at least as wide as libutp's, never
 	// wider, and the extension is the same four bytes either way.
-	SELECTIVE_ACK_WINDOW int = 14 + 16
+	selectiveAckWindow int = 14 + 16
 )
 
 type receiveBuffer struct {
@@ -216,7 +216,7 @@ func (rb *receiveBuffer) WasWritten(seqNum uint16) bool {
 		return true
 	}
 	exists := rb.pending.Len() > 0 && rb.pending.Has(&pendingItem{seqNum: seqNum})
-	if rb.logger != nil && rb.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if rb.logger != nil && rb.logger.Enabled(baseContext, log.LevelTrace) {
 		rb.logger.Trace("checking written", "seqNum", seqNum, "initSeqNum", rb.initSeqNum, "consumed", rb.consumed, "exists", exists)
 	}
 	return exists
@@ -259,7 +259,7 @@ func (rb *receiveBuffer) Write(data []byte, seqNum uint16) error {
 	if rb.WasWritten(seqNum) {
 		return nil
 	}
-	if rb.logger != nil && rb.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if rb.logger != nil && rb.logger.Enabled(baseContext, log.LevelTrace) {
 		rb.logger.Trace("will put a data to recv buffer", "seq", seqNum)
 	}
 	// The packet that fills the gap is admitted against the whole of what is
@@ -299,7 +299,7 @@ func (rb *receiveBuffer) Write(data []byte, seqNum uint16) error {
 	}
 	rb.pendingBytes += len(data)
 
-	if rb.logger != nil && rb.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if rb.logger != nil && rb.logger.Enabled(baseContext, log.LevelTrace) {
 		rb.logger.Trace("will handle pending data in recv buffer", "startSeq", next)
 	}
 
@@ -315,12 +315,12 @@ func (rb *receiveBuffer) Write(data []byte, seqNum uint16) error {
 		rb.consumed += 1
 		rb.pending.Delete(pending)
 		rb.pendingBytes -= len(pending.data)
-		if rb.logger != nil && rb.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		if rb.logger != nil && rb.logger.Enabled(baseContext, log.LevelTrace) {
 			rb.logger.Trace("will delete a pending data in recv buffer", "seq", next, "pending.len", rb.pending.Len())
 		}
 		next += 1
 	}
-	if rb.logger != nil && rb.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if rb.logger != nil && rb.logger.Enabled(baseContext, log.LevelTrace) {
 		rb.logger.Trace("handled pending data in recv buffer", "endSeq", next)
 	}
 	return nil
@@ -330,7 +330,7 @@ func (rb *receiveBuffer) AckNum() uint16 {
 	return rb.initSeqNum + rb.consumed
 }
 
-func (rb *receiveBuffer) SelectiveAck() *SelectiveAck {
+func (rb *receiveBuffer) SelectiveAck() *selectiveAck {
 	if rb.pending.Len() == 0 {
 		return nil
 	}
@@ -358,16 +358,16 @@ func (rb *receiveBuffer) SelectiveAck() *SelectiveAck {
 	// and recovers by letting the window slide forward as the gap fills, so
 	// sending them buys nothing against a libutp peer and costs bandwidth on
 	// the ack path exactly when the path is already in trouble.
-	acked := make([]bool, SELECTIVE_ACK_WINDOW)
-	for i := 0; i < SELECTIVE_ACK_WINDOW; i++ {
+	acked := make([]bool, selectiveAckWindow)
+	for i := 0; i < selectiveAckWindow; i++ {
 		acked[i] = pendingSeqs[base+uint16(i)]
 	}
 
-	if rb.logger != nil && rb.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if rb.logger != nil && rb.logger.Enabled(baseContext, log.LevelTrace) {
 		rb.logger.Trace("will new selective ack", "base", base, "acked.len", len(acked))
 	}
 
-	return NewSelectiveAck(acked)
+	return newSelectiveAck(acked)
 }
 
 func (rb *receiveBuffer) close() {

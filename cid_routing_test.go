@@ -13,7 +13,7 @@ func awaitSyn(t *testing.T, conn *scriptedConn) *packet {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, raw := range conn.takeEmitted() {
-			if p, err := DecodePacket(raw); err == nil && p.Header.PacketType == st_syn {
+			if p, err := decodePacket(raw, false); err == nil && p.Header.PacketType == st_syn {
 				return p
 			}
 		}
@@ -57,7 +57,7 @@ func TestPacketReachesTheConnectionItIsFor(t *testing.T) {
 	}
 	answer := func(syn *packet) {
 		// The SYN carries our receive id; the answer comes back on it.
-		conn.inject(NewPacketBuilder(st_state, syn.Header.ConnectionId,
+		conn.inject(newPacketBuilder(st_state, syn.Header.ConnectionId,
 			uint32(time.Now().UnixMicro()), 1<<20, peerConn).
 			WithAckNum(syn.Header.SeqNum).Build().Encode())
 	}
@@ -100,7 +100,7 @@ func TestSynForATakenReceiveIdIsRefused(t *testing.T) {
 	before := sock.NumConnections()
 
 	// The peer dials us with id recv-1: the connection would receive on recv.
-	conn.inject(NewPacketBuilder(st_syn, recv-1, uint32(time.Now().UnixMicro()), 1<<20, 500).Build().Encode())
+	conn.inject(newPacketBuilder(st_syn, recv-1, uint32(time.Now().UnixMicro()), 1<<20, 500).Build().Encode())
 	deadline := time.Now().Add(2 * time.Second)
 	for sock.ConnectionsRefusedIdInUse() == 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
@@ -112,7 +112,7 @@ func TestSynForATakenReceiveIdIsRefused(t *testing.T) {
 		t.Fatalf("%d connections after the refused SYN, %d before", n, before)
 	}
 	for _, raw := range conn.takeEmitted() {
-		if p, err := DecodePacket(raw); err == nil && p.Header.ConnectionId == recv-1 {
+		if p, err := decodePacket(raw, false); err == nil && p.Header.ConnectionId == recv-1 {
 			t.Fatalf("the refused SYN was answered: %s", describePackets([][]byte{raw}))
 		}
 	}
@@ -135,7 +135,7 @@ func TestDialledConnectionAvoidsAReceiveIdInUse(t *testing.T) {
 		_, err := sock.Accept(ctx, NewConnectionConfig())
 		accepted <- err
 	}()
-	conn.inject(NewPacketBuilder(st_syn, taken-1, uint32(time.Now().UnixMicro()), 1<<20, 500).Build().Encode())
+	conn.inject(newPacketBuilder(st_syn, taken-1, uint32(time.Now().UnixMicro()), 1<<20, 500).Build().Encode())
 	if err := <-accepted; err != nil {
 		t.Fatalf("accept: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestDialledConnectionAvoidsAReceiveIdInUse(t *testing.T) {
 	}
 	prev := randomUint16Source.Load()
 	randomUint16Source.Store(&next)
-	cid := sock.GenerateCid(conn.peer, true, nil)
+	cid := sock.generateCid(conn.peer, true, nil)
 	randomUint16Source.Store(prev)
 	if cid.Recv == taken {
 		t.Fatalf("a dialled connection was given receive id %d, which an accepted one already has", taken)
@@ -179,13 +179,13 @@ func TestClosedConnectionIdsAreNotReusedAtOnce(t *testing.T) {
 		done <- s
 	}()
 	syn := awaitSyn(t, conn)
-	conn.inject(NewPacketBuilder(st_state, syn.Header.ConnectionId, uint32(time.Now().UnixMicro()), 1<<20, 300).
+	conn.inject(newPacketBuilder(st_state, syn.Header.ConnectionId, uint32(time.Now().UnixMicro()), 1<<20, 300).
 		WithAckNum(syn.Header.SeqNum).Build().Encode())
 	if <-done == nil {
 		t.Fatal("did not connect")
 	}
 	// The peer resets it, and it is gone.
-	conn.inject(NewPacketBuilder(st_reset, recv, 0, 0, 301).WithAckNum(syn.Header.SeqNum).Build().Encode())
+	conn.inject(newPacketBuilder(st_reset, recv, 0, 0, 301).WithAckNum(syn.Header.SeqNum).Build().Encode())
 	deadline := time.Now().Add(5 * time.Second)
 	for sock.NumConnections() > 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
@@ -207,7 +207,7 @@ func TestClosedConnectionIdsAreNotReusedAtOnce(t *testing.T) {
 	}
 	prev := randomUint16Source.Load()
 	randomUint16Source.Store(&next)
-	cid := sock.GenerateCid(conn.peer, true, nil)
+	cid := sock.generateCid(conn.peer, true, nil)
 	randomUint16Source.Store(prev)
 	if cid.Recv == recv {
 		t.Fatalf("receive id %d reused the moment the connection holding it ended", recv)
@@ -245,7 +245,7 @@ func TestDialledConnectionDoesNotSendOnAnIdInUse(t *testing.T) {
 	}
 	prev := randomUint16Source.Load()
 	randomUint16Source.Store(&next)
-	cid := sock.GenerateCid(conn.peer, true, nil)
+	cid := sock.generateCid(conn.peer, true, nil)
 	randomUint16Source.Store(prev)
 	if cid.Send == recv {
 		t.Fatalf("a dialled connection sends on %d, which another connection to the peer receives on", recv)

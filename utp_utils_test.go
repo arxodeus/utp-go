@@ -16,7 +16,7 @@ func TestRandomUint16DataRace(t *testing.T) {
 	for i := 0; i < numGoroutines; i++ {
 		go func() {
 			defer wg.Done()
-			_ = RandomUint16()
+			_ = randomUint16()
 		}()
 	}
 	wg.Wait()
@@ -86,14 +86,14 @@ func TestTimestampDiffMicros(t *testing.T) {
 
 func TestDurationBetween(t *testing.T) {
 	const max = uint32(math.MaxUint32)
-	if got, want := DurationBetween(1000, 1200), 200*time.Microsecond; got != want {
-		t.Fatalf("DurationBetween(1000, 1200) = %v, want %v", got, want)
+	if got, want := durationBetween(1000, 1200), 200*time.Microsecond; got != want {
+		t.Fatalf("durationBetween(1000, 1200) = %v, want %v", got, want)
 	}
 	// Across the wrap: earlier is just below the boundary, later just above.
-	if got, want := DurationBetween(max-99, 100), 200*time.Microsecond; got != want {
-		t.Fatalf("DurationBetween across wrap = %v, want %v", got, want)
+	if got, want := durationBetween(max-99, 100), 200*time.Microsecond; got != want {
+		t.Fatalf("durationBetween across wrap = %v, want %v", got, want)
 	}
-	if got, want := DurationBetween(0, 0), time.Duration(0); got != want {
-		t.Fatalf("DurationBetween(0, 0) = %v, want %v", got, want)
+	if got, want := durationBetween(0, 0), time.Duration(0); got != want {
+		t.Fatalf("durationBetween(0, 0) = %v, want %v", got, want)
 	}
 }

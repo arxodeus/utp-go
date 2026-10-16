@@ -19,9 +19,9 @@ func drainTestConn(t *testing.T, lastAdvertised uint32, bufferSize int) *connect
 	t.Helper()
 	const syn = uint16(100)
 	const synAck = uint16(101)
-	conn := CreateTestConnection(Endpoint{Type: Acceptor, SynNum: syn, SynAck: synAck})
-	conn.state = &ConnState{
-		stateType:   ConnConnected,
+	conn := CreateTestConnection(endpointInfo{Type: acceptor, SynNum: syn, SynAck: synAck})
+	conn.state = &connState{
+		stateType:   connConnected,
 		SentPackets: newSentPacketsWithoutLogger(synAck, newDefaultController(fromConnConfig(conn.config))),
 		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
 		RecvBuf:     newReceiveBuffer(bufferSize, syn),
@@ -100,7 +100,7 @@ func TestReadDrainedCoversASubPacketWindow(t *testing.T) {
 // peer to tell and no buffer to report.
 func TestReadDrainedIgnoresAnUnestablishedConnection(t *testing.T) {
 	conn := drainTestConn(t, 0, TEST_BUFFER_SIZE)
-	conn.state.stateType = ConnConnecting
+	conn.state.stateType = connConnecting
 	conn.onReadDrained()
 	if conn.ackPending {
 		t.Error("owed an acknowledgement on a connection that is not established")
@@ -121,7 +121,7 @@ func TestLastAdvertisedWindowFollowsWhatWasSent(t *testing.T) {
 	conn := drainTestConn(t, 0, TEST_BUFFER_SIZE)
 	conn.socketEvents = make(chan *socketEvent, 4)
 
-	pkt := NewPacketBuilder(st_state, 1, 0, 4242, 1).Build()
+	pkt := newPacketBuilder(st_state, 1, 0, 4242, 1).Build()
 	conn.emit(pkt)
 
 	if conn.lastAdvertisedWindow != 4242 {

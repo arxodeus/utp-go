@@ -422,7 +422,7 @@ none.
   an event-loop pass ends on the real clock. Nothing in this corpus asserts
   *when* a packet was sent, only what it contained, how many there were, and
   in what order.
-  **The timers are now virtual too** (`Clock`, `IdleBarrier`,
+  **The timers are now virtual too** (`Clock`, `idleBarrier`,
   `virtualClock`), and emission *instants* are compared exactly —
   `TestSynRetransmissionInstantsMatchLibutp` reads them off the packets
   themselves, on both sides, and gets the same numbers on every run. Ack

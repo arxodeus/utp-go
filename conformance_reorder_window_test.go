@@ -40,7 +40,7 @@ func TestReorderedDataCostsUsNoMoreWindowThanLibutp(t *testing.T) {
 	for i := 0; i < held; i++ {
 		// +2 onwards: +1 is the gap, and it never arrives.
 		seq := corpusSynSeq + 2 + uint16(i)
-		raws = append(raws, NewPacketBuilder(st_data, corpusSynConnID+1,
+		raws = append(raws, newPacketBuilder(st_data, corpusSynConnID+1,
 			200000+uint32(i), corpusWindow, seq).
 			WithAckNum(corpusPinnedSeq-1).WithPayload(body).Build().Encode())
 	}
@@ -85,7 +85,7 @@ func TestReorderedDataDoesNotBlockOurWindow(t *testing.T) {
 	var raws [][]byte
 	for i := 0; i < held; i++ {
 		seq := corpusSynSeq + 2 + uint16(i)
-		raws = append(raws, NewPacketBuilder(st_data, corpusSynConnID+1,
+		raws = append(raws, newPacketBuilder(st_data, corpusSynConnID+1,
 			200000+uint32(i), corpusWindow, seq).
 			WithAckNum(corpusPinnedSeq-1).WithPayload(body).Build().Encode())
 	}
@@ -122,7 +122,7 @@ func windowsAfter(t *testing.T, raws [][]byte) (ours, libutpOut uint32) {
 			t.Fatalf("%s emitted nothing; with a gap open every packet should draw an "+
 				"acknowledgement", tag)
 		}
-		pkt, err := DecodePacket(raw[len(raw)-1])
+		pkt, err := decodePacket(raw[len(raw)-1], false)
 		if err != nil {
 			t.Fatalf("%s: could not decode its last packet: %v", tag, err)
 		}

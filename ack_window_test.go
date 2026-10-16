@@ -33,15 +33,15 @@ func TestStaleAckIsIgnoredNotFatal(t *testing.T) {
 	const syn = uint16(100)
 	const synAck = uint16(101)
 
-	conn := CreateTestConnection(Endpoint{Type: Acceptor, SynNum: syn, SynAck: synAck})
+	conn := CreateTestConnection(endpointInfo{Type: acceptor, SynNum: syn, SynAck: synAck})
 
 	congestionCtrl := newDefaultController(fromConnConfig(conn.config))
 	sentPackets := newSentPacketsWithoutLogger(synAck, congestionCtrl)
 	now := time.Now()
 	sentPackets.OnTransmit(synAck+1, st_data, []byte{0xef}, 64, now)
 
-	conn.state = &ConnState{
-		stateType:   ConnConnected,
+	conn.state = &connState{
+		stateType:   connConnected,
 		SentPackets: sentPackets,
 		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
 		RecvBuf:     newReceiveBuffer(TEST_BUFFER_SIZE, syn),
@@ -51,7 +51,7 @@ func TestStaleAckIsIgnoredNotFatal(t *testing.T) {
 	// invalidAckNum tolerates, outside everything sentPackets tracks. That
 	// gap is the only way to reach this branch at all, which is worth
 	// stating -- a test that could not reach it would prove nothing.
-	stale := NewPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()),
+	stale := newPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()),
 		DefaultWindowSize, syn+1).WithAckNum(synAck - 2).Build()
 	if conn.invalidAckNum(stale) {
 		t.Fatal("the pre-filter rejected this packet, so the branch under test is never reached")
@@ -59,9 +59,9 @@ func TestStaleAckIsIgnoredNotFatal(t *testing.T) {
 
 	conn.onPacket(stale, now)
 
-	if conn.state.stateType != ConnConnected {
+	if conn.state.stateType != connConnected {
 		t.Errorf("the connection is %v after a stale acknowledgement, want %v",
-			connStateName(conn.state.stateType), connStateName(ConnConnected))
+			connStateName(conn.state.stateType), connStateName(connConnected))
 	}
 	if conn.state.Err != nil {
 		t.Errorf("the connection recorded %v; libutp records nothing at all", conn.state.Err)
@@ -73,7 +73,7 @@ func TestStaleAckIsIgnoredNotFatal(t *testing.T) {
 
 	// And it still works: a real acknowledgement for the packet that is
 	// genuinely outstanding is still acted on.
-	good := NewPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()),
+	good := newPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()),
 		DefaultWindowSize, syn+2).WithAckNum(synAck + 1).Build()
 	conn.onPacket(good, now.Add(10*time.Millisecond))
 
@@ -95,21 +95,21 @@ func TestAckForAPacketNeverSentIsDropped(t *testing.T) {
 	const syn = uint16(100)
 	const synAck = uint16(101)
 
-	conn := CreateTestConnection(Endpoint{Type: Acceptor, SynNum: syn, SynAck: synAck})
+	conn := CreateTestConnection(endpointInfo{Type: acceptor, SynNum: syn, SynAck: synAck})
 
 	congestionCtrl := newDefaultController(fromConnConfig(conn.config))
 	sentPackets := newSentPacketsWithoutLogger(synAck, congestionCtrl)
 	now := time.Now()
 	sentPackets.OnTransmit(synAck+1, st_data, []byte{0xef}, 64, now)
 
-	conn.state = &ConnState{
-		stateType:   ConnConnected,
+	conn.state = &connState{
+		stateType:   connConnected,
 		SentPackets: sentPackets,
 		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
 		RecvBuf:     newReceiveBuffer(TEST_BUFFER_SIZE, syn),
 	}
 
-	forged := NewPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()),
+	forged := newPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()),
 		DefaultWindowSize, syn+1).WithAckNum(synAck + 30000).Build()
 
 	if !conn.invalidAckNum(forged) {
@@ -118,9 +118,9 @@ func TestAckForAPacketNeverSentIsDropped(t *testing.T) {
 
 	conn.onPacket(forged, now)
 
-	if conn.state.stateType != ConnConnected {
+	if conn.state.stateType != connConnected {
 		t.Errorf("the connection is %v after a forged acknowledgement, want %v",
-			connStateName(conn.state.stateType), connStateName(ConnConnected))
+			connStateName(conn.state.stateType), connStateName(connConnected))
 	}
 	if !conn.state.SentPackets.HasUnackedPackets() {
 		t.Error("a forged acknowledgement acknowledged a packet")
@@ -139,10 +139,10 @@ func TestReadShutdownAcksWithoutBuffering(t *testing.T) {
 	const syn = uint16(100)
 	const synAck = uint16(101)
 
-	conn := CreateTestConnection(Endpoint{Type: Acceptor, SynNum: syn, SynAck: synAck})
+	conn := CreateTestConnection(endpointInfo{Type: acceptor, SynNum: syn, SynAck: synAck})
 	congestionCtrl := newDefaultController(fromConnConfig(conn.config))
-	conn.state = &ConnState{
-		stateType:   ConnConnected,
+	conn.state = &connState{
+		stateType:   connConnected,
 		SentPackets: newSentPacketsWithoutLogger(synAck, congestionCtrl),
 		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
 		RecvBuf:     newReceiveBuffer(TEST_BUFFER_SIZE, syn),
@@ -178,10 +178,10 @@ func TestReadShutdownStillReorders(t *testing.T) {
 	const syn = uint16(100)
 	const synAck = uint16(101)
 
-	conn := CreateTestConnection(Endpoint{Type: Acceptor, SynNum: syn, SynAck: synAck})
+	conn := CreateTestConnection(endpointInfo{Type: acceptor, SynNum: syn, SynAck: synAck})
 	congestionCtrl := newDefaultController(fromConnConfig(conn.config))
-	conn.state = &ConnState{
-		stateType:   ConnConnected,
+	conn.state = &connState{
+		stateType:   connConnected,
 		SentPackets: newSentPacketsWithoutLogger(synAck, congestionCtrl),
 		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
 		RecvBuf:     newReceiveBuffer(TEST_BUFFER_SIZE, syn),

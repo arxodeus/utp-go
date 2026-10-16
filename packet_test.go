@@ -11,17 +11,17 @@ import (
 	"time"
 )
 
-func (p *PacketHeaderV1) Generate(rand *rand.Rand, size int) reflect.Value {
-	packetType := PacketType(rand.Intn(5))
+func (p *packetHeaderV1) Generate(rand *rand.Rand, size int) reflect.Value {
+	packetType := packetType(rand.Intn(5))
 	// The extension byte must name a known extension: the decoder rejects
-	// anything above MAX_KNOWN_EXTENSION, matching libutp
+	// anything above maxKnownExtension, matching libutp
 	// (utp_internal.cpp:2481). This generator previously produced arbitrary
 	// bytes and asserted they survived a round trip, which only held while
 	// the decoder validated nothing.
-	extension := byte(rand.Intn(MAX_KNOWN_EXTENSION + 1))
-	header := &PacketHeaderV1{
+	extension := byte(rand.Intn(maxKnownExtension + 1))
+	header := &packetHeaderV1{
 		PacketType:    packetType,
-		Version:       PROTOCOL_VERSION_ONE,
+		Version:       protocolVersionOne,
 		Extension:     extension,
 		ConnectionId:  uint16(rand.Intn(math.MaxUint16)),
 		Timestamp:     int64(rand.Intn(math.MaxUint32)),
@@ -33,7 +33,7 @@ func (p *PacketHeaderV1) Generate(rand *rand.Rand, size int) reflect.Value {
 	return reflect.ValueOf(header)
 }
 
-func (a *SelectiveAck) Generate(rand *rand.Rand, size int) reflect.Value {
+func (a *selectiveAck) Generate(rand *rand.Rand, size int) reflect.Value {
 	bits := rand.Intn(size)
 	acked := make([]bool, bits)
 	for i := 0; i < bits; i++ {
@@ -43,7 +43,7 @@ func (a *SelectiveAck) Generate(rand *rand.Rand, size int) reflect.Value {
 	//	var empty [32]bool
 	//	acked = empty[:]
 	//}
-	return reflect.ValueOf(NewSelectiveAck(acked))
+	return reflect.ValueOf(newSelectiveAck(acked))
 }
 
 func TestPacketHeaderEncodeDecode(t *testing.T) {
@@ -51,12 +51,12 @@ func TestPacketHeaderEncodeDecode(t *testing.T) {
 		MaxCount: 1000,
 		Rand:     rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
-	checkPacketHeader := func(header *PacketHeaderV1) bool {
+	checkPacketHeader := func(header *packetHeaderV1) bool {
 		encoded := header.EncodeToBytes()
 		if len(encoded) != 20 {
 			return false
 		}
-		headerFromDecode, err := DecodePacketHeader(encoded)
+		headerFromDecode, err := decodePacketHeader(encoded)
 		if err != nil {
 			return false
 		}
@@ -72,18 +72,18 @@ func TestSelectiveAckEncodeDecode(t *testing.T) {
 		MaxCount: 1000,
 		Rand:     rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
-	checkSelective := func(ack *SelectiveAck) bool {
+	checkSelective := func(ack *selectiveAck) bool {
 		encodedLen := ack.EncodedLen()
 		encoded := ack.Encode()
-		if len(encoded)%(SELECTIVE_ACK_BITS/8) != 0 {
+		if len(encoded)%(selectiveAckBits/8) != 0 {
 			return false
 		}
 		if len(encoded) != encodedLen {
 			return false
 		}
-		ackFromDecode, err := DecodeSelectiveAck(encoded)
+		ackFromDecode, err := decodeSelectiveAck(encoded)
 		if err != nil {
-			if encodedLen < 4 && errors.Is(err, ErrInsufficientSelectiveAckLen) {
+			if encodedLen < 4 && errors.Is(err, errInsufficientSelectiveAckLen) {
 				return true
 			}
 			t.Logf("expected err to be nil, got %v", err)
@@ -106,7 +106,7 @@ func TestPacket(t *testing.T) {
 		Rand:     rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 	// Helper function to check property
-	checkPacket := func(header *PacketHeaderV1, selectiveAck *SelectiveAck, payload []byte) bool {
+	checkPacket := func(header *packetHeaderV1, selectiveAck *selectiveAck, payload []byte) bool {
 		// Check empty payload
 		if len(payload) == 0 {
 			return true
@@ -141,7 +141,7 @@ func TestPacket(t *testing.T) {
 
 		// Decode packet
 
-		decoded, err := DecodePacket(encoded)
+		decoded, err := decodePacket(encoded, false)
 		if err != nil {
 			t.Errorf("failed to decode packet: %v", err)
 			return false
@@ -165,16 +165,16 @@ func TestPacket(t *testing.T) {
 // its selective ack gets that edit written in the ack's place. The fuzzer
 // checks the unedited round trip; these are the edits it cannot make.
 func TestDecodedPacketKeepsExtensionsThroughEdits(t *testing.T) {
-	base := NewPacketBuilder(st_state, 5, 1, 2, 3).
-		WithSelectiveAck(NewSelectiveAck([]bool{true, false, false, false})).Build().Encode()
+	base := newPacketBuilder(st_state, 5, 1, 2, 3).
+		WithSelectiveAck(newSelectiveAck([]bool{true, false, false, false})).Build().Encode()
 	// Chain an unknown extension, type 99, after the selective ack.
-	sackEnd := MINIMAL_HEADER_SIZE + 2 + 4
+	sackEnd := minimalHeaderSize + 2 + 4
 	wire := append([]byte{}, base[:sackEnd]...)
-	wire[MINIMAL_HEADER_SIZE] = 99
+	wire[minimalHeaderSize] = 99
 	wire = append(wire, 0, 3, 0xaa, 0xbb, 0xcc)
 	wire = append(wire, base[sackEnd:]...)
 
-	decoded, err := DecodePacket(wire)
+	decoded, err := decodePacket(wire, false)
 	if err != nil {
 		t.Fatalf("setup: %v", err)
 	}
@@ -183,9 +183,9 @@ func TestDecodedPacketKeepsExtensionsThroughEdits(t *testing.T) {
 	}
 
 	t.Run("a replaced selective ack is written in its place", func(t *testing.T) {
-		p, _ := DecodePacket(wire)
-		p.Eack = NewSelectiveAck([]bool{false, true, false, false})
-		again, err := DecodePacket(p.Encode())
+		p, _ := decodePacket(wire, false)
+		p.Eack = newSelectiveAck([]bool{false, true, false, false})
+		again, err := decodePacket(p.Encode(), false)
 		if err != nil {
 			t.Fatalf("the edited packet does not decode: %v", err)
 		}
@@ -198,10 +198,10 @@ func TestDecodedPacketKeepsExtensionsThroughEdits(t *testing.T) {
 	})
 
 	t.Run("a cleared selective ack never leaves an unknown extension first", func(t *testing.T) {
-		p, _ := DecodePacket(wire)
+		p, _ := decodePacket(wire, false)
 		p.Eack = nil
 		out := p.Encode()
-		again, err := DecodePacket(out)
+		again, err := decodePacket(out, false)
 		if err != nil {
 			t.Fatalf("clearing the selective ack produced an unreadable packet: %v\n%x", err, out)
 		}

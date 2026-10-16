@@ -28,7 +28,7 @@ func maxInt64(a, b int64) int64 {
 	return b
 }
 
-// NowMicro is the timestamp uTP puts on the wire: microseconds, truncated to
+// nowMicro is the timestamp uTP puts on the wire: microseconds, truncated to
 // 32 bits, from a clock that never jumps.
 //
 // libutp stamps packets from CLOCK_MONOTONIC (utp_utils.cpp:158-175), and
@@ -42,7 +42,7 @@ func maxInt64(a, b int64) int64 {
 // forward by the monotonic clock: the same number time.Now().UnixMicro() would
 // give while nobody touches the clock, and unaffected when somebody does. Only
 // differences between stamps carry meaning, so where it starts does not matter.
-func NowMicro() uint32 {
+func nowMicro() uint32 {
 	return uint32(wireClockEpochMicros + time.Since(wireClockEpoch).Microseconds())
 }
 
@@ -71,13 +71,13 @@ func timestampDiffMicros(now, peerTimestamp uint32) time.Duration {
 	return time.Duration(wrappingSubUint32(now, peerTimestamp)) * time.Microsecond
 }
 
-// DurationBetween returns the time between two uint32 microsecond timestamps.
+// durationBetween returns the time between two uint32 microsecond timestamps.
 //
 // The previous implementation was off by one on the wrapping branch
 // (MaxUint32-earlier+later rather than 2^32-earlier+later) and returned a
 // Duration built from a microsecond count without scaling it, so the value
 // was a nanosecond-typed Duration holding microseconds.
-func DurationBetween(earlier uint32, later uint32) time.Duration {
+func durationBetween(earlier uint32, later uint32) time.Duration {
 	return time.Duration(wrappingSubUint32(later, earlier)) * time.Microsecond
 }
 
@@ -91,7 +91,7 @@ func DurationBetween(earlier uint32, later uint32) time.Duration {
 // a test that pins the source next would otherwise race it.
 var randomUint16Source atomic.Pointer[func() uint16]
 
-func RandomUint16() uint16 {
+func randomUint16() uint16 {
 	if f := randomUint16Source.Load(); f != nil {
 		return (*f)()
 	}

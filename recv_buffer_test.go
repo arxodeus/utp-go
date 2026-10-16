@@ -285,7 +285,7 @@ func TestSelectiveAckWindowIsBounded(t *testing.T) {
 	buf := newReceiveBuffer(2*1024*1024, 100)
 
 	// A gap at 101, one packet just past it, and one far past the window.
-	for _, seq := range []uint16{102, 100 + 2 + uint16(SELECTIVE_ACK_WINDOW) + 5} {
+	for _, seq := range []uint16{102, 100 + 2 + uint16(selectiveAckWindow) + 5} {
 		if err := buf.Write([]byte("x"), seq); err != nil {
 			t.Fatalf("write seq %d: %v", seq, err)
 		}
@@ -319,7 +319,7 @@ func TestSelectiveAckWindowIsBounded(t *testing.T) {
 // four bytes regardless of what lies past it.
 func TestSelectiveAckIgnoresPacketsPastTheWindow(t *testing.T) {
 	buf := newReceiveBuffer(2*1024*1024, 100)
-	far := 100 + 2 + uint16(SELECTIVE_ACK_WINDOW) + 1
+	far := 100 + 2 + uint16(selectiveAckWindow) + 1
 	if err := buf.Write([]byte("x"), far); err != nil {
 		t.Fatalf("write seq %d: %v", far, err)
 	}
@@ -333,7 +333,7 @@ func TestSelectiveAckIgnoresPacketsPastTheWindow(t *testing.T) {
 	}
 	for i, set := range ack.Acked() {
 		if set {
-			t.Errorf("entry %d is set for a packet outside the %d-entry window", i, SELECTIVE_ACK_WINDOW)
+			t.Errorf("entry %d is set for a packet outside the %d-entry window", i, selectiveAckWindow)
 		}
 	}
 }

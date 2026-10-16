@@ -32,7 +32,7 @@ func TestResetAnsweringOurAckEndsTheConnection(t *testing.T) {
 			accepted <- s
 		}()
 		time.Sleep(time.Millisecond)
-		conn.inject(NewPacketBuilder(st_syn, peerID, uint32(time.Now().UnixMicro()), 1<<20, 900).Build().Encode())
+		conn.inject(newPacketBuilder(st_syn, peerID, uint32(time.Now().UnixMicro()), 1<<20, 900).Build().Encode())
 		s := <-accepted
 		if s == nil {
 			t.Fatal("no accept")
@@ -40,13 +40,13 @@ func TestResetAnsweringOurAckEndsTheConnection(t *testing.T) {
 		var ourSeq uint16
 		for ourSeq == 0 {
 			for _, raw := range conn.takeEmitted() {
-				if p, err := DecodePacket(raw); err == nil && p.Header.PacketType == st_state {
+				if p, err := decodePacket(raw, false); err == nil && p.Header.PacketType == st_state {
 					ourSeq = p.Header.SeqNum
 				}
 			}
 			time.Sleep(time.Millisecond)
 		}
-		conn.inject(NewPacketBuilder(st_data, peerID+1, uint32(time.Now().UnixMicro()), 1<<20, 901).
+		conn.inject(newPacketBuilder(st_data, peerID+1, uint32(time.Now().UnixMicro()), 1<<20, 901).
 			WithAckNum(ourSeq - 1).WithPayload([]byte("hi")).Build().Encode())
 		got := make(chan error, 1)
 		go func() {
@@ -59,7 +59,7 @@ func TestResetAnsweringOurAckEndsTheConnection(t *testing.T) {
 			got <- err
 		}()
 		time.Sleep(time.Duration(i%7) * time.Millisecond)
-		conn.inject(NewPacketBuilder(st_reset, peerID+1, 0, 0, 902).WithAckNum(ourSeq).Build().Encode())
+		conn.inject(newPacketBuilder(st_reset, peerID+1, 0, 0, 902).WithAckNum(ourSeq).Build().Encode())
 		select {
 		case err := <-got:
 			if !errors.Is(err, ErrReset) {

@@ -42,7 +42,7 @@ func deadByIdleTimeout(t *testing.T) (*UtpStream, context.CancelFunc, func()) {
 	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(NewPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+		conn.inject(newPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
 	})
 	stream := <-accepted
 	if stream == nil {
@@ -51,7 +51,7 @@ func deadByIdleTimeout(t *testing.T) (*UtpStream, context.CancelFunc, func()) {
 	clk.AwaitParticipants(4)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(NewPacketBuilder(st_data, peerID+1, 110000, 1<<20, peerSeq+1).
+		conn.inject(newPacketBuilder(st_data, peerID+1, 110000, 1<<20, peerSeq+1).
 			WithAckNum(ourSeq - 1).WithPayload([]byte("hello")).Build().Encode())
 	})
 	buf := make([]byte, 16)

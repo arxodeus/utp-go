@@ -81,7 +81,7 @@ func (c *connection) mayRest() bool {
 		return false
 	}
 	stream := c.stream
-	if c.state.stateType != ConnConnected || c.state.closing != nil ||
+	if c.state.stateType != connConnected || c.state.closing != nil ||
 		c.closeRequested || c.writeShut ||
 		stream.shutdown.Load() || stream.writeClosed.Load() {
 		return false

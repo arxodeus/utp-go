@@ -36,11 +36,11 @@ func envInt(k string, def int) int {
 }
 
 // TestReaderUnblocksWhenPeerGoesAway covers the defect where a connection that
-// reached ConnClosed by any path other than "remote FIN fully received" never
+// reached connClosed by any path other than "remote FIN fully received" never
 // delivered the end-of-stream marker, leaving ReadToEOF blocked forever.
 //
 // The event loop guarded the final drain with `if !c.eof()`, but eof() is true
-// by definition once the state is ConnClosed, so the drain never ran.
+// by definition once the state is connClosed, so the drain never ran.
 func TestReaderUnblocksWhenPeerGoesAway(t *testing.T) {
 	logger := quietLogger()
 	aAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500}
@@ -268,7 +268,7 @@ func TestAbortedTransfersTearDown(t *testing.T) {
 // when the caller's own context had no deadline.
 func TestAcceptTimesOutWithoutSyn(t *testing.T) {
 	if testing.Short() {
-		t.Skip("waits for AWAITING_CONNECTION_TIMEOUT")
+		t.Skip("waits for the socket's accept expiry")
 	}
 	logger := quietLogger()
 	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4800}
@@ -296,7 +296,9 @@ func TestAcceptTimesOutWithoutSyn(t *testing.T) {
 			t.Fatal("expected an error, got a stream")
 		}
 		t.Logf("AcceptWithCid returned: %v", err)
-	case <-time.After(utp.AWAITING_CONNECTION_TIMEOUT + 20*time.Second):
+	// The socket gives up on an accept after 20 seconds (see
+	// utp.ErrAcceptTimedOut); allow as long again for slow machines.
+	case <-time.After(40 * time.Second):
 		t.Fatal("AcceptWithCid never returned for a connection that never arrived")
 	}
 }

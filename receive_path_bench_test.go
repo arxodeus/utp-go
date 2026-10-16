@@ -94,12 +94,12 @@ func benchReceiver(b *testing.B) (*benchConn, *UtpSocket, *UtpStream, []byte) {
 	}()
 	time.Sleep(20 * time.Millisecond)
 	b.Cleanup(pinRandom(benchOurSeq))
-	conn.in <- NewPacketBuilder(st_syn, benchConnID, 100000, benchWindow, benchPeerSeq).Build().Encode()
+	conn.in <- newPacketBuilder(st_syn, benchConnID, 100000, benchWindow, benchPeerSeq).Build().Encode()
 	stream := <-accepted
 	if stream == nil {
 		b.FailNow()
 	}
-	template := NewPacketBuilder(st_data, benchConnID+1, 200000, benchWindow, benchPeerSeq+1).
+	template := newPacketBuilder(st_data, benchConnID+1, 200000, benchWindow, benchPeerSeq+1).
 		WithAckNum(benchOurSeq - 1).WithPayload(make([]byte, benchPayload)).Build().Encode()
 	return conn, sock, stream, template
 }
@@ -125,7 +125,7 @@ func BenchmarkReceivePath(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		binary.BigEndian.PutUint32(template[4:], 200000+uint32(i))
 		binary.BigEndian.PutUint16(template[16:], benchPeerSeq+1+uint16(i))
-		sock.dispatch(&IncomingPacketRaw{peer: conn.peer, payload: template}, touched)
+		sock.dispatch(&incomingPacketRaw{peer: conn.peer, payload: template}, touched)
 		sock.endBatch(touched)
 		for len(stream.reads) > 0 {
 			read += (<-stream.reads).Len
@@ -168,7 +168,7 @@ func BenchmarkReceivePathCold(b *testing.B) {
 		binary.BigEndian.PutUint32(template[4:], 200000+uint32(i))
 		binary.BigEndian.PutUint16(template[16:], benchPeerSeq+1+uint16(i))
 		start := time.Now()
-		sock.dispatch(&IncomingPacketRaw{peer: conn.peer, payload: template}, touched)
+		sock.dispatch(&incomingPacketRaw{peer: conn.peer, payload: template}, touched)
 		sock.endBatch(touched)
 		took = append(took, time.Since(start))
 		if conn.wroteAt.After(start) {

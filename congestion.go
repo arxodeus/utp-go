@@ -60,11 +60,11 @@ const (
 )
 
 const (
-	Initial = iota
-	Retransmission
+	transmitInitial = iota
+	transmitRetransmission
 )
 
-type Transmit int
+type transmitKind int
 
 type packetRecord struct {
 	// SentWindow is the congestion window when the packet was last
@@ -84,16 +84,16 @@ type packetRecord struct {
 	SentAt time.Time
 }
 
-type Ack struct {
+type ackSample struct {
 	Delay      time.Duration
 	RTT        time.Duration
 	ReceivedAt time.Time
 }
 
 var (
-	ErrInsufficientWindowSize = errors.New("insufficient window size")
-	ErrUnknownSeqNum          = errors.New("unknown sequence number")
-	ErrDuplicateTransmission  = errors.New("duplicate transmission")
+	errInsufficientWindowSize = errors.New("insufficient window size")
+	errUnknownSeqNum          = errors.New("unknown sequence number")
+	errDuplicateTransmission  = errors.New("duplicate transmission")
 )
 
 type ctrlConfig struct {
@@ -131,9 +131,9 @@ func defaultCtrlConfig() *ctrlConfig {
 	}
 }
 
-type Controller interface {
-	OnTransmit(seqNum uint16, transmit Transmit, dataLen uint32) error
-	OnAck(seqNum uint16, ack Ack) error
+type controller interface {
+	OnTransmit(seqNum uint16, transmit transmitKind, dataLen uint32) error
+	OnAck(seqNum uint16, ack ackSample) error
 	OnLostPacket(seqNum uint16, retransmitting bool, now time.Time) error
 	OnTimeout(hasPacketsInFlight bool)
 	OnWindowFull(now time.Time)
@@ -181,11 +181,11 @@ type Controller interface {
 	// estimate over time. A controller that can only be observed through its
 	// effect on throughput cannot be told apart from one that is doing
 	// nothing -- which is not hypothetical here; see KNOWN-LIMITATIONS.md.
-	Stats() ControllerStats
+	Stats() controllerStats
 }
 
-// ControllerStats is a snapshot of a congestion controller's state.
-type ControllerStats struct {
+// controllerStats is a snapshot of a congestion controller's state.
+type controllerStats struct {
 	// WindowSizeBytes is the volume currently considered in flight.
 	WindowSizeBytes uint32
 	// MaxWindowSizeBytes is the congestion window: what the controller
@@ -287,8 +287,8 @@ type defaultController struct {
 	undo lossUndo
 	// spuriousLossesUndone counts undoSpuriousLoss's undos.
 	spuriousLossesUndone uint64
-	fineRTT              time.Duration // see ControllerStats.FineRTT
-	minFineRTT           time.Duration // see ControllerStats.MinFineRTT
+	fineRTT              time.Duration // see controllerStats.FineRTT
+	minFineRTT           time.Duration // see controllerStats.MinFineRTT
 	delayAcc             *baseDelayHist
 	// curDelayHist is libutp's cur_delay_hist: the last curDelaySize
 	// queueing-delay samples, each taken against the base as it stood when
@@ -443,14 +443,14 @@ func newDefaultController(config *ctrlConfig) *defaultController {
 }
 
 // Stats returns a snapshot of this controller's state.
-func (c *defaultController) Stats() ControllerStats {
+func (c *defaultController) Stats() controllerStats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var appLimitedSince time.Duration
 	if !c.lastMaxedOutWindow.IsZero() {
 		appLimitedSince = c.now().Sub(c.lastMaxedOutWindow)
 	}
-	return ControllerStats{
+	return controllerStats{
 		WindowSizeBytes:       c.windowSizeBytes,
 		MaxWindowSizeBytes:    c.maxWindowSizeBytes,
 		MinWindowSizeBytes:    c.minWindowSizeBytes,
@@ -612,19 +612,19 @@ func (c *defaultController) forgetTransmission(seqNum uint16) {
 	c.freeRecords = append(c.freeRecords, rec)
 }
 
-func (c *defaultController) OnTransmit(seqNum uint16, transmission Transmit, dataLen uint32) error {
+func (c *defaultController) OnTransmit(seqNum uint16, transmission transmitKind, dataLen uint32) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	var packetInst *packetRecord
-	if transmission == Initial {
+	if transmission == transmitInitial {
 		// A record already acknowledged is from 65,536 packets ago: sequence
 		// numbers wrap, and the new packet takes its place. Only one still
 		// outstanding is a real duplicate. (This map is never otherwise
 		// pruned, so it holds at most one record per sequence number.)
 		old, exists := c.transmissions[seqNum]
 		if exists && !old.Acked {
-			return ErrDuplicateTransmission
+			return errDuplicateTransmission
 		}
 		switch {
 		case exists:
@@ -647,7 +647,7 @@ func (c *defaultController) OnTransmit(seqNum uint16, transmission Transmit, dat
 		var exists bool
 		packetInst, exists = c.transmissions[seqNum]
 		if !exists {
-			return ErrUnknownSeqNum
+			return errUnknownSeqNum
 		}
 		packetInst.NumTransmissions++
 		packetInst.SentAt = c.now()
@@ -664,7 +664,7 @@ func (c *defaultController) OnTransmit(seqNum uint16, transmission Transmit, dat
 	}
 	if packetInst.NumTransmissions == 1 {
 		if c.windowSizeBytes+packetInst.SizeBytes > c.maxWindowSizeBytes {
-			return ErrInsufficientWindowSize
+			return errInsufficientWindowSize
 		}
 		c.windowSizeBytes += packetInst.SizeBytes
 	}
@@ -695,7 +695,7 @@ const ackBatchRTTFallback = 50 * time.Millisecond
 const curDelaySize = 3
 
 // OnAckDelay is one incoming acknowledgement's delay sample. See the
-// Controller interface.
+// controller interface.
 //
 // A zero is no measurement -- the peer has not timed one of our packets yet,
 // or reported the MaxInt32 sentinel -- and libutp neither records it nor
@@ -743,7 +743,7 @@ func (c *defaultController) QueueingDelay() time.Duration {
 }
 
 // ApplyAck is the once-per-acknowledgement end of classic LEDBAT. See the
-// Controller interface.
+// controller interface.
 func (c *defaultController) ApplyAck() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -784,12 +784,12 @@ var sendWindowCredit = func() *atomic.Bool {
 	return b
 }()
 
-func (c *defaultController) OnAck(seqNum uint16, ack Ack) error {
+func (c *defaultController) OnAck(seqNum uint16, ack ackSample) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	packetInst, exists := c.transmissions[seqNum]
 	if !exists {
-		return ErrUnknownSeqNum
+		return errUnknownSeqNum
 	}
 
 	if packetInst.Acked {
@@ -980,7 +980,7 @@ func (c *defaultController) OnLostPacket(seqNum uint16, retransmitting bool, now
 	defer c.mu.Unlock()
 	packetInst, exists := c.transmissions[seqNum]
 	if !exists {
-		return ErrUnknownSeqNum
+		return errUnknownSeqNum
 	}
 
 	// Halve the window at most once per maxWindowDecayInterval.
@@ -1378,7 +1378,7 @@ type baseDelayHist struct {
 	rotatedAt time.Time
 	bucketLen time.Duration
 	init      bool
-	// skew is the total of every shift, for ControllerStats. The shifts
+	// skew is the total of every shift, for controllerStats. The shifts
 	// themselves live in the buckets and age out with them.
 	skew time.Duration
 }

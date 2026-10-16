@@ -369,7 +369,7 @@ func TestLedbatPPLossFromBeforeASlowdownHalvesTheSavedWindow(t *testing.T) {
 	ctrl, clk := newPPTestController(t0)
 	packet := ctrl.minWindowSizeBytes / 2
 
-	if err := ctrl.OnTransmit(1, Initial, packet); err != nil {
+	if err := ctrl.OnTransmit(1, transmitInitial, packet); err != nil {
 		t.Fatal(err)
 	}
 
@@ -414,7 +414,7 @@ func TestLedbatPPLossIsChargedOncePerCongestionEvent(t *testing.T) {
 	ctrl.maxWindowSizeBytes = 64 * packet
 
 	for _, seq := range []uint16{1, 2} {
-		if err := ctrl.OnTransmit(seq, Initial, packet); err != nil {
+		if err := ctrl.OnTransmit(seq, transmitInitial, packet); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -435,7 +435,7 @@ func TestLedbatPPLossIsChargedOncePerCongestionEvent(t *testing.T) {
 			got, 32*packet)
 	}
 
-	if err := ctrl.OnTransmit(3, Initial, packet); err != nil {
+	if err := ctrl.OnTransmit(3, transmitInitial, packet); err != nil {
 		t.Fatal(err)
 	}
 	clk.t = t0.Add(400 * time.Millisecond)

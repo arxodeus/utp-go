@@ -14,14 +14,14 @@ import (
 )
 
 const (
-	Initiator EndpointType = iota
-	Acceptor
+	initiator endpointType = iota
+	acceptor
 )
 
 const (
-	ConnConnecting ConnStateType = iota
-	ConnConnected
-	ConnClosed
+	connConnecting connStateType = iota
+	connConnected
+	connClosed
 )
 
 // maxConsecutiveTimeouts is how many retransmission timeouts may pass without
@@ -42,16 +42,8 @@ const DefaultWindowSize = 1024 * 1024
 const DefaultBufferSize = 1024 * 1024
 
 var (
-	// ErrEmptyDataPayload is no longer returned: a zero-length ST_DATA is
-	// accepted, as libutp accepts it. Retained because it is exported.
-	ErrEmptyDataPayload  = errors.New("empty data payload")
-	ErrConnInvalidAckNum = errors.New("invalid ack number")
-	ErrInvalidFin        = errors.New("invalid fin")
-	ErrInvalidSeqNum     = errors.New("invalid seq number")
-	ErrInvalidSyn        = errors.New("invalid syn")
-	ErrReset             = errors.New("reset")
-	ErrSynFromAcceptor   = errors.New("syn from acceptor")
-	ErrTimedOut          = errors.New("timed out")
+	ErrReset    = errors.New("reset")
+	ErrTimedOut = errors.New("timed out")
 	// ErrConnRefused is libutp's UTP_ECONNREFUSED: an ICMP error arrived for
 	// a connection that had only sent its SYN, so nothing is listening.
 	//
@@ -65,35 +57,35 @@ var (
 	ErrConnRefused = errors.New("connection refused")
 )
 
-type EndpointType int
+type endpointType int
 
-type Endpoint struct {
-	Type     EndpointType
+type endpointInfo struct {
+	Type     endpointType
 	SynNum   uint16
 	SynAck   uint16
 	Attempts int
 }
 
-type ClosingRecord struct {
+type closingRecord struct {
 	LocalFin  *uint16
 	RemoteFin *uint16
 }
 
-type ConnStateType int
+type connStateType int
 
-type ConnState struct {
-	stateType   ConnStateType
+type connState struct {
+	stateType   connStateType
 	connectedCh chan error
 	RecvBuf     *receiveBuffer
 	SendBuf     *sendBuffer
 	SentPackets *sentPackets
-	closing     *ClosingRecord
+	closing     *closingRecord
 	Err         error
 }
 
-func NewConnState(connected chan error) *ConnState {
-	return &ConnState{
-		stateType:   ConnConnecting,
+func newConnState(connected chan error) *connState {
+	return &connState{
+		stateType:   connConnecting,
 		connectedCh: connected,
 	}
 }
@@ -126,7 +118,7 @@ type ConnectionConfig struct {
 	Clock Clock
 
 	// NowMicros is where this connection reads the wall clock, in the uint32
-	// microseconds uTP puts on the wire. Defaults to NowMicro.
+	// microseconds uTP puts on the wire. Defaults to nowMicro.
 	//
 	// It governs only what is *stamped and measured* -- the timestamp field,
 	// the timestamp difference echoed back, and the one-way delays derived
@@ -414,7 +406,7 @@ func (r *readOrWriteResult) release() {
 type connection struct {
 	ctx    context.Context
 	logger log.Logger
-	state  *ConnState
+	state  *connState
 	cid    *ConnectionId
 	config *ConnectionConfig
 	// windowCeiling, when set, replaces config.WindowSize for this
@@ -422,7 +414,7 @@ type connection struct {
 	// utp_setsockopt(UTP_SNDBUF). config may be shared with other
 	// connections, so it is not written. Guarded by mu.
 	windowCeiling  uint32
-	endpoint       *Endpoint
+	endpoint       *endpointInfo
 	peerTsDiff     time.Duration
 	peerRecvWindow uint32
 	socketEvents   chan *socketEvent
@@ -605,7 +597,7 @@ type connection struct {
 	// -- libutp's model, where the embedder's read loop runs the protocol.
 	mu sync.Mutex
 	// ready is set once the event loop has finished setting the connection
-	// up. NewUtpStream holds mu from creation until then, so the reader never
+	// up. newUtpStream holds mu from creation until then, so the reader never
 	// sees it unset on a connection the socket made; a connection built by
 	// hand, without an event loop, declines inline packets. finished is set
 	// once the loop has stopped running passes; from then on nothing touches
@@ -627,9 +619,9 @@ type connection struct {
 	kick chan struct{}
 	// loopTimers are the timers the event loop waits on. Guarded by mu.
 	loopTimers loopTimers
-	// barrier is the connection's clock as an IdleBarrier, or nil: a virtual
+	// barrier is the connection's clock as an idleBarrier, or nil: a virtual
 	// clock in a test. Resolved once, in newConnection.
-	barrier IdleBarrier
+	barrier idleBarrier
 	// What lets the loop rest: see dormant.go. dormant is the loop's
 	// goroutine having gone, read and cleared without mu; asleep is the same
 	// under mu. restClock is nil for a connection that never rests.
@@ -778,14 +770,14 @@ func newConnection(
 		}
 	}
 
-	var endpoint *Endpoint
+	var endpoint *endpointInfo
 	var peerTsDiff time.Duration
 	var peerRecvWindow uint32
 
 	if syn != nil {
-		synAck := RandomUint16()
-		endpoint = &Endpoint{
-			Type:   Acceptor,
+		synAck := randomUint16()
+		endpoint = &endpointInfo{
+			Type:   acceptor,
 			SynNum: syn.Header.SeqNum,
 			SynAck: synAck,
 		}
@@ -816,9 +808,9 @@ func newConnection(
 		peerTsDiff = 0
 		peerRecvWindow = syn.Header.WndSize
 	} else {
-		synNum := RandomUint16()
-		endpoint = &Endpoint{
-			Type:     Initiator,
+		synNum := randomUint16()
+		endpoint = &endpointInfo{
+			Type:     initiator,
 			SynNum:   synNum,
 			Attempts: 0,
 		}
@@ -833,7 +825,7 @@ func newConnection(
 		logger:         logger,
 		clk:            clk,
 		clock:          clock,
-		state:          NewConnState(connected),
+		state:          newConnState(connected),
 		cid:            cid,
 		config:         config,
 		endpoint:       endpoint,
@@ -856,7 +848,7 @@ func newConnection(
 		// See newMtuSearch.
 		mtu: newMtuSearch(uint32(config.MaxPacketSize), clk.Now()),
 	}
-	c.barrier, _ = c.timeSource().(IdleBarrier)
+	c.barrier, _ = c.timeSource().(idleBarrier)
 	c.wakeFn = c.wake
 	return c
 }
@@ -972,20 +964,20 @@ func (c *connection) eventLoop(stream *UtpStream) (error, bool) {
 }
 
 // setupLoop is everything the event loop does once, before its first pass.
-// Called with mu held, from NewUtpStream; the loop releases it the first time
+// Called with mu held, from newUtpStream; the loop releases it the first time
 // it waits.
 func (c *connection) setupLoop(stream *UtpStream) {
-	if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if c.logger.Enabled(baseContext, log.LevelTrace) {
 		c.logger.Trace("uTP conn starting", "dst.peer", c.cid.Peer, "cid.Send", c.cid.Send, "cid.Recv", c.cid.Recv)
 	}
-	// mu is held for setup, from NewUtpStream, and for every pass; it is
+	// mu is held for setup, from newUtpStream, and for every pass; it is
 	// released only while the loop waits. See connection.mu.
 	// Initialize connection based on endpoint type
-	if c.endpoint.Type == Initiator {
+	if c.endpoint.Type == initiator {
 		synSeqNum := c.endpoint.SynNum
 		synPkt := c.synPacket(synSeqNum)
 		c.emit(synPkt)
-		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		if c.logger.Enabled(baseContext, log.LevelTrace) {
 			c.logger.Trace("put a initial syn packet to delay map", "socketEvents.len", len(c.socketEvents), "dst.peer", c.cid.Peer, "synSeqNum", synSeqNum)
 		}
 		c.synTimeout = c.config.InitialTimeout
@@ -1015,7 +1007,7 @@ func (c *connection) setupLoop(stream *UtpStream) {
 			panic("connection in invalid statePacket prior to event loop beginning")
 		}
 
-		c.state.stateType = ConnConnected
+		c.state.stateType = connConnected
 		c.state.RecvBuf = recvBuf
 		c.state.SendBuf = sendBuf
 		c.state.SentPackets = sentPacketsHolder
@@ -1113,7 +1105,7 @@ func (c *connection) setupLoop(stream *UtpStream) {
 
 	// A virtual clock needs to know when this loop has finished reacting, so
 	// that it can move time without racing the reaction. Resolved once here
-	// rather than per pass; nil for the real clock. See IdleBarrier.
+	// rather than per pass; nil for the real clock. See idleBarrier.
 	if c.barrier != nil {
 		c.barrier.Register()
 	}
@@ -1161,7 +1153,7 @@ func (c *connection) finishLoop() {
 	t.idle.stop()
 	c.endDormancy()
 	// Tell the socket to drop this connection on *every* exit, not only the
-	// one where the state machine reached ConnClosed.
+	// one where the state machine reached connClosed.
 	//
 	// It used to be reported from that one branch alone, so a connection torn
 	// down by a cancelled context -- which is what an abandoned or failed
@@ -1228,7 +1220,7 @@ func (c *connection) runLoop() (err error, final bool) {
 // connection, without blocking, and reports whether there was any.
 func (c *connection) takeQueued() bool {
 	stream := c.stream
-	if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if c.logger.Enabled(baseContext, log.LevelTrace) {
 		c.logger.Trace("connection event count",
 			"streamEvents.len", len(stream.streamEvents),
 			"readable.len", len(c.readable),
@@ -1268,7 +1260,7 @@ func (c *connection) takeQueued() bool {
 // That shape is what lets a virtual clock be told the loop is running again
 // before any of those bodies can emit a packet -- one MarkBusy, on the one
 // path out, rather than one per case where missing a single one would put
-// the nondeterminism straight back. See IdleBarrier.
+// the nondeterminism straight back. See idleBarrier.
 func (c *connection) wait() (w wakeResult) {
 	stream := c.stream
 	t := &c.loopTimers
@@ -1278,7 +1270,7 @@ func (c *connection) wait() (w wakeResult) {
 	idleRto, lossProbe, rack, idle := t.idleRto.C(), t.lossProbe.C(), t.rack.C(), t.idle.C()
 	// Tell a virtual clock this loop is about to block, so it knows the
 	// reaction to the last instant is complete and time may move. A real
-	// clock has no barrier and this is nil. See IdleBarrier.
+	// clock has no barrier and this is nil. See idleBarrier.
 	//
 	// Not while a wake this loop queued for itself is still waiting: an
 	// incoming packet that reopens the peer's window signals writable, and
@@ -1395,7 +1387,7 @@ func (c *connection) react(w wakeResult) (err error, final bool) {
 		c.checkIdleTimeout()
 	case wakeCtxDone:
 		c.handleCtxDone()
-		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		if c.logger.Enabled(baseContext, log.LevelTrace) {
 			c.logger.Trace("stream context done, will force stop...", "c.cid.peer", c.cid.Peer, "c.cid.Send", c.cid.Send, "c.cid.Recv", c.cid.Recv)
 		}
 		c.finished = true
@@ -1410,8 +1402,8 @@ func (c *connection) react(w wakeResult) (err error, final bool) {
 		}
 	}
 
-	if c.state.stateType == ConnClosed {
-		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if c.state.stateType == connClosed {
+		if c.logger.Enabled(baseContext, log.LevelTrace) {
 			c.logger.Trace("uTP conn closing...", "err", c.state.Err, "c.cid.Send", c.cid.Send, "c.cid.Recv", c.cid.Recv)
 		}
 		// No more passes: the reader leaves this connection alone from
@@ -1421,7 +1413,7 @@ func (c *connection) react(w wakeResult) (err error, final bool) {
 		c.mu.Unlock()
 		// Always drain and terminate the read side here. The previous
 		// `if !c.eof()` guard was inverted in effect: eof() is true by
-		// definition once stateType is ConnClosed, so processReads was
+		// definition once stateType is connClosed, so processReads was
 		// never called and the end-of-stream marker was never delivered.
 		// Readers reaching this path blocked in ReadToEOF forever.
 		c.drainReadsForTeardown()
@@ -1451,7 +1443,7 @@ func (c *connection) takeIncoming(event *streamEvent) {
 func (c *connection) handleIncoming(event *streamEvent) {
 	stream := c.stream
 	if event.Type == streamIncoming {
-		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		if c.logger.Enabled(baseContext, log.LevelTrace) {
 			c.logger.Trace("incoming packet",
 				"stream.streamEvents.len", len(stream.streamEvents),
 				"src.peer", c.cid.Peer,
@@ -1476,7 +1468,7 @@ func (c *connection) handleIncoming(event *streamEvent) {
 }
 
 func (c *connection) handleWrite(write *queuedWrite) {
-	if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if c.logger.Enabled(baseContext, log.LevelTrace) {
 		c.logger.Trace("get queued write from writes", "dst.peer", c.cid.Peer, "content", len(write.data))
 	}
 	c.lastActivity = c.now()
@@ -1502,9 +1494,9 @@ func (c *connection) checkIdleTimeout() {
 		c.loopTimers.idle.arm(left)
 		return
 	}
-	if c.state.stateType != ConnClosed {
+	if c.state.stateType != connClosed {
 		c.logger.Trace("idle timeout, closing...")
-		c.state.stateType = ConnClosed
+		c.state.stateType = connClosed
 		c.state.Err = ErrTimedOut
 	}
 }
@@ -1519,7 +1511,7 @@ func (c *connection) handleCtxDone() {
 	// why it ended, and what its reader and writers are told. A stream
 	// whose own context was cancelled -- an abandoned dial -- keeps
 	// whatever it had.
-	if c.state.Err == nil && c.state.stateType != ConnClosed &&
+	if c.state.Err == nil && c.state.stateType != connClosed &&
 		stream.socketCtx != nil && stream.socketCtx.Err() != nil {
 		c.state.Err = ErrSocketClosed
 	}
@@ -1533,7 +1525,7 @@ func (c *connection) onKeepAliveTimer() {
 	// libutp: `if (state >= CS_CONNECTED && !fin_sent)` and the
 	// connection has been silent for the interval
 	// (utp_internal.cpp:1271-1274).
-	if c.state.stateType == ConnConnected &&
+	if c.state.stateType == connConnected &&
 		(c.state.closing == nil || c.state.closing.LocalFin == nil) &&
 		now.Sub(c.lastSentPacket) >= interval {
 		c.emit(c.keepAlivePacket())
@@ -1608,7 +1600,7 @@ func (c *connection) afterPass() (moreToWrite bool) {
 		c.closeRequested = true
 	}
 	if (stream.shutdown.Load() || stream.writeClosed.Load()) &&
-		c.state.stateType != ConnClosed {
+		c.state.stateType != connClosed {
 		if !c.writeShut {
 			c.writeShut = true
 			c.processWrites(now)
@@ -1638,7 +1630,7 @@ const maxWritesPerPass = 64
 func (c *connection) receiveInline(pkt *packet) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.finished || (c.ready && c.state.stateType == ConnClosed) {
+	if c.finished || (c.ready && c.state.stateType == connClosed) {
 		return true
 	}
 	if !c.ready {
@@ -1682,7 +1674,7 @@ func (c *connection) endBatch() {
 		return
 	}
 	more := c.afterPass()
-	if more || c.state.stateType == ConnClosed {
+	if more || c.state.stateType == connClosed {
 		c.kickLoop()
 	}
 }
@@ -1691,7 +1683,7 @@ func (c *connection) endBatch() {
 // buffered or queued by the application, or packets a timeout marked for
 // resending.
 func (c *connection) hasSendWork() bool {
-	if c.state.stateType != ConnConnected {
+	if c.state.stateType != connConnected {
 		return false
 	}
 	if len(c.pendingWrites) > 0 ||
@@ -1706,7 +1698,7 @@ func (c *connection) hasSendWork() bool {
 }
 
 // kickLoop wakes the event loop from another goroutine, accounting for the
-// wake with a virtual clock. See IdleBarrier.NoteHandoff.
+// wake with a virtual clock. See idleBarrier.NoteHandoff.
 func (c *connection) kickLoop() {
 	barrier := c.barrier
 	if barrier != nil {
@@ -1757,7 +1749,7 @@ const (
 // quiet. It is a no-op while packets are in flight, where the per-packet
 // timers already cover it.
 func (c *connection) scheduleIdleRto(now time.Time) {
-	if c.armIdleRto == nil || c.state.stateType != ConnConnected ||
+	if c.armIdleRto == nil || c.state.stateType != connConnected ||
 		c.state.SentPackets == nil || len(c.armed) != 0 || c.rtoDeadline.IsZero() {
 		return
 	}
@@ -1777,7 +1769,7 @@ func (c *connection) scheduleIdleRto(now time.Time) {
 // false here, which is exactly the distinction libutp draws with
 // `cur_window_packets == 0`.
 func (c *connection) onIdleRto(now time.Time) {
-	if c.state.stateType != ConnConnected || c.state.SentPackets == nil ||
+	if c.state.stateType != connConnected || c.state.SentPackets == nil ||
 		len(c.armed) != 0 || c.rtoDeadline.IsZero() || now.Before(c.rtoDeadline) {
 		return
 	}
@@ -1785,8 +1777,8 @@ func (c *connection) onIdleRto(now time.Time) {
 	// libutp re-arms from the doubled timeout (:1204), which OnTimeout has
 	// just applied.
 	c.rtoDeadline = now.Add(c.state.SentPackets.Timeout())
-	if c.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
-		stats := c.state.SentPackets.ControllerStats()
+	if c.logger.Enabled(baseContext, log.LevelDebug) {
+		stats := c.state.SentPackets.controllerStats()
 		c.logger.Debug("idle window decay", "cwnd", stats.MaxWindowSizeBytes,
 			"timeout", stats.Timeout)
 	}
@@ -1901,11 +1893,11 @@ func (c *connection) finFits(now time.Time) bool {
 
 func (c *connection) shutdown() {
 	switch c.state.stateType {
-	case ConnConnecting:
-		c.state.stateType = ConnClosed
-	case ConnClosed:
+	case connConnecting:
+		c.state.stateType = connClosed
+	case connClosed:
 		// ignore
-	case ConnConnected:
+	case connConnected:
 		if c.state.closing != nil {
 			localFin := c.state.closing.LocalFin
 			// If we have not sent our FIN, and there are no pending writes, and there is no
@@ -1916,7 +1908,7 @@ func (c *connection) shutdown() {
 				ackNum := c.state.RecvBuf.AckNum()
 
 				// No selective ack: see statePacket.
-				fin := NewPacketBuilder(
+				fin := newPacketBuilder(
 					st_fin,
 					c.cid.Send,
 					c.nowMicros(),
@@ -1925,7 +1917,7 @@ func (c *connection) shutdown() {
 				).WithAckNum(ackNum).Build()
 
 				c.state.closing.LocalFin = &seqNum
-				if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+				if c.logger.Enabled(baseContext, log.LevelTrace) {
 					c.logger.Trace("transmitting FIN", "dst.Peer", c.cid.Peer, "dst.Send", c.cid.Send, "dst.Recv", c.cid.Recv, "seq", seqNum)
 				}
 				c.rememberLingerState()
@@ -1939,7 +1931,7 @@ func (c *connection) shutdown() {
 				ackNum := c.state.RecvBuf.AckNum()
 
 				// No selective ack: see statePacket.
-				fin := NewPacketBuilder(
+				fin := newPacketBuilder(
 					st_fin,
 					c.cid.Send,
 					c.nowMicros(),
@@ -1949,16 +1941,16 @@ func (c *connection) shutdown() {
 					Build()
 
 				localFin = &seqNum
-				if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+				if c.logger.Enabled(baseContext, log.LevelTrace) {
 					c.logger.Trace("transmitting FIN", "dst.Peer", c.cid.Peer, "dst.Send", c.cid.Send, "dst.Recv", c.cid.Recv, "seq", seqNum)
 				}
 				c.rememberLingerState()
 				c.transmit(fin, c.now(), true)
 			}
-			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+			if c.logger.Enabled(baseContext, log.LevelTrace) {
 				c.logger.Trace("init localFin of closingRecord", "dst.peer", c.cid.Peer, "dst.send", c.cid.Send, "dst.recv", c.cid.Recv, "localFin", localFin)
 			}
-			c.state.closing = &ClosingRecord{
+			c.state.closing = &closingRecord{
 				LocalFin:  localFin,
 				RemoteFin: nil,
 			}
@@ -2006,8 +1998,8 @@ func (c *connection) emitPacket(pkt *packet, dontFragment bool) {
 	}
 	// A virtual clock must not consider the system quiet while this packet is
 	// queued but not yet taken by whoever reads socketEvents. See
-	// IdleBarrier.NoteHandoff.
-	if b, ok := c.timeSource().(IdleBarrier); ok {
+	// idleBarrier.NoteHandoff.
+	if b, ok := c.timeSource().(idleBarrier); ok {
 		b.NoteHandoff()
 	}
 	c.socketEvents <- ev
@@ -2035,10 +2027,10 @@ func (c *connection) keepAlivePacket() *packet {
 	// every bit one packet early and could free a packet we never received.
 	// TestKeepAliveSelectiveAckMatchesItsAckNumber.
 	if pkt.Eack != nil {
-		old := pkt.Eack.Acked()[:SELECTIVE_ACK_WINDOW]
+		old := pkt.Eack.Acked()[:selectiveAckWindow]
 		shifted := make([]bool, len(old))
 		copy(shifted[1:], old[:len(old)-1])
-		pkt.Eack = NewSelectiveAck(shifted)
+		pkt.Eack = newSelectiveAck(shifted)
 	}
 	return pkt
 }
@@ -2086,10 +2078,10 @@ func (c *connection) processWrites(now time.Time) {
 		c.state.SentPackets.OnTick(now)
 	}
 	switch c.state.stateType {
-	case ConnConnecting:
+	case connConnecting:
 		return
-	case ConnClosed:
-		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	case connClosed:
+		if c.logger.Enabled(baseContext, log.LevelTrace) {
 			c.logger.Warn("connection is closed, will not process pending writes",
 				"c.cid.send", c.cid.Send, "c.cid.recv", c.cid.Recv)
 		}
@@ -2245,7 +2237,7 @@ func (c *connection) processWrites(now time.Time) {
 
 	for _, payload := range payloads {
 		// No selective ack: see statePacket.
-		packetInst := NewPacketBuilder(
+		packetInst := newPacketBuilder(
 			st_data,
 			c.cid.Send,
 			c.nowMicros(),
@@ -2263,13 +2255,13 @@ func (c *connection) processWrites(now time.Time) {
 func (c *connection) onWrite(writeReq *queuedWrite) {
 	writeReq.written = 0
 	switch c.state.stateType {
-	case ConnConnecting:
+	case connConnecting:
 		// There are 0 bytes written so far
 		c.pendingWrites = append(c.pendingWrites, writeReq)
 
-	case ConnConnected:
+	case connConnected:
 		if c.state.closing != nil {
-			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+			if c.logger.Enabled(baseContext, log.LevelTrace) {
 				c.logger.Trace("append a queuedWrite to pending writes when closing the conn...")
 			}
 			if c.state.closing.LocalFin == nil && c.state.closing.RemoteFin != nil {
@@ -2288,7 +2280,7 @@ func (c *connection) onWrite(writeReq *queuedWrite) {
 			c.pendingWrites = append(c.pendingWrites, writeReq)
 		}
 
-	case ConnClosed:
+	case connClosed:
 		c.logger.Warn("discard a queuedWrite when closed the conn...")
 		// A connection that closed cleanly has no error of its own, and a
 		// write that sends nothing must still report one.
@@ -2303,12 +2295,12 @@ func (c *connection) onWrite(writeReq *queuedWrite) {
 }
 
 func (c *connection) processReads() {
-	if c.state.stateType == ConnConnecting {
+	if c.state.stateType == connConnecting {
 		return
 	}
 	recvBuf := c.state.RecvBuf
 
-	if recvBuf != nil && c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if recvBuf != nil && c.logger.Enabled(baseContext, log.LevelTrace) {
 		c.logger.Trace("read data saving in the recvBuf, start...", "available", recvBuf.Available(), "isEmpty", recvBuf.IsEmpty())
 	}
 	// Drain contiguous data even once the connection is closed: bytes that
@@ -2355,7 +2347,7 @@ func (c *connection) processReads() {
 			return
 		}
 	}
-	if recvBuf != nil && c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if recvBuf != nil && c.logger.Enabled(baseContext, log.LevelTrace) {
 		c.logger.Trace("read data saving in the recvBuf, end...", "available", recvBuf.Available(), "isEmpty", recvBuf.IsEmpty())
 	}
 
@@ -2384,7 +2376,7 @@ func (c *connection) processReads() {
 // contiguous in the receive buffer, up to a chunk of at most MaxPacketSize for
 // each free slot in the reader's queue -- processReads' own loop, counted.
 func (c *connection) drainable() int {
-	if c.state.stateType == ConnConnecting || c.state.RecvBuf == nil {
+	if c.state.stateType == connConnecting || c.state.RecvBuf == nil {
 		return 0
 	}
 	free := cap(c.reads) - len(c.reads)
@@ -2434,7 +2426,7 @@ func (c *connection) recvWindow() uint32 {
 // preserved, because it does not exist here: flushAck runs at the end of this
 // same pass either way.
 func (c *connection) onReadDrained() {
-	if c.state == nil || c.state.stateType != ConnConnected || c.state.RecvBuf == nil {
+	if c.state == nil || c.state.stateType != connConnected || c.state.RecvBuf == nil {
 		return
 	}
 	if uint32(c.state.RecvBuf.Window()) > c.lastAdvertisedWindow {
@@ -2530,7 +2522,7 @@ func (c *connection) sampleMetrics(now time.Time, force bool) {
 		State:              connStateName(c.state.stateType),
 	}
 	if c.state.SentPackets != nil {
-		cs := c.state.SentPackets.ControllerStats()
+		cs := c.state.SentPackets.controllerStats()
 		m.CwndBytes = cs.MaxWindowSizeBytes
 		m.InFlightBytes = cs.WindowSizeBytes
 		m.MinCwndBytes = cs.MinWindowSizeBytes
@@ -2659,14 +2651,14 @@ func (c *connection) sendRead(res *readOrWriteResult) bool {
 
 func (c *connection) eof() bool {
 	switch c.state.stateType {
-	case ConnConnecting:
+	case connConnecting:
 		return false
-	case ConnConnected:
+	case connConnected:
 		if c.state.closing != nil && c.state.closing.RemoteFin != nil {
 			return c.state.RecvBuf.AckNum() == *c.state.closing.RemoteFin
 		}
 		return false
-	case ConnClosed:
+	case connClosed:
 		return true
 	default:
 		return false
@@ -2675,8 +2667,8 @@ func (c *connection) eof() bool {
 
 func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 	switch c.state.stateType {
-	case ConnConnecting:
-		if c.endpoint.Type == Acceptor {
+	case connConnecting:
+		if c.endpoint.Type == acceptor {
 			return
 		}
 		if c.endpoint.Attempts >= c.config.MaxConnAttempts {
@@ -2685,7 +2677,7 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 			if c.state.connectedCh != nil {
 				c.state.connectedCh <- err
 			}
-			c.state.stateType = ConnClosed
+			c.state.stateType = connClosed
 			c.state.Err = err
 			return
 		} else {
@@ -2722,7 +2714,7 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 			c.emit(c.synPacket(seq))
 		}
 
-	case ConnConnected:
+	case connConnected:
 		// If the timed out packet is a SYN, do nothing
 		if originPacket.Header.PacketType == st_syn {
 			return
@@ -2802,7 +2794,7 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 			// and starts the fast-timeout retry (:1240, :1247). Only the
 			// doubling and the window collapse are skipped (:1179, :1206).
 			if c.retransmitCount >= maxConsecutiveTimeouts {
-				c.state.stateType = ConnClosed
+				c.state.stateType = connClosed
 				c.state.Err = ErrTimedOut
 				return
 			}
@@ -2838,7 +2830,7 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 			c.logger.Warn("giving up on connection",
 				"consecutiveTimeouts", c.retransmitCount,
 				"cid.send", c.cid.Send, "cid.recv", c.cid.Recv)
-			c.state.stateType = ConnClosed
+			c.state.stateType = connClosed
 			c.state.Err = ErrTimedOut
 			return
 		}
@@ -3121,7 +3113,7 @@ func (c *connection) flushAck() {
 // peer reads about our current state is not.
 func (c *connection) retransmit(originPacket *packet, now time.Time) {
 	retransmissionPacket := &packet{
-		Header: &PacketHeaderV1{
+		Header: &packetHeaderV1{
 			PacketType: originPacket.Header.PacketType,
 			Version:    originPacket.Header.Version,
 			// No selective ack: see statePacket.
@@ -3201,7 +3193,7 @@ func (c *connection) checkSpuriousLoss(fullAcked *circularRangeInclusive, select
 // timeout itself, processWrites or onFastTimeout is sending it. It returns the
 // packet as sent.
 func (c *connection) resendSentPacket(pkt *sentPacket, now time.Time) *packet {
-	builder := NewPacketBuilder(pkt.packetType, c.cid.Send, c.nowMicros(),
+	builder := newPacketBuilder(pkt.packetType, c.cid.Send, c.nowMicros(),
 		c.recvWindow(), pkt.seqNum)
 	if pkt.data != nil {
 		builder.WithPayload(pkt.data)
@@ -3244,7 +3236,7 @@ const minLossProbeTimeout = 10 * time.Millisecond
 func (c *connection) lossProbeTimeout() time.Duration {
 	// The microsecond estimate: libutp's own is in whole milliseconds, and
 	// on a path faster than one it is zero.
-	rtt := c.state.SentPackets.ControllerStats().FineRTT
+	rtt := c.state.SentPackets.controllerStats().FineRTT
 	if rtt <= 0 {
 		return 0
 	}
@@ -3257,7 +3249,7 @@ func (c *connection) lossProbeTimeout() time.Duration {
 // acknowledgement that moves the cumulative ack forward starts a new
 // episode, with a new probe to spend.
 func (c *connection) rearmLossProbe(ackNum uint16) {
-	if !c.lossProbeActive() || c.armLossProbe == nil || c.state.stateType != ConnConnected ||
+	if !c.lossProbeActive() || c.armLossProbe == nil || c.state.stateType != connConnected ||
 		c.state.SentPackets == nil {
 		return
 	}
@@ -3294,7 +3286,7 @@ func (c *connection) rearmLossProbe(ackNum uint16) {
 // the loss that led here has already been charged.
 func (c *connection) onLossProbe(now time.Time) {
 	if !c.lossProbeActive() || c.lossProbeSent || c.fastTimeout ||
-		c.state.stateType != ConnConnected || c.state.SentPackets == nil ||
+		c.state.stateType != connConnected || c.state.SentPackets == nil ||
 		c.rtoDeadline.IsZero() || !now.Before(c.rtoDeadline) {
 		return
 	}
@@ -3336,7 +3328,7 @@ func (c *connection) onLossProbe(now time.Time) {
 // selective one; here it runs after both, before any fast retransmission,
 // which sees fast_resend_seq_nr already moved on exactly as libutp's does.
 func (c *connection) onFastTimeout(now time.Time) {
-	if !c.fastTimeout || c.state.stateType != ConnConnected || c.state.SentPackets == nil {
+	if !c.fastTimeout || c.state.stateType != connConnected || c.state.SentPackets == nil {
 		return
 	}
 	if c.probeRecovery {
@@ -3399,7 +3391,7 @@ func (c *connection) probeAnswered(fullAcked *circularRangeInclusive, now time.T
 		if int32(c.ackEcho-c.lossProbeStamp) < 0 {
 			return false
 		}
-	} else if minRTT := sp.ControllerStats().MinFineRTT; minRTT == 0 || now.Sub(c.lossProbeAt) < minRTT {
+	} else if minRTT := sp.controllerStats().MinFineRTT; minRTT == 0 || now.Sub(c.lossProbeAt) < minRTT {
 		return false
 	}
 	oldest, ok := sp.OldestOutstanding()
@@ -3499,7 +3491,7 @@ func (c *connection) invalidAckNum(pkt *packet) bool {
 		// previous packets for it to be acking.
 		return false
 	}
-	if c.state.stateType != ConnConnected || c.state.SentPackets == nil {
+	if c.state.stateType != connConnected || c.state.SentPackets == nil {
 		return false
 	}
 
@@ -3565,7 +3557,7 @@ func (c *connection) outsideReorderWindow(pkt *packet) bool {
 	default:
 		return false
 	}
-	if c.state.stateType != ConnConnected || c.state.RecvBuf == nil {
+	if c.state.stateType != connConnected || c.state.RecvBuf == nil {
 		return false
 	}
 
@@ -3591,7 +3583,7 @@ func (c *connection) outsideReorderWindow(pkt *packet) bool {
 			c.emit(statePkt)
 		}
 	}
-	if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if c.logger.Enabled(baseContext, log.LevelTrace) {
 		c.logger.Trace("dropping packet outside the reorder window",
 			"seqNum", pkt.Header.SeqNum, "ackNum", c.state.RecvBuf.AckNum(),
 			"distance", distance)
@@ -3600,7 +3592,7 @@ func (c *connection) outsideReorderWindow(pkt *packet) bool {
 }
 
 func (c *connection) onPacket(packet *packet, now time.Time) {
-	if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if c.logger.Enabled(baseContext, log.LevelTrace) {
 		c.logger.Trace("on packet start...",
 			"packet.body.len", len(packet.Body),
 			"packet.type", packet.Header.PacketType.String(),
@@ -3622,7 +3614,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	// this connection's own sequence number is the peer not having heard
 	// the SYN-ACK, and is still answered (the st_syn case at the end).
 	if packet.Header.PacketType == st_syn && !c.isOwnSyn(packet.Header.SeqNum) {
-		if c.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+		if c.logger.Enabled(baseContext, log.LevelDebug) {
 			c.logger.Debug("ignoring a SYN that is not this connection's",
 				"seq", packet.Header.SeqNum, "cid.send", c.cid.Send, "cid.recv", c.cid.Recv)
 		}
@@ -3657,7 +3649,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	// so does this. Order matters: a packet rejected here must not first
 	// draw a re-ack from the reorder-window check below.
 	if c.invalidAckNum(packet) {
-		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		if c.logger.Enabled(baseContext, log.LevelTrace) {
 			c.logger.Trace("dropping packet with an out-of-range ack number",
 				"ackNum", packet.Header.AckNum, "type", packet.Header.PacketType.String())
 		}
@@ -3823,7 +3815,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 		c.onFastTimeout(now)
 		c.rearmLossProbe(packet.Header.AckNum)
 		if err != nil {
-			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+			if c.logger.Enabled(baseContext, log.LevelTrace) {
 				c.logger.Trace("ack does not correspond to known seq_num",
 					"packet.type", packet.Header.PacketType,
 					"packet.seqNum", packet.Header.SeqNum,
@@ -3853,8 +3845,8 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 				// sequence number of the packet that drew it
 				// (utp_internal.cpp:846-865). This one used to carry a
 				// timestamp and a 100000-byte window.
-				randSeqNum := RandomUint16()
-				resetPacket := NewPacketBuilder(st_reset, packet.Header.ConnectionId, 0, 0, randSeqNum).
+				randSeqNum := randomUint16()
+				resetPacket := newPacketBuilder(st_reset, packet.Header.ConnectionId, 0, 0, randSeqNum).
 					WithAckNum(packet.Header.SeqNum).Build()
 				c.emit(resetPacket)
 			}
@@ -3870,7 +3862,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 			// retries. This comment used to say the opposite, citing a line
 			// in the socket destructor. DEVIATIONS.md, "A retransmitted SYN
 			// is answered"; TestConformanceDuplicateSynBeforeData.
-			if c.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+			if c.logger.Enabled(baseContext, log.LevelDebug) {
 				c.logger.Debug("re-sending SYN-ACK for retransmitted SYN",
 					"dst.peer", c.cid.Peer, "cid.send", c.cid.Send, "cid.recv", c.cid.Recv,
 					"seqNum", c.synState.Header.SeqNum, "ackNum", c.synState.Header.AckNum)
@@ -3968,8 +3960,8 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 // closed cycles and 48 goroutines grown, every one of them that second closer.
 func (c *connection) updateClosingState() {
 	// Handle connection closing cases
-	if c.state.stateType == ConnConnected && c.state.closing != nil && c.state.closing.LocalFin != nil {
-		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if c.state.stateType == connConnected && c.state.closing != nil && c.state.closing.LocalFin != nil {
+		if c.logger.Enabled(baseContext, log.LevelTrace) {
 			c.logger.Trace("try close connection locally...", "dst.Peer", c.cid.Peer, "dst.Send", c.cid.Send, "dst.Recv", c.cid.Recv)
 		}
 		lastAckNum, isNone := c.state.SentPackets.LastAckNum()
@@ -3977,14 +3969,14 @@ func (c *connection) updateClosingState() {
 		// CloseWrite is acknowledged like any other packet and means nothing
 		// about the reading side, which is still someone's (:2178-2182).
 		if !isNone && lastAckNum == *c.state.closing.LocalFin && c.closeRequested {
-			c.state.stateType = ConnClosed
+			c.state.stateType = connClosed
 			c.state.Err = nil
 		}
 	}
 
 	// A connection whose peer has closed its sending side is *not* finished.
 	//
-	// This used to move to ConnClosed as soon as the remote FIN was reached
+	// This used to move to connClosed as soon as the remote FIN was reached
 	// and everything sent had been acknowledged -- without this end ever
 	// sending a FIN of its own, and whatever its application was doing. That
 	// is the half-close, and refusing it was the one place libutp could do
@@ -4022,13 +4014,13 @@ func (c *connection) updateClosingState() {
 	// discards the rest. Measured: the half-close test stopped delivering its
 	// 512 KB reply, because Write returns when the data is buffered and the
 	// application closed straight after it.
-	if c.state.stateType == ConnConnected && c.state.closing != nil &&
+	if c.state.stateType == connConnected && c.state.closing != nil &&
 		c.state.closing.RemoteFin != nil && c.state.closing.LocalFin != nil &&
 		c.closeRequested {
 		if !c.state.SentPackets.HasUnackedPackets() &&
 			c.state.RecvBuf.AckNum() == *c.state.closing.RemoteFin {
 			c.processReads()
-			c.state.stateType = ConnClosed
+			c.state.stateType = connClosed
 			c.state.Err = nil
 		}
 	}
@@ -4038,10 +4030,10 @@ func (c *connection) updateClosingState() {
 	// tearing down here would discard it. The same close_requested rule
 	// applies -- a connection whose application never closes ends on the idle
 	// timeout, which is what libutp does with a socket its embedder forgets.
-	if c.state.stateType == ConnConnected && c.state.closing != nil &&
+	if c.state.stateType == connConnected && c.state.closing != nil &&
 		c.state.closing.RemoteFin != nil && c.state.closing.LocalFin != nil &&
 		c.closeRequested {
-		c.state.stateType = ConnClosed
+		c.state.stateType = connClosed
 		c.state.Err = nil
 	}
 }
@@ -4097,8 +4089,8 @@ const duplicateAcksBeforeResend = 3
 // refused. Three or more is the same evidence -- at least three packets after
 // the hole arrived and the hole did not -- that libutp's selective ack already
 // resends on (`count >= DUPLICATE_ACKS_BEFORE_RESEND`, :1538).
-func (c *connection) noteDuplicateAck(packetType PacketType, ackNum uint16) {
-	if c.state.stateType != ConnConnected || c.state.SentPackets == nil {
+func (c *connection) noteDuplicateAck(packetType packetType, ackNum uint16) {
+	if c.state.stateType != connConnected || c.state.SentPackets == nil {
 		return
 	}
 	if c.state.SentPackets.UnackedCount() == 0 {
@@ -4125,7 +4117,7 @@ func (c *connection) judgeProbeFromDuplicates(ackNum uint16) {
 	if ackNum == c.mtu.probeSeq-1 {
 		c.mtu.onProbeLost(c.now())
 		c.mtuProbesLostToDuplicateAcks++
-		if c.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+		if c.logger.Enabled(baseContext, log.LevelDebug) {
 			c.logger.Debug("MTU probe presumed too big, from duplicate acks",
 				"floor", c.mtu.floor, "ceiling", c.mtu.ceiling, "current", c.mtu.current,
 				"probeSeq", c.mtu.probeSeq)
@@ -4156,9 +4148,9 @@ func (c *connection) judgeProbeFromDuplicates(ackNum uint16) {
 //
 // A count that reaches three judges an outstanding probe there and then,
 // which libutp does not do: see noteDuplicateAck.
-func (c *connection) noteSelectiveAckCount(ackNum uint16, sack *SelectiveAck) {
+func (c *connection) noteSelectiveAckCount(ackNum uint16, sack *selectiveAck) {
 	sp := c.state.SentPackets
-	if c.state.stateType != ConnConnected || sp == nil {
+	if c.state.stateType != connConnected || sp == nil {
 		return
 	}
 	window := sp.UnackedCount() // libutp's cur_window_packets
@@ -4181,11 +4173,11 @@ func (c *connection) noteSelectiveAckCount(ackNum uint16, sack *SelectiveAck) {
 
 func (c *connection) processAck(
 	ackNum uint16,
-	selectiveAck *SelectiveAck,
+	selectiveAck *selectiveAck,
 	delay time.Duration,
 	now time.Time,
 ) error {
-	if c.state.stateType != ConnConnected {
+	if c.state.stateType != connConnected {
 		return nil
 	}
 
@@ -4213,7 +4205,7 @@ func (c *connection) processAck(
 		ackNum, selectiveAck, delay, now)
 	if err != nil {
 		seqRange := c.state.SentPackets.SeqNumRange()
-		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		if c.logger.Enabled(baseContext, log.LevelTrace) {
 			c.logger.Trace("sent packets onAck has error",
 				"err", err,
 				"cid.send", c.cid.Send,
@@ -4223,7 +4215,7 @@ func (c *connection) processAck(
 				seqRange.start,
 				"seqEnd", seqRange.end)
 		}
-		if errors.Is(err, ErrInvalidAckNum) {
+		if errors.Is(err, errInvalidAckNum) {
 			// An acknowledgement number outside what this connection has
 			// outstanding acknowledges nothing. It does not end the
 			// connection.
@@ -4265,7 +4257,7 @@ func (c *connection) processAck(
 		}
 		return err
 	}
-	if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if c.logger.Enabled(baseContext, log.LevelTrace) {
 		c.logger.Trace("process ack",
 			"cid.send", c.cid.Send,
 			"cid.recv", c.cid.Recv,
@@ -4332,7 +4324,7 @@ func (c *connection) processAck(
 		c.rtoDeadline = now.Add(c.state.SentPackets.Timeout())
 	}
 	for _, selectedAck := range selectedAcks {
-		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		if c.logger.Enabled(baseContext, log.LevelTrace) {
 			c.logger.Trace("process ack, will remove acked num from innerMap",
 				"cid.send", c.cid.Send,
 				"cid.recv", c.cid.Recv,
@@ -4362,7 +4354,7 @@ func (c *connection) processAck(
 // isOwnSyn reports whether a SYN is this connection's own, retransmitted by a
 // peer that has not heard the SYN-ACK.
 func (c *connection) isOwnSyn(seqNum uint16) bool {
-	return c.endpoint.Type == Acceptor && seqNum == c.endpoint.SynNum
+	return c.endpoint.Type == acceptor && seqNum == c.endpoint.SynNum
 }
 
 // onSyn handles a SYN that reached the connection. Only its own does (see
@@ -4373,15 +4365,15 @@ func (c *connection) isOwnSyn(seqNum uint16) bool {
 func (c *connection) onSyn(seqNum uint16) {}
 
 func (c *connection) onState(seqNum, ackNum uint16) {
-	if ConnConnecting != c.state.stateType {
+	if connConnecting != c.state.stateType {
 		return
 	}
 
-	if c.endpoint.Type == Initiator && ackNum == c.endpoint.SynNum {
+	if c.endpoint.Type == initiator && ackNum == c.endpoint.SynNum {
 		// NOTE: In a deviation from the specification, we initialize the ACK num
 		// to the sequence number of the SYN-ACK minus 1. This is consistent with
 		// the reference implementation and the libtorrent implementation.
-		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		if c.logger.Enabled(baseContext, log.LevelTrace) {
 			c.logger.Trace("connect success, will initial connection state...",
 				"cid.send", c.cid.Send, "cid.recv", c.cid.Recv)
 		}
@@ -4419,13 +4411,13 @@ func (c *connection) onState(seqNum, ackNum uint16) {
 		// passed: they all use ConnectWithCid.
 		//
 		// The channel is buffered with room for one, and the failure path at
-		// onTimeout only fires while the state is still ConnConnecting, so
+		// onTimeout only fires while the state is still connConnecting, so
 		// this send cannot block and cannot be followed by another.
 		if c.state.connectedCh != nil {
 			c.state.connectedCh <- nil
 			c.state.connectedCh = nil
 		}
-		c.state.stateType = ConnConnected
+		c.state.stateType = connConnected
 		c.state.RecvBuf = recvBuf
 		c.state.SendBuf = sendBuf
 		c.state.SentPackets = sentPacketsHolder
@@ -4433,7 +4425,7 @@ func (c *connection) onState(seqNum, ackNum uint16) {
 }
 
 func (c *connection) onData(seqNum uint16, data []byte) error {
-	if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if c.logger.Enabled(baseContext, log.LevelTrace) {
 		c.logger.Trace("on data packet", "seqNum", seqNum, "data.len", len(data))
 	}
 	// An empty payload is not an error. libutp delivers only non-empty data
@@ -4443,21 +4435,21 @@ func (c *connection) onData(seqNum uint16, data []byte) error {
 	// ack number without copying anything.
 
 	switch c.state.stateType {
-	case ConnConnecting:
-		if c.endpoint.Type == Acceptor {
+	case connConnecting:
+		if c.endpoint.Type == acceptor {
 			return errors.New("unreachable: connection should be marked established")
 		} else {
 			// connection being established.
-			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+			if c.logger.Enabled(baseContext, log.LevelTrace) {
 				c.logger.Trace("connection being established, ignore", "src.peer", c.cid.Peer, "seqNum", seqNum)
 			}
 			return nil
 		}
 
-	case ConnConnected:
+	case connConnected:
 		if c.state.closing != nil && c.state.closing.RemoteFin != nil {
 			// connection is closing
-			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+			if c.logger.Enabled(baseContext, log.LevelTrace) {
 				c.logger.Trace("connection has received remote FIN", "src.peer", c.cid.Peer, "seqNum", seqNum)
 			}
 			start := c.state.RecvBuf.InitSeqNum()
@@ -4508,7 +4500,7 @@ func (c *connection) onData(seqNum uint16, data []byte) error {
 				c.logger.Warn("write data to recv buffer, but available space is not enough",
 					"src.peer", c.cid.Peer, "seqNum", seqNum, "data.len", len(data))
 			}
-			if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+			if c.logger.Enabled(baseContext, log.LevelTrace) {
 				c.logger.Trace("write data to recv buffer",
 					"src.peer", c.cid.Peer, "seqNum", seqNum, "data.len", len(data), "nextAckNum", c.state.RecvBuf.AckNum())
 			}
@@ -4525,11 +4517,11 @@ func (c *connection) onData(seqNum uint16, data []byte) error {
 
 func (c *connection) onFin(seqNum uint16, data []byte) error {
 	switch c.state.stateType {
-	case ConnConnecting, ConnClosed:
+	case connConnecting, connClosed:
 		return nil
 
-	case ConnConnected:
-		if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	case connConnected:
+		if c.logger.Enabled(baseContext, log.LevelTrace) {
 			c.logger.Trace("received FIN", "seq", seqNum, "c.cid.send", c.cid.Send, "c.cid.recv", c.cid.Recv)
 		}
 		// A FIN may carry a final payload, and it reaches the application by
@@ -4561,7 +4553,7 @@ func (c *connection) onFin(seqNum uint16, data []byte) error {
 			if err := c.state.RecvBuf.Write(data, seqNum); err != nil {
 				return err
 			}
-			c.state.closing = &ClosingRecord{
+			c.state.closing = &closingRecord{
 				LocalFin:  nil,
 				RemoteFin: &seqNum,
 			}
@@ -4575,7 +4567,7 @@ func (c *connection) onFin(seqNum uint16, data []byte) error {
 func (c *connection) onReset() {
 	c.logger.Warn("RESET from remote")
 
-	if c.state.stateType == ConnClosed {
+	if c.state.stateType == connClosed {
 		return
 	}
 	// A reset answering our SYN is a refusal: nothing on the other end will
@@ -4591,7 +4583,7 @@ func (c *connection) onReset() {
 	// corrects the same line. Its ICMP path, which tests the state first
 	// (onICMPUnreachable), already distinguished the two here.
 	err := ErrReset
-	if c.state.stateType == ConnConnecting && c.endpoint.Type == Initiator {
+	if c.state.stateType == connConnecting && c.endpoint.Type == initiator {
 		err = ErrConnRefused
 	}
 	c.reset(err)
@@ -4669,20 +4661,20 @@ func (c *connection) onICMPFragmentationNeeded(nextHopMTU uint32, now time.Time)
 // is skipped for the same stated reason ("don't pass on errors for
 // idle/closed connections").
 //
-// CS_DESTROY and CS_RESET both land on ConnClosed here, because that is the
+// CS_DESTROY and CS_RESET both land on connClosed here, because that is the
 // only terminal state this connection has. The distinction libutp draws is
 // how soon the socket object goes away, not what the application is told:
 // both branches fall through to the same utp_call_on_error, so the error is
 // reported either way.
 func (c *connection) onICMPUnreachable() {
-	if c.state.stateType == ConnClosed {
+	if c.state.stateType == connClosed {
 		return
 	}
 
 	err := ErrReset
 	// CS_SYN_SENT is reachable only by the initiator, and only before the
 	// handshake completes.
-	if c.state.stateType == ConnConnecting && c.endpoint.Type == Initiator {
+	if c.state.stateType == connConnecting && c.endpoint.Type == initiator {
 		err = ErrConnRefused
 	}
 
@@ -4703,7 +4695,7 @@ func (c *connection) onICMPUnreachable() {
 		c.state.connectedCh = nil
 	}
 
-	c.state.stateType = ConnClosed
+	c.state.stateType = connClosed
 	c.state.Err = err
 }
 
@@ -4738,7 +4730,7 @@ func (c *connection) nowMicros() uint32 {
 	if c.clock != nil {
 		return c.clock()
 	}
-	return NowMicro()
+	return nowMicro()
 }
 
 func (c *connection) reset(err error) {
@@ -4746,9 +4738,9 @@ func (c *connection) reset(err error) {
 
 	// If we already sent our fin and got a reset we assume the receiver already got our fin
 	// and has successfully closed their connection, hence mark this as a successful close.
-	if c.state.stateType == ConnConnected {
+	if c.state.stateType == connConnected {
 		if c.state.closing != nil && c.state.closing.LocalFin != nil {
-			c.state.stateType = ConnClosed
+			c.state.stateType = connClosed
 			return
 		}
 	}
@@ -4760,20 +4752,20 @@ func (c *connection) reset(err error) {
 	// ICMP paths already signalled it; see onICMPUnreachable. Only during the
 	// handshake: afterwards nobody waits on the channel, and its one slot may
 	// still hold the success already sent.
-	if c.state.stateType == ConnConnecting && c.state.connectedCh != nil {
+	if c.state.stateType == connConnecting && c.state.connectedCh != nil {
 		select {
 		case c.state.connectedCh <- err:
 		default:
 		}
 		c.state.connectedCh = nil
 	}
-	c.state.stateType = ConnClosed
+	c.state.stateType = connClosed
 	c.state.Err = err
 }
 
 func (c *connection) synPacket(seqNum uint16) *packet {
 	nowMicros := int64(c.nowMicros())
-	return NewPacketBuilder(
+	return newPacketBuilder(
 		st_syn,
 		c.cid.Recv,
 		uint32(nowMicros),
@@ -4799,19 +4791,19 @@ func (c *connection) statePacket() *packet {
 	tsDiffMicros := uint32(c.peerTsDiff.Microseconds())
 
 	switch c.state.stateType {
-	case ConnConnecting:
-		if c.endpoint.Type == Initiator {
+	case connConnecting:
+		if c.endpoint.Type == initiator {
 			return nil
 		}
 
 		syn := c.endpoint.SynNum
 		synAck := c.endpoint.SynAck
-		return NewPacketBuilder(st_state, c.cid.Send, uint32(now), c.config.WindowSize, synAck).
+		return newPacketBuilder(st_state, c.cid.Send, uint32(now), c.config.WindowSize, synAck).
 			WithTsDiffMicros(tsDiffMicros).
 			WithAckNum(syn).
 			Build()
 
-	case ConnConnected:
+	case connConnected:
 		// NOTE: Consistent with the reference implementation and the libtorrent
 		// implementation, STATE packets always include the next sequence number.
 		seqNum := c.state.SentPackets.NextSeqNum()
@@ -4833,12 +4825,12 @@ func (c *connection) statePacket() *packet {
 		// branch below). It is kept because it matches the reference and
 		// because it becomes load-bearing the moment a half-close exists --
 		// see TestConformanceDataAfterReachedFin.
-		var selectiveAck *SelectiveAck
+		var selectiveAck *selectiveAck
 		if !c.eof() {
 			selectiveAck = c.state.RecvBuf.SelectiveAck()
 		}
 
-		return NewPacketBuilder(st_state, c.cid.Send, uint32(now), recvWindow, seqNum).
+		return newPacketBuilder(st_state, c.cid.Send, uint32(now), recvWindow, seqNum).
 			WithTsDiffMicros(tsDiffMicros).
 			WithAckNum(ackNum).
 			WithSelectiveAck(selectiveAck).
@@ -4850,7 +4842,7 @@ func (c *connection) statePacket() *packet {
 }
 
 func (c *connection) retransmitLostPackets(now time.Time) {
-	if c.state.stateType != ConnConnected {
+	if c.state.stateType != connConnected {
 		return
 	}
 	if !c.state.SentPackets.HasLostPackets() {
@@ -4866,7 +4858,7 @@ func (c *connection) retransmitLostPackets(now time.Time) {
 		packetType := lostPacket.PacketType
 		payload := lostPacket.Data
 
-		builder := NewPacketBuilder(packetType, connID, uint32(nowMicros), recvWindow, seqNum)
+		builder := newPacketBuilder(packetType, connID, uint32(nowMicros), recvWindow, seqNum)
 		if payload != nil {
 			builder.WithPayload(payload)
 		}
@@ -4879,7 +4871,7 @@ func (c *connection) retransmitLostPackets(now time.Time) {
 		c.packetsRetransmitted++
 		c.bytesRetransmitted += uint64(len(payload))
 		c.fastRetransmits++
-		if c.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+		if c.logger.Enabled(baseContext, log.LevelDebug) {
 			c.logger.Debug("will retransmit lost packet",
 				"packet.type", packetInst.Header.PacketType,
 				"packet.seqNum", packetInst.Header.SeqNum,
@@ -4918,7 +4910,7 @@ func (c *connection) transmit(packet *packet, now time.Time, firstTransmission b
 		length = uint32(len(packet.Body))
 	}
 
-	if c.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if c.logger.Enabled(baseContext, log.LevelTrace) {
 		c.logger.Trace("will transmit packet",
 			"cid", packet.Header.ConnectionId,
 			"packet.type", packet.Header.PacketType.String(),
@@ -4967,7 +4959,7 @@ func (c *connection) transmit(packet *packet, now time.Time, firstTransmission b
 	if datagramSize := uint32(packet.EncodedLen()); c.mtu.eligibleProbe(datagramSize, firstTransmission) {
 		c.mtu.beginProbe(packet.Header.SeqNum, datagramSize)
 		isProbe = true
-		if c.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+		if c.logger.Enabled(baseContext, log.LevelDebug) {
 			c.logger.Debug("MTU probe", "size", datagramSize,
 				"floor", c.mtu.floor, "ceiling", c.mtu.ceiling, "seq", packet.Header.SeqNum)
 		}
@@ -5011,7 +5003,7 @@ func (c *connection) rearmRack() {
 // passed it, with nothing since to say it arrived.
 func (c *connection) onRackTimer(now time.Time) {
 	sp := c.state.SentPackets
-	if c.state.stateType != ConnConnected || sp == nil || !sp.rack.active {
+	if c.state.stateType != connConnected || sp == nil || !sp.rack.active {
 		return
 	}
 	sp.rackDetectAndMark(now)

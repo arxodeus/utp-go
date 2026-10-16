@@ -7,22 +7,22 @@ import (
 )
 
 const (
-	MINIMAL_HEADER_SIZE                    = 20
-	MINIMAL_HEADER_SIZE_WITH_SELECTIVE_ACK = 26
-	PROTOCOL_VERSION_ONE                   = 1
-	// MAX_KNOWN_EXTENSION is the highest extension type either implementation
+	minimalHeaderSize                 = 20
+	minimalHeaderSizeWithSelectiveAck = 26
+	protocolVersionOne                = 1
+	// maxKnownExtension is the highest extension type either implementation
 	// recognises: 0 none, 1 selective ack, 2 extension bits.
-	MAX_KNOWN_EXTENSION = 2
-	ZERO_MOMENT         = time.Duration(0)
-	ACKS_ARRAY_LENGTH   = byte(4)
-	PACKET_HEADER_LEN   = 20
-	SELECTIVE_ACK_BITS  = 32
-	EXTENSION_TYPE_LEN  = 1
-	EXTENSION_LEN_LEN   = 1
+	maxKnownExtension = 2
+	zeroMoment        = time.Duration(0)
+	acksArrayLength   = byte(4)
+	packetHeaderLen   = 20
+	selectiveAckBits  = 32
+	extensionTypeLen  = 1
+	extensionLenLen   = 1
 )
 
 const (
-	st_data PacketType = iota
+	st_data packetType = iota
 	st_fin
 	st_state
 	st_reset
@@ -30,28 +30,25 @@ const (
 )
 
 var (
-	ErrInvalidHeaderSize           = errors.New("invalid header size")
-	ErrUnsupportedVersion          = errors.New("unsupported protocol version")
-	ErrUnknownExtension            = errors.New("unknown extension type")
-	ErrInvalidPacketVersion        = errors.New("invalid packet version")
-	ErrInvalidPacketType           = errors.New("invalid packet type")
-	ErrInvalidExtensionType        = errors.New("invalid extension type")
-	ErrInsufficientLen             = errors.New("insufficient length for extension")
-	ErrPacketTooShort              = errors.New("packet too short for selective ack extension")
-	ErrInsufficientSelectiveAckLen = errors.New("insufficient length for selective ACK")
-	ErrInvalidSelectiveAckLen      = errors.New("invalid length for selective ACK")
+	errInvalidHeaderSize           = errors.New("invalid header size")
+	errUnsupportedVersion          = errors.New("unsupported protocol version")
+	errUnknownExtension            = errors.New("unknown extension type")
+	errInvalidPacketType           = errors.New("invalid packet type")
+	errInsufficientLen             = errors.New("insufficient length for extension")
+	errInsufficientSelectiveAckLen = errors.New("insufficient length for selective ACK")
+	errInvalidSelectiveAckLen      = errors.New("invalid length for selective ACK")
 )
 
-type PacketType byte
+type packetType byte
 
-func (p PacketType) Check() error {
+func (p packetType) Check() error {
 	if p > 4 {
-		return ErrInvalidPacketType
+		return errInvalidPacketType
 	}
 	return nil
 }
 
-func (p *PacketType) String() string {
+func (p *packetType) String() string {
 	switch *p {
 	case st_data:
 		return "st_data"
@@ -68,8 +65,8 @@ func (p *PacketType) String() string {
 	}
 }
 
-type PacketHeaderV1 struct {
-	PacketType    PacketType
+type packetHeaderV1 struct {
+	PacketType    packetType
 	Version       byte
 	Extension     byte
 	ConnectionId  uint16
@@ -80,17 +77,17 @@ type PacketHeaderV1 struct {
 	AckNum        uint16
 }
 
-func (h *PacketHeaderV1) encodeTypeVer() byte {
+func (h *packetHeaderV1) encodeTypeVer() byte {
 	typeVer := byte(h.PacketType)<<4 | h.Version
 	return typeVer
 }
 
-func (h *PacketHeaderV1) EncodeToBytes() []byte {
-	return h.appendTo(make([]byte, 0, MINIMAL_HEADER_SIZE))
+func (h *packetHeaderV1) EncodeToBytes() []byte {
+	return h.appendTo(make([]byte, 0, minimalHeaderSize))
 }
 
 // appendTo appends the header's 20 bytes to b.
-func (h *PacketHeaderV1) appendTo(b []byte) []byte {
+func (h *packetHeaderV1) appendTo(b []byte) []byte {
 	b = append(b, h.encodeTypeVer(), h.Extension)             // 2
 	b = binary.BigEndian.AppendUint16(b, h.ConnectionId)      // 2
 	b = binary.BigEndian.AppendUint32(b, uint32(h.Timestamp)) // 4
@@ -101,23 +98,37 @@ func (h *PacketHeaderV1) appendTo(b []byte) []byte {
 	return b
 }
 
-func DecodePacketHeader(value []byte) (*PacketHeaderV1, error) {
-	h := new(PacketHeaderV1)
+// IsPacket reports whether b is a uTP packet for this implementation, as far
+// as its header can say: the length, the packet type, the version nibble and
+// the first extension byte, the same four things libutp checks before it will
+// look at a packet at all (utp_internal.cpp:2481, :2834). It is the decoder's
+// own validation, so a datagram this accepts is one the socket can parse, and
+// one it refuses is one the socket would drop. utpnet uses it to tell uTP from
+// another protocol sharing the port.
+func IsPacket(b []byte) bool {
+	if len(b) < minimalHeaderSize {
+		return false
+	}
+	var h packetHeaderV1
+	return decodePacketHeaderInto(&h, b[:minimalHeaderSize]) == nil
+}
+
+func decodePacketHeader(value []byte) (*packetHeaderV1, error) {
+	h := new(packetHeaderV1)
 	if err := decodePacketHeaderInto(h, value); err != nil {
 		return nil, err
 	}
 	return h, nil
 }
 
-// decodePacketHeaderInto is DecodePacketHeader into a header the caller
+// decodePacketHeaderInto is decodePacketHeader into a header the caller
 // provides.
-func decodePacketHeaderInto(h *PacketHeaderV1, value []byte) error {
-	if len(value) < MINIMAL_HEADER_SIZE {
-		return ErrInvalidHeaderSize
+func decodePacketHeaderInto(h *packetHeaderV1, value []byte) error {
+	if len(value) < minimalHeaderSize {
+		return errInvalidHeaderSize
 	}
 
-	packetType := value[0] >> 4
-	packetTypeVal := PacketType(packetType)
+	packetTypeVal := packetType(value[0] >> 4)
 	if err := packetTypeVal.Check(); err != nil {
 		return err
 	}
@@ -128,8 +139,8 @@ func decodePacketHeaderInto(h *PacketHeaderV1, value []byte) error {
 	// an attack surface: it lets a peer reach the rest of this decoder with a
 	// packet no real implementation would have sent.
 	version := value[0] & 0x0F
-	if version != PROTOCOL_VERSION_ONE {
-		return ErrUnsupportedVersion
+	if version != protocolVersionOne {
+		return errUnsupportedVersion
 	}
 	versionVal := version
 
@@ -151,8 +162,8 @@ func decodePacketHeaderInto(h *PacketHeaderV1, value []byte) error {
 	// Accepting what the reference rejects is both an incompatibility and an
 	// attack surface, so this rejects too.
 	extension := value[1]
-	if extension > MAX_KNOWN_EXTENSION {
-		return ErrUnknownExtension
+	if extension > maxKnownExtension {
+		return errUnknownExtension
 	}
 
 	connID := binary.BigEndian.Uint16(value[2:4])
@@ -162,7 +173,7 @@ func decodePacketHeaderInto(h *PacketHeaderV1, value []byte) error {
 	seqNum := binary.BigEndian.Uint16(value[16:18])
 	ackNum := binary.BigEndian.Uint16(value[18:20])
 
-	*h = PacketHeaderV1{
+	*h = packetHeaderV1{
 		PacketType:    packetTypeVal,
 		Version:       versionVal,
 		Extension:     extension,
@@ -180,41 +191,41 @@ func decodePacketHeaderInto(h *PacketHeaderV1, value []byte) error {
 // decoder and the builder, which make one of each for every packet.
 type packetWithHeader struct {
 	p packet
-	h PacketHeaderV1
+	h packetHeaderV1
 }
 
-// SelectiveAck represents a selective acknowledgment
-type SelectiveAck struct {
-	acked [][SELECTIVE_ACK_BITS]bool
+// selectiveAck represents a selective acknowledgment
+type selectiveAck struct {
+	acked [][selectiveAckBits]bool
 }
 
-// NewSelectiveAck creates a new SelectiveAck from a slice of booleans
-func NewSelectiveAck(acked []bool) *SelectiveAck {
-	chunks := len(acked) / SELECTIVE_ACK_BITS
-	remainder := len(acked) % SELECTIVE_ACK_BITS
+// newSelectiveAck creates a new SelectiveAck from a slice of booleans
+func newSelectiveAck(acked []bool) *selectiveAck {
+	chunks := len(acked) / selectiveAckBits
+	remainder := len(acked) % selectiveAckBits
 
-	ack := &SelectiveAck{acked: make([][SELECTIVE_ACK_BITS]bool, chunks)}
+	ack := &selectiveAck{acked: make([][selectiveAckBits]bool, chunks)}
 	for i := 0; i < chunks; i++ {
 		var fragment [32]bool
-		copy(fragment[:], acked[i*SELECTIVE_ACK_BITS:(i+1)*SELECTIVE_ACK_BITS])
+		copy(fragment[:], acked[i*selectiveAckBits:(i+1)*selectiveAckBits])
 		ack.acked[i] = fragment
 	}
 
 	if remainder > 0 {
 		var fragment [32]bool
-		copy(fragment[:], acked[chunks*SELECTIVE_ACK_BITS:])
+		copy(fragment[:], acked[chunks*selectiveAckBits:])
 		ack.acked = append(ack.acked, fragment)
 	}
 
 	return ack
 }
 
-func (s *SelectiveAck) EncodedLen() int {
-	return (len(s.acked) * SELECTIVE_ACK_BITS) / 8
+func (s *selectiveAck) EncodedLen() int {
+	return (len(s.acked) * selectiveAckBits) / 8
 }
 
-func (s *SelectiveAck) Acked() []bool {
-	result := make([]bool, 0, len(s.acked)*SELECTIVE_ACK_BITS)
+func (s *selectiveAck) Acked() []bool {
+	result := make([]bool, 0, len(s.acked)*selectiveAckBits)
 	for _, boolArray := range s.acked {
 		result = append(result, boolArray[:]...)
 	}
@@ -236,7 +247,7 @@ func (s *SelectiveAck) Acked() []bool {
 // ack it sent was misread by any real peer, and every one it received was
 // misread in turn. Only a comparison against libutp surfaces a bug that is
 // self-consistent.
-func (s *SelectiveAck) Encode() []byte {
+func (s *selectiveAck) Encode() []byte {
 	var bitmask []byte
 	for _, word := range s.acked {
 		for i := 0; i < len(word); i += 8 {
@@ -252,18 +263,18 @@ func (s *SelectiveAck) Encode() []byte {
 	return bitmask
 }
 
-// DecodeSelectiveAck decodes a byte slice into a SelectiveAck
-func DecodeSelectiveAck(data []byte) (*SelectiveAck, error) {
+// decodeSelectiveAck decodes a byte slice into a SelectiveAck
+func decodeSelectiveAck(data []byte) (*selectiveAck, error) {
 	if len(data) < 4 {
-		return nil, ErrInsufficientSelectiveAckLen
+		return nil, errInsufficientSelectiveAckLen
 	}
 	if len(data)%4 != 0 {
-		return nil, ErrInvalidSelectiveAckLen
+		return nil, errInvalidSelectiveAckLen
 	}
 
-	acked := make([][SELECTIVE_ACK_BITS]bool, len(data)/4)
+	acked := make([][selectiveAckBits]bool, len(data)/4)
 	for i := 0; i < len(data); i += 4 {
-		var tmp [SELECTIVE_ACK_BITS]bool
+		var tmp [selectiveAckBits]bool
 		for j := 0; j < 4; j++ {
 			byteVal := data[i+j]
 			for k := 0; k < 8; k++ {
@@ -274,18 +285,16 @@ func DecodeSelectiveAck(data []byte) (*SelectiveAck, error) {
 		acked[i/4] = tmp
 	}
 
-	return &SelectiveAck{acked: acked}, nil
+	return &selectiveAck{acked: acked}, nil
 }
 
-type SelectiveAckExtension [4]byte
-
 type packet struct {
-	Header *PacketHeaderV1
-	Eack   *SelectiveAck
+	Header *packetHeaderV1
+	Eack   *selectiveAck
 	Body   []byte
 	// chain is the extension chain as it arrived, in order, for a decoded
 	// packet, and nil for one built here. See wireExtensions.
-	chain []ExtensionData
+	chain []extensionData
 	// borrowed says Body is a slice of the socket reader's buffer, which the
 	// next read reuses. Whatever keeps the packet beyond the call that
 	// received it takes the body first. See own.
@@ -312,9 +321,9 @@ func (p *packet) own() {
 }
 
 func (p *packet) EncodedLen() int {
-	length := MINIMAL_HEADER_SIZE
+	length := minimalHeaderSize
 	for _, e := range p.wireExtensions() {
-		length += EXTENSION_TYPE_LEN + EXTENSION_LEN_LEN + len(e.payload)
+		length += extensionTypeLen + extensionLenLen + len(e.payload)
 	}
 	length += len(p.Body)
 	return length
@@ -342,9 +351,9 @@ func (p *packet) malformedExtensionBits() bool {
 // further along the chain, which both this decoder and libutp step over
 // (utp_internal.cpp:1844-1866), and extension 2, whose contents nothing here
 // reads. These used to be dropped. Nothing on the live path re-encodes a
-// received packet, and libutp never does, but DecodePacket is exported, and
-// anything that forwarded packets through it would have stripped what it did
-// not understand.
+// received packet, and libutp never does, but the decoder was then exported,
+// and anything that forwarded packets through it would have stripped what it
+// did not understand.
 //
 // The selective ack keeps its place in the chain, and its bytes come from
 // Eack, so a caller that changes Eack changes what is written. Its place is
@@ -358,10 +367,10 @@ func (p *packet) malformedExtensionBits() bool {
 // unreadable. It can only happen if a caller cleared the selective ack that
 // used to come first, and then the unknown extensions ahead of the first
 // known one are dropped.
-func (p *packet) wireExtensions() []ExtensionData {
+func (p *packet) wireExtensions() []extensionData {
 	if len(p.chain) == 0 {
 		if p.Eack != nil {
-			return []ExtensionData{{extension: 1, payload: p.Eack.Encode()}}
+			return []extensionData{{extension: 1, payload: p.Eack.Encode()}}
 		}
 		return nil
 	}
@@ -371,22 +380,22 @@ func (p *packet) wireExtensions() []ExtensionData {
 			slot = i
 		}
 	}
-	out := make([]ExtensionData, 0, len(p.chain)+1)
+	out := make([]extensionData, 0, len(p.chain)+1)
 	if slot < 0 && p.Eack != nil {
-		out = append(out, ExtensionData{extension: 1, payload: p.Eack.Encode()})
+		out = append(out, extensionData{extension: 1, payload: p.Eack.Encode()})
 	}
 	for i, e := range p.chain {
 		if i == slot {
 			switch {
 			case p.Eack != nil:
-				e = ExtensionData{extension: 1, payload: p.Eack.Encode()}
+				e = extensionData{extension: 1, payload: p.Eack.Encode()}
 			case len(e.payload) != 0:
 				continue
 			}
 		}
 		out = append(out, e)
 	}
-	for len(out) > 0 && out[0].extension > MAX_KNOWN_EXTENSION {
+	for len(out) > 0 && out[0].extension > maxKnownExtension {
 		out = out[1:]
 	}
 	return out
@@ -399,7 +408,7 @@ func (p *packet) wireExtensions() []ExtensionData {
 // decoded again.
 //
 // It used to be taken from p.Header, which is only correct for packets built
-// by PacketBuilder. A *decoded* packet keeps whatever extension byte the peer
+// by packetBuilder. A *decoded* packet keeps whatever extension byte the peer
 // sent, while Eack is nil unless a selective ack was retained -- so a packet
 // that arrived carrying a zero-length selective ack, or the extension-bits
 // extension, re-encoded to a header claiming an extension with no extension
@@ -407,9 +416,9 @@ func (p *packet) wireExtensions() []ExtensionData {
 // "insufficient length for extension". Found by FuzzDecodePacket.
 //
 // Nothing on the live path re-encodes a decoded packet today, so this was
-// latent -- but DecodePacket is exported and its result has exported methods,
-// so an external caller could reach it, and a proxy or relay built on this
-// library would have emitted unparseable packets.
+// latent -- but the decoder was then exported and its result had exported
+// methods, so an external caller could reach it, and a proxy or relay built on
+// this library would have emitted unparseable packets.
 func (p *packet) Encode() []byte {
 	return p.appendEncoded(make([]byte, 0, p.EncodedLen()))
 }
@@ -443,11 +452,6 @@ func (p *packet) appendEncoded(bytes []byte) []byte {
 	return bytes
 }
 
-// DecodePacket decodes one datagram. The packet's body is a slice of b.
-func DecodePacket(b []byte) (*packet, error) {
-	return decodePacket(b, false)
-}
-
 // decodePacket decodes one datagram. If borrowed is set, b is the reader's
 // buffer, reused once the datagram has been dispatched: the packet's body
 // still refers to it, and is taken by own when the packet is kept. Nothing
@@ -455,36 +459,36 @@ func DecodePacket(b []byte) (*packet, error) {
 // extension copied.
 func decodePacket(b []byte, borrowed bool) (*packet, error) {
 	receivedBytesLength := len(b)
-	if receivedBytesLength < MINIMAL_HEADER_SIZE {
-		return nil, ErrInvalidHeaderSize
+	if receivedBytesLength < minimalHeaderSize {
+		return nil, errInvalidHeaderSize
 	}
 
 	ph := &packetWithHeader{}
 	p := &ph.p
 	header := &ph.h
-	if err := decodePacketHeaderInto(header, b[:MINIMAL_HEADER_SIZE]); err != nil {
+	if err := decodePacketHeaderInto(header, b[:minimalHeaderSize]); err != nil {
 		return nil, err
 	}
 
-	extensions, extensionsLen, err := DecodeRawExtensions(header.Extension, b[MINIMAL_HEADER_SIZE:])
+	extensions, extensionsLen, err := decodeRawExtensions(header.Extension, b[minimalHeaderSize:])
 	if err != nil {
 		return nil, err
 	}
 
-	var extension ExtensionData
+	var extension extensionData
 	for _, extensionData := range extensions {
 		if extensionData.extension == 1 {
 			extension = extensionData
 		}
 	}
-	var ack *SelectiveAck
+	var ack *selectiveAck
 	if len(extension.payload) != 0 {
-		if ack, err = DecodeSelectiveAck(extension.payload); err != nil {
+		if ack, err = decodeSelectiveAck(extension.payload); err != nil {
 			return nil, err
 		}
 	}
 
-	payloadStartIndex := MINIMAL_HEADER_SIZE + extensionsLen
+	payloadStartIndex := minimalHeaderSize + extensionsLen
 	var payload []byte
 	if len(b) == payloadStartIndex {
 		payload = make([]byte, 0)
@@ -508,58 +512,22 @@ func decodePacket(b []byte, borrowed bool) (*packet, error) {
 	p.chain = extensions
 	p.borrowed = borrowed
 	return p, nil
-	//var body []byte
-	//if header.Extension == 0 {
-	//	if receivedBytesLength == MINIMAL_HEADER_SIZE {
-	//		body = []byte{}
-	//	} else {
-	//		body = b[MINIMAL_HEADER_SIZE:]
-	//	}
-	//	p.Header = header
-	//	p.Eack = nil
-	//	p.Body = body
-	//	return &p, nil
-	//}
-	//if receivedBytesLength < MINIMAL_HEADER_SIZE_WITH_SELECTIVE_ACK {
-	//	return nil, ErrPacketTooShort
-	//}
-	//nextExtension := b[20]
-	//extLength := b[21]
-	//
-	//if nextExtension != 0 || extLength != 4 {
-	//	return nil, fmt.Errorf("bad format of selective ack extension: extension=%d, len=%d", nextExtension, extLength)
-	//}
-	//
-	//extension, err := DecodeSelectiveAck(b[22:26])
-	//if err != nil {
-	//	return nil, ErrInvalidSelectiveAckLen
-	//}
-
-	//if receivedBytesLength == MINIMAL_HEADER_SIZE_WITH_SELECTIVE_ACK {
-	//	body = []byte{}
-	//} else {
-	//	body = b[MINIMAL_HEADER_SIZE_WITH_SELECTIVE_ACK:]
-	//}
-	//p.Header = header
-	//p.Eack = extension
-	//p.Body = body
-	//return &p, nil
 }
 
-type ExtensionData struct {
+type extensionData struct {
 	extension byte
 	payload   []byte
 }
 
-func DecodeRawExtensions(firstExt byte, data []byte) ([]ExtensionData, int, error) {
+func decodeRawExtensions(firstExt byte, data []byte) ([]extensionData, int, error) {
 	ext := firstExt
 	index := 0
-	extensions := make([]ExtensionData, 0)
+	extensions := make([]extensionData, 0)
 
 	for ext != 0 {
 		// Check if enough data for header (2 bytes)
 		if len(data[index:]) < 2 {
-			return nil, 0, ErrInsufficientLen
+			return nil, 0, errInsufficientLen
 		}
 
 		// Read next extension type
@@ -573,7 +541,7 @@ func DecodeRawExtensions(firstExt byte, data []byte) ([]ExtensionData, int, erro
 
 		// Check if enough data for extension content
 		if len(data[extStart:]) < extLen {
-			return nil, 0, ErrInsufficientLen
+			return nil, 0, errInsufficientLen
 		}
 
 		// Copy extension data
@@ -581,7 +549,7 @@ func DecodeRawExtensions(firstExt byte, data []byte) ([]ExtensionData, int, erro
 		copy(extData, data[extStart:extStart+extLen])
 
 		// Add to extensions list
-		extensions = append(extensions, ExtensionData{
+		extensions = append(extensions, extensionData{
 			extension: ext,
 			payload:   extData,
 		})
@@ -594,26 +562,26 @@ func DecodeRawExtensions(firstExt byte, data []byte) ([]ExtensionData, int, erro
 	return extensions, index, nil
 }
 
-type PacketBuilder struct {
-	packetType   PacketType
+type packetBuilder struct {
+	packetType   packetType
 	connID       uint16
 	tsMicros     uint32
 	tsDiffMicros uint32
 	windowSize   uint32
 	seqNum       uint16
 	ackNum       uint16
-	selectiveAck *SelectiveAck
+	selectiveAck *selectiveAck
 	payload      []byte
 }
 
-func NewPacketBuilder(
-	packetType PacketType,
+func newPacketBuilder(
+	packetType packetType,
 	connID uint16,
 	tsMicros uint32,
 	windowSize uint32,
 	seqNum uint16,
-) *PacketBuilder {
-	return &PacketBuilder{
+) *packetBuilder {
+	return &packetBuilder{
 		packetType:   packetType,
 		connID:       connID,
 		tsMicros:     tsMicros,
@@ -624,27 +592,27 @@ func NewPacketBuilder(
 	}
 }
 
-func (b *PacketBuilder) WithTsDiffMicros(tsDiffMicros uint32) *PacketBuilder {
+func (b *packetBuilder) WithTsDiffMicros(tsDiffMicros uint32) *packetBuilder {
 	b.tsDiffMicros = tsDiffMicros
 	return b
 }
 
-func (b *PacketBuilder) WithAckNum(ackNum uint16) *PacketBuilder {
+func (b *packetBuilder) WithAckNum(ackNum uint16) *packetBuilder {
 	b.ackNum = ackNum
 	return b
 }
 
-func (b *PacketBuilder) WithSelectiveAck(selectiveAck *SelectiveAck) *PacketBuilder {
+func (b *packetBuilder) WithSelectiveAck(selectiveAck *selectiveAck) *packetBuilder {
 	b.selectiveAck = selectiveAck
 	return b
 }
 
-func (b *PacketBuilder) WithPayload(payload []byte) *PacketBuilder {
+func (b *packetBuilder) WithPayload(payload []byte) *packetBuilder {
 	b.payload = payload
 	return b
 }
 
-func (b *PacketBuilder) Build() *packet {
+func (b *packetBuilder) Build() *packet {
 	var headerExtension byte
 	if b.selectiveAck != nil {
 		headerExtension = 1
@@ -656,9 +624,9 @@ func (b *PacketBuilder) Build() *packet {
 	}
 
 	ph := &packetWithHeader{
-		h: PacketHeaderV1{
+		h: packetHeaderV1{
 			PacketType:    b.packetType,
-			Version:       PROTOCOL_VERSION_ONE,
+			Version:       protocolVersionOne,
 			Extension:     headerExtension,
 			ConnectionId:  b.connID,
 			Timestamp:     int64(b.tsMicros),

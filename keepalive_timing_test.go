@@ -60,7 +60,7 @@ func TestKeepAliveLeavesOneIntervalAfterTheLastPacket(t *testing.T) {
 	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(NewPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+		conn.inject(newPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
 	})
 	select {
 	case err := <-accepted:
@@ -78,7 +78,7 @@ func TestKeepAliveLeavesOneIntervalAfterTheLastPacket(t *testing.T) {
 	// packet the connection sends before it goes quiet.
 	clk.Advance(quietFrom)
 	clk.AwaitReactionTo(func() {
-		conn.inject(NewPacketBuilder(st_data, peerID+1, 190000, 1<<20, peerSeq+1).
+		conn.inject(newPacketBuilder(st_data, peerID+1, 190000, 1<<20, peerSeq+1).
 			WithAckNum(ourSeq - 1).WithPayload([]byte("last word")).Build().Encode())
 	})
 	if n := len(conn.takeEmitted()); n != 1 {
@@ -100,7 +100,7 @@ func TestKeepAliveLeavesOneIntervalAfterTheLastPacket(t *testing.T) {
 				"KEEPALIVE_INTERVAL, utp_internal.cpp:1272)",
 				i, len(emitted), clk.Now().Sub(lastSent))
 		}
-		pkt, err := DecodePacket(emitted[0])
+		pkt, err := decodePacket(emitted[0], false)
 		if err != nil {
 			t.Fatalf("keep-alive %d does not decode: %v", i, err)
 		}
@@ -116,7 +116,7 @@ func TestKeepAliveLeavesOneIntervalAfterTheLastPacket(t *testing.T) {
 		// Answer it, as a live peer does. The answer must not itself draw a
 		// packet, or it would move lastSent.
 		clk.AwaitReactionTo(func() {
-			conn.inject(NewPacketBuilder(st_state, peerID+1, 200000, 1<<20, peerSeq+2).
+			conn.inject(newPacketBuilder(st_state, peerID+1, 200000, 1<<20, peerSeq+2).
 				WithAckNum(ourSeq - 1).Build().Encode())
 		})
 		if emitted := conn.takeEmitted(); len(emitted) != 0 {
@@ -165,7 +165,7 @@ func TestKeepAliveSelectiveAckMatchesItsAckNumber(t *testing.T) {
 	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(NewPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+		conn.inject(newPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
 	})
 	if err := <-accepted; err != nil {
 		t.Fatalf("accept: %v", err)
@@ -177,7 +177,7 @@ func TestKeepAliveSelectiveAckMatchesItsAckNumber(t *testing.T) {
 	// peerSeq+1 never arrives; peerSeq+2 does. The acknowledgement stays at
 	// peerSeq, with peerSeq+2 selectively acknowledged.
 	clk.AwaitReactionTo(func() {
-		conn.inject(NewPacketBuilder(st_data, peerID+1, 190000, 1<<20, peerSeq+2).
+		conn.inject(newPacketBuilder(st_data, peerID+1, 190000, 1<<20, peerSeq+2).
 			WithAckNum(ourSeq - 1).WithPayload([]byte("after the gap")).Build().Encode())
 	})
 	conn.takeEmitted()
@@ -187,7 +187,7 @@ func TestKeepAliveSelectiveAckMatchesItsAckNumber(t *testing.T) {
 	if len(emitted) != 1 {
 		t.Fatalf("expected one keep-alive after %v of silence, got %s", interval, describePackets(emitted))
 	}
-	pkt, err := DecodePacket(emitted[0])
+	pkt, err := decodePacket(emitted[0], false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func TestIdleTimeoutRunsFromTheLastPacketHeard(t *testing.T) {
 	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(NewPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+		conn.inject(newPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
 	})
 	var stream *UtpStream
 	select {
@@ -272,7 +272,7 @@ func TestIdleTimeoutRunsFromTheLastPacketHeard(t *testing.T) {
 
 	clk.Advance(heardAt)
 	clk.AwaitReactionTo(func() {
-		conn.inject(NewPacketBuilder(st_data, peerID+1, 190000, 1<<20, peerSeq+1).
+		conn.inject(newPacketBuilder(st_data, peerID+1, 190000, 1<<20, peerSeq+1).
 			WithAckNum(ourSeq - 1).WithPayload([]byte("still here")).Build().Encode())
 	})
 

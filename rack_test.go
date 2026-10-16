@@ -43,13 +43,13 @@ func (h *rackHarness) resend(i, ms int) {
 func (h *rackHarness) ack(ms, upTo int, sacked ...int) {
 	h.t.Helper()
 	ackNum := h.seq[upTo]
-	var sack *SelectiveAck
+	var sack *selectiveAck
 	if len(sacked) > 0 {
 		bits := make([]bool, 32)
 		for _, i := range sacked {
 			bits[int(h.seq[i]-ackNum-2)] = true
 		}
-		sack = NewSelectiveAck(bits)
+		sack = newSelectiveAck(bits)
 	}
 	_, _, err := h.sp.onAck(ackNum, sack, 0, h.at(ms))
 	require.NoError(h.t, err)
@@ -165,7 +165,7 @@ func TestRackSpuriousLossWidensTheWindow(t *testing.T) {
 	h.send(0)
 	h.ack(20, 1) // minimum round trip 20 ms
 	require.False(t, h.sp.rack.reorderingSeen)
-	require.Zero(t, h.sp.rackReoWnd(LossThreshold), "no window before reordering is seen")
+	require.Zero(t, h.sp.rackReoWnd(lossThreshold), "no window before reordering is seen")
 	h.sp.rackOnSpuriousLoss()
 	require.True(t, h.sp.rack.reorderingSeen, "a spurious loss is reordering")
 	h.sp.rack.reoWndMult = 1

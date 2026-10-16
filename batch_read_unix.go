@@ -19,7 +19,7 @@ const maxReadBatch = 4096
 // native/libutp/bridge.cpp). See UtpSocket.readLoop. drain does the reading:
 // recvmmsg on Linux (batch_drain_linux.go), recvfrom elsewhere
 // (batch_drain_recvfrom.go).
-// udpConnReader is what UdpConn's batched reads keep between reads.
+// udpConnReader is what udpConn's batched reads keep between reads.
 type udpConnReader struct {
 	// peers caches the peer for each source address the read loop has seen.
 	// See peerForKey.
@@ -33,7 +33,7 @@ type udpConnReader struct {
 }
 
 // peerKey is a source address as the kernel reports it, comparable so it can
-// key the reader's peer cache (UdpConn.peerForKey).
+// key the reader's peer cache (udpConn.peerForKey).
 type peerKey struct {
 	ip   [16]byte
 	port int
@@ -45,7 +45,7 @@ type peerKey struct {
 // costs one address formatting per peer that sends again.
 const maxCachedPeers = 4096
 
-func (c *UdpConn) readBatch() ([]datagram, error) {
+func (c *udpConn) readBatch() ([]datagram, error) {
 	rc, err := c.base.SyscallConn()
 	if err != nil {
 		return nil, err
@@ -65,7 +65,7 @@ func (c *UdpConn) readBatch() ([]datagram, error) {
 // then kept as its body: an allocation for every datagram received, for an
 // acknowledgement as much as for data. A packet decoded from a borrowed
 // buffer copies its body only if it is kept (packet.own).
-func (c *UdpConn) lend(b []byte) []byte {
+func (c *udpConn) lend(b []byte) []byte {
 	start := len(c.arena)
 	c.arena = append(c.arena, b...)
 	return c.arena[start:len(c.arena):len(c.arena)]
@@ -77,7 +77,7 @@ func (c *UdpConn) lend(b []byte) []byte {
 // every packet is routed by -- for every packet: the largest single cost of
 // routing one, measured on a reader just woken. Only the read loop calls
 // this, so the cache needs no lock.
-func (c *UdpConn) peerForKey(k peerKey) *UdpPeer {
+func (c *udpConn) peerForKey(k peerKey) *UdpPeer {
 	if p, ok := c.peers[k]; ok {
 		return p
 	}

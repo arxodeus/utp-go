@@ -43,7 +43,7 @@ func tailBurstRecovery(t *testing.T, rtt time.Duration, burst int) (time.Duratio
 	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(NewPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+		conn.inject(newPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
 	})
 	stream := <-accepted
 	if stream == nil {
@@ -68,19 +68,19 @@ func tailBurstRecovery(t *testing.T, rtt time.Duration, burst int) (time.Duratio
 		}
 		// A one-way delay of half the round trip: without a delay sample
 		// LEDBAT leaves the window where it is, in libutp as here.
-		b := NewPacketBuilder(st_state, peerID+1, uint32(clk.Now().UnixMicro()), 1<<20, peerSeq+1).
+		b := newPacketBuilder(st_state, peerID+1, uint32(clk.Now().UnixMicro()), 1<<20, peerSeq+1).
 			WithAckNum(cum).WithTsDiffMicros(uint32(rtt.Microseconds() / 2))
 		if stray != 0 && wrappingLessThan(cum+1, stray) {
 			bits := make([]bool, 32)
 			bits[stray-cum-2] = true
-			b = b.WithSelectiveAck(NewSelectiveAck(bits))
+			b = b.WithSelectiveAck(newSelectiveAck(bits))
 		}
 		return b.Build().Encode()
 	}
 	sentData := func() []uint16 {
 		var seqs []uint16
 		for _, raw := range conn.takeEmitted() {
-			if p, err := DecodePacket(raw); err == nil && p.Header.PacketType == st_data {
+			if p, err := decodePacket(raw, false); err == nil && p.Header.PacketType == st_data {
 				seqs = append(seqs, p.Header.SeqNum)
 			}
 		}

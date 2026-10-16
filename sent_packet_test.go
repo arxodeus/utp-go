@@ -132,7 +132,7 @@ func TestOnSelectiveAck(t *testing.T) {
 			acked[i] = true
 		}
 	}
-	selectiveAck := NewSelectiveAck(acked)
+	selectiveAck := newSelectiveAck(acked)
 
 	// Process ACK
 	now := time.Now()
@@ -157,7 +157,7 @@ func TestOnSelectiveAck(t *testing.T) {
 func TestDetectLostPackets(t *testing.T) {
 	const (
 		COUNT = 10
-		START = COUNT - LossThreshold
+		START = COUNT - lossThreshold
 		DELAY = time.Millisecond * 100
 	)
 
@@ -344,7 +344,7 @@ func TestFastRetransmitHappensOncePerPacket(t *testing.T) {
 	for i := range acked {
 		acked[i] = true
 	}
-	sack := NewSelectiveAck(acked)
+	sack := newSelectiveAck(acked)
 
 	if _, _, err := sent.onAck(initSeqNum, sack, 10*time.Millisecond, time.Now()); err != nil {
 		t.Fatalf("first ack: %v", err)
@@ -392,7 +392,7 @@ func TestFastRetransmitFromAnyInitialSequenceNumber(t *testing.T) {
 			sent.OnTransmit(sent.NextSeqNum(), st_data, data, uint32(len(data)), time.Now())
 		}
 		// The first packet is missing; the next four arrive.
-		sack := NewSelectiveAck([]bool{true, true, true, true})
+		sack := newSelectiveAck([]bool{true, true, true, true})
 		if _, _, err := sent.onAck(initSeqNum, sack, 10*time.Millisecond, time.Now()); err != nil {
 			t.Fatalf("init %d: %v", initSeqNum, err)
 		}
@@ -423,7 +423,7 @@ func TestFastRetransmitIsCappedPerAck(t *testing.T) {
 	for i := range acked {
 		acked[i] = i%2 == 0
 	}
-	sack := NewSelectiveAck(acked)
+	sack := newSelectiveAck(acked)
 
 	if _, _, err := sent.onAck(initSeqNum, sack, 10*time.Millisecond, time.Now()); err != nil {
 		t.Fatalf("ack: %v", err)
@@ -447,7 +447,7 @@ func TestFastRetransmitIsCappedPerAck(t *testing.T) {
 	}
 }
 
-func describeLost(packets []*LostPacket) []uint16 {
+func describeLost(packets []*lostPacket) []uint16 {
 	seqNums := make([]uint16, 0, len(packets))
 	for _, p := range packets {
 		seqNums = append(seqNums, p.SeqNum)

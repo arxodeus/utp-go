@@ -55,14 +55,14 @@ func TestResetAfterTheFinTakesNothingBack(t *testing.T) {
 	server.conn.mu.Lock()
 	lastSent := server.conn.state.SentPackets.NextSeqNum() - 1
 	server.conn.mu.Unlock()
-	reset := NewPacketBuilder(st_reset, cid+1, 0, 0, RandomUint16()).WithAckNum(lastSent).Build()
+	reset := newPacketBuilder(st_reset, cid+1, 0, 0, randomUint16()).WithAckNum(lastSent).Build()
 	client.conn.out(newOutgoingSocketEvent(reset, client.conn.cid.Peer))
 	// The connection ends once its reader has taken what it holds; wait
 	// for the reset to land first.
 	deadline = time.Now().Add(10 * time.Second)
 	for {
 		server.conn.mu.Lock()
-		closed := server.conn.state.stateType == ConnClosed
+		closed := server.conn.state.stateType == connClosed
 		server.conn.mu.Unlock()
 		if closed {
 			break

@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// BenchmarkReadBatch is the cost of UdpConn.readBatch taking k datagrams the
+// BenchmarkReadBatch is the cost of udpConn.readBatch taking k datagrams the
 // kernel already holds, per datagram (ns/datagram): k = 1 is a reader woken
 // for each packet, as on a paced path, and larger k a reader that fell behind
 // a burst. Only the read is timed; the datagrams are queued before it.
@@ -21,7 +21,7 @@ func BenchmarkReadBatch(b *testing.B) {
 				b.Fatal(err)
 			}
 			_ = base.SetReadBuffer(4 << 20)
-			c := &UdpConn{base: base}
+			c := &udpConn{base: base}
 			defer c.Close()
 			src, err := net.DialUDP("udp4", nil, base.LocalAddr().(*net.UDPAddr))
 			if err != nil {

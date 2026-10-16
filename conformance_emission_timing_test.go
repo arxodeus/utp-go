@@ -29,10 +29,10 @@ func emissionInstants(t *testing.T, raw [][]byte, startMicros uint64) []time.Dur
 	t.Helper()
 	var at []time.Duration
 	for i, b := range raw {
-		if len(b) < MINIMAL_HEADER_SIZE {
+		if len(b) < minimalHeaderSize {
 			t.Fatalf("emitted packet %d is %d bytes, shorter than a header", i, len(b))
 		}
-		h, err := DecodePacketHeader(b[:MINIMAL_HEADER_SIZE])
+		h, err := decodePacketHeader(b[:minimalHeaderSize])
 		if err != nil {
 			t.Fatalf("emitted packet %d does not decode: %v", i, err)
 		}
@@ -138,7 +138,7 @@ func libutpSynRetransmissions(t *testing.T, within time.Duration) []time.Duratio
 // than for an event, and why two of this session's defects turned out to be
 // timing assumptions in the harness rather than faults in the library.
 //
-// Clock and IdleBarrier close that. The connection's deadlines, timers and
+// Clock and idleBarrier close that. The connection's deadlines, timers and
 // wall clock all come from a clock this test owns, and the event loop, the
 // retransmission wheel and the socket's read loop each report when they are
 // parked, so time moves between reactions rather than during one. The
@@ -360,7 +360,7 @@ func TestReplyInstantMatchesLibutp(t *testing.T) {
 	ours, raw := ourReplyInstant(t)
 	theirs := libutpReplyInstant(t)
 
-	h, err := DecodePacketHeader(raw[:MINIMAL_HEADER_SIZE])
+	h, err := decodePacketHeader(raw[:minimalHeaderSize])
 	if err != nil {
 		t.Fatalf("our reply does not decode: %v", err)
 	}

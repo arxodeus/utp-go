@@ -187,7 +187,7 @@ func TestConnectionForAnAbandonedAcceptIsClosed(t *testing.T) {
 	// The handover racing the caller's context: the caller gives up first.
 	accept := newAccept(ctx, nil, nil)
 	accept.giveUp()
-	accept.hand(&StreamResult{stream: stream})
+	accept.hand(&streamResult{stream: stream})
 	if !stream.shutdown.Load() {
 		t.Fatal("a connection handed to an Accept that had given up was left open")
 	}

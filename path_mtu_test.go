@@ -187,7 +187,7 @@ func TestNarrowPathLowersTheConnectionCeiling(t *testing.T) {
 		t.Fatal(err)
 	}
 	narrowConn := &fakePathMTU{
-		Conn:  &UdpConn{base: base},
+		Conn:  &udpConn{base: base},
 		mtu:   narrow,
 		ok:    true,
 		local: base.LocalAddr(),

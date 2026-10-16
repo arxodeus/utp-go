@@ -16,9 +16,9 @@ import (
 )
 
 const (
-	MAX_UDP_PAYLOAD_SIZE         = math.MaxUint16
-	CidGenerationTryWarningCount = 10
-	AWAITING_CONNECTION_TIMEOUT  = time.Second * 20
+	maxUdpPayloadSize            = math.MaxUint16
+	cidGenerationTryWarningCount = 10
+	awaitingConnectionTimeout    = time.Second * 20
 
 	// rstInfoTimeout is how long a sent RESET is remembered, so a peer that
 	// keeps sending packets for a connection we do not have receives one
@@ -51,15 +51,10 @@ type rstInfoKey struct {
 }
 
 var (
-	ErrConnect = errors.New("utp_socket: connect error")
 	// ErrAcceptTimedOut is returned by Accept/AcceptWithCid when no matching
-	// SYN arrived within AWAITING_CONNECTION_TIMEOUT.
+	// SYN arrived within 20 seconds.
 	ErrAcceptTimedOut = errors.New("utp_socket: timed out waiting for incoming connection")
 )
-
-type PeerInfo interface {
-	Hash() [32]byte
-}
 
 // Conn is the datagram transport a UtpSocket runs over.
 //
@@ -81,14 +76,14 @@ type Conn interface {
 	Close() error
 }
 
-type StreamResult struct {
+type streamResult struct {
 	stream *UtpStream
 	err    error
 }
 
-type Accept struct {
+type acceptRequest struct {
 	ctx    context.Context
-	stream chan *StreamResult
+	stream chan *streamResult
 	config *ConnectionConfig
 	cid    *ConnectionId
 	hasCid bool
@@ -98,13 +93,13 @@ type Accept struct {
 	gaveUp bool
 	// onHand, when set, takes the result in place of a caller: the socket's
 	// own request for a SYN it answered with nobody waiting (holdAnswered).
-	onHand func(*StreamResult)
+	onHand func(*streamResult)
 }
 
-func newAccept(ctx context.Context, cid *ConnectionId, config *ConnectionConfig) *Accept {
-	return &Accept{
+func newAccept(ctx context.Context, cid *ConnectionId, config *ConnectionConfig) *acceptRequest {
+	return &acceptRequest{
 		ctx:    ctx,
-		stream: make(chan *StreamResult, 1),
+		stream: make(chan *streamResult, 1),
 		config: config,
 		cid:    cid,
 		hasCid: cid != nil,
@@ -120,7 +115,7 @@ func newAccept(ctx context.Context, cid *ConnectionId, config *ConnectionConfig)
 // stayed. libutp hands each incoming connection to its application from
 // inside the call that received the SYN (utp_call_on_accept,
 // utp_internal.cpp:3001), so it has no such gap to close.
-func (a *Accept) hand(res *StreamResult) {
+func (a *acceptRequest) hand(res *streamResult) {
 	if a.onHand != nil {
 		a.onHand(res)
 		return
@@ -143,7 +138,7 @@ func (a *Accept) hand(res *StreamResult) {
 // giveUp records that the caller has stopped waiting, and returns a result
 // already handed over, if there is one: the caller takes it rather than
 // leaving it behind.
-func (a *Accept) giveUp() *StreamResult {
+func (a *acceptRequest) giveUp() *streamResult {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.gaveUp = true
@@ -156,8 +151,8 @@ func (a *Accept) giveUp() *StreamResult {
 }
 
 // wait is what Accept and AcceptWithCid do once the request is queued.
-func (a *Accept) wait(ctx context.Context) (*UtpStream, error) {
-	var res *StreamResult
+func (a *acceptRequest) wait(ctx context.Context) (*UtpStream, error) {
+	var res *streamResult
 	select {
 	case res = <-a.stream:
 	case <-ctx.Done():
@@ -174,7 +169,7 @@ func (a *Accept) wait(ctx context.Context) (*UtpStream, error) {
 	return res.stream, nil
 }
 
-type UdpConn struct {
+type udpConn struct {
 	base *net.UDPConn
 	// udpConnReader is what batched reads keep between reads, which differs
 	// by platform (batch_read_unix.go, batch_read_other.go). Only the
@@ -186,7 +181,7 @@ type UdpConn struct {
 	dfUnsupported atomic.Bool
 }
 
-func (c *UdpConn) ReadFrom(b []byte) (int, ConnectionPeer, error) {
+func (c *udpConn) ReadFrom(b []byte) (int, ConnectionPeer, error) {
 	n, addr, err := c.base.ReadFrom(b)
 	if err != nil {
 		return 0, nil, err
@@ -194,7 +189,7 @@ func (c *UdpConn) ReadFrom(b []byte) (int, ConnectionPeer, error) {
 	udpAddr := addr.(*net.UDPAddr)
 	return n, &UdpPeer{addr: udpAddr}, nil
 }
-func (c *UdpConn) WriteTo(b []byte, dst ConnectionPeer) (int, error) {
+func (c *udpConn) WriteTo(b []byte, dst ConnectionPeer) (int, error) {
 	if dst == nil {
 		return 0, fmt.Errorf("utp_socket: can't write to nil connection")
 	}
@@ -237,7 +232,7 @@ func (c *UdpConn) WriteTo(b []byte, dst ConnectionPeer) (int, error) {
 //
 // A platform with no such option answers ErrDontFragmentUnsupported, and
 // nothing is sent. The caller then sends it normally.
-func (c *UdpConn) WriteToDontFragment(b []byte, dst ConnectionPeer) (int, error) {
+func (c *udpConn) WriteToDontFragment(b []byte, dst ConnectionPeer) (int, error) {
 	if c.dfUnsupported.Load() {
 		return 0, ErrDontFragmentUnsupported
 	}
@@ -257,16 +252,16 @@ func (c *UdpConn) WriteToDontFragment(b []byte, dst ConnectionPeer) (int, error)
 	return n, err
 }
 
-func (c *UdpConn) Close() error {
+func (c *udpConn) Close() error {
 	return c.base.Close()
 }
 
 // LocalAddr returns the address this connection is bound to.
-func (c *UdpConn) LocalAddr() net.Addr {
+func (c *udpConn) LocalAddr() net.Addr {
 	return c.base.LocalAddr()
 }
 
-type IncomingPacketRaw struct {
+type incomingPacketRaw struct {
 	peer    ConnectionPeer
 	payload []byte
 	// borrowed says payload is the reader's buffer, which it reuses once the
@@ -279,12 +274,12 @@ type datagram struct {
 	payload []byte
 	peer    ConnectionPeer
 	// borrowed says payload is reused by the next batch. See
-	// IncomingPacketRaw.borrowed.
+	// incomingPacketRaw.borrowed.
 	borrowed bool
 }
 
 // batchReader is a Conn that can hand over everything already queued in one
-// call. UdpConn on Unix is one; anything else reads a datagram at a time.
+// call. udpConn on Unix is one; anything else reads a datagram at a time.
 type batchReader interface {
 	readBatch() ([]datagram, error)
 }
@@ -309,7 +304,7 @@ const maxQueuedRun = 4096
 
 var errBatchReadUnsupported = errors.New("utp: batched reads are not supported on this platform")
 
-type IncomingPacket struct {
+type incomingPacket struct {
 	pkt *packet
 	cid *ConnectionId
 }
@@ -342,12 +337,12 @@ type UtpSocket struct {
 	clk                      Clock
 	connsMutex               sync.RWMutex
 	conns                    map[string]chan *streamEvent
-	accepts                  chan *Accept
-	acceptsWithCidCh         chan *Accept
-	awaiting                 *syncMap[*Accept]
-	awaitingExpirations      *timeWheel[any, *Accept]
-	incomingConns            *syncMap[*IncomingPacket]
-	incomingConnsExpirations *timeWheel[any, *IncomingPacket]
+	accepts                  chan *acceptRequest
+	acceptsWithCidCh         chan *acceptRequest
+	awaiting                 *syncMap[*acceptRequest]
+	awaitingExpirations      *timeWheel[any, *acceptRequest]
+	incomingConns            *syncMap[*incomingPacket]
+	incomingConnsExpirations *timeWheel[any, *incomingPacket]
 	socket                   Conn
 	// retransmitTimers is one timer wheel for every connection on this
 	// socket. Per-connection wheels cost a ticker each; see
@@ -355,7 +350,7 @@ type UtpSocket struct {
 	retransmitTimers *retransmitTimers
 	// pendingAccepts holds Accept calls that named no connection id and are
 	// waiting for any incoming SYN. Guarded by dispatchMu.
-	pendingAccepts []*Accept
+	pendingAccepts []*acceptRequest
 	// answered holds connections whose SYN was answered with no Accept
 	// waiting, oldest first, until an Accept or AcceptWithCid takes one. Only
 	// a socket with WithAcceptConfig answers so. Guarded by dispatchMu.
@@ -520,7 +515,7 @@ func WithFirewall(refuse func(peer ConnectionPeer) bool) SocketOption {
 //
 // Without it, the configuration is each Accept's, so a SYN that arrives
 // before its Accept is parked, unanswered, until an Accept claims it or
-// AWAITING_CONNECTION_TIMEOUT passes: the connection cannot be made before
+// 20 seconds pass: the connection cannot be made before
 // the call that says how. DEVIATIONS.md, "A SYN is answered when an Accept
 // takes it, unless the socket has a configuration of its own".
 //
@@ -532,7 +527,7 @@ func WithAcceptConfig(config func() *ConnectionConfig) SocketOption {
 }
 
 // configForAccept is the configuration an accepted connection gets.
-func (s *UtpSocket) configForAccept(accept *Accept, peer ConnectionPeer) *ConnectionConfig {
+func (s *UtpSocket) configForAccept(accept *acceptRequest, peer ConnectionPeer) *ConnectionConfig {
 	config := accept.config
 	if config == nil && s.acceptConfig != nil {
 		config = s.acceptConfig()
@@ -594,7 +589,7 @@ func Bind(ctx context.Context, network string, addr *net.UDPAddr, logger log.Log
 	if err := conn.SetWriteBuffer(DefaultSocketBufferSize); err != nil && logger != nil {
 		logger.Debug("could not enlarge UDP write buffer", "err", err)
 	}
-	sock := WithSocket(ctx, &UdpConn{base: conn}, logger, opts...)
+	sock := WithSocket(ctx, &udpConn{base: conn}, logger, opts...)
 	sock.ownsSocket = true
 	return sock, nil
 }
@@ -605,24 +600,24 @@ func WithSocket(ctx context.Context, socket Conn, logger log.Logger, opts ...Soc
 		logger = log.New("utp", "socket")
 	}
 
-	awaitingMap := newSyncMap[*Accept]()
-	handleAwaitExpirations := func(key any, accReq *Accept) {
+	awaitingMap := newSyncMap[*acceptRequest]()
+	handleAwaitExpirations := func(key any, accReq *acceptRequest) {
 		awaitingMap.remove(key)
 		// Tell the caller. Dropping the request silently left AcceptWithCid
 		// blocked on accReq.stream forever whenever the caller's own context
 		// had no deadline.
 		select {
-		case accReq.stream <- &StreamResult{err: ErrAcceptTimedOut}:
+		case accReq.stream <- &streamResult{err: ErrAcceptTimedOut}:
 		default:
 		}
 	}
-	awaitExpirations := newTimeWheel[any, *Accept](2*time.Second, 20, handleAwaitExpirations)
+	awaitExpirations := newTimeWheel[any, *acceptRequest](2*time.Second, 20, handleAwaitExpirations)
 
-	incomingConns := newSyncMap[*IncomingPacket]()
-	handleIncomingExpirations := func(key any, incomingPacket *IncomingPacket) {
+	incomingConns := newSyncMap[*incomingPacket]()
+	handleIncomingExpirations := func(key any, incomingPacket *incomingPacket) {
 		incomingConns.remove(key.(string))
 	}
-	incomingExpirations := newTimeWheel[any, *IncomingPacket](2*time.Second, 20, handleIncomingExpirations)
+	incomingExpirations := newTimeWheel[any, *incomingPacket](2*time.Second, 20, handleIncomingExpirations)
 
 	rstInfo := newSyncMap[struct{}]()
 	rstExpirations := newTimeWheel[any, rstInfoKey](time.Second, 16, func(key any, _ rstInfoKey) {
@@ -652,8 +647,8 @@ func WithSocket(ctx context.Context, socket Conn, logger log.Logger, opts ...Soc
 		logger:                    logger,
 		conns:                     make(map[string]chan *streamEvent),
 		inlineConns:               make(map[chan *streamEvent]*connection),
-		accepts:                   make(chan *Accept, 1000),
-		acceptsWithCidCh:          make(chan *Accept, 1000),
+		accepts:                   make(chan *acceptRequest, 1000),
+		acceptsWithCidCh:          make(chan *acceptRequest, 1000),
 		awaiting:                  awaitingMap,
 		awaitingExpirations:       awaitExpirations,
 		incomingConns:             incomingConns,
@@ -678,8 +673,8 @@ func (s *UtpSocket) readLoop() {
 	buf := make([]byte, math.MaxUint16)
 
 	// The inbound path starts here, so a virtual clock must not move while a
-	// packet is between the wire and a connection. See IdleBarrier.
-	barrier, _ := s.clock().(IdleBarrier)
+	// packet is between the wire and a connection. See idleBarrier.
+	barrier, _ := s.clock().(idleBarrier)
 	if barrier != nil {
 		barrier.Register()
 		defer func() {
@@ -710,7 +705,7 @@ func (s *UtpSocket) readLoop() {
 		default:
 			// Part way through a run the read cannot block, so this loop is
 			// not idle -- and must not be seen to be, with acknowledgements
-			// still owed for the run. See IdleBarrier.
+			// still owed for the run. See idleBarrier.
 			if barrier != nil && run == 0 {
 				barrier.MarkIdle()
 			}
@@ -724,7 +719,7 @@ func (s *UtpSocket) readLoop() {
 					continue
 				}
 				for _, d := range dgs {
-					s.dispatch(&IncomingPacketRaw{peer: d.peer, payload: d.payload, borrowed: d.borrowed}, touched)
+					s.dispatch(&incomingPacketRaw{peer: d.peer, payload: d.payload, borrowed: d.borrowed}, touched)
 				}
 				s.endBatch(touched)
 				if s.readFailed(err, &failures) {
@@ -736,7 +731,7 @@ func (s *UtpSocket) readLoop() {
 			if barrier != nil && run == 0 {
 				barrier.MarkBusy()
 			}
-			if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+			if s.logger.Enabled(baseContext, log.LevelDebug) {
 				s.logger.Debug("read data from base socket", "n", n, "from", from)
 			}
 			if err != nil {
@@ -752,7 +747,7 @@ func (s *UtpSocket) readLoop() {
 			// processed before then needs no copy, and one kept takes its
 			// body (packet.own). The whole datagram was copied, an
 			// allocation for every packet received.
-			s.dispatch(&IncomingPacketRaw{peer: from, payload: buf[:n], borrowed: true}, touched)
+			s.dispatch(&incomingPacketRaw{peer: from, payload: buf[:n], borrowed: true}, touched)
 			if run++; qr == nil || run >= maxQueuedRun || qr.Queued() == 0 {
 				s.endBatch(touched)
 				run = 0
@@ -772,7 +767,7 @@ func (s *UtpSocket) readLoop() {
 // was looked at, and a third, to a write loop, before its acknowledgement
 // left. libutp's embedder calls utp_process_udp from its read loop and the
 // acknowledgement is sent from the same call stack.
-func (s *UtpSocket) dispatch(raw *IncomingPacketRaw, touched *readBatch) {
+func (s *UtpSocket) dispatch(raw *incomingPacketRaw, touched *readBatch) {
 	s.dispatchMu.Lock()
 	c := s.handleIncomingBuf(raw)
 	s.dispatchMu.Unlock()
@@ -877,14 +872,14 @@ var encodeBufs = sync.Pool{New: func() any {
 // utp_internal.cpp:713). Conn.WriteTo is called concurrently from here, as
 // net.PacketConn allows.
 func (s *UtpSocket) sendEvent(event *socketEvent) {
-	if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if s.logger.Enabled(baseContext, log.LevelTrace) {
 		s.logger.Trace("a socket event should be sent to target", "event.type", event.Type, "event.cid", event.ConnectionId)
 	}
 	switch event.Type {
 	case outgoing:
 		bufp := encodeBufs.Get().(*[]byte)
 		encoded := event.Packet.appendEncoded((*bufp)[:0])
-		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		if s.logger.Enabled(baseContext, log.LevelTrace) {
 			s.logger.Trace("Send a packet out",
 				"target.cid", event.ConnectionId,
 				"packet.type", event.Packet.Header.PacketType.String(),
@@ -907,7 +902,7 @@ func (s *UtpSocket) sendEvent(event *socketEvent) {
 			if event.Packet.Eack != nil {
 				eackEncodeLen = event.Packet.Eack.EncodedLen()
 			}
-			if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+			if s.logger.Enabled(baseContext, log.LevelTrace) {
 				s.logger.Trace("Failed to send uTP packet",
 					"error", err,
 					"cid", event.Packet.Header.ConnectionId,
@@ -918,7 +913,7 @@ func (s *UtpSocket) sendEvent(event *socketEvent) {
 		}
 
 	case socketShutdown:
-		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		if s.logger.Enabled(baseContext, log.LevelTrace) {
 			s.logger.Trace("uTP conn shutdown", "cid.Hash", event.ConnectionId.Hash())
 		}
 		s.rememberLingerAck(event.ConnectionId.Hash(), event.Packet)
@@ -956,7 +951,7 @@ func (s *UtpSocket) writeDatagram(b []byte, peer ConnectionPeer, dontFragment bo
 	if !errors.Is(err, ErrDontFragmentUnsupported) {
 		return n, err
 	}
-	if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+	if s.logger.Enabled(baseContext, log.LevelDebug) {
 		s.logger.Debug("MTU probe sent without the don't-fragment bit; "+
 			"this platform has no per-packet setting for it", "len", len(b))
 	}
@@ -964,7 +959,7 @@ func (s *UtpSocket) writeDatagram(b []byte, peer ConnectionPeer, dontFragment bo
 }
 
 func (s *UtpSocket) eventLoop() {
-	barrier, _ := s.clock().(IdleBarrier)
+	barrier, _ := s.clock().(idleBarrier)
 	if barrier != nil {
 		barrier.Register()
 		defer func() {
@@ -976,8 +971,8 @@ func (s *UtpSocket) eventLoop() {
 	for {
 		// Receive without acting, so that a virtual clock can be told the
 		// loop is running again before any case body can create a
-		// connection. See IdleBarrier.
-		var gotAcceptCid, gotAccept *Accept
+		// connection. See idleBarrier.
+		var gotAcceptCid, gotAccept *acceptRequest
 		if barrier != nil {
 			barrier.MarkIdle()
 		}
@@ -1008,7 +1003,7 @@ func (s *UtpSocket) eventLoop() {
 
 // handleIncomingBuf routes one datagram, and returns the connection that
 // took it inline, or nil. Called with dispatchMu held.
-func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connection {
+func (s *UtpSocket) handleIncomingBuf(incomingRaw *incomingPacketRaw) *connection {
 	// Handle incoming packets
 	packetPtr, err := decodePacket(incomingRaw.payload, incomingRaw.borrowed)
 	if err != nil {
@@ -1020,7 +1015,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 		return nil
 	}
 
-	if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if s.logger.Enabled(baseContext, log.LevelTrace) {
 		s.logger.Trace("receive incoming packet",
 			"src.peer", incomingRaw.peer,
 			"packet.type", packetPtr.Header.PacketType.String(),
@@ -1032,7 +1027,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 
 	// Each derivation is looked up by its key alone, built into a reused
 	// buffer: no ConnectionId and no string per attempt. This ran three
-	// CidFromPacket calls for every datagram -- for an accepted connection the
+	// cidFromPacket calls for every datagram -- for an accepted connection the
 	// match is the third -- each formatting the peer's address and the key
 	// anew: 9 of the 23 allocations a data packet cost, and most of the time
 	// routing took. A ConnectionId is built below only for a SYN.
@@ -1053,8 +1048,8 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 		// CloseRead and Close -- and only this one is a clock
 		// participant. Keying both halves on the event type makes the
 		// pairing structural: nothing else notes, and the connection
-		// takes for nothing else. See IdleBarrier.
-		barrier, _ := s.clock().(IdleBarrier)
+		// takes for nothing else. See idleBarrier.
+		barrier, _ := s.clock().(idleBarrier)
 		if barrier != nil {
 			barrier.NoteHandoff()
 		}
@@ -1076,21 +1071,21 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 				"connStream.len", len(connStream), "cid.send", send, "cid.recv", recv, "cid.peer", peerKey)
 			return nil
 		}
-		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		if s.logger.Enabled(baseContext, log.LevelTrace) {
 			s.logger.Trace("recieve a packet for a exist conn stream", "connStream.len", len(connStream))
 		}
 		return nil
 	}
 
-	if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if s.logger.Enabled(baseContext, log.LevelTrace) {
 		s.logger.Trace("received uTP packet for non-existing conn",
 			"cid", packetPtr.Header.ConnectionId,
 			"packetType", packetPtr.Header.PacketType,
 			"seq", packetPtr.Header.SeqNum,
 			"ack", packetPtr.Header.AckNum,
-			"peerInitCID", CidFromPacket(packetPtr, incomingRaw.peer, cidTypes[0]),
-			"weInitCid", CidFromPacket(packetPtr, incomingRaw.peer, cidTypes[1]),
-			"accCID", CidFromPacket(packetPtr, incomingRaw.peer, cidTypes[2]))
+			"peerInitCID", cidFromPacket(packetPtr, incomingRaw.peer, cidTypes[0]),
+			"weInitCid", cidFromPacket(packetPtr, incomingRaw.peer, cidTypes[1]),
+			"accCID", cidFromPacket(packetPtr, incomingRaw.peer, cidTypes[2]))
 	}
 	if packetPtr.Header.PacketType != st_syn {
 		// An unmatched RESET is dropped, never answered: replying to a reset
@@ -1113,7 +1108,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 	// A SYN is kept, by the connection it starts or until an Accept takes
 	// it. See packet.own.
 	packetPtr.own()
-	cid := CidFromPacket(packetPtr, incomingRaw.peer, cidTypes[2])
+	cid := cidFromPacket(packetPtr, incomingRaw.peer, cidTypes[2])
 	cidHash := cid.Hash()
 
 	// A connection we dialled may already receive on the id this one would:
@@ -1126,7 +1121,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 	s.connsMutex.RUnlock()
 	if taken {
 		s.refusedIdInUse.Add(1)
-		if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+		if s.logger.Enabled(baseContext, log.LevelDebug) {
 			s.logger.Debug("refusing an incoming connection: its receive id is in use",
 				"src.peer", incomingRaw.peer, "recv", cid.Recv)
 		}
@@ -1141,7 +1136,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 	if s.maxConns > 0 {
 		if _, parked := s.incomingConns.get(cidHash); !parked && s.connectionCount() > s.maxConns {
 			s.refusedAtCapacity.Add(1)
-			if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+			if s.logger.Enabled(baseContext, log.LevelDebug) {
 				s.logger.Debug("refusing an incoming connection: at capacity",
 					"src.peer", incomingRaw.peer, "cap", s.maxConns)
 			}
@@ -1158,7 +1153,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 	// listening, which is the opposite of what a blocklist is for.
 	if s.firewall != nil && s.firewall(incomingRaw.peer) {
 		s.refusedByFirewall.Add(1)
-		if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+		if s.logger.Enabled(baseContext, log.LevelDebug) {
 			s.logger.Debug("refusing an incoming connection: firewall", "src.peer", incomingRaw.peer)
 		}
 		return nil
@@ -1171,7 +1166,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 		"cid.hash", cidHash)
 
 	if accept, exist := s.getAwaiting(cidHash); exist {
-		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		if s.logger.Enabled(baseContext, log.LevelTrace) {
 			s.logger.Trace("found a accept request from awaiting map...",
 				"accept.cid.Send", accept.cid.Send, "accept.cid.Recv", accept.cid.Recv)
 		}
@@ -1179,12 +1174,12 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 		connected := make(chan error, 1)
 		newConnStream := make(chan *streamEvent, connEventQueueLen)
 		s.putConnStream(cidHash, newConnStream)
-		stream := NewUtpStream(s.ctx, s.logger, cid, s.configForAccept(accept, cid.Peer), packetPtr, nil, s.sendEvent, newConnStream, connected, s.retransmitTimers)
+		stream := newUtpStream(s.ctx, s.logger, cid, s.configForAccept(accept, cid.Peer), packetPtr, nil, s.sendEvent, newConnStream, connected, s.retransmitTimers)
 		s.attachInline(cidHash, newConnStream, stream.conn)
 		stream.linger = s.linger
 		go s.awaitConnected(stream, accept, connected)
 	} else if accept := s.takePendingAccept(); accept != nil {
-		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		if s.logger.Enabled(baseContext, log.LevelTrace) {
 			s.logger.Trace("handing a new SYN to a waiting Accept",
 				"cid.Send", cid.Send, "cid.Recv", cid.Recv)
 		}
@@ -1202,18 +1197,18 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *IncomingPacketRaw) *connectio
 		// found nothing -- TestDialCompletesWithNoAcceptWaiting, 9 runs in
 		// 200. libutp hands its embedder the connection from inside the call
 		// that received the SYN (utp_call_on_accept, utp_internal.cpp:3001).
-		if st := s.selectAcceptHelper(cid, packetPtr, &Accept{
+		if st := s.selectAcceptHelper(cid, packetPtr, &acceptRequest{
 			ctx:    s.ctx,
-			stream: make(chan *StreamResult, 1),
+			stream: make(chan *streamResult, 1),
 			// Already held. A connection that fails ends, and is dropped
 			// from answered once it has.
-			onHand: func(*StreamResult) {},
+			onHand: func(*streamResult) {},
 		}); st != nil {
 			s.holdAnswered(st)
 		}
 	} else {
 		s.logger.Debug("put a new syn packet to incomingConns...")
-		s.putIncomingConn(cidHash, &IncomingPacket{pkt: packetPtr, cid: cid})
+		s.putIncomingConn(cidHash, &incomingPacket{pkt: packetPtr, cid: cid})
 	}
 	return nil
 }
@@ -1307,7 +1302,7 @@ func (s *UtpSocket) reAckLingering(pkt *packet, peer ConnectionPeer) bool {
 		return false
 	}
 	for _, cidType := range cidTypes {
-		cid := CidFromPacket(pkt, peer, cidType)
+		cid := cidFromPacket(pkt, peer, cidType)
 		ack, ok := s.lingerAcks.get(cid.Hash())
 		if !ok {
 			continue
@@ -1326,7 +1321,7 @@ func (s *UtpSocket) reAckLingering(pkt *packet, peer ConnectionPeer) bool {
 		// reference and costs the peer nothing but a few retransmissions it
 		// was going to make anyway.
 		if wrappingLessThan(ack.Header.AckNum, pkt.Header.SeqNum) {
-			if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+			if s.logger.Enabled(baseContext, log.LevelDebug) {
 				s.logger.Debug("ignoring data past a closed connection's FIN",
 					"cid.send", cid.Send, "cid.recv", cid.Recv, "seq", pkt.Header.SeqNum)
 			}
@@ -1338,7 +1333,7 @@ func (s *UtpSocket) reAckLingering(pkt *packet, peer ConnectionPeer) bool {
 			s.lingerExpirations.put(cid.Hash(), cid.Hash(), lingerAckTimeout)
 			return true
 		}
-		if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+		if s.logger.Enabled(baseContext, log.LevelDebug) {
 			s.logger.Debug("re-acking a FIN for a connection that has closed",
 				"cid.send", cid.Send, "cid.recv", cid.Recv)
 		}
@@ -1366,7 +1361,7 @@ func (s *UtpSocket) maybeSendReset(pkt *packet, peer ConnectionPeer) {
 	if s.rstInfo.len() > rstInfoLimit {
 		// Past this point libutp stops answering entirely rather than let the
 		// table grow without bound (utp_internal.cpp:2928).
-		if s.logger.Enabled(BASE_CONTEXT, log.LevelDebug) {
+		if s.logger.Enabled(baseContext, log.LevelDebug) {
 			s.logger.Debug("not sending RESET, too many already outstanding", "stored", s.rstInfo.len())
 		}
 		return
@@ -1386,14 +1381,14 @@ func (s *UtpSocket) maybeSendReset(pkt *packet, peer ConnectionPeer) {
 	//     window to advertise. We previously advertised 100000.
 	//   - the timestamp fields are left at zero. libutp zeroes the whole
 	//     header and never fills them in for a reset.
-	randSeqNum := RandomUint16()
-	resetPacket := NewPacketBuilder(st_reset, pkt.Header.ConnectionId, 0, 0, randSeqNum).
+	randSeqNum := randomUint16()
+	resetPacket := newPacketBuilder(st_reset, pkt.Header.ConnectionId, 0, 0, randSeqNum).
 		WithAckNum(pkt.Header.SeqNum).
 		Build()
 	s.sendEvent(newOutgoingSocketEvent(resetPacket, peer))
 }
 
-func (s *UtpSocket) handleNewAcceptWithCidEvent(acceptWithCid *Accept) {
+func (s *UtpSocket) handleNewAcceptWithCidEvent(acceptWithCid *acceptRequest) {
 	s.logger.Debug("get a accept event with cid",
 		"accept.cid.Send", acceptWithCid.cid.Send,
 		"accept.cid.Recv",
@@ -1402,27 +1397,27 @@ func (s *UtpSocket) handleNewAcceptWithCidEvent(acceptWithCid *Accept) {
 	incomingConnsKey := acceptWithCid.cid.Hash()
 
 	if st := s.takeAnswered(incomingConnsKey); st != nil {
-		acceptWithCid.hand(&StreamResult{stream: st})
+		acceptWithCid.hand(&streamResult{stream: st})
 		return
 	}
 	if incomingConn, exists := s.removeIncomingConn(incomingConnsKey); exists {
-		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		if s.logger.Enabled(baseContext, log.LevelTrace) {
 			s.logger.Trace("conn has already accepted", "key", incomingConnsKey)
 		}
 		s.selectAcceptHelper(acceptWithCid.cid, incomingConn.pkt, acceptWithCid)
 	} else {
-		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		if s.logger.Enabled(baseContext, log.LevelTrace) {
 			s.logger.Trace("wait for the syn pkt arrive", "key", incomingConnsKey)
 		}
 		s.putAwaiting(incomingConnsKey, acceptWithCid)
 	}
 }
 
-func (s *UtpSocket) handleNewAcceptEvent(accept *Accept) {
+func (s *UtpSocket) handleNewAcceptEvent(accept *acceptRequest) {
 	// A connection already answered satisfies this immediately, and so does
 	// a SYN that already arrived.
 	if st := s.takeAnswered(""); st != nil {
-		accept.hand(&StreamResult{stream: st})
+		accept.hand(&streamResult{stream: st})
 		return
 	}
 	if incomingAccept := s.nextIncomingConn(); incomingAccept != nil {
@@ -1442,7 +1437,7 @@ func (s *UtpSocket) handleNewAcceptEvent(accept *Accept) {
 
 // takePendingAccept returns the oldest waiting cid-less Accept whose caller
 // has not already given up, or nil.
-func (s *UtpSocket) takePendingAccept() *Accept {
+func (s *UtpSocket) takePendingAccept() *acceptRequest {
 	for len(s.pendingAccepts) > 0 {
 		accept := s.pendingAccepts[0]
 		s.pendingAccepts = s.pendingAccepts[1:]
@@ -1457,14 +1452,14 @@ func (s *UtpSocket) takePendingAccept() *Accept {
 	return nil
 }
 
-func (s *UtpSocket) getAwaiting(key string) (*Accept, bool) {
+func (s *UtpSocket) getAwaiting(key string) (*acceptRequest, bool) {
 	accept, ok := s.awaiting.get(key)
 	return accept, ok
 }
 
-func (s *UtpSocket) putAwaiting(key string, acceptWithCid *Accept) {
+func (s *UtpSocket) putAwaiting(key string, acceptWithCid *acceptRequest) {
 	s.awaiting.put(key, acceptWithCid)
-	s.awaitingExpirations.put(key, acceptWithCid, AWAITING_CONNECTION_TIMEOUT)
+	s.awaitingExpirations.put(key, acceptWithCid, awaitingConnectionTimeout)
 }
 
 func (s *UtpSocket) removeAwaiting(key string) {
@@ -1472,12 +1467,12 @@ func (s *UtpSocket) removeAwaiting(key string) {
 	s.awaitingExpirations.remove(key)
 }
 
-func (s *UtpSocket) putIncomingConn(key string, incomingConn *IncomingPacket) {
+func (s *UtpSocket) putIncomingConn(key string, incomingConn *incomingPacket) {
 	s.incomingConns.put(key, incomingConn)
-	s.incomingConnsExpirations.put(key, incomingConn, AWAITING_CONNECTION_TIMEOUT)
+	s.incomingConnsExpirations.put(key, incomingConn, awaitingConnectionTimeout)
 }
 
-func (s *UtpSocket) removeIncomingConn(key string) (*IncomingPacket, bool) {
+func (s *UtpSocket) removeIncomingConn(key string) (*incomingPacket, bool) {
 	incomingConn, exists := s.incomingConns.get(key)
 	if exists {
 		s.incomingConns.remove(key)
@@ -1486,10 +1481,10 @@ func (s *UtpSocket) removeIncomingConn(key string) (*IncomingPacket, bool) {
 	return incomingConn, exists
 }
 
-func (s *UtpSocket) nextIncomingConn() *IncomingPacket {
+func (s *UtpSocket) nextIncomingConn() *incomingPacket {
 	var cidHash string
-	var incomingAccept *IncomingPacket
-	s.incomingConns.Range(func(key any, accept *IncomingPacket) bool {
+	var incomingAccept *incomingPacket
+	s.incomingConns.Range(func(key any, accept *incomingPacket) bool {
 		cidHash = key.(string)
 		incomingAccept = accept
 		return false
@@ -1625,11 +1620,7 @@ func (s *UtpSocket) awaitLingering() {
 	wg.Wait()
 }
 
-func (s *UtpSocket) Cid(peer ConnectionPeer, isInitiator bool) *ConnectionId {
-	return s.GenerateCid(peer, isInitiator, nil)
-}
-
-func (s *UtpSocket) GenerateCid(peer ConnectionPeer, isInitiator bool, eventCh chan *streamEvent) *ConnectionId {
+func (s *UtpSocket) generateCid(peer ConnectionPeer, isInitiator bool, eventCh chan *streamEvent) *ConnectionId {
 	cid := &ConnectionId{
 		Peer: peer,
 	}
@@ -1637,7 +1628,7 @@ func (s *UtpSocket) GenerateCid(peer ConnectionPeer, isInitiator bool, eventCh c
 	generationAttemptCount := 0
 	for {
 		// Generate random recv ID
-		recv := RandomUint16()
+		recv := randomUint16()
 		var send uint16
 		// Calculate send ID based on initiator status
 		if isInitiator {
@@ -1719,10 +1710,10 @@ func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *Co
 	// Registered under the reader's lock, so the reader never finds the
 	// connection's queue without the connection behind it. Nothing here
 	// waits: a packet for the connection that arrives before its event loop
-	// has set it up waits on the connection's own lock. See NewUtpStream.
+	// has set it up waits on the connection's own lock. See newUtpStream.
 	s.dispatchMu.Lock()
 	// Generate connection ID
-	cid := s.GenerateCid(peer, true, streamEvents)
+	cid := s.generateCid(peer, true, streamEvents)
 	s.logger.Info("connecting", "dst.peer.hash", peer.Hash(), "dst.send", cid.Send, "dst.recv", cid.Recv, "dst.hash", cid.Hash(), "dst.peer", peer)
 	// Create new UTP stream
 	s.putConnStream(cid.Hash(), streamEvents)
@@ -1740,7 +1731,7 @@ func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *Co
 	//
 	// The caller's context still governs the wait below, which is the part it
 	// is for.
-	stream := NewUtpStream(
+	stream := newUtpStream(
 		s.ctx,
 		s.logger,
 		cid,
@@ -1786,7 +1777,7 @@ func (s *UtpSocket) ConnectWithCid(
 	cid *ConnectionId,
 	config *ConnectionConfig,
 ) (*UtpStream, error) {
-	if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if s.logger.Enabled(baseContext, log.LevelTrace) {
 		s.logger.Trace("connecting with cid", "dst.peer.hash", cid.Peer.Hash(),
 			"dst.send", cid.Send, "dst.recv", cid.Recv, "dst.hash", cid.Hash(), "dst.peer", cid.Peer)
 	}
@@ -1803,7 +1794,7 @@ func (s *UtpSocket) ConnectWithCid(
 
 	s.putConnStream(cid.Hash(), streamEvents)
 	// The socket's context, not the dial's -- see the note in Connect.
-	stream := NewUtpStream(
+	stream := newUtpStream(
 		s.ctx,
 		s.logger,
 		cid,
@@ -1847,7 +1838,7 @@ func (s *UtpSocket) ConnectWithCid(
 
 func (s *UtpSocket) awaitConnected(
 	stream *UtpStream,
-	accept *Accept,
+	accept *acceptRequest,
 	connected chan error,
 ) {
 	// Report against the stream's connection id, not the accept's. A cid-less
@@ -1858,21 +1849,21 @@ func (s *UtpSocket) awaitConnected(
 	s.logger.Debug("waiting for answering the new connections", "dst.peer", cid.Peer.Hash(), "cid.Send", cid.Send, "cid.Recv", cid.Recv)
 	err, ok := <-connected
 	if err == nil && ok {
-		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		if s.logger.Enabled(baseContext, log.LevelTrace) {
 			s.logger.Trace("new connection created", "src", cid.Peer.Hash(), "src.cid.Send", cid.Send, "src.cid.Recv", cid.Recv)
 		}
-		accept.hand(&StreamResult{stream: stream})
+		accept.hand(&streamResult{stream: stream})
 		return
 	} else if err != nil {
-		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		if s.logger.Enabled(baseContext, log.LevelTrace) {
 			s.logger.Trace("connected failed", "peer", cid.Peer.Hash(), "cid.Send", cid.Send, "cid.Recv", cid.Recv, "err", err)
 		}
-		accept.hand(&StreamResult{err: fmt.Errorf("utp_socket: connection failed: %w", err)})
+		accept.hand(&streamResult{err: fmt.Errorf("utp_socket: connection failed: %w", err)})
 		return
 	}
 
 	s.logger.Warn("connected failed", "peer", cid.Peer.Hash(), "cid.Send", cid.Send, "cid.Recv", cid.Recv)
-	accept.hand(&StreamResult{err: fmt.Errorf("connection aborted")})
+	accept.hand(&streamResult{err: fmt.Errorf("connection aborted")})
 }
 
 // selectAcceptHelper makes the connection for an incoming SYN and hands it to
@@ -1886,22 +1877,22 @@ func (s *UtpSocket) awaitConnected(
 func (s *UtpSocket) selectAcceptHelper(
 	cid *ConnectionId,
 	syn *packet,
-	accept *Accept,
+	accept *acceptRequest,
 ) *UtpStream {
 	if _, exists := s.getConnStream(cid.Hash()); exists {
-		accept.hand(&StreamResult{err: fmt.Errorf("connection ID unavailable")})
+		accept.hand(&streamResult{err: fmt.Errorf("connection ID unavailable")})
 		return nil
 	}
 
 	connected := make(chan error, 1)
 	streamEvents := make(chan *streamEvent, connEventQueueLen)
 
-	if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if s.logger.Enabled(baseContext, log.LevelTrace) {
 		s.logger.Trace("put a conn stream at selectAcceptHelper", "cid.Peer", cid.Peer, "cid", cid)
 	}
 	s.putConnStream(cid.Hash(), streamEvents)
 
-	stream := NewUtpStream(
+	stream := newUtpStream(
 		s.ctx,
 		s.logger,
 		cid,
@@ -1923,7 +1914,7 @@ func (s *UtpSocket) selectAcceptHelper(
 func (s *UtpSocket) removeConnStream(key string) {
 	s.connsMutex.Lock()
 	defer s.connsMutex.Unlock()
-	if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if s.logger.Enabled(baseContext, log.LevelTrace) {
 		s.logger.Trace("remove conn stream", "key", key)
 	}
 	if ch, ok := s.conns[key]; ok {
@@ -2085,7 +2076,7 @@ func (s *UtpSocket) getConnStream(key string) (chan *streamEvent, bool) {
 func (s *UtpSocket) putConnStream(key string, streamCh chan *streamEvent) {
 	s.connsMutex.Lock()
 	defer s.connsMutex.Unlock()
-	if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if s.logger.Enabled(baseContext, log.LevelTrace) {
 		s.logger.Trace("put conn stream", "key", key)
 	}
 	s.conns[key] = streamCh
@@ -2182,7 +2173,7 @@ func (s *UtpSocket) deliverICMP(quoted []byte, peer ConnectionPeer, notice *icmp
 	// another 20 bytes. So, in order to find the entire UTP header, we need
 	// the ICMP packet to quote 28 bytes." -- and then libutp checks for 20,
 	// because by this point the UDP header is already off (:3032-3041).
-	if len(quoted) < MINIMAL_HEADER_SIZE {
+	if len(quoted) < minimalHeaderSize {
 		s.logger.Debug("ignoring ICMP: runt quoted payload", "len", len(quoted), "peer", peer)
 		return false
 	}
@@ -2192,7 +2183,7 @@ func (s *UtpSocket) deliverICMP(quoted []byte, peer ConnectionPeer, notice *icmp
 	// below 3, which is exactly what this decoder checks. Only the fixed
 	// header is parsed: a router that quoted 20 bytes has cut the extensions
 	// off, and requiring them would throw away the report.
-	header, err := DecodePacketHeader(quoted[:MINIMAL_HEADER_SIZE])
+	header, err := decodePacketHeader(quoted[:minimalHeaderSize])
 	if err != nil {
 		s.logger.Debug("ignoring ICMP: quoted payload is not a uTP v1 packet",
 			"peer", peer, "err", err)
@@ -2300,42 +2291,42 @@ func (s *UtpSocket) getConnStreamForQuotedId(id uint16, peer ConnectionPeer) cha
 	return nil
 }
 
-type IdType int
+type idType int
 
 const (
-	IdTypeRecvId IdType = iota
-	IdTypeSendIdWeInitiated
-	IdTypeSendIdPeerInitiated
+	idTypeRecvId idType = iota
+	idTypeSendIdWeInitiated
+	idTypeSendIdPeerInitiated
 )
 
-var cidTypes []IdType = []IdType{IdTypeSendIdPeerInitiated, IdTypeSendIdWeInitiated, IdTypeRecvId}
+var cidTypes []idType = []idType{idTypeSendIdPeerInitiated, idTypeSendIdWeInitiated, idTypeRecvId}
 
-func (i IdType) String() string {
+func (i idType) String() string {
 	switch i {
-	case IdTypeRecvId:
-		return "IdTypeRecvId"
-	case IdTypeSendIdWeInitiated:
-		return "IdTypeSendIdWeInitiated"
-	case IdTypeSendIdPeerInitiated:
-		return "IdTypeSendIdPeerInitiated"
+	case idTypeRecvId:
+		return "idTypeRecvId"
+	case idTypeSendIdWeInitiated:
+		return "idTypeSendIdWeInitiated"
+	case idTypeSendIdPeerInitiated:
+		return "idTypeSendIdPeerInitiated"
 	default:
 		return "Unknown"
 	}
 }
 
-func CidFromPacket(
+func cidFromPacket(
 	packet *packet,
 	src ConnectionPeer,
-	idType IdType,
+	idType idType,
 ) *ConnectionId {
 	send, recv := cidIds(packet, idType)
 	return NewConnectionId(src, recv, send)
 }
 
-// cidIds is CidFromPacket's send and receive ids, without the ConnectionId.
-func cidIds(packet *packet, idType IdType) (send, recv uint16) {
+// cidIds is cidFromPacket's send and receive ids, without the ConnectionId.
+func cidIds(packet *packet, idType idType) (send, recv uint16) {
 	switch idType {
-	case IdTypeRecvId:
+	case idTypeRecvId:
 		switch packet.Header.PacketType {
 		case st_syn:
 			send = packet.Header.ConnectionId
@@ -2345,11 +2336,11 @@ func cidIds(packet *packet, idType IdType) (send, recv uint16) {
 			recv = packet.Header.ConnectionId
 		}
 
-	case IdTypeSendIdWeInitiated:
+	case idTypeSendIdWeInitiated:
 		send = packet.Header.ConnectionId + 1 // wrapping add
 		recv = packet.Header.ConnectionId
 
-	case IdTypeSendIdPeerInitiated:
+	case idTypeSendIdPeerInitiated:
 		send = packet.Header.ConnectionId
 		recv = packet.Header.ConnectionId - 1 // wrapping sub
 	}

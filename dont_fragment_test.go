@@ -139,7 +139,7 @@ func TestDontFragmentTravelsOnTheSocketEvent(t *testing.T) {
 	events := make(chan *socketEvent, 2)
 	c := &connection{socketEvents: events}
 
-	pkt := NewPacketBuilder(st_data, 1, 0, 1024, 1).WithPayload([]byte("x")).Build()
+	pkt := newPacketBuilder(st_data, 1, 0, 1024, 1).WithPayload([]byte("x")).Build()
 	c.emitPacket(pkt, true)
 	c.emitPacket(pkt, false)
 

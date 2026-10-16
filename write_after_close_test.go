@@ -9,10 +9,10 @@ import (
 func connectedFixture(t *testing.T) *connection {
 	t.Helper()
 	const syn, synAck = uint16(100), uint16(101)
-	conn := CreateTestConnection(Endpoint{Type: Acceptor, SynNum: syn, SynAck: synAck})
+	conn := CreateTestConnection(endpointInfo{Type: acceptor, SynNum: syn, SynAck: synAck})
 	cc := newDefaultController(fromConnConfig(conn.config))
-	conn.state = &ConnState{
-		stateType:   ConnConnected,
+	conn.state = &connState{
+		stateType:   connConnected,
 		SentPackets: newSentPacketsWithoutLogger(synAck, cc),
 		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
 		RecvBuf:     newReceiveBuffer(TEST_BUFFER_SIZE, syn),
@@ -39,7 +39,7 @@ func writeResult(t *testing.T, ch chan *readOrWriteResult) *readOrWriteResult {
 func TestWriteAfterOurFinIsRefused(t *testing.T) {
 	conn := connectedFixture(t)
 	fin := uint16(500)
-	conn.state.closing = &ClosingRecord{LocalFin: &fin}
+	conn.state.closing = &closingRecord{LocalFin: &fin}
 	ch := make(chan *readOrWriteResult, 1)
 	conn.onWrite(&queuedWrite{data: []byte("late"), resultCh: ch})
 	r := writeResult(t, ch)
@@ -52,7 +52,7 @@ func TestWriteAfterOurFinIsRefused(t *testing.T) {
 // own, still gets one.
 func TestWriteAfterCleanCloseIsRefused(t *testing.T) {
 	conn := connectedFixture(t)
-	conn.state.stateType = ConnClosed
+	conn.state.stateType = connClosed
 	ch := make(chan *readOrWriteResult, 1)
 	conn.onWrite(&queuedWrite{data: []byte("late"), resultCh: ch})
 	r := writeResult(t, ch)
@@ -67,7 +67,7 @@ func TestPendingWriterToldWhatWasTaken(t *testing.T) {
 	conn := connectedFixture(t)
 	ch := make(chan *readOrWriteResult, 1)
 	conn.pendingWrites = append(conn.pendingWrites, &queuedWrite{data: make([]byte, 100), written: 300, resultCh: ch})
-	conn.state.stateType = ConnClosed
+	conn.state.stateType = connClosed
 	conn.processWrites(time.Now())
 	r := writeResult(t, ch)
 	if r.Len != 300 || !errors.Is(r.Err, ErrNotConnected) {

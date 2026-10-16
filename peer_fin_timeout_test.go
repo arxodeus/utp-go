@@ -35,7 +35,7 @@ func libutpFirstResendAfterResponse(t *testing.T, peerFin bool) time.Duration {
 	drv.PushRandom(corpusPinnedSeq)
 	drv.Listen()
 	drv.Inject(synPacketFor(corpusSynConnID, corpusSynSeq).Encode())
-	drv.Inject(NewPacketBuilder(st_data, corpusSynConnID+1, 200000, corpusWindow, corpusSynSeq+1).
+	drv.Inject(newPacketBuilder(st_data, corpusSynConnID+1, 200000, corpusWindow, corpusSynSeq+1).
 		WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("request")).Build().Encode())
 	drv.IssueAcks()
 	drv.ClearEmitted()
@@ -45,7 +45,7 @@ func libutpFirstResendAfterResponse(t *testing.T, peerFin bool) time.Duration {
 	drv.IssueAcks()
 	drv.ClearEmitted()
 	if peerFin {
-		drv.Inject(NewPacketBuilder(st_fin, corpusSynConnID+1, 210000, corpusWindow, corpusSynSeq+2).
+		drv.Inject(newPacketBuilder(st_fin, corpusSynConnID+1, 210000, corpusWindow, corpusSynSeq+2).
 			WithAckNum(corpusPinnedSeq - 1).Build().Encode())
 		drv.IssueAcks()
 		drv.ClearEmitted()
@@ -55,7 +55,7 @@ func libutpFirstResendAfterResponse(t *testing.T, peerFin bool) time.Duration {
 		drv.CheckTimeouts()
 		drv.IssueAcks()
 		for _, raw := range drv.Emitted() {
-			if p, err := DecodePacket(raw); err == nil && p.Header.PacketType == st_data {
+			if p, err := decodePacket(raw, false); err == nil && p.Header.PacketType == st_data {
 				return time.Duration(ms) * time.Millisecond
 			}
 		}
@@ -98,7 +98,7 @@ func ourFirstResendAfterResponse(t *testing.T, peerFin bool) time.Duration {
 	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(NewPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+		conn.inject(newPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
 	})
 	stream := <-accepted
 	if stream == nil {
@@ -107,7 +107,7 @@ func ourFirstResendAfterResponse(t *testing.T, peerFin bool) time.Duration {
 	clk.AwaitParticipants(4)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(NewPacketBuilder(st_data, peerID+1, 190000, 1<<20, peerSeq+1).
+		conn.inject(newPacketBuilder(st_data, peerID+1, 190000, 1<<20, peerSeq+1).
 			WithAckNum(ourSeq - 1).WithPayload([]byte("request")).Build().Encode())
 	})
 	conn.takeEmitted()
@@ -125,7 +125,7 @@ func ourFirstResendAfterResponse(t *testing.T, peerFin bool) time.Duration {
 	clk.AwaitQuiet()
 	var sentSeq uint16
 	for _, raw := range conn.takeEmitted() {
-		if p, err := DecodePacket(raw); err == nil && p.Header.PacketType == st_data {
+		if p, err := decodePacket(raw, false); err == nil && p.Header.PacketType == st_data {
 			sentSeq = p.Header.SeqNum
 		}
 	}
@@ -134,7 +134,7 @@ func ourFirstResendAfterResponse(t *testing.T, peerFin bool) time.Duration {
 	}
 	if peerFin {
 		clk.AwaitReactionTo(func() {
-			conn.inject(NewPacketBuilder(st_fin, peerID+1, 200000, 1<<20, peerSeq+2).
+			conn.inject(newPacketBuilder(st_fin, peerID+1, 200000, 1<<20, peerSeq+2).
 				WithAckNum(ourSeq - 1).Build().Encode())
 		})
 		conn.takeEmitted()
@@ -142,7 +142,7 @@ func ourFirstResendAfterResponse(t *testing.T, peerFin bool) time.Duration {
 	for ms := 100; ms <= 8000; ms += 100 {
 		clk.Advance(100 * time.Millisecond)
 		for _, raw := range conn.takeEmitted() {
-			if p, err := DecodePacket(raw); err == nil && p.Header.PacketType == st_data && p.Header.SeqNum == sentSeq {
+			if p, err := decodePacket(raw, false); err == nil && p.Header.PacketType == st_data && p.Header.SeqNum == sentSeq {
 				return time.Duration(ms) * time.Millisecond
 			}
 		}

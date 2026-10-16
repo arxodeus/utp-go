@@ -62,7 +62,7 @@ func liveAccepted(t *testing.T) (*UtpStream, *scriptedConn, *virtualClock, func(
 	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(NewPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+		conn.inject(newPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
 	})
 	stream := <-accepted
 	if stream == nil {
@@ -71,7 +71,7 @@ func liveAccepted(t *testing.T) (*UtpStream, *scriptedConn, *virtualClock, func(
 	clk.AwaitParticipants(4)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(NewPacketBuilder(st_data, peerID+1, 110000, 1<<20, peerSeq+1).
+		conn.inject(newPacketBuilder(st_data, peerID+1, 110000, 1<<20, peerSeq+1).
 			WithAckNum(ourSeq - 1).WithPayload([]byte("hello")).Build().Encode())
 	})
 	buf := make([]byte, 16)
@@ -88,7 +88,7 @@ func liveAccepted(t *testing.T) (*UtpStream, *scriptedConn, *virtualClock, func(
 func deadByReset(t *testing.T) (*UtpStream, func()) {
 	return deadAccepted(t, func(conn *scriptedConn, clk *virtualClock, _ *UtpStream) {
 		clk.AwaitReactionTo(func() {
-			conn.inject(NewPacketBuilder(st_reset, 6000+1, 120000, 0, 902).
+			conn.inject(newPacketBuilder(st_reset, 6000+1, 120000, 0, 902).
 				WithAckNum(0x4321 - 1).Build().Encode())
 		})
 		clk.AwaitQuiet()

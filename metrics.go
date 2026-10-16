@@ -242,13 +242,13 @@ type MetricsObserver func(ConnectionMetrics)
 // set but no interval is given.
 const DefaultMetricsInterval = 10 * time.Millisecond
 
-func connStateName(s ConnStateType) string {
+func connStateName(s connStateType) string {
 	switch s {
-	case ConnConnecting:
+	case connConnecting:
 		return "connecting"
-	case ConnConnected:
+	case connConnected:
 		return "connected"
-	case ConnClosed:
+	case connClosed:
 		return "closed"
 	default:
 		return "unknown"

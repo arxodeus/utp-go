@@ -218,11 +218,11 @@ func TestRetransmitKeysAreScoped(t *testing.T) {
 
 	chA := make(chan *packet, 1)
 	chB := make(chan *packet, 1)
-	pktA := &packet{Header: &PacketHeaderV1{SeqNum: 7}}
-	pktB := &packet{Header: &PacketHeaderV1{SeqNum: 7}}
+	pktA := &packet{Header: &packetHeaderV1{SeqNum: 7}}
+	pktB := &packet{Header: &packetHeaderV1{SeqNum: 7}}
 
-	timers.arm(retransmitKey{scope: a, seq: 7}, retransmitTimer{packet: pktA, deliver: chA, ctx: BASE_CONTEXT}, time.Second)
-	timers.arm(retransmitKey{scope: b, seq: 7}, retransmitTimer{packet: pktB, deliver: chB, ctx: BASE_CONTEXT}, time.Second)
+	timers.arm(retransmitKey{scope: a, seq: 7}, retransmitTimer{packet: pktA, deliver: chA, ctx: baseContext}, time.Second)
+	timers.arm(retransmitKey{scope: b, seq: 7}, retransmitTimer{packet: pktB, deliver: chB, ctx: baseContext}, time.Second)
 
 	if got := timers.Len(); got != 2 {
 		t.Fatalf("same seq num in two scopes gave Len() = %d, want 2 -- the scopes collided", got)

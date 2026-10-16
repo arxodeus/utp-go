@@ -17,13 +17,13 @@ const (
 	TEST_INITIAL_TIMEOUT = time.Second
 )
 
-func CreateTestConnection(endpoint Endpoint) *connection {
+func CreateTestConnection(endpoint endpointInfo) *connection {
 	// Create channels
 	socketEvents := make(chan *socketEvent, 100)
 	reads := make(chan *readOrWriteResult, 100)
 
 	// Create peer address
-	peer := &TcpPeer{&net.TCPAddr{
+	peer := &tcpPeer{&net.TCPAddr{
 		IP:   net.IPv4(127, 0, 0, 1),
 		Port: 3400,
 	},
@@ -40,7 +40,7 @@ func CreateTestConnection(endpoint Endpoint) *connection {
 	timers := newRetransmitTimers(TEST_INITIAL_TIMEOUT/4, 8)
 	conn := &connection{
 		logger:         log.Root(),
-		state:          NewConnState(make(chan error, 1)),
+		state:          newConnState(make(chan error, 1)),
 		cid:            &cid,
 		config:         NewConnectionConfig(),
 		endpoint:       &endpoint,
@@ -69,8 +69,8 @@ func CreateTestConnection(endpoint Endpoint) *connection {
 
 func TestOnSynInitiator(t *testing.T) {
 	syn := uint16(100)
-	endpoint := Endpoint{
-		Type:   Initiator,
+	endpoint := endpointInfo{
+		Type:   initiator,
 		SynNum: syn,
 	}
 	conn := CreateTestConnection(endpoint)
@@ -80,7 +80,7 @@ func TestOnSynInitiator(t *testing.T) {
 	// never lets one reach the connection ("connection already exists",
 	// utp_internal.cpp:2957-2965). It used to reset it with
 	// ErrSynFromAcceptor.
-	conn.onPacket(NewPacketBuilder(st_syn, 7, 0, 1<<20, syn).Build(), time.Now())
+	conn.onPacket(newPacketBuilder(st_syn, 7, 0, 1<<20, syn).Build(), time.Now())
 
 	require.Equal(t, before, conn.state.stateType, "a stray SYN changed the connection's state")
 	require.NoError(t, conn.state.Err, "a stray SYN ended the connection")
@@ -90,8 +90,8 @@ func TestOnSynAcceptor(t *testing.T) {
 	// Setup
 	syn := uint16(100)
 	synAck := uint16(101)
-	endpoint := Endpoint{
-		Type:   Acceptor,
+	endpoint := endpointInfo{
+		Type:   acceptor,
 		SynNum: syn,
 		SynAck: synAck,
 	}
@@ -99,15 +99,15 @@ func TestOnSynAcceptor(t *testing.T) {
 	conn := CreateTestConnection(endpoint)
 
 	conn.onSyn(syn)
-	require.Equal(t, ConnConnecting, conn.state.stateType, "expected state to be connecting, got %v", conn.state.stateType)
+	require.Equal(t, connConnecting, conn.state.stateType, "expected state to be connecting, got %v", conn.state.stateType)
 }
 
 func TestOnSynAcceptorNonMatchingSyn(t *testing.T) {
 	// Step 1: Setup the connection with expected syn
 	syn := uint16(100)
 	synAck := uint16(101)
-	endpoint := Endpoint{
-		Type:   Acceptor,
+	endpoint := endpointInfo{
+		Type:   acceptor,
 		SynNum: syn,
 		SynAck: synAck,
 	}
@@ -122,7 +122,7 @@ func TestOnSynAcceptorNonMatchingSyn(t *testing.T) {
 	// peer's new connection kill an established one that way, 41 times in
 	// 880,000 connections.
 	altSyn := uint16(128)
-	conn.onPacket(NewPacketBuilder(st_syn, 7, 0, 1<<20, altSyn).Build(), time.Now())
+	conn.onPacket(newPacketBuilder(st_syn, 7, 0, 1<<20, altSyn).Build(), time.Now())
 	require.Equal(t, before, conn.state.stateType,
 		"a SYN that was not this connection's changed its state")
 	require.NoError(t, conn.state.Err, "a SYN that was not this connection's ended it")
@@ -131,8 +131,8 @@ func TestOnSynAcceptorNonMatchingSyn(t *testing.T) {
 func TestOnStateConnectingInitiator(t *testing.T) {
 	// Setup
 	syn := uint16(100)
-	endpoint := Endpoint{
-		Type:   Initiator,
+	endpoint := endpointInfo{
+		Type:   initiator,
 		SynNum: syn,
 	}
 	conn := CreateTestConnection(endpoint)
@@ -142,7 +142,7 @@ func TestOnStateConnectingInitiator(t *testing.T) {
 	conn.onState(seqNum, syn)
 
 	// Verify
-	require.Equal(t, ConnConnected, conn.state.stateType,
+	require.Equal(t, connConnected, conn.state.stateType,
 		"expected state to be connected, got %v", conn.state.stateType)
 	require.Nil(t, conn.state.closing, "expected closing to be nil")
 }
@@ -151,8 +151,8 @@ func TestOnPacketInvalidAckNum(t *testing.T) {
 	// Setup connection
 	syn := uint16(100)
 	synAck := uint16(101)
-	endpoint := Endpoint{
-		Type:   Acceptor,
+	endpoint := endpointInfo{
+		Type:   acceptor,
 		SynNum: syn,
 		SynAck: synAck,
 	}
@@ -178,8 +178,8 @@ func TestOnPacketInvalidAckNum(t *testing.T) {
 	sendBuf := newSendBuffer(TEST_BUFFER_SIZE)
 	recvBuf := newReceiveBuffer(TEST_BUFFER_SIZE, syn)
 
-	conn.state = &ConnState{
-		stateType:   ConnConnected,
+	conn.state = &connState{
+		stateType:   connConnected,
 		SentPackets: sentPackets,
 		SendBuf:     sendBuf,
 		RecvBuf:     recvBuf,
@@ -192,15 +192,15 @@ func TestOnPacketInvalidAckNum(t *testing.T) {
 	//	if (acks > conn->cur_window_packets) acks = 0;
 	//	                                (utp_internal.cpp:1904-1907)
 	//
-	// This used to require the opposite: state ConnClosed and
-	// ErrInvalidAckNum. That made one forged ST_STATE enough to end an
+	// This used to require the opposite: state connClosed and
+	// errInvalidAckNum. That made one forged ST_STATE enough to end an
 	// established transfer, and made an ordinary late or duplicated
 	// acknowledgement fatal on a lossy path.
 	delay := 100 * time.Millisecond
 	ackResult := conn.processAck(synAck+2, nil, delay, now)
 
 	require.NoError(t, ackResult, "an acknowledgement outside the window is ignored, not an error")
-	require.Equal(t, ConnConnected, conn.state.stateType,
+	require.Equal(t, connConnected, conn.state.stateType,
 		"the connection must survive an acknowledgement it cannot match")
 	require.NoError(t, conn.state.Err, "no error should have been recorded")
 	require.True(t, conn.state.SentPackets.HasUnackedPackets(),
@@ -211,8 +211,8 @@ func TestOnFinEstablished(t *testing.T) {
 	// Setup
 	syn := uint16(100)
 	synAck := uint16(101)
-	endpoint := Endpoint{
-		Type:   Acceptor,
+	endpoint := endpointInfo{
+		Type:   acceptor,
 		SynNum: syn,
 		SynAck: synAck,
 	}
@@ -225,8 +225,8 @@ func TestOnFinEstablished(t *testing.T) {
 	recvBuf := newReceiveBuffer(TEST_BUFFER_SIZE, syn)
 
 	// Set connected state
-	conn.state = &ConnState{
-		stateType:   ConnConnected,
+	conn.state = &connState{
+		stateType:   connConnected,
 		SendBuf:     sendBuf,
 		SentPackets: sentPackets,
 		RecvBuf:     recvBuf,
@@ -238,7 +238,7 @@ func TestOnFinEstablished(t *testing.T) {
 	require.NoError(t, err, "expected no error")
 
 	// Verify state
-	require.Equal(t, ConnConnected, conn.state.stateType,
+	require.Equal(t, connConnected, conn.state.stateType,
 		"expected state to be Connected, got %v", conn.state.stateType)
 	require.NotNil(t, conn.state.closing, "expected closing to be not nil")
 	require.Nil(t, conn.state.closing.LocalFin, "expected closing.LocalFin to be nil")
@@ -250,8 +250,8 @@ func TestOnFinClosing(t *testing.T) {
 	// Step 1: Setup initial connection
 	syn := uint16(100)
 	synAck := uint16(101)
-	endpoint := Endpoint{
-		Type:   Acceptor,
+	endpoint := endpointInfo{
+		Type:   acceptor,
 		SynNum: syn,
 		SynAck: synAck,
 	}
@@ -265,12 +265,12 @@ func TestOnFinClosing(t *testing.T) {
 
 	// Step 3: Set local fin
 	localFin := synAck + 3
-	conn.state = &ConnState{
-		stateType:   ConnConnected,
+	conn.state = &connState{
+		stateType:   connConnected,
 		SendBuf:     sendBuf,
 		SentPackets: sentPackets,
 		RecvBuf:     recvBuf,
-		closing: &ClosingRecord{
+		closing: &closingRecord{
 			LocalFin:  &localFin,
 			RemoteFin: nil,
 		},
@@ -282,7 +282,7 @@ func TestOnFinClosing(t *testing.T) {
 	require.NoError(t, err, "expected no error")
 
 	// Step 5: Verify state
-	require.Equal(t, ConnConnected, conn.state.stateType,
+	require.Equal(t, connConnected, conn.state.stateType,
 		"expected state to be connected, got %v", conn.state.stateType)
 	require.NotNil(t, conn.state.closing, "expected closing to be not nil")
 	require.NotNil(t, conn.state.closing.LocalFin, "expected closing.LocalFin to be not nil")
@@ -297,8 +297,8 @@ func TestOnFinClosingNonMatchingFin(t *testing.T) {
 	// Step 1: Setup connection
 	syn := uint16(100)
 	synAck := uint16(101)
-	endpoint := Endpoint{
-		Type:   Acceptor,
+	endpoint := endpointInfo{
+		Type:   acceptor,
 		SynNum: syn,
 		SynAck: synAck,
 	}
@@ -312,12 +312,12 @@ func TestOnFinClosingNonMatchingFin(t *testing.T) {
 
 	// Step 3: Set initial fin
 	fin := syn + 3
-	conn.state = &ConnState{
-		stateType:   ConnConnected,
+	conn.state = &connState{
+		stateType:   connConnected,
 		SendBuf:     sendBuf,
 		SentPackets: sentPackets,
 		RecvBuf:     recvBuf,
-		closing: &ClosingRecord{
+		closing: &closingRecord{
 			LocalFin:  nil,
 			RemoteFin: &fin,
 		},
@@ -333,7 +333,7 @@ func TestOnFinClosingNonMatchingFin(t *testing.T) {
 	// eof_pkt only for the first FIN (utp_internal.cpp:2316) and drops a
 	// packet numbered past it without acknowledging it (:2381-2386).
 	// TestConformanceSecondFinDoesNotMoveTheEnd compares the two directly.
-	require.Equal(t, ConnConnected, conn.state.stateType, "expected the connection to stay up")
+	require.Equal(t, connConnected, conn.state.stateType, "expected the connection to stay up")
 	require.NoError(t, conn.state.Err)
 	require.Equal(t, fin, *conn.state.closing.RemoteFin, "the end of the stream moved")
 	require.True(t, conn.dropUnacked, "a FIN numbered past the end should be dropped unacknowledged")
@@ -342,22 +342,22 @@ func TestOnFinClosingNonMatchingFin(t *testing.T) {
 func TestOnResetNonClosed(t *testing.T) {
 	// Setup
 	syn := uint16(100)
-	endpoint := Endpoint{
-		Type:   Initiator,
+	endpoint := endpointInfo{
+		Type:   initiator,
 		SynNum: syn,
 	}
 	conn := CreateTestConnection(endpoint)
 
 	// A reset answering our SYN: the dial was refused.
-	require.Equal(t, ConnConnecting, conn.state.stateType)
+	require.Equal(t, connConnecting, conn.state.stateType)
 	conn.onReset()
-	require.Equal(t, ConnClosed, conn.state.stateType, "expected state to be closed")
+	require.Equal(t, connClosed, conn.state.stateType, "expected state to be closed")
 	require.ErrorIs(t, conn.state.Err, ErrConnRefused,
 		"a reset answering our SYN is a refusal; libutp means to say so and cannot (utp_internal.cpp:2865-2870)")
 
 	// Once connected, a reset is a reset.
 	conn = CreateTestConnection(endpoint)
-	conn.state.stateType = ConnConnected
+	conn.state.stateType = connConnected
 	conn.onReset()
 	require.ErrorIs(t, conn.state.Err, ErrReset, "expected error %v, got %v", ErrReset, conn.state.Err)
 }
@@ -365,21 +365,21 @@ func TestOnResetNonClosed(t *testing.T) {
 func TestOnResetClosed(t *testing.T) {
 	// Setup
 	syn := uint16(100)
-	endpoint := Endpoint{
-		Type:   Initiator,
+	endpoint := endpointInfo{
+		Type:   initiator,
 		SynNum: syn,
 	}
 	conn := CreateTestConnection(endpoint)
 
 	// Set initial closed state
-	conn.state = &ConnState{
-		stateType: ConnClosed,
+	conn.state = &connState{
+		stateType: connClosed,
 	}
 
 	// Test reset
 	conn.onReset()
 
 	// Verify state remains unchanged
-	require.Equal(t, ConnClosed, conn.state.stateType, "expected state to be closed")
+	require.Equal(t, connClosed, conn.state.stateType, "expected state to be closed")
 	require.NoError(t, conn.state.Err, "expected error to be nil")
 }

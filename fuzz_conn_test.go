@@ -135,7 +135,7 @@ func FuzzResponderPacketSequence(f *testing.F) {
 	f.Add([]byte{4, 0xFF, 0xFF, 0xFF, 0xFF})
 	f.Add(append([]byte{22}, append(make([]byte, 20), 1, 0)...))
 
-	data := NewPacketBuilder(st_data, fuzzConnID+1, 200000, fuzzWindow, fuzzSynSeq+1).
+	data := newPacketBuilder(st_data, fuzzConnID+1, 200000, fuzzWindow, fuzzSynSeq+1).
 		WithAckNum(fuzzSynSeq).WithPayload([]byte("seed")).Build().Encode()
 	f.Add(append([]byte{byte(len(data))}, data...))
 
@@ -161,7 +161,7 @@ func FuzzResponderPacketSequence(f *testing.F) {
 		}()
 
 		// Establish, then feed the sequence.
-		conn.inject(NewPacketBuilder(st_syn, fuzzConnID, 100000, fuzzWindow, fuzzSynSeq).Build().Encode())
+		conn.inject(newPacketBuilder(st_syn, fuzzConnID, 100000, fuzzWindow, fuzzSynSeq).Build().Encode())
 		time.Sleep(fuzzSettle)
 
 		for _, pkt := range packets {
@@ -183,7 +183,7 @@ func FuzzResponderPacketSequence(f *testing.F) {
 			_, _ = sock.AcceptWithCid(freshCtx, fresh, NewConnectionConfig())
 		}()
 		time.Sleep(fuzzSettle)
-		conn.inject(NewPacketBuilder(st_syn, fuzzConnID+2, 300000, fuzzWindow, 900).Build().Encode())
+		conn.inject(newPacketBuilder(st_syn, fuzzConnID+2, 300000, fuzzWindow, 900).Build().Encode())
 
 		deadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) {

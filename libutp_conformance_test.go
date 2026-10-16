@@ -22,12 +22,12 @@ import (
 // retransmit it forever.
 
 func TestDecoderAcceptsZeroLengthData(t *testing.T) {
-	pkt := NewPacketBuilder(st_data, 4242, 12345, 100_000, 7).
+	pkt := newPacketBuilder(st_data, 4242, 12345, 100_000, 7).
 		WithAckNum(3).
 		Build()
 
 	encoded := pkt.Encode()
-	decoded, err := DecodePacket(encoded)
+	decoded, err := decodePacket(encoded, false)
 	require.NoError(t, err, "a zero-length ST_DATA must decode; libutp accepts one")
 	require.Equal(t, st_data, decoded.Header.PacketType)
 	require.Equal(t, uint16(7), decoded.Header.SeqNum)
@@ -37,11 +37,11 @@ func TestDecoderAcceptsZeroLengthData(t *testing.T) {
 func TestZeroLengthDataAdvancesTheAckNumber(t *testing.T) {
 	syn := uint16(100)
 	synAck := uint16(101)
-	conn := CreateTestConnection(Endpoint{Type: Acceptor, SynNum: syn, SynAck: synAck})
+	conn := CreateTestConnection(endpointInfo{Type: acceptor, SynNum: syn, SynAck: synAck})
 
 	congestionCtrl := newDefaultController(fromConnConfig(conn.config))
-	conn.state = &ConnState{
-		stateType:   ConnConnected,
+	conn.state = &connState{
+		stateType:   connConnected,
 		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
 		SentPackets: newSentPacketsWithoutLogger(synAck, congestionCtrl),
 		RecvBuf:     newReceiveBuffer(TEST_BUFFER_SIZE, syn),
@@ -53,7 +53,7 @@ func TestZeroLengthDataAdvancesTheAckNumber(t *testing.T) {
 	// The next in-order packet, carrying nothing.
 	require.NoError(t, conn.onData(syn+1, []byte{}))
 
-	require.Equal(t, ConnConnected, conn.state.stateType,
+	require.Equal(t, connConnected, conn.state.stateType,
 		"a zero-length ST_DATA must not close the connection")
 	require.Equal(t, before+1, conn.state.RecvBuf.AckNum(),
 		"a zero-length ST_DATA must still advance the ack number, as libutp does at utp_internal.cpp:2354")
@@ -190,15 +190,15 @@ func relativeStamps(stamps []time.Time) []time.Duration {
 //
 // This implementation keeps the same quantities in microseconds.
 
-func ackAfter(seqNum uint16, rtt time.Duration) Ack {
-	return Ack{Delay: 10 * time.Millisecond, RTT: rtt, ReceivedAt: time.Now()}
+func ackAfter(seqNum uint16, rtt time.Duration) ackSample {
+	return ackSample{Delay: 10 * time.Millisecond, RTT: rtt, ReceivedAt: time.Now()}
 }
 
 func TestFirstRTTSampleIsAdoptedDirectly(t *testing.T) {
 	ctrl := newDefaultController(defaultCtrlConfig())
 
 	const ertt = 400 * time.Millisecond
-	require.NoError(t, ctrl.OnTransmit(1, Initial, 500))
+	require.NoError(t, ctrl.OnTransmit(1, transmitInitial, 500))
 	require.NoError(t, ctrl.OnAck(1, ackAfter(1, ertt)))
 
 	st := ctrl.Stats()
@@ -217,7 +217,7 @@ func TestRTOFloorIsOneSecond(t *testing.T) {
 
 	// A fast path: rtt + rtt_var*4 = 20ms + 40ms = 60ms, well under the floor.
 	const ertt = 20 * time.Millisecond
-	require.NoError(t, ctrl.OnTransmit(1, Initial, 500))
+	require.NoError(t, ctrl.OnTransmit(1, transmitInitial, 500))
 	require.NoError(t, ctrl.OnAck(1, ackAfter(1, ertt)))
 
 	st := ctrl.Stats()
@@ -230,12 +230,12 @@ func TestSubsequentRTTSamplesFollowLibutp(t *testing.T) {
 	ctrl := newDefaultController(defaultCtrlConfig())
 
 	const first = 400 * time.Millisecond
-	require.NoError(t, ctrl.OnTransmit(1, Initial, 500))
+	require.NoError(t, ctrl.OnTransmit(1, transmitInitial, 500))
 	require.NoError(t, ctrl.OnAck(1, ackAfter(1, first)))
 
 	// rtt = 400ms, rtt_var = 200ms.
 	const second = 480 * time.Millisecond
-	require.NoError(t, ctrl.OnTransmit(2, Initial, 500))
+	require.NoError(t, ctrl.OnTransmit(2, transmitInitial, 500))
 	require.NoError(t, ctrl.OnAck(2, ackAfter(2, second)))
 
 	// delta   = 400 - 480 = -80ms
@@ -256,9 +256,9 @@ func TestSubsequentRTTSamplesFollowLibutp(t *testing.T) {
 func TestRTTSamplesAreWholeMilliseconds(t *testing.T) {
 	ctrl := newDefaultController(defaultCtrlConfig())
 
-	require.NoError(t, ctrl.OnTransmit(1, Initial, 500))
+	require.NoError(t, ctrl.OnTransmit(1, transmitInitial, 500))
 	require.NoError(t, ctrl.OnAck(1, ackAfter(1, 400*time.Millisecond+900*time.Microsecond)))
-	require.NoError(t, ctrl.OnTransmit(2, Initial, 500))
+	require.NoError(t, ctrl.OnTransmit(2, transmitInitial, 500))
 	require.NoError(t, ctrl.OnAck(2, ackAfter(2, 480*time.Millisecond+700*time.Microsecond)))
 
 	// As TestSubsequentRTTSamplesFollowLibutp: ertt 400 then 480 give
@@ -273,7 +273,7 @@ func TestRTTSamplesAreWholeMilliseconds(t *testing.T) {
 	// every sample is taken as the first (:1365). The loss probe, which is
 	// not libutp's, needs the round trip anyway, and has its own.
 	fast := newDefaultController(defaultCtrlConfig())
-	require.NoError(t, fast.OnTransmit(1, Initial, 500))
+	require.NoError(t, fast.OnTransmit(1, transmitInitial, 500))
 	require.NoError(t, fast.OnAck(1, ackAfter(1, 300*time.Microsecond)))
 	require.Equal(t, time.Duration(0), fast.Stats().RTT)
 	require.Equal(t, 300*time.Microsecond, fast.Stats().FineRTT)
@@ -286,13 +286,13 @@ func TestRetransmittedPacketDoesNotUpdateRTT(t *testing.T) {
 	ctrl := newDefaultController(defaultCtrlConfig())
 
 	const ertt = 400 * time.Millisecond
-	require.NoError(t, ctrl.OnTransmit(1, Initial, 500))
+	require.NoError(t, ctrl.OnTransmit(1, transmitInitial, 500))
 	require.NoError(t, ctrl.OnAck(1, ackAfter(1, ertt)))
 	before := ctrl.Stats()
 
 	// A packet sent twice, then acked with a wildly different measurement.
-	require.NoError(t, ctrl.OnTransmit(2, Initial, 500))
-	require.NoError(t, ctrl.OnTransmit(2, Retransmission, 500))
+	require.NoError(t, ctrl.OnTransmit(2, transmitInitial, 500))
+	require.NoError(t, ctrl.OnTransmit(2, transmitRetransmission, 500))
 	require.NoError(t, ctrl.OnAck(2, ackAfter(2, 5*time.Second)))
 
 	after := ctrl.Stats()

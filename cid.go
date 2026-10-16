@@ -41,15 +41,15 @@ func (p *UdpPeer) String() string {
 	return p.addr.String()
 }
 
-type TcpPeer struct {
+type tcpPeer struct {
 	addr *net.TCPAddr
 }
 
-func (p *TcpPeer) Hash() string {
+func (p *tcpPeer) Hash() string {
 	return p.addr.String()
 }
 
-func (p *TcpPeer) String() string {
+func (p *tcpPeer) String() string {
 	return p.addr.String()
 }
 

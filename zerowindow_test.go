@@ -51,7 +51,7 @@ func TestZeroWindowProbe(t *testing.T) {
 	waitFor(t, 2*time.Second, func() bool { return conn.emittedCount() > 0 })
 
 	// Answer the SYN, advertising a full window so the connection completes.
-	conn.inject(NewPacketBuilder(st_state, 4000, 150000, 1024*1024, 900).
+	conn.inject(newPacketBuilder(st_state, 4000, 150000, 1024*1024, 900).
 		WithAckNum(4000).Build().Encode())
 
 	var stream *UtpStream
@@ -62,7 +62,7 @@ func TestZeroWindowProbe(t *testing.T) {
 	}
 
 	// Now tell it the window is closed.
-	conn.inject(NewPacketBuilder(st_state, 4000, 160000, 0, 900).
+	conn.inject(newPacketBuilder(st_state, 4000, 160000, 0, 900).
 		WithAckNum(4000).Build().Encode())
 	time.Sleep(50 * time.Millisecond)
 	conn.takeEmitted()
@@ -85,7 +85,7 @@ func TestZeroWindowProbe(t *testing.T) {
 	for time.Now().Before(deadline) {
 		if conn.emittedCount() > 0 {
 			emitted := conn.takeEmitted()
-			pkt, err := DecodePacket(emitted[0])
+			pkt, err := decodePacket(emitted[0], false)
 			if err != nil {
 				t.Fatalf("probe does not decode: %v", err)
 			}
@@ -144,7 +144,7 @@ func TestKeepAlive(t *testing.T) {
 	}()
 
 	waitFor(t, 2*time.Second, func() bool { return conn.emittedCount() > 0 })
-	conn.inject(NewPacketBuilder(st_state, 4100, 150000, 1024*1024, 900).
+	conn.inject(newPacketBuilder(st_state, 4100, 150000, 1024*1024, 900).
 		WithAckNum(4100).Build().Encode())
 
 	select {
@@ -160,7 +160,7 @@ func TestKeepAlive(t *testing.T) {
 	for time.Now().Before(deadline) {
 		if conn.emittedCount() > 0 {
 			emitted := conn.takeEmitted()
-			pkt, err := DecodePacket(emitted[0])
+			pkt, err := decodePacket(emitted[0], false)
 			if err != nil {
 				t.Fatalf("keep-alive does not decode: %v", err)
 			}

@@ -81,7 +81,7 @@ const readQueueLen = 100
 // either way. It was 100, 800 bytes allocated whole per connection.
 const writeQueueLen = 16
 
-func NewUtpStream(
+func newUtpStream(
 	ctx context.Context,
 	logger log.Logger,
 	cid *ConnectionId,
@@ -93,7 +93,7 @@ func NewUtpStream(
 	connected chan error,
 	timers *retransmitTimers,
 ) *UtpStream {
-	if logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if logger.Enabled(baseContext, log.LevelTrace) {
 		logger.Trace("new a utp stream", "dst.peer", cid.Peer, "dst.send", cid.Send, "dst.recv", cid.Recv)
 	}
 	connHandle := &sync.WaitGroup{}
@@ -309,7 +309,7 @@ func (s *UtpStream) ReadToEOF(ctx context.Context, buf *[]byte) (int, error) {
 				return n, s.terminalErr()
 			}
 			s.notifyRead()
-			if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+			if s.logger.Enabled(baseContext, log.LevelTrace) {
 				s.logger.Trace("read a new buf", "len", res.Len)
 			}
 			if len(res.Data) == 0 {
@@ -495,7 +495,7 @@ func (s *UtpStream) writeQueued(ctx context.Context, queued []byte, resCh chan *
 	case <-s.ended:
 		return 0, s.writeErr()
 	}
-	if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+	if s.logger.Enabled(baseContext, log.LevelTrace) {
 		s.logger.Trace("created a new queued write to writes channel",
 			"dst.peer", s.cid.Peer,
 			"buf.len", len(queued),
@@ -643,7 +643,7 @@ func (s *UtpStream) WindowSize() uint32 {
 // that (UtpSocket.Close). libutp's utp_close (utp_internal.cpp:3358-3380).
 func (s *UtpStream) Close() {
 	s.closeOnce.Do(func() {
-		if s.logger.Enabled(BASE_CONTEXT, log.LevelTrace) {
+		if s.logger.Enabled(baseContext, log.LevelTrace) {
 			s.logger.Trace("call close utp stream", "dst.Peer", s.cid.Peer, "dst.send", s.cid.Send, "dst.recv", s.cid.Recv)
 		}
 		s.shutdown.Store(true)
