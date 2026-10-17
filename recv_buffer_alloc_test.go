@@ -31,8 +31,9 @@ func TestReceiveBufferAllocatesAsDataArrives(t *testing.T) {
 
 // Against a model: packets arrive in order, out of order and repeated, reads
 // take random amounts, and what is read is exactly the stream, in order. The
-// allocation never passes the capacity, and the window and admission figures
-// are those of the fixed-size buffer this replaced.
+// allocation never passes the capacity but by the one packet taken while
+// nothing was readable (receiveBuffer.Admits), and the window and admission
+// figures are those of the fixed-size buffer this replaced.
 func TestReceiveBufferMatchesModel(t *testing.T) {
 	for seed := int64(1); seed <= 50; seed++ {
 		rng := rand.New(rand.NewSource(seed))
@@ -78,7 +79,7 @@ func TestReceiveBufferMatchesModel(t *testing.T) {
 				n := rb.Read(buf)
 				got = append(got, buf[:n]...)
 			}
-			if len(rb.buf) > capacity {
+			if len(rb.buf) > capacity+1400 {
 				t.Fatalf("seed %d: %d bytes allocated for a capacity of %d", seed, len(rb.buf), capacity)
 			}
 			pending := 0
@@ -89,7 +90,7 @@ func TestReceiveBufferMatchesModel(t *testing.T) {
 			for i := 0; i < next; i++ {
 				inOrder += len(payloads[i])
 			}
-			if unread := inOrder - len(got); rb.Window() != capacity-unread ||
+			if unread := inOrder - len(got); rb.Window() != max(capacity-unread, 0) ||
 				rb.Available() != capacity-unread-pending {
 				t.Fatalf("seed %d step %d: window %d available %d; want %d and %d",
 					seed, step, rb.Window(), rb.Available(), capacity-unread, capacity-unread-pending)

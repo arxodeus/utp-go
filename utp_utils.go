@@ -95,7 +95,9 @@ func randomUint16() uint16 {
 	if f := randomUint16Source.Load(); f != nil {
 		return (*f)()
 	}
-	return uint16(fastrand.Uint32n(65535))
+	// All 65536 values, as libutp's get_random truncated to 16 bits gives.
+	// This was Uint32n(65535), which is [0, 65535) and never drew 65535.
+	return uint16(fastrand.Uint32())
 }
 
 func maxUint32(a, b uint32) uint32 {

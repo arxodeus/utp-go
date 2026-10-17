@@ -80,6 +80,33 @@ func (rb *receiveBuffer) gapReserve() int {
 	return rb.largestPacket
 }
 
+// Admits reports whether a packet of n bytes numbered seqNum may be taken.
+//
+// Out of order, it must leave gapReserve free. In order, it must fit what is
+// free -- or, when nothing is readable, it is taken whatever its size.
+//
+// The reserve is the largest packet received, and the packet that fills a
+// gap can be larger: it is one that never arrived. With a 4,096-byte buffer
+// holding twelve 300-byte packets behind a gap, 496 bytes are free and a
+// missing 1,400-byte packet never fit; nothing was readable, so no read could
+// free room, and the connection stalled for good. A buffer smaller than one
+// packet stalled the same way at its first packet. A peer within the window
+// cannot cause either, but the window is not the only thing that lets a peer
+// send: a zero-window probe, and the drain credit (see onReadDrained), both
+// let one packet past it.
+//
+// libutp has no receive buffer and never refuses the packet it is waiting
+// for. Here the buffer may exceed its capacity by that one packet, and only
+// while nothing is readable -- once the packet is in, something is, and the
+// rule stops applying until the reader has taken it. See the release review
+// of 9c44c4f (R5).
+func (rb *receiveBuffer) Admits(seqNum uint16, n int) bool {
+	if seqNum != rb.initSeqNum+1+rb.consumed {
+		return n <= rb.Available()-rb.gapReserve()
+	}
+	return n <= rb.Available() || (rb.offset == 0 && n <= maxUdpPayloadSize)
+}
+
 func newReceiveBuffer(size int, initSeqNum uint16) *receiveBuffer {
 	return newReceiveBufferWithLogger(size, initSeqNum, nil)
 }
@@ -161,9 +188,9 @@ func (rb *receiveBuffer) releaseStorage() {
 // # Why this does not overrun the buffer
 //
 // Available() still charges the out-of-order bytes, and admission still uses
-// Available(), so the invariant the collapse loop in Write depends on --
-// offset plus pending never exceeding the capacity, which appendInOrder relies
-// on to find its room -- is unchanged.
+// it, so offset plus pending stays within the capacity -- but for the one
+// packet Admits takes while nothing is readable, which appendInOrder grows
+// the storage for.
 //
 // A peer respecting this window cannot break it either: the window is the
 // capacity less what has been delivered, so everything the peer is permitted
@@ -171,7 +198,9 @@ func (rb *receiveBuffer) releaseStorage() {
 // peer ignoring the window is caught by admission, which drops rather than
 // writes. Over-advertising therefore costs a retransmission, never a panic.
 func (rb *receiveBuffer) Window() int {
-	return rb.capacity - rb.offset
+	// Never negative: the in-order data can exceed the capacity by the one
+	// packet Admits lets past it.
+	return max(rb.capacity-rb.offset, 0)
 }
 
 // Available is the room left for bytes actually arriving, counting data held
@@ -269,11 +298,7 @@ func (rb *receiveBuffer) Write(data []byte, seqNum uint16) error {
 	// fills the buffer, and the retransmission that would release all of it is
 	// then refused for want of space, every time, forever. See gapReserve.
 	next := rb.initSeqNum + 1 + rb.consumed
-	room := rb.Available()
-	if seqNum != next {
-		room -= rb.gapReserve()
-	}
-	if len(data) > room {
+	if !rb.Admits(seqNum, len(data)) {
 		return errors.New("insufficient space in buffer")
 	}
 	if len(data) > rb.largestPacket {

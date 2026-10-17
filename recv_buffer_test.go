@@ -109,17 +109,21 @@ func TestRecvBufferWrite(t *testing.T) {
 	require.True(t, bytes.Equal(dataSecond, buf.buf[DATA_LEN:DATA_LEN*2]))
 }
 
+// Refused while the buffer holds something to read: the reader will free the
+// room. With nothing readable, the next packet is taken whatever its size (see
+// receiveBuffer.Admits), so this holds one byte first.
 func TestRecvBufferWriteExceedsAvailable(t *testing.T) {
 
 	initSeqNum := uint16(0xFFFF)
 	buf := newReceiveBuffer(RECV_SIZE, initSeqNum)
 
 	seqNum := initSeqNum + 1
-	data := make([]byte, RECV_SIZE+1)
+	require.NoError(t, buf.Write([]byte{1}, seqNum))
+	data := make([]byte, RECV_SIZE)
 	for i := range data {
 		data[i] = 0xef
 	}
-	err := buf.Write(data, seqNum)
+	err := buf.Write(data, seqNum+1)
 	require.Error(t, err)
 }
 

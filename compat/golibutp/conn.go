@@ -39,6 +39,11 @@ type Conn struct {
 
 var _ net.Conn = (*Conn)(nil)
 
+// testHookConnPublished, when set, runs in newConn just after the connection
+// is published to its socket: the moment a concurrent Socket.Close can reach
+// it.
+var testHookConnPublished func(*Socket)
+
 func (s *Socket) newConn(nc *utpnet.Conn) (*Conn, error) {
 	c := &Conn{
 		s:          s,
@@ -50,6 +55,9 @@ func (s *Socket) newConn(nc *utpnet.Conn) (*Conn, error) {
 	if c.remoteAddr != nil {
 		c.remoteKey = c.remoteAddr.String()
 	}
+	// Taken from the stream before c is published: once it is in s.conns,
+	// c.us is mu's, and Socket.Close sets it to nil.
+	done := nc.Stream().Done()
 	mu.Lock()
 	if s.closed {
 		mu.Unlock()
@@ -58,7 +66,9 @@ func (s *Socket) newConn(nc *utpnet.Conn) (*Conn, error) {
 	}
 	s.conns[c] = struct{}{}
 	mu.Unlock()
-	done := c.us.Done()
+	if testHookConnPublished != nil {
+		testHookConnPublished(s)
+	}
 	go func() {
 		<-done
 		mu.Lock()

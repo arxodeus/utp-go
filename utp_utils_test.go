@@ -97,3 +97,15 @@ func TestDurationBetween(t *testing.T) {
 		t.Fatalf("durationBetween(0, 0) = %v, want %v", got, want)
 	}
 }
+
+// Connection ids and sequence numbers are drawn from all 65536 values, as
+// libutp draws them. 65535 used to be unreachable. Two million draws miss a
+// given value with probability e^-30.
+func TestRandomUint16CoversTheWholeRange(t *testing.T) {
+	for i := 0; i < 2_000_000; i++ {
+		if randomUint16() == 65535 {
+			return
+		}
+	}
+	t.Fatal("65535 never drawn in two million draws")
+}

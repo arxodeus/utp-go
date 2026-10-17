@@ -4452,7 +4452,13 @@ func (c *connection) onData(seqNum uint16, data []byte) error {
 			if c.logger.Enabled(baseContext, log.LevelTrace) {
 				c.logger.Trace("connection has received remote FIN", "src.peer", c.cid.Peer, "seqNum", seqNum)
 			}
-			start := c.state.RecvBuf.InitSeqNum()
+			// From the acknowledgement number, not the connection's first
+			// sequence number: once 65,536 packets have arrived, that is no
+			// lower bound at all, and a FIN that overtook the last data
+			// left a packet just behind the first number outside the range
+			// -- dropped every time it was resent, holding everything after
+			// it behind a gap that never filled.
+			start := c.state.RecvBuf.AckNum()
 			seqRange := newCircularRangeInclusive(start, *c.state.closing.RemoteFin)
 			if !seqRange.Contains(seqNum) {
 				// Numbered past the end of the stream: dropped, unacknowledged,
@@ -4493,7 +4499,7 @@ func (c *connection) onData(seqNum uint16, data []byte) error {
 			return nil
 		}
 		// not closing should send data
-		if len(data) <= c.state.RecvBuf.Available() {
+		if c.state.RecvBuf.Admits(seqNum, len(data)) {
 			err := c.state.RecvBuf.Write(data, seqNum)
 			if err != nil {
 				c.recvBufferDrops++
