@@ -97,8 +97,16 @@ type Socket struct {
 	writeDeadline *deadline
 
 	closeOnce sync.Once
+	// closed ends what the application is waiting in -- Accept, ReadFrom,
+	// the dials -- at the start of Close. appCtx ends with it, for Accept.
 	closed    chan struct{}
-	readLoop  sync.WaitGroup
+	appCtx    context.Context
+	appCancel context.CancelFunc
+	// stopRead ends the reader, once the uTP socket has finished with it.
+	stopRead chan struct{}
+	// readErr is the read error that closed the socket, if one did.
+	readErr  atomic.Pointer[error]
+	readLoop sync.WaitGroup
 }
 
 type datagram struct {
@@ -206,7 +214,9 @@ func newSocket(ctx context.Context, conn udpPacketConn, opts *Options) (*Socket,
 		readDeadline:  newDeadline(),
 		writeDeadline: newDeadline(),
 		closed:        make(chan struct{}),
+		stopRead:      make(chan struct{}),
 	}
+	s.appCtx, s.appCancel = context.WithCancel(ctx)
 	s.config.Store(config)
 	s.generic, _ = conn.(*packetConn)
 	s.inner = newDemuxConn(conn)
@@ -248,7 +258,7 @@ func (s *Socket) run() {
 	buf := make([]byte, maxDatagram)
 	for {
 		select {
-		case <-s.closed:
+		case <-s.stopRead:
 			return
 		default:
 		}
@@ -256,15 +266,21 @@ func (s *Socket) run() {
 		n, from, err := s.udp.ReadFromUDP(buf)
 		if err != nil {
 			select {
-			case <-s.closed:
+			case <-s.stopRead:
 				return
 			default:
 			}
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
 			}
-			// A read error on a socket nobody closed is terminal.
-			s.logger.Debug("utpnet: UDP read failed", "err", err)
+			// A read error on a socket nobody closed is terminal, and the
+			// socket closes with it. It used to stop reading and nothing
+			// else: Accept and ReadFrom waited for ever, and every
+			// connection went on retransmitting into a socket that could no
+			// longer hear the answer. From another goroutine, because Close
+			// waits for this one. Release review of 9c44c4f (R9).
+			s.logger.Debug("utpnet: UDP read failed; closing the socket", "err", err)
+			go s.shutdown(err)
 			return
 		}
 
@@ -344,7 +360,7 @@ func (s *Socket) ReadFrom(p []byte) (int, net.Addr, error) {
 		select {
 		case <-s.closed:
 			stop()
-			return 0, nil, ErrSocketClosed
+			return 0, nil, s.closedErr()
 		case d := <-s.passthrough:
 			stop()
 			n := copy(p, d.payload)
@@ -366,7 +382,7 @@ func (s *Socket) ReadFrom(p []byte) (int, net.Addr, error) {
 func (s *Socket) WriteTo(p []byte, addr net.Addr) (int, error) {
 	select {
 	case <-s.closed:
-		return 0, ErrSocketClosed
+		return 0, s.closedErr()
 	default:
 	}
 	// expired rather than wait: this path only needs the answer, and wait
@@ -390,11 +406,11 @@ func (s *Socket) WriteTo(p []byte, addr net.Addr) (int, error) {
 func (s *Socket) Accept() (net.Conn, error) {
 	// A nil config: the connection takes s.config as it stands when its
 	// SYN arrives (utp.WithAcceptConfig), not as it stood now.
-	stream, err := s.sock.Accept(s.ctx, nil)
+	stream, err := s.sock.Accept(s.appCtx, nil)
 	if err != nil {
 		select {
 		case <-s.closed:
-			return nil, ErrSocketClosed
+			return nil, s.closedErr()
 		default:
 		}
 		return nil, err
@@ -409,7 +425,7 @@ func (s *Socket) Accept() (net.Conn, error) {
 func (s *Socket) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	select {
 	case <-s.closed:
-		return nil, ErrSocketClosed
+		return nil, s.closedErr()
 	default:
 	}
 	if network == "" {
@@ -429,7 +445,7 @@ func (s *Socket) DialContext(ctx context.Context, network, addr string) (net.Con
 func (s *Socket) DialAddr(ctx context.Context, addr net.Addr) (net.Conn, error) {
 	select {
 	case <-s.closed:
-		return nil, ErrSocketClosed
+		return nil, s.closedErr()
 	default:
 	}
 	var udpAddr *net.UDPAddr
@@ -552,10 +568,33 @@ func (s *Socket) SetWriteDeadline(t time.Time) error {
 
 // Close shuts down the socket, every connection on it, and the underlying UDP
 // port. It is idempotent.
+//
+// Connections already closed are given the time to deliver what they hold,
+// as utp.UtpSocket.Close gives them, and the port goes on being read while
+// they do: their acknowledgements arrive on it. The reader used to stop
+// first, so a Write followed by Close and Socket.Close lost whatever was
+// still behind the congestion window. Release review of 9c44c4f (R2).
 func (s *Socket) Close() error {
+	s.shutdown(nil)
+	return nil
+}
+
+// shutdown is Close, and the close a terminal read error causes.
+func (s *Socket) shutdown(readErr error) {
 	s.closeOnce.Do(func() {
+		if readErr != nil {
+			s.readErr.Store(&readErr)
+		}
+		// What the application waits in ends now.
 		close(s.closed)
+		s.appCancel()
+		if readErr != nil {
+			// Nothing can be delivered without a receive path: end the
+			// connections rather than wait for acknowledgements.
+			s.cancel()
+		}
 		s.sock.Close()
+		close(s.stopRead)
 		s.cancel()
 		s.inner.close()
 		_ = s.udp.SetReadDeadline(time.Now())
@@ -568,7 +607,15 @@ func (s *Socket) Close() error {
 		s.readLoop.Wait()
 		_ = s.udp.Close()
 	})
-	return nil
+}
+
+// closedErr is what an operation on a closed socket returns: ErrSocketClosed,
+// wrapping the read error that closed it if one did.
+func (s *Socket) closedErr() error {
+	if err := s.readErr.Load(); err != nil {
+		return fmt.Errorf("%w: %w", ErrSocketClosed, *err)
+	}
+	return ErrSocketClosed
 }
 
 func udpNetwork(network string) string {

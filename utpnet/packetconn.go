@@ -17,7 +17,9 @@ import (
 // UDP socket it does not wait for its reader to return when it closes:
 // nothing says a PacketConn it did not make honours a read deadline, and a
 // Close that waited on one that does not would never return. The reader
-// stops when pc's ReadFrom fails.
+// stops when pc's ReadFrom fails, and an error that is not a timeout, on a
+// Socket not yet closed, closes it: Accept, ReadFrom and the dials then
+// return ErrSocketClosed wrapping that error.
 //
 // Addresses need only name a host and port. A datagram from an address of
 // some other type than *net.UDPAddr is handled under its UDP form, and

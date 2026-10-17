@@ -53,10 +53,28 @@ func (c *Conn) Read(b []byte) (int, error) {
 	})
 }
 
+// Write writes all of b, or reports how much of it was written.
+//
+// When the deadline moves while it waits, it carries on with what is left:
+// the stream reports what it had already taken (see UtpStream.Write), and
+// those bytes will be sent. It used to start over from the beginning on any
+// write that came back with nothing reported -- and the stream reported
+// nothing even when it had taken bytes -- so a deadline moved during a
+// blocked write sent its bytes twice. From the release review of 9c44c4f
+// (R1).
 func (c *Conn) Write(b []byte) (int, error) {
-	return c.withDeadline(c.writeDeadline, func(ctx context.Context) (int, error) {
-		return c.stream.Write(ctx, b)
+	written := 0
+	_, err := c.withDeadline(c.writeDeadline, func(ctx context.Context) (int, error) {
+		n, err := c.stream.Write(ctx, b[written:])
+		written += n
+		if err != nil {
+			// Nothing reported, so that withDeadline goes on with the rest
+			// if the deadline moved.
+			return 0, err
+		}
+		return n, nil
 	})
+	return written, err
 }
 
 // withDeadline runs op under a context derived from d, and translates what

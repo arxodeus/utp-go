@@ -357,6 +357,33 @@ type queuedWrite struct {
 	data     []byte
 	written  int
 	resultCh chan *readOrWriteResult
+
+	// mu orders the connection taking bytes from this write against its
+	// writer giving up on it. written is the loop's, read by the writer
+	// under mu; canceled is the writer's, read by the loop under mu.
+	mu       sync.Mutex
+	canceled bool
+}
+
+// cancel withdraws what the connection has not yet taken, and reports what
+// it has: the count of bytes already in the send buffer, which will be sent,
+// or the result, if the whole write was taken before the writer gave up.
+//
+// A write used to return 0 on cancellation while the connection went on
+// taking the rest of it, so its bytes were sent after the caller had been
+// told none were -- and utpnet, which retries a write whose deadline moved
+// and that reported nothing written, sent them twice. From the release
+// review of 9c44c4f (R1).
+func (w *queuedWrite) cancel() (int, *readOrWriteResult) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.canceled = true
+	select {
+	case res := <-w.resultCh:
+		return 0, res
+	default:
+	}
+	return w.written, nil
 }
 
 type readOrWriteResult struct {
@@ -1553,6 +1580,14 @@ func (c *connection) onKeepAliveTimer() {
 // Called with mu held, by the event loop and by endBatch.
 func (c *connection) afterPass() (moreToWrite bool) {
 	stream := c.stream
+	// CloseRead is applied from its flag, not its event, which is dropped
+	// when the event queue is full. Taken from the event alone, a CloseRead
+	// that lost its event left Read refusing data the connection went on
+	// buffering, until the window closed on the peer. Release review of
+	// 9c44c4f (R6).
+	if !c.readShutdown && stream.readClosed.Load() {
+		c.onCloseRead()
+	}
 	// Hand bytes up before acknowledging, so the acknowledgement carries
 	// the window that results rather than the one from before the drain.
 	//
@@ -2203,12 +2238,21 @@ func (c *connection) processWrites(now time.Time) {
 
 	// Write pending data to send buffer
 	for len(c.pendingWrites) > 0 {
+		writeReq := c.pendingWrites[0]
+		writeReq.mu.Lock()
+		// A write its caller gave up on is dropped whether or not there is
+		// room, so that it does not hold a FIN behind it.
+		if writeReq.canceled {
+			writeReq.mu.Unlock()
+			c.pendingWrites[0] = nil
+			c.pendingWrites = c.pendingWrites[1:]
+			continue
+		}
 		bufSpace := c.state.SendBuf.Available()
 		if bufSpace <= 0 {
+			writeReq.mu.Unlock()
 			break
 		}
-
-		writeReq := c.pendingWrites[0]
 
 		// The queued data is the stream's own copy of what was written
 		// (writeQueued), so the send buffer takes it as it is.
@@ -2218,6 +2262,7 @@ func (c *connection) processWrites(now time.Time) {
 				Len: len(writeReq.data) + writeReq.written,
 			}
 			writeReq.resultCh <- result
+			c.pendingWrites[0] = nil
 			c.pendingWrites = c.pendingWrites[1:]
 		} else {
 			nextWrite := writeReq.data[:bufSpace]
@@ -2227,6 +2272,7 @@ func (c *connection) processWrites(now time.Time) {
 			writeReq.data = remainingData
 			writeReq.written += bufSpace
 		}
+		writeReq.mu.Unlock()
 		c.wantWrite = true
 	}
 
@@ -2253,7 +2299,6 @@ func (c *connection) processWrites(now time.Time) {
 }
 
 func (c *connection) onWrite(writeReq *queuedWrite) {
-	writeReq.written = 0
 	switch c.state.stateType {
 	case connConnecting:
 		// There are 0 bytes written so far

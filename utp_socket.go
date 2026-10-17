@@ -151,13 +151,23 @@ func (a *acceptRequest) giveUp() *streamResult {
 }
 
 // wait is what Accept and AcceptWithCid do once the request is queued.
-func (a *acceptRequest) wait(ctx context.Context) (*UtpStream, error) {
+//
+// It ends with the socket as well as with the caller. It used to watch only
+// the caller's context, so an Accept on context.Background() outlived the
+// socket it was queued on: the dispatcher that would have answered it was
+// gone, and so, for AcceptWithCid, was the expiry wheel that would have timed
+// it out. From the release review of 9c44c4f (R7).
+func (a *acceptRequest) wait(ctx, sockCtx context.Context) (*UtpStream, error) {
 	var res *streamResult
 	select {
 	case res = <-a.stream:
 	case <-ctx.Done():
 		if res = a.giveUp(); res == nil || res.stream == nil {
 			return nil, ctx.Err()
+		}
+	case <-sockCtx.Done():
+		if res = a.giveUp(); res == nil || res.stream == nil {
+			return nil, sockCtx.Err()
 		}
 	}
 	if res == nil {
@@ -1432,7 +1442,30 @@ func (s *UtpSocket) handleNewAcceptEvent(accept *acceptRequest) {
 	// a moment later was parked in incomingConns with nobody left to claim
 	// it, and the peer retried until it gave up. The cid-specific path has
 	// always queued the request; this one now does too.
-	s.pendingAccepts = append(s.pendingAccepts, accept)
+	//
+	// Those already abandoned go first. They were dropped only when a SYN
+	// came to claim one, so on a socket nobody connected to, an accept loop
+	// with a timeout grew this list by one per timeout for as long as it
+	// ran (release review of 9c44c4f, R7). Pruned on each arrival, it holds
+	// at most the live requests and those abandoned since the last one.
+	live := s.pendingAccepts[:0]
+	for _, a := range s.pendingAccepts {
+		if !a.abandoned() {
+			live = append(live, a)
+		}
+	}
+	clear(s.pendingAccepts[len(live):])
+	s.pendingAccepts = append(live, accept)
+}
+
+// abandoned reports whether the caller has stopped waiting for this request.
+func (a *acceptRequest) abandoned() bool {
+	if a.ctx.Err() != nil {
+		return true
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.gaveUp
 }
 
 // takePendingAccept returns the oldest waiting cid-less Accept whose caller
@@ -1441,11 +1474,9 @@ func (s *UtpSocket) takePendingAccept() *acceptRequest {
 	for len(s.pendingAccepts) > 0 {
 		accept := s.pendingAccepts[0]
 		s.pendingAccepts = s.pendingAccepts[1:]
-		// Skip callers that have already returned via their own context.
-		select {
-		case <-accept.ctx.Done():
+		// Skip callers that have already returned.
+		if accept.abandoned() {
 			continue
-		default:
 		}
 		return accept
 	}
@@ -1686,20 +1717,24 @@ func (s *UtpSocket) Accept(ctx context.Context, config *ConnectionConfig) (*UtpS
 	accept := newAccept(ctx, nil, config)
 	select {
 	case s.accepts <- accept:
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	case <-s.ctx.Done():
 		return nil, s.ctx.Err()
 	}
-	return accept.wait(ctx)
+	return accept.wait(ctx, s.ctx)
 }
 
 func (s *UtpSocket) AcceptWithCid(ctx context.Context, cid *ConnectionId, config *ConnectionConfig) (*UtpStream, error) {
 	accept := newAccept(ctx, cid, config)
 	select {
 	case s.acceptsWithCidCh <- accept:
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	case <-s.ctx.Done():
 		return nil, s.ctx.Err()
 	}
-	return accept.wait(ctx)
+	return accept.wait(ctx, s.ctx)
 }
 
 func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *ConnectionConfig) (*UtpStream, error) {

@@ -43,6 +43,11 @@ type UtpStream struct {
 	// readClosed is set by CloseRead: this end has finished reading, but is
 	// still sending. The mirror of writeClosed, and libutp's read_shutdown.
 	readClosed atomic.Bool
+	// readShutCh is closed by CloseRead, to wake a Read already waiting.
+	// Made by the first read that waits (readClosedSignal), so a stream
+	// never read from carries none. Guarded by readShutMu.
+	readShutMu sync.Mutex
+	readShutCh chan struct{}
 	connHandle *sync.WaitGroup
 	conn       *connection
 	// linger, set by the socket that made this stream, takes it over at
@@ -292,11 +297,14 @@ func (s *UtpStream) ReadToEOF(ctx context.Context, buf *[]byte) (int, error) {
 	n := 0
 	data := (*buf)[:0]
 	streamDone := s.streamCtx.Done()
+	readShut := s.readClosedSignal()
 	for {
 		select {
 		case <-ctx.Done():
 			s.logger.Error("ctx has been canceled", "err", ctx.Err(), "readLength", n)
 			return n, ctx.Err()
+		case <-readShut:
+			return n, ErrReadClosed
 		case <-streamDone:
 			// The connection is ending. Its loop closes the read queue as it
 			// returns, behind what had arrived: read on to that.
@@ -359,6 +367,8 @@ func (s *UtpStream) Read(ctx context.Context, buf []byte) (int, error) {
 	select {
 	case <-ctx.Done():
 		return 0, ctx.Err()
+	case <-s.readClosedSignal():
+		return 0, ErrReadClosed
 	case <-s.streamCtx.Done():
 		// The connection is ending. Its loop closes the read queue as it
 		// returns, behind what had arrived, with the reason it ended in
@@ -487,8 +497,9 @@ func (s *UtpStream) WriteV(ctx context.Context, bufs [][]byte) (int, error) {
 // that is not connected (utp_internal.cpp:3181), its embedder having been
 // told why by the error callback.
 func (s *UtpStream) writeQueued(ctx context.Context, queued []byte, resCh chan *readOrWriteResult) (int, error) {
+	write := &queuedWrite{data: queued, resultCh: resCh}
 	select {
-	case s.writes <- &queuedWrite{queued, 0, resCh}:
+	case s.writes <- write:
 		s.wakeLoop()
 	case <-ctx.Done():
 		return 0, ctx.Err()
@@ -511,7 +522,14 @@ func (s *UtpStream) writeQueued(ctx context.Context, queued []byte, resCh chan *
 			return writeRes.Len, writeRes.Err
 		}
 	case <-ctx.Done():
-		return 0, ctx.Err()
+		// What the connection has already taken will be sent, so it is
+		// reported; the rest is withdrawn. The caller can retry from there
+		// without sending anything twice.
+		n, res := write.cancel()
+		if res != nil {
+			return res.Len, res.Err
+		}
+		return n, ctx.Err()
 	case <-s.ended:
 		// An answer sent before the end still counts.
 		select {
@@ -605,12 +623,36 @@ func (s *UtpStream) CloseRead() error {
 	if s.readClosed.Swap(true) {
 		return nil
 	}
+	s.readShutMu.Lock()
+	if s.readShutCh != nil {
+		close(s.readShutCh)
+	}
+	s.readShutMu.Unlock()
+	// The event only wakes the loop; the flag is what it acts on (see
+	// afterPass), so an event dropped from a full queue loses nothing.
 	select {
 	case s.streamEvents <- &streamEvent{Type: streamCloseRead}:
 	default:
 	}
 	s.wakeLoop()
 	return nil
+}
+
+// readClosedSignal is closed once CloseRead has been called.
+//
+// A Read waiting on an open, silent stream used to wait through CloseRead:
+// the flag was checked only before the wait, as net.TCPConn's CloseRead does
+// not leave a blocked Read waiting. From the release review of 9c44c4f (R6).
+func (s *UtpStream) readClosedSignal() <-chan struct{} {
+	s.readShutMu.Lock()
+	defer s.readShutMu.Unlock()
+	if s.readShutCh == nil {
+		s.readShutCh = make(chan struct{})
+		if s.readClosed.Load() {
+			close(s.readShutCh)
+		}
+	}
+	return s.readShutCh
 }
 
 // Done is closed once the connection has ended and holds nothing more: its
