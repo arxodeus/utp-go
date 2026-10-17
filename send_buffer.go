@@ -34,19 +34,11 @@ func (sb *sendBuffer) IsEmpty() bool {
 
 // Write copies data into the buffer and reports how much it took.
 //
-// The copy is not an optimisation to remove. This buffer used to retain the
-// caller's slice, and UtpStream.Write returns as soon as the bytes are
-// accepted here -- before they are transmitted. So the caller got control back
-// while the connection still held a reference to their array, and anything
-// that reuses its buffer between writes had its queued bytes overwritten with
-// whatever it read next.
-//
-// That is not an exotic pattern: io.Writer's contract says "Implementations
-// must not retain p", and io.Copy, bufio.Writer and every echo loop rely on
-// it. It showed up as corrupted payloads in any full-duplex exchange -- read
-// into a buffer, write it back, repeat -- while every unidirectional test in
-// this repository passed, because they each write one buffer once and never
-// touch it again.
+// The copy is not an optimisation to remove. UtpStream.Write returns as soon
+// as the bytes are accepted here -- before they are transmitted -- and
+// io.Writer's contract says "Implementations must not retain p": io.Copy,
+// bufio.Writer and every echo loop reuse their buffer between writes.
+// History: HISTORY.md, "sendBuffer.Write".
 func (sb *sendBuffer) Write(data []byte) int {
 	available := sb.Available()
 	n := len(data)

@@ -144,30 +144,20 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 		}
 
 		// A timeout for a packet the peer has already acknowledged is not a
-		// timeout at all, and acting on one is what made a quiet connection
-		// punish itself.
+		// timeout at all.
 		//
 		// Timers are armed per packet and cancelled when the ack arrives, but
 		// cancelling cannot stop one that has already fired: it is out of the
-		// wheel and on its way to this loop, and disarmAcked will not find
-		// it. The delivery then arrived for a packet that had been
-		// acknowledged in the meantime -- and the early-timer guard below,
-		// which asks only what the clock says, re-armed it. Each re-arm put
-		// the same dead timer back in the wheel, so the armed set grew by one
-		// per write and never shrank, and whenever several of them landed
-		// past the deadline at once they were counted as a real timeout: the
-		// window halved and packets the peer already had were sent again.
-		//
-		// Measured on a link with no loss configured, after a bulk transfer
-		// followed by 200-byte writes every 200ms: 2 timeouts, 12
-		// retransmissions of delivered data, and the congestion window taken
-		// from 55513 to 24831 bytes for nothing. That is the shape a
-		// BitTorrent peer connection spends most of its life in.
+		// wheel and on its way to this loop, and disarmAcked will not find it.
+		// Acting on it -- re-arming it, or counting it towards a timeout -- would
+		// halve the window and resend packets the peer already has, on a quiet
+		// connection with no loss at all.
 		//
 		// libutp cannot reach this state. It has one timeout deadline rather
 		// than a timer per packet, and it retransmits out of its outgoing
 		// buffer (utp_internal.cpp:1230-1244), which no longer holds a packet
-		// the peer has acknowledged.
+		// the peer has acknowledged. History: HISTORY.md, "onTimeout: a timeout
+		// for an acknowledged packet".
 		if c.state.SentPackets != nil &&
 			!c.state.SentPackets.Outstanding(originPacket.Header.SeqNum) {
 			return
@@ -183,25 +173,12 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 		// rest go out oldest first from flush_packets, as the congestion
 		// window -- which the timeout has just cut to one packet (:1225) --
 		// allows, or one per acknowledgement through the fast-timeout path
-		// (:2256-2282).
-		//
-		// This connection arms a timer per packet, so an expiry arrives as
-		// several callbacks. It used to resend every packet whose callback
-		// came, on the reasoning that libutp "marks every outstanding packet
-		// need_resend". Marking is not sending. Measured with the data
-		// direction blacked out for three seconds (netem.TestRTOBurstMeasure):
-		// libutp resent one packet at the timeout; this resent its whole
-		// window, 75 packets, and most of them again a second later, because
-		// the callbacks after the first were measured against the old
-		// deadline and never counted as a timeout. On a path that is
-		// congested or down, that is the opposite of what a timeout is for.
-		//
-		// An earlier attempt at this went wrong the other way: it skipped the
-		// other callbacks' resends and nothing replaced them, which left holes
-		// fast retransmit could not fill, and the 5%-loss benchmark stopped
-		// completing. What replaces them here is libutp's own two routes:
-		// processWrites resends marked packets ahead of new data, and
-		// fastTimeout resends the oldest on each acknowledgement.
+		// (:2256-2282). This connection arms a timer per packet, so an expiry
+		// arrives as several callbacks; the others resend nothing, and
+		// libutp's two routes replace them: processWrites resends marked
+		// packets ahead of new data, and fastTimeout resends the oldest on each
+		// acknowledgement. netem.TestRTOBurstMeasure; history: HISTORY.md,
+		// "onTimeout: one resend per timeout".
 		now := c.now()
 
 		// A retransmission timeout on the MTU probe, with nothing else
@@ -347,7 +324,8 @@ func (c *connection) noteResend(pkt *packet) {
 // would also have made.
 //
 // Every resend goes through transmit, which notes it (noteResend), so "not
-// resent" is not a guess.
+// resent" is not a guess. DEVIATIONS.md; history: HISTORY.md,
+// "checkSpuriousLoss".
 func (c *connection) checkSpuriousLoss(fullAcked *circularRangeInclusive, selected []uint16) {
 	u, ok := c.state.SentPackets.congestionCtrl.(lossUndoer)
 	if !ok {
@@ -611,12 +589,8 @@ const duplicateAcksBeforeResend = 3
 // libutp: utp_internal.cpp:1921-1941. This is the second of its two routes to
 // lowering the MTU ceiling, and the only one that works during a bulk
 // transfer. The other needs the probe to be the only packet outstanding
-// (:1152-1167, and onTimeout), which a saturated send
-// window never leaves it -- so without this a probe dropped for being too big
-// is retransmitted fragmentable, arrives, is acknowledged, and the search
-// concludes the size was fine. Measured before this existed: on a 1000-byte
-// path with a 1400-byte ceiling, the search settled at 1384 whether or not the
-// probe was refused.
+// (:1152-1167, and onTimeout), which a saturated send window never leaves
+// it.
 //
 // Three rules, all libutp's:
 //
@@ -639,19 +613,15 @@ const duplicateAcksBeforeResend = 3
 // another can be sent, and the ceiling is left alone.
 //
 // It acts once per run of duplicates -- a run ends when the acknowledgement
-// moves -- on the first duplicate that finds the count at three or more. That
-// is the one place this differs from libutp, whose test is equality with three
-// (`duplicate_ack == DUPLICATE_ACKS_BEFORE_RESEND`, :1928). The selective ack
-// sets the count (noteSelectiveAckCount), and an acknowledgement covering a
-// read batch can name more than three later packets at once: the count jumps
-// past three without ever equalling it, and libutp never concludes anything
-// from that run. Its own embedders batch reads that way, and so does ours on a
-// real socket. Measured over netem with a receiver that batches as a real
-// socket does: TestDontFragmentBringsTheSearchWithinThePath failed 9 runs in
-// 10 under the equality test, the search never once hearing that a probe was
-// refused. Three or more is the same evidence -- at least three packets after
-// the hole arrived and the hole did not -- that libutp's selective ack already
-// resends on (`count >= DUPLICATE_ACKS_BEFORE_RESEND`, :1538).
+// moves -- on the first duplicate that finds the count at three or more,
+// where libutp tests equality with three (`duplicate_ack ==
+// DUPLICATE_ACKS_BEFORE_RESEND`, :1928). The selective ack sets the count
+// (noteSelectiveAckCount), and an acknowledgement covering a read batch can
+// name more than three later packets at once, so the count can jump past
+// three without ever equalling it. Three or more is the same evidence that
+// libutp's selective ack already resends on (`count >=
+// DUPLICATE_ACKS_BEFORE_RESEND`, :1538). History: HISTORY.md,
+// "noteDuplicateAck".
 func (c *connection) noteDuplicateAck(packetType packetType, ackNum uint16) {
 	if c.state.stateType != connConnected || c.state.SentPackets == nil {
 		return

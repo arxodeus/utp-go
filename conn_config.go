@@ -53,14 +53,9 @@ type ConnectionConfig struct {
 	//
 	// It governs only what is *stamped and measured* -- the timestamp field,
 	// the timestamp difference echoed back, and the one-way delays derived
-	// from them. Scheduling still runs on real timers: this is not a virtual
-	// clock, and a connection given a frozen NowMicros still retransmits on
-	// time.
-	//
-	// It exists because libutp's driver reads a virtual clock where this
-	// library read the real one, so the conformance corpus could not compare
-	// the two timestamp fields at all and listed both as tolerated
-	// differences. Pinning this to the driver's clock removes the tolerance;
+	// from them. Scheduling runs on Clock, real time by default: a
+	// connection given a frozen NowMicros still retransmits on time. The conformance corpus pins it to
+	// libutp's driver's clock, so the timestamp fields can be compared;
 	// see conformance_harness_test.go.
 	NowMicros func() uint32
 
@@ -77,8 +72,7 @@ type ConnectionConfig struct {
 	// does: a sender whose clock loses time sees its measured delay grow
 	// without bound, and the base only follows once the inflated samples have
 	// aged out. The steady-state error is the window multiplied by the drift
-	// rate, which is a relationship nothing could test while the window was a
-	// constant two minutes. See netem.TestClockDriftInflatesTheDelaySignal.
+	// rate. See netem.TestClockDriftInflatesTheDelaySignal.
 	DelayWindow time.Duration
 	WindowSize  uint32
 	BufferSize  int
@@ -128,13 +122,9 @@ type ConnectionConfig struct {
 	// (flush_packets, utp_internal.cpp:974-982): a packet smaller than a
 	// full one waits while anything else is unacknowledged, and later writes
 	// join it, until it fills, everything before it is acknowledged, or the
-	// write side closes.
-	//
-	// Measured against libutp, 2,000 messages of 100 bytes written every
-	// 0.5 ms over a 20 ms round trip: with the rule, both send them in about
-	// 140 packets; with NoDelay, 2,000 packets, and each message arrives
-	// sooner -- a median of 10.9 ms against 15.3 ms, a 99th percentile of
-	// 19.9 ms against 44.8 ms.
+	// write side closes. With the rule small writes share packets; with
+	// NoDelay each goes out at once and arrives sooner. The measurement:
+	// HISTORY.md, "ConnectionConfig.NoDelay".
 	NoDelay bool
 }
 

@@ -230,20 +230,13 @@ func (s *UtpSocket) handleNewAcceptEvent(accept *acceptRequest) {
 		s.selectAcceptHelper(incomingAccept.cid, incomingAccept.pkt, accept)
 		return
 	}
-	// Otherwise wait for one.
+	// Otherwise wait for one, so that the ordinary server pattern -- call
+	// Accept, then have a client connect -- works: the SYN that arrives a
+	// moment later finds the request.
 	//
-	// This used to fail outright with "no incoming conn" when nothing had
-	// arrived yet, which made Accept unusable for the ordinary server
-	// pattern: call Accept, then have a client connect. The SYN that arrived
-	// a moment later was parked in incomingConns with nobody left to claim
-	// it, and the peer retried until it gave up. The cid-specific path has
-	// always queued the request; this one now does too.
-	//
-	// Those already abandoned go first. They were dropped only when a SYN
-	// came to claim one, so on a socket nobody connected to, an accept loop
-	// with a timeout grew this list by one per timeout for as long as it
-	// ran (release review of 9c44c4f, R7). Pruned on each arrival, it holds
-	// at most the live requests and those abandoned since the last one.
+	// Those already abandoned go first: pruned on each arrival, the list
+	// holds at most the live requests and those abandoned since the last
+	// one. History: HISTORY.md, "handleNewAcceptEvent: waiting".
 	live := s.pendingAccepts[:0]
 	for _, a := range s.pendingAccepts {
 		if !a.abandoned() {

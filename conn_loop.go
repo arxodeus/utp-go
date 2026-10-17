@@ -5,20 +5,14 @@ import (
 )
 
 // lazyTimer is a Timer made the first time it is armed. Until then its
-// channel is nil, which a select never takes.
-//
-// A connection used to make all seven of its timers at the start, stopped,
-// whether it would ever arm them or not: the RACK timer without RACK, the
-// idle timeout without one configured, the zero-window probe without a
-// closed window. About 240 bytes each, held for the connection's life.
+// channel is nil, which a select never takes, so a connection holds only
+// the timers it has used.
 //
 // A timer made while the event loop is parked is one its select is not
 // watching: the loop chose its channels before the timer existed, and the
 // socket's reader arms timers in passes it runs inline. So making one wakes
-// the loop (kickLoop), which goes round and selects on it. Without that, the
-// first fire of a timer the reader made went unseen until something else
-// woke the loop -- on the virtual clock, never:
-// TestTailBurstLossAgainstLibutp hung.
+// the loop (kickLoop), which goes round and selects on it. History:
+// HISTORY.md, "lazyTimer".
 type lazyTimer struct {
 	c *connection
 	t Timer
@@ -170,6 +164,7 @@ func (c *connection) setupLoop(stream *UtpStream) {
 	// retransmission timer exists, and nothing will arrive until the peer
 	// chooses to speak. Without this the probe would be armed and never
 	// checked.
+	//
 	// An established connection that has gone quiet still has to say
 	// something occasionally, or a NAT drops its mapping and the peer's own
 	// idle timeout eventually kills it. libutp checks
@@ -177,15 +172,9 @@ func (c *connection) setupLoop(stream *UtpStream) {
 	// pass (utp_internal.cpp:1271-1274), so its keep-alive leaves one
 	// interval after the last packet, to within the 500ms libutp allows
 	// between passes however often its embedder calls it
-	// (TIMEOUT_CHECK_INTERVAL, :37, :3284).
-	//
-	// This is a timer aimed at that instant, re-aimed from lastSentPacket
-	// every time it fires. It used to be a ticker at the interval, counted
-	// from connection start, which checked the same condition but only on
-	// the tick: a connection that went quiet just after one failed the check
-	// at the next and waited for the one after -- up to twice the interval,
-	// 58 seconds where libutp's is 29 and a NAT mapping commonly lasts 30.
-	// Measured: 58.21s against 29.70s. See KNOWN-LIMITATIONS.md, section 2e.
+	// (TIMEOUT_CHECK_INTERVAL, :37, :3284). This is a timer aimed at that
+	// instant, re-aimed from lastSentPacket every time it fires. History:
+	// HISTORY.md, "setupLoop: the zero-window probe and keep-alive timers".
 	t.keepAlive = c.timeSource().NewTimer(c.keepAliveIntervalOrDefault())
 
 	t.probe = c.newLazyTimer()
@@ -197,28 +186,19 @@ func (c *connection) setupLoop(stream *UtpStream) {
 	//
 	// Retransmission timers are armed per packet, so a connection with
 	// nothing outstanding has none, and its event loop is completely
-	// quiescent -- it does not even produce a metrics sample. libutp is not
-	// built that way: it keeps one deadline per socket, never clears it when
+	// quiescent. libutp keeps one deadline per socket and never clears it when
 	// the window empties (it is set at utp_internal.cpp:997, reset on each
-	// acknowledged packet at :1389, re-armed on each expiry at :1204), and
-	// when it passes with nothing in flight the idle branch decays the window
-	// by a third (:1216-1222). Because `retransmit_count` is only incremented
-	// when something *is* outstanding (:1240), that repeats without ever
-	// killing the connection.
-	//
-	// Measured against real libutp over the same emulated link, 8 seconds
-	// idle after a bulk transfer: libutp's first flight afterwards was 15972
-	// bytes against 55176 with no idle -- 29%, which is (2/3)^3, three decays
-	// at one, three and seven RTOs. Ours was unchanged at 55375, so it would
-	// have put a window it last measured 8 seconds ago straight back onto a
-	// path it has not probed since. See netem.TestLibutpIdleWindowDecay.
+	// acknowledged packet at :1389, re-armed on each expiry at :1204); when it
+	// passes with nothing in flight the idle branch decays the window by a
+	// third (:1216-1222). Because `retransmit_count` is only incremented when
+	// something *is* outstanding (:1240), that repeats without ever killing
+	// the connection. netem.TestLibutpIdleWindowDecay holds this one to it.
 	//
 	// A resting connection has no loop to wake: its rest timer is already
 	// set for this deadline (armDormant), and is moved only if a pass the
-	// reader ran has brought the deadline forward -- which nothing does
-	// while there is nothing in flight, but which costs a comparison to be
-	// sure of. Resetting it unconditionally cost a timer operation for every
-	// read batch a resting receiver handled.
+	// reader ran has brought the deadline forward, which costs a comparison
+	// to be sure of rather than a timer operation per read batch. History:
+	// HISTORY.md, "setupLoop: the idle RTO".
 	t.idleRto = c.newLazyTimer()
 	c.armIdleRto = func(d time.Duration) {
 		if c.asleep {
@@ -292,17 +272,10 @@ func (c *connection) finishLoop() {
 	t.idle.stop()
 	c.endDormancy()
 	// Tell the socket to drop this connection on *every* exit, not only the
-	// one where the state machine reached connClosed.
-	//
-	// It used to be reported from that one branch alone, so a connection torn
-	// down by a cancelled context -- which is what an abandoned or failed
-	// connection attempt is -- left its entry in the socket's table forever.
-	// Measured before the fix: 40 attempts to a dead port left 40 tracked
-	// connections behind, permanently. A client dialling unreachable peers,
-	// which is most of them, accumulates one of these per attempt.
-	//
-	// The goroutines were fine; it is the map entry and its channel that
-	// leaked, which is why nothing that counted goroutines noticed.
+	// one where the state machine reached connClosed: a connection torn down
+	// by a cancelled context -- which is what an abandoned or failed
+	// connection attempt is -- must leave the socket's table too. History:
+	// HISTORY.md, "finishLoop: reporting to the socket".
 	c.notifySocketShutdown()
 	// Report the end of the stream to the reader on every exit.
 	//
@@ -705,22 +678,19 @@ func (c *connection) afterPass() (moreToWrite bool) {
 	//
 	// This ordering is libutp's. It hands bytes to its embedder inside
 	// utp_process_incoming and acknowledges afterwards, which is why
-	// utp_read_drained finds nothing to report on an ordinary packet.
-	// Draining on a later pass instead -- which is what this loop did --
-	// makes every drain look like the window growing, and reporting that
-	// doubles the reverse traffic. Measured: every data packet drew two
-	// acknowledgements instead of one, which the corpus caught at once.
-	//
-	// ackPending is a bool and flushAck runs once per pass, so the drain
-	// and the data that prompted it now share one acknowledgement.
+	// utp_read_drained finds nothing to report on an ordinary packet. A
+	// drain on a later pass would look like the window growing, and report
+	// it with a second acknowledgement. ackPending is a bool and flushAck
+	// runs once per pass, so the drain and the data that prompted it share
+	// one acknowledgement.
 	//
 	// What the drain will take is counted first (drainable) and advertised
 	// as if already taken (drainCredit, recvWindow); the drain itself runs
 	// once the acknowledgement has gone. The packets are the same either
-	// way. What moves is the work: copying the bytes out, allocating what
-	// the reader is handed, and waking the reader -- measured at 4-5us of
-	// a cold reader's path from datagram to acknowledgement, which libutp,
-	// handing its bytes up through a callback, does not spend there.
+	// way. What moves is the work -- copying the bytes out, allocating what
+	// the reader is handed, and waking the reader -- off the path from
+	// datagram to acknowledgement. History: HISTORY.md, "afterPass: drain
+	// before acknowledging".
 	c.drainCredit = c.drainable()
 	// One reading of the clock for the whole pass, as libutp reads
 	// ctx->current_ms once per call into it.
@@ -799,16 +769,13 @@ func (c *connection) receiveInline(pkt *packet) bool {
 // event loop's: one goroutine per connection does the sending, and the reader,
 // which serves every connection on the socket, does not. libutp sends from
 // inside utp_process_incoming, on its one thread; done here, the reader's
-// write system calls for every sender on the socket left it no time to read.
-// Measured with 1000 transfers on one socket pair: the sending side's reader
-// was busy 90-100% of the time handling 5,000 acknowledgements a second, they
-// waited in the kernel for seconds, RTT samples reached 17 s, and a transfer
-// whose last packets were lost waited out a retransmission timeout grown from
-// them past the test's two minutes. The acknowledgement this pass owes goes
-// out with the data, as it would have here.
+// write system calls for every sender on the socket would leave it no time
+// to read. The acknowledgement this pass owes goes out with the data, as it
+// would have here.
 //
 // Otherwise the event loop is woken only for what it alone can do: tear the
-// connection down, or go on sending past one pass's worth.
+// connection down, or go on sending past one pass's worth. History:
+// HISTORY.md, "endBatch".
 func (c *connection) endBatch() {
 	c.mu.Lock()
 	defer c.mu.Unlock()

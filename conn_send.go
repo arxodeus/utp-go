@@ -196,22 +196,18 @@ func (c *connection) processWrites(now time.Time) {
 	// :963-985). is_full is called there with no argument, so it charges a
 	// whole packet_size whatever the queued packet actually holds (:933-934),
 	// and refuses when cur_window + packet_size > min(max_window, opt_sndbuf,
-	// max_window_user) (:936, :956). Two things follow, and both used to be
-	// different here:
+	// max_window_user) (:936, :956). Two things follow:
 	//
 	//   - Bytes in flight count against the peer's window, not only against
 	//     the congestion window. The peer's advertisement is how much it can
 	//     take beyond what it has already acknowledged; everything we have
-	//     sent since is already spending it. Without this we overran a
-	//     receiver's buffer by up to a full window whenever its application
-	//     fell behind, and every packet past its room was dropped and had to
-	//     be retransmitted.
+	//     sent since is already spending it.
 	//   - Nothing is sent into less than a full packet of room, and a packet
-	//     is never cut down to fit what room there is. We used to fill a
-	//     window to the byte with whatever size fitted.
+	//     is never cut down to fit what room there is.
 	//
 	// opt_sndbuf has no counterpart: our send buffer bounds what the
-	// application may queue, not what may be in flight.
+	// application may queue, not what may be in flight. History: HISTORY.md,
+	// "processWrites: composing packets".
 	packetSize := c.mtu.payloadSize()
 	maxSend := minUint32(c.state.SentPackets.CongestionWindow(), c.effectivePeerWindow(now))
 	// And never more than maxOutstandingPackets in flight, however small
@@ -471,11 +467,11 @@ func (c *connection) transmit(packet *packet, now time.Time, firstTransmission b
 	//
 	// A Conn that cannot -- the libutp driver, an emulated network that does
 	// not model fragmentation, an operating system with no such socket option
-	// -- sends it normally, which is what every probe did before this existed.
-	// The cost of that is real and is why the bit is worth carrying: on IPv4 a
-	// router may fragment an oversized probe rather than drop it, so the probe
-	// is acknowledged, the floor rises, and the search settles on a size that
-	// works only because every packet at it is being fragmented.
+	// -- sends it normally. On IPv4 a router may then fragment an oversized
+	// probe rather than drop it, so the probe is acknowledged, the floor rises,
+	// and the search settles on a size that works only because every packet at
+	// it is being fragmented. History: HISTORY.md, "transmit: the MTU
+	// probe".
 	isProbe := false
 	if datagramSize := uint32(packet.EncodedLen()); c.mtu.eligibleProbe(datagramSize, firstTransmission) {
 		c.mtu.beginProbe(packet.Header.SeqNum, datagramSize)

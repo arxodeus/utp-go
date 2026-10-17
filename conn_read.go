@@ -162,23 +162,14 @@ func (c *connection) recvWindow() uint32 {
 //
 // Without it the peer finds out only from the next acknowledgement this end
 // happens to send -- and while it is blocked on a window too small to fit a
-// packet it sends nothing, so nothing draws one.
-//
-// **The test is growth, not growth from zero, and the difference is a hang.**
-// An earlier version of this fired only when the window last advertised was
-// zero, on the reasoning that an ordinary drain is already covered by the
-// acknowledgement owed for the data. It deadlocked one run in three. The
-// trace: the window fell to 861 bytes, which is not zero but is less than a
-// packet, so the sender could not fit one and went quiet; nothing arrived, so
-// nothing was acknowledged; the application read and freed the buffer, and the
-// zero-only test declined to mention it. Both ends sat silent for seconds at a
-// time and a 512KB transfer delivered 154KB before the test gave up. A window
-// too small to use is as blocking as a closed one, and libutp's condition
-// covers both because it compares against what was actually last sent.
+// packet it sends nothing, so nothing draws one. The test is growth, not
+// growth from zero: a window too small to use is as blocking as a closed
+// one, and libutp's condition covers both because it compares against what
+// was actually last sent.
 //
 // libutp's distinction between acknowledging now and scheduling is not
 // preserved, because it does not exist here: flushAck runs at the end of this
-// same pass either way.
+// same pass either way. History: HISTORY.md, "connection.onReadDrained".
 func (c *connection) onReadDrained() {
 	if c.state == nil || c.state.stateType != connConnected || c.state.RecvBuf == nil {
 		return
@@ -272,29 +263,20 @@ func (c *connection) deliverTerminalRead() {
 
 // readEndErr is what the reader is told when the stream ends: the error that
 // ended the connection, or nil for a clean end -- and a clean end means the
-// reader has been given everything the peer sent, up to its FIN.
-//
-// A connection that ended without error but short of that reported nil too.
-// The case that showed it: the consumer closes the stream while bytes are
-// still on their way to its reader, teardown drops them (they are owed to
-// nobody), and a ReadToEOF still running returned the bytes it had so far
-// with a nil error -- a truncated transfer reported as a complete one.
-// TestDataValidWhenResendingSynStateResponse saw it about once in 20 runs
-// under -race, before this change as after. It is ErrReadClosed now: this end
-// closed before it had read everything.
+// reader has been given everything the peer sent, up to its FIN. A
+// connection that ended without error but short of that reports
+// ErrReadClosed: this end closed before it had read everything.
 //
 // Once everything the peer sent before its FIN has arrived and been handed
 // on, the read side has ended cleanly, whatever ends the connection
 // afterwards. libutp has delivered every byte to its embedder by then and
 // signalled UTP_STATE_EOF (utp_internal.cpp:2339-2343, :2355-2357); a RESET
 // that follows is reported as an error but takes nothing back, and
-// go-libutp's reader returns the data and io.EOF before it
-// (conn.go, readNoWait). It happens: the side that closed first destroys
+// go-libutp's reader returns the data and io.EOF before it (go-libutp's
+// conn.go, readNoWait). It happens: the side that closed first destroys
 // its connection once its FIN is acknowledged, and answers whatever the
 // other side sends next -- a window update as its reader drains -- with a
-// RESET (:2179-2182, :2907-2944). Here that reset turned a complete
-// transfer into "read: reset", one 16 MB loopback transfer in ten under
-// load (integrated.TestUdpTransfer).
+// RESET (:2179-2182, :2907-2944). History: HISTORY.md, "readEndErr".
 func (c *connection) readEndErr() error {
 	if !c.readsTruncated && c.receivedThroughFin() {
 		return nil

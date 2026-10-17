@@ -16,29 +16,17 @@ type timeWheelItem[K comparable, P any] struct {
 	rounds int
 }
 
-// timeWheel is a hashed timing wheel.
+// timeWheel is a hashed timing wheel. An item fires on the first tick at or
+// after its deadline: never early, and less than one interval late. A rounds
+// counter lets a delay exceed slotNum*interval, so exponential backoff is not
+// clamped.
 //
-// Two properties matter for retransmission timing, and the original
-// implementation had neither:
+// Removal is O(1): an index maps each key to the slot holding it, which a
+// wheel shared across a whole socket needs.
 //
-//   - Resolution. A delay shorter than one tick used to land in the slot
-//     being processed next, so it fired somewhere in [0, interval) rather
-//     than at the requested time. With a one-second interval and a 500 ms
-//     RTO, that declared packets lost long before their ack could arrive --
-//     about 6% of them on a lossless path. An item now fires on the first
-//     tick at or after its deadline: never early, and less than one interval
-//     late.
-//   - Range. Delays beyond slotNum*interval used to be clamped to that
-//     ceiling, so exponential RTO backoff stopped growing. The rounds
-//     counter removes the ceiling.
-//
-// Removal is O(1): an index maps each key to the slot holding it. Scanning
-// every slot was acceptable for a per-connection wheel but not for one shared
-// across a whole socket.
 // It is generic in its key as well as its value, and keeps items by value,
-// so that scheduling one costs no allocation: with an interface key and a
-// pointer per item, the retransmission wheel allocated three objects for every
-// packet sent.
+// so that scheduling one costs no allocation. History: HISTORY.md,
+// "timeWheel".
 type timeWheel[K comparable, P any] struct {
 	stopped  chan struct{}
 	interval time.Duration
@@ -102,6 +90,10 @@ func newTimeWheelWithClock[K comparable, P any](interval time.Duration, slotNum 
 	return tw
 }
 
+// wheelResolution is how precisely a deadline is honoured: libutp's
+// millisecond. See put.
+const wheelResolution = time.Millisecond
+
 // put schedules value to expire after delay. Re-putting an existing key
 // reschedules it.
 //
@@ -111,24 +103,10 @@ func newTimeWheelWithClock[K comparable, P any](interval time.Duration, slotNum 
 // current_ms, a deadline is current_ms plus the timeout, and it fires once
 // (int)(current_ms - rto_timeout) >= 0 (utp_internal.cpp:997, :1147, :1389),
 // which can be up to a millisecond before the microsecond the deadline was
-// set for.
-//
-// It used to count whole intervals from now, rounded up, and add one more,
-// because the wheel ticks on its own schedule and "n ticks from now" could be
-// as little as n-1 intervals away. Placing it n intervals past the slot about
-// to be processed made it never early -- measured against libutp before that:
-// a SYN with a 200 ms timeout retransmitted at 186 ms -- but nearly a whole
-// interval late whenever the put came just after a tick. A retransmission
-// re-arms its timer from the tick that fired it, so every backoff landed one
-// 25 ms tick later than the last: a 200 ms timeout's retransmissions at 208,
-// 633, 1458 and 3084 ms against 200, 600, 1400 and 3000. Placing by deadline
-// to the microsecond did no better, because the re-arm runs a fraction of a
-// millisecond after the tick and its deadline lands just past the matching
-// one.
-// wheelResolution is how precisely a deadline is honoured: libutp's
-// millisecond. See put.
-const wheelResolution = time.Millisecond
-
+// set for. A retransmission re-arms its timer from the tick that fired it,
+// and placing by the millisecond keeps each backoff on libutp's schedule
+// rather than a tick later than the last. History: HISTORY.md,
+// "timeWheel.put".
 func (tw *timeWheel[K, P]) put(key K, value P, delay time.Duration) {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()

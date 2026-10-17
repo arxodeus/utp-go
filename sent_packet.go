@@ -64,15 +64,9 @@ type sentPackets struct {
 	// each one after it the next. Acknowledged packets at the front are
 	// dropped when a new one is added (trimAcked), so this holds what is
 	// outstanding and little else -- libutp's outbuf, which holds
-	// cur_window_packets (utp_internal.cpp:1071-1077).
-	//
-	// It used to hold every packet the connection had ever sent, indexed by
-	// distance from the initial sequence number modulo 65536. Past 65,535
-	// packets -- about 90 MB -- a new sequence number landed on an old,
-	// acknowledged entry: the new packet was booked as a retransmission of
-	// it, bytes in flight stopped counting it, and the sender ran away at
-	// the full rate of its event loop, measured at 22,000 packets a second
-	// into a 10 Mbps link. Nothing acknowledged was ever freed either.
+	// cur_window_packets (utp_internal.cpp:1071-1077) -- and indexes by
+	// distance from base, which stays right however far the sequence number
+	// has wrapped. History: HISTORY.md, "sentPackets.packets".
 	packets []*sentPacket
 	// fullAcked is what onAck last returned as cumulatively acknowledged.
 	fullAcked circularRangeInclusive
@@ -98,13 +92,9 @@ type sentPackets struct {
 	// This is libutp's `fast_resend_seq_nr` (utp_internal.cpp:470), advanced
 	// past each packet as it is resent (:1603) and forward with the
 	// cumulative ack (:2186-2188), and tested before any fast retransmit
-	// (:1537, :1560).
-	//
-	// Without it a packet declared lost stayed lost until its own ack came
-	// back, and every ack that arrived in the meantime resent it again and
-	// halved the window again. Measured on a 2%-loss link: 52 fast
-	// retransmissions for 7 distinct lost packets, one packet sent 16 extra
-	// times.
+	// (:1537, :1560). Without it each acknowledgement that still reported a
+	// packet missing would resend it again and halve the window again.
+	// History: HISTORY.md, "sentPackets.fastResendSeqNum".
 	fastResendSeqNum uint16
 	congestionCtrl   controller
 	// rack is RFC 8985's loss detection, used in place of the rule above

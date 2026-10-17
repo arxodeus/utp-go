@@ -23,16 +23,10 @@ type receiveBuffer struct {
 	logger *ulogger
 	// capacity is the configured size: what the window is advertised from
 	// and admission is checked against. buf grows towards it as data
-	// arrives, and holds the offset bytes not yet read at buf[head:].
-	//
-	// buf was allocated at the full capacity up front -- 1 MB by default --
-	// so every connection held a megabyte from the moment it was set up,
-	// whether it ever carried data or not: 1.08 MB per connection end that
-	// exchanged 1 KB, measured, where libutp holds about 10 KB per socket,
-	// its buffers growing as they are used (SizableCircularBuffer::grow,
-	// utp_internal.cpp:185-194, behind inbuf and outbuf at :549). With no idle timeout
-	// by default, that was a megabyte held for every vanished peer an
-	// application did not close. Like libutp's, it grows and is kept.
+	// arrives, and holds the offset bytes not yet read at buf[head:], as
+	// libutp's buffers grow as they are used (SizableCircularBuffer::grow,
+	// utp_internal.cpp:185-194, behind inbuf and outbuf at :549). History:
+	// HISTORY.md, "receiveBuffer.capacity".
 	capacity   int
 	buf        []byte
 	head       int
@@ -65,16 +59,11 @@ func (i *pendingItem) Less(other btree.Item) bool {
 // retransmission of the missing packet -- is refused for want of space. It is
 // refused every time the peer sends it, and the peer sends it forever.
 //
-// Measured before this existed, on a 32KB receive buffer with a reader that
-// paused for two seconds: `pending 32613, readable 0, held-behind-gap 32613`,
-// unchanged for the rest of the run while packets kept arriving and being
-// dropped. A 512KB transfer delivered 152KB and stopped. It reached that state
-// in about 3 runs in 20.
-//
-// The figure is the largest packet this peer has sent so far rather than a
-// constant, because that is exactly what the gap-filling retransmission will
-// be: the peer is resending a packet it already sent, and every packet it has
-// sent is at most this. It costs that much of the buffer, once.
+// The figure is the largest packet this peer has sent so far, which is what
+// a retransmission of a packet already received will be; for a packet that
+// never arrived, Admits takes it when nothing is readable whatever its size.
+// It costs that much of the buffer, once. History: HISTORY.md,
+// "receiveBuffer.gapReserve".
 func (rb *receiveBuffer) gapReserve() int {
 	return rb.largestPacket
 }
@@ -165,7 +154,7 @@ func (rb *receiveBuffer) releaseStorage() {
 // the bytes already delivered in order and not yet handed up.
 //
 // Deliberately not Available(). Data held out of order is not counted against
-// it, which is libutp's accounting and was not this library's:
+// it, which is libutp's accounting:
 //
 //	UTPSocket::get_rcv_window  (utp_internal.cpp:590-596)
 //	    const size_t numbuf = utp_call_get_read_buffer_size(this->ctx, this);
@@ -173,16 +162,10 @@ func (rb *receiveBuffer) releaseStorage() {
 //
 // libutp's window is what its embedder has not yet read. A packet held out of
 // order sits in conn->inbuf and never reaches utp_call_on_read until the gap
-// before it is filled, so it never enters that figure.
-//
-// Charging it, as Available() does, closes the window on the peer for holding
-// data the peer was entitled to send -- and the window is what permits the
-// peer to send, including to retransmit the very packet that would fill the
-// gap and let all of it be delivered. Measured before this split: 40,000
-// bytes held behind a gap cost exactly 40,000 of advertised window where
-// libutp lost none, and 800 packets drove it to 1,376 bytes, under the size of
-// one packet and above the zero that would have armed the peer's zero-window
-// probe. Both ends then sit silent. See KNOWN-LIMITATIONS.md.
+// before it is filled, so it never enters that figure. Charging it would
+// close the window on the peer for holding data the peer was entitled to
+// send -- and the window is what permits the peer to retransmit the very
+// packet that would fill the gap.
 //
 // # Why this does not overrun the buffer
 //
@@ -196,6 +179,7 @@ func (rb *receiveBuffer) releaseStorage() {
 // to send fits in what is left, whether it lands in order or behind a gap. A
 // peer ignoring the window is caught by admission, which drops rather than
 // writes. Over-advertising therefore costs a retransmission, never a panic.
+// History: HISTORY.md, "receiveBuffer.Window".
 func (rb *receiveBuffer) Window() int {
 	// Never negative: the in-order data can exceed the capacity by the one
 	// packet Admits lets past it.
@@ -365,22 +349,12 @@ func (rb *receiveBuffer) SelectiveAck() *selectiveAck {
 	base := rb.AckNum() + 2
 
 	// A fixed window, as libutp uses, rather than one sized to reach the
-	// highest pending sequence number.
+	// highest pending sequence number: libutp sends no more, and recovers by
+	// letting the window slide forward as the gap fills.
 	//
-	// This previously grew until every pending packet was covered, up to 2016
-	// bits. A peer that leaves a gap open and then delivers a packet far past
-	// it -- reordering, or deliberately -- made us answer every subsequent
-	// packet with a 254-byte extension where libutp answers with six bytes.
-	// The extra bits carry real information, but libutp does not send them
-	// and recovers by letting the window slide forward as the gap fills, so
-	// sending them buys nothing against a libutp peer and costs bandwidth on
-	// the ack path exactly when the path is already in trouble.
-	//
-	// Only the window is visited. Every packet held used to be copied into a
-	// map first, on every acknowledgement, to look up the window's few
-	// dozen: work and an allocation growing with the reorder buffer, which
-	// libutp's fixed-size scan of its own (utp_internal.cpp:800-830) does not
-	// have. Release review of 9c44c4f.
+	// Only the window is visited, as libutp's fixed-size scan of its own
+	// (utp_internal.cpp:800-830) visits only its window. History:
+	// HISTORY.md, "receiveBuffer.SelectiveAck: the window".
 	acked := make([]bool, selectiveAckWindow)
 	mark := func(i btree.Item) bool {
 		acked[i.(*pendingItem).seqNum-base] = true

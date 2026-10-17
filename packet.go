@@ -232,21 +232,15 @@ func (s *selectiveAck) Acked() []bool {
 	return result
 }
 
-// Encode encodes the SelectiveAck into a byte slice
 // Encode renders the selective-ack bitmask.
 //
 // Bit order is least-significant-first within each byte: the LSB of the first
 // byte represents ack_nr+2, the next bit ack_nr+3, and so on. That is what
 // BEP 29 specifies and what libutp emits -- it builds the mask with
 // `m |= 1 << i` for the i'th packet past ack_nr+2 and writes the low byte
-// first (utp_internal.cpp:806-818).
-//
-// This previously set `1 << (7-j)`, reversing the bits within every byte. The
-// decoder below reversed them the same way, so this implementation agreed
-// with itself and Go-to-Go transfers were unaffected -- but every selective
-// ack it sent was misread by any real peer, and every one it received was
-// misread in turn. Only a comparison against libutp surfaces a bug that is
-// self-consistent.
+// first (utp_internal.cpp:806-818). A reversed order would agree with a
+// decoder reversed the same way, so only a comparison against libutp checks
+// it. History: HISTORY.md, "selectiveAck.Encode".
 func (s *selectiveAck) Encode() []byte {
 	var bitmask []byte
 	for _, word := range s.acked {
@@ -350,10 +344,7 @@ func (p *packet) malformedExtensionBits() bool {
 // decoding and encoding again gives back the same bytes: unknown types
 // further along the chain, which both this decoder and libutp step over
 // (utp_internal.cpp:1844-1866), and extension 2, whose contents nothing here
-// reads. These used to be dropped. Nothing on the live path re-encodes a
-// received packet, and libutp never does, but the decoder was then exported,
-// and anything that forwarded packets through it would have stripped what it
-// did not understand.
+// reads.
 //
 // The selective ack keeps its place in the chain, and its bytes come from
 // Eack, so a caller that changes Eack changes what is written. Its place is
@@ -365,8 +356,8 @@ func (p *packet) malformedExtensionBits() bool {
 // unknown is rejected by this decoder and by libutp's version check
 // (utp_internal.cpp:2480), so leading with one would make the packet
 // unreadable. It can only happen if a caller cleared the selective ack that
-// used to come first, and then the unknown extensions ahead of the first
-// known one are dropped.
+// came first, and then the unknown extensions ahead of the first known one
+// are dropped. History: HISTORY.md, "packet.wireExtensions".
 func (p *packet) wireExtensions() []extensionData {
 	if len(p.chain) == 0 {
 		if p.Eack != nil {
@@ -405,20 +396,10 @@ func (p *packet) wireExtensions() []extensionData {
 //
 // The header's extension byte is derived from what is actually being written
 // rather than taken from p.Header, so that everything this produces can be
-// decoded again.
-//
-// It used to be taken from p.Header, which is only correct for packets built
-// by packetBuilder. A *decoded* packet keeps whatever extension byte the peer
-// sent, while Eack is nil unless a selective ack was retained -- so a packet
-// that arrived carrying a zero-length selective ack, or the extension-bits
-// extension, re-encoded to a header claiming an extension with no extension
-// bytes after it. This implementation's own decoder rejects that, with
-// "insufficient length for extension". Found by FuzzDecodePacket.
-//
-// Nothing on the live path re-encodes a decoded packet today, so this was
-// latent -- but the decoder was then exported and its result had exported
-// methods, so an external caller could reach it, and a proxy or relay built on
-// this library would have emitted unparseable packets.
+// decoded again: a decoded packet keeps whatever extension byte the peer
+// sent, while Eack is nil unless a selective ack was retained.
+// FuzzDecodePacket holds it to that; history: HISTORY.md,
+// "packet.Encode".
 func (p *packet) Encode() []byte {
 	return p.appendEncoded(make([]byte, 0, p.EncodedLen()))
 }

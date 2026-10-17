@@ -203,21 +203,8 @@ func (m ConnectionMetrics) RetransmitRate() float64 {
 // seen. This is the quantity LEDBAT exists to bound.
 //
 // Both terms come from the same series and the same direction -- the peer's
-// measurement of our outbound path. **They did not.** This subtracted
-// BaseDelay, an outbound figure, from PeerTsDiff, an inbound one, and the
-// difference between two directions is not a queue in either of them. On an
-// asymmetric path -- which is most paths, and every consumer broadband link --
-// it was a constant offset with the actual queue buried in it.
-//
-// The congestion controller was never affected: it compares the current
-// sample against the base from the same series, in hand at the point it acts
-// (congestion.go, defaultController.OnAck). What this fed was the queueing
-// delay netem's Recorder reports, which is diagnostic.
-//
-// The comment here also used to claim this was "the number the M5 gates are
-// judged on". It was not: those gates read the emulated link's own
-// MeanQueueDelay, measured at the bottleneck rather than inferred from
-// timestamps, which is why they stayed sound while this did not.
+// measurement of our outbound path. The difference between two directions'
+// delays is not a queue in either of them.
 //
 // It is only meaningful once BaseDelay has been established; before then it
 // returns zero.

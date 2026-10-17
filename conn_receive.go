@@ -41,25 +41,15 @@ const reorderOldPacketFloor = uint16(1<<16 - 1024)
 // Either way libutp drops it without buffering it, acking it, or letting it
 // touch congestion control. An old packet -- within 1024 behind, and not a
 // STATE -- additionally re-triggers an ack, because the peer evidently missed
-// the one already sent.
-//
-// This fork had no such bound. A peer could name any sequence number in the
-// 16-bit space and we would buffer the packet as out-of-order data and answer
-// it with a STATE. Three costs: unbounded pending state driven by a remote
-// party, one emitted packet per junk packet where the reference emits none,
-// and -- since the sequence number is far outside the 30-entry selective-ack
-// window -- a selective ack naming nothing at all.
+// the one already sent. Without the bound a peer could make this connection
+// hold pending state anywhere in the 16-bit space.
 //
 // The check covers ST_DATA, ST_STATE and ST_FIN only. libutp reaches it
 // through utp_process_incoming, which a SYN returns from before the check
 // (utp_internal.cpp:1878) and which a RESET never enters at all: RESET is
 // handled in its own branch at the socket level and returns
-// (utp_internal.cpp:2855-2880).
-//
-// Both the missing bound and the wrongly-included RESET were found by
-// FuzzDifferentialResponder, which runs this implementation and libutp over
-// the same generated packet sequences and fails when we answer something the
-// reference ignores.
+// (utp_internal.cpp:2855-2880). FuzzDifferentialResponder holds both to
+// libutp's; history: HISTORY.md, "outsideReorderWindow".
 func (c *connection) outsideReorderWindow(pkt *packet) bool {
 	switch pkt.Header.PacketType {
 	case st_data, st_state, st_fin:
@@ -203,47 +193,27 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 
 	// Measure how long ago the peer stamped this packet. That value is what we
 	// echo back in timestamp_difference_microseconds, and it is the peer's
-	// only delay signal for congestion control.
-	//
-	// This used to subtract the packet's timestamp_difference field from our
-	// own full-width wall clock: the wrong field, and mixing an int64 epoch
-	// clock with a uint32 wire value. The result was ~1.79e15 microseconds on
-	// every packet, which the cap below then pinned to exactly 1 second -- so
-	// every packet we sent advertised a constant 1,000,000 us delay and the
-	// peer's LEDBAT controller was fed a constant. It had no delay signal at
-	// all. See KNOWN-LIMITATIONS.md.
-	//
-	// libutp computes reply_micro the same way, as a uint32 subtraction of the
-	// packet's timestamp from the current time (utp_internal.cpp:2000-2002).
+	// only delay signal for congestion control. libutp computes reply_micro
+	// the same way, as a uint32 subtraction of the packet's timestamp from the
+	// current time (utp_internal.cpp:2000-2002).
 	//
 	// **It is measured here, after the validation above, and not before.**
 	// libutp reaches `conn->reply_micro = their_delay` only once the packet
 	// has passed the acknowledgement-number rule (:1794-1807) and the
 	// reorder-window check (:1886-1899); a packet either of those rejects
-	// never touches it. This did it first thing, so a packet the reference
-	// discards still changed what we echoed to the peer -- which is the
-	// peer's whole delay signal, and reachable by anyone who can guess a
-	// connection id and send a packet bad enough to be dropped.
+	// never touches it, and so a packet bad enough to be dropped cannot change
+	// the peer's delay signal.
 	//
-	// Found by FuzzDifferentialResponder once the clock became injectable:
-	// libutp's ack carried the *previous* packet's delay where ours carried
-	// the rejected one's. Invisible while the timestamp fields were excluded
-	// from comparison.
-	// Not capped. This used to pin anything above MaxIdleTimeout to exactly
-	// one second, which was protection against the defect described above --
-	// the wrong field, producing ~1.79e15 on every packet -- and outlived it.
-	//
-	// libutp echoes `time - p` raw, however it wraps (utp_internal.cpp:2000).
-	// A peer whose clock is ahead of ours produces a value that wraps to
-	// something enormous, and that is what the reference passes on; the
-	// receiving end has its own rule for it, not the sending end. Capping
-	// here put a number on the wire that no libutp would have sent, and
-	// FuzzDifferentialResponder showed it the moment the timestamp fields
-	// could be compared: ours 1000000 against libutp's 3487502864.
+	// Not capped: libutp echoes `time - p` raw, however it wraps
+	// (utp_internal.cpp:2000). A peer whose clock is ahead of ours produces a
+	// value that wraps to something enormous, and that is what the reference
+	// passes on; the receiving end has its own rule for it.
 	//
 	// A zero timestamp is no timestamp: `their_delay = (p == 0 ? 0 : time -
 	// p)` (:2000), and a zero is neither echoed as a delay nor sampled
-	// (:2002). This used to echo the whole of our clock back.
+	// (:2002). FuzzDifferentialResponder compares the echoed field with
+	// libutp's; history: HISTORY.md, "onPacket: measuring the peer's
+	// delay".
 	peerStamp := uint32(packet.Header.Timestamp)
 	// One reading of the microsecond clock for both uses below.
 	var nowMicros uint32
@@ -409,14 +379,8 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 		// libutp calls `schedule_ack()` (utp_internal.cpp:2404, :2472), which
 		// adds the socket to a list its embedder flushes once per pass of its
 		// event loop. So a batch of packets arriving together draws one
-		// acknowledgement, not one each.
-		//
-		// This library used to answer every packet immediately. Measured
-		// against libutp with the driver's deferred-ack flush: eight data
-		// packets in one batch drew one acknowledgement from libutp and eight
-		// from us. On an asymmetric path -- ADSL, cellular -- that reverse
-		// traffic is not free, and on a shared bottleneck it competes with
-		// the forward data.
+		// acknowledgement, not one each. History: HISTORY.md, "onPacket:
+		// deferring the acknowledgement".
 		if !c.dropUnacked {
 			c.ackPending = true
 			c.dataSinceAck++
@@ -439,16 +403,10 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	// on ST_STATE. libutp makes the socket writable again whenever an incoming
 	// packet leaves the window below full, before the early return that is
 	// specific to ST_STATE (utp_internal.cpp:2302-2308), so its embedder
-	// writes on the acknowledgements a data packet carries as well.
-	//
-	// This woke only for ST_STATE. On a connection carrying data both ways,
-	// the peer's acknowledgements ride on its data packets -- a data packet
-	// carrying the pending acknowledgement replaces the ST_STATE (send_data,
-	// :768) -- so the window opened and nothing used it until a timer
-	// happened to run. Measured: two-way transfers of 1 MB each way over
-	// 20 Mb/s, 20 ms and 5% loss took about 36 s in 3 runs of 15, against a
-	// 5 s median, one direction sitting idle with 1 MB queued, nothing in
-	// flight and a window that had room, until the idle timeout fired.
+	// writes on the acknowledgements a data packet carries as well. On a
+	// connection carrying data both ways the peer's acknowledgements ride on
+	// its data packets (send_data, :768), and a window they open must be used.
+	// History: HISTORY.md, "onPacket: waking the writer".
 	switch packet.Header.PacketType {
 	case st_state, st_data, st_fin:
 		c.wantWrite = true
@@ -506,21 +464,13 @@ func (c *connection) onState(seqNum, ackNum uint16) {
 		sentPacketsHolder := newSentPackets(c.endpoint.SynNum, congestionCtrl, c.logger)
 		sentPacketsHolder.rack.active = c.config.RACK
 
-		// Report success the same way the acceptor path does, at line ~351:
-		// send nil.
-		//
-		// This used to close the channel instead. A closed channel and a
-		// successful one are indistinguishable to a receiver that checks the
-		// `ok` flag, and UtpSocket.Connect checks it -- so every successful
-		// outgoing connection made through Connect was reported to the caller
-		// as "connection timed out", after a handshake that had in fact
-		// completed. ConnectWithCid happened to use the bare receive form and
-		// so was unaffected, which is why every test in this repository
-		// passed: they all use ConnectWithCid.
+		// Report success the same way the acceptor path does: send nil, not
+		// close the channel, which a receiver checking `ok` reads as failure.
 		//
 		// The channel is buffered with room for one, and the failure path at
 		// onTimeout only fires while the state is still connConnecting, so
-		// this send cannot block and cannot be followed by another.
+		// this send cannot block and cannot be followed by another. History:
+		// HISTORY.md, "onState: reporting a connection".
 		if c.state.connectedCh != nil {
 			c.state.connectedCh <- nil
 			c.state.connectedCh = nil

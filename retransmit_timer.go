@@ -8,18 +8,13 @@ import (
 
 const (
 	// defaultRetransmitTickInterval is the resolution of the retransmission
-	// timer wheel.
-	//
-	// This bounds how late a retransmission can be, and -- more importantly --
-	// it used to bound how *early* one could be. The wheel was previously
-	// built per connection with an interval of InitialTimeout/4, one second,
-	// which cannot express a 500 ms RTO at all: the timer landed on the next
-	// tick, uniformly 0-1000 ms away, so roughly 6% of packets on a lossless
-	// path were declared lost before their ack could arrive.
+	// timer wheel: how late a retransmission can be. A timer is never early
+	// (timeWheel.put).
 	//
 	// 25 ms is fine enough that quantisation is negligible against any
 	// realistic RTO. It is affordable only because the wheel is shared across
-	// the whole socket: one ticker, not one per connection.
+	// the whole socket: one ticker, not one per connection. History:
+	// HISTORY.md, "defaultRetransmitTickInterval".
 	defaultRetransmitTickInterval = 25 * time.Millisecond
 
 	// defaultRetransmitSlots gives one revolution of 1.6s at the default

@@ -39,6 +39,8 @@ do. See:
 | [BENCHMARKS.md](BENCHMARKS.md) | Congestion-control measurements: LEDBAT against LEDBAT++, the latecomer experiment, and what the numbers do not prove. |
 | [REFERENCE.md](REFERENCE.md) | Which copy of libutp is normative, and proof the copy used for differential testing is protocol-identical to it. |
 | [DEVIATIONS.md](DEVIATIONS.md) | Every intentional difference from libutp. |
+| [HISTORY.md](HISTORY.md) | The long reasoning behind particular pieces of code -- the defect each guards against, how it was found and measured -- moved out of the comments, which point to it. |
+| [RELEASING.md](RELEASING.md) | The release gates, and the order in which the two modules are tagged. |
 | [UPSTREAM.md](UPSTREAM.md) | What should go back to `zen-eth/utp-go`, and in what order. |
 | [native/libutp/VENDOR.md](native/libutp/VENDOR.md) | The vendored libutp: provenance, what was taken, and how the bridge works. |
 

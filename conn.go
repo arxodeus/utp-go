@@ -387,15 +387,10 @@ type connection struct {
 	// utp_internal.cpp:494): armed when the first packet enters an empty
 	// window (:994-998), reset on every acknowledgement of new data
 	// (:1388-1389), and compared against the clock before a timeout is
-	// declared (:1147-1148).
-	//
-	// This connection arms one timer per outstanding packet, so without a
-	// deadline of its own a single RTO expiry produced several timeout
-	// events, and the wheel's resolution let a callback arrive before the
-	// timeout had actually elapsed. Measured against libutp: our backoff
-	// doubled once every *two* retransmissions instead of every one, and the
-	// first retransmission fired at roughly 0.6 of the RTO. See
-	// conformance_timing_test.go.
+	// declared (:1147-1148). This connection arms a timer per outstanding
+	// packet, and this deadline is what makes their expiries one timeout,
+	// not several, and never early. conformance_timing_test.go; history:
+	// HISTORY.md, "rtoDeadline".
 	rtoDeadline time.Time
 
 	// fastTimeout is libutp's fast_timeout (utp_internal.cpp:444): set by a
@@ -463,14 +458,7 @@ func newConnection(
 		// initialised with (:2617) until a non-SYN packet arrives, and zero
 		// is a defined signal rather than a measurement: "if the actual delay
 		// is 0, it means the other end hasn't received a sample from us yet".
-		//
-		// This used to measure the SYN and echo it, which gave the initiator
-		// a delay sample a round trip earlier than the reference does -- and
-		// one derived from a single packet, carrying whatever offset stands
-		// between two clocks that have exchanged nothing yet. The corpus
-		// could not see it: the timestamp fields were excluded from
-		// comparison until this connection's clock became injectable, which
-		// is what that exclusion was hiding.
+		// History: HISTORY.md, "newConnection: no delay from the SYN".
 		peerTsDiff = 0
 		peerRecvWindow = syn.Header.WndSize
 	} else {

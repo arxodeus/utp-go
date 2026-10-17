@@ -134,16 +134,9 @@ func newUtpStream(
 	utpStream.conn.out = out
 	// The connection's lock is taken here and released by its event loop once
 	// it has set the connection up, so a packet the socket's reader brings
-	// before then waits for the setup rather than finding it half done.
-	//
-	// It used to be taken by the event loop itself, and this waited for the
-	// setup to finish -- with the socket's dispatch lock held, since the
-	// connection has to be registered atomically. That put a goroutine's
-	// scheduling latency in front of every packet on the socket, once per new
-	// connection: with 1000 connections starting together the acknowledgements
-	// of those already running were held up for seconds, their RTT samples
-	// reached 15 s, and a retransmission timeout grown from them stalled a
-	// transfer past TestManyConcurrentTransfers' two minutes.
+	// before then waits for the setup rather than finding it half done -- and
+	// nothing here waits for the loop, with the socket's dispatch lock held.
+	// History: HISTORY.md, "newUtpStream: the connection's lock".
 	utpStream.conn.mu.Lock()
 	go utpStream.start()
 	return utpStream
@@ -441,22 +434,15 @@ func (s *UtpStream) Write(ctx context.Context, buf []byte) (int, error) {
 	resCh := make(chan *readOrWriteResult, 1)
 	// The connection goroutine keeps hold of what is queued here until it has
 	// copied it into the send buffer, which may be long after this call
-	// returns: a Write that hits its deadline returns on ctx.Done below with
-	// its entry still in the connection's pending list. The caller is then
-	// free to reuse its buffer -- net.Conn makes no promise otherwise -- and
-	// the connection would copy whatever it had become.
+	// returns, and the caller is then free to reuse its buffer -- net.Conn
+	// makes no promise otherwise. So the bytes are copied first.
 	//
-	// That is not only a race detector complaint. The bytes actually sent
-	// would be the mutated ones, silently, on a write the caller had already
-	// been told failed. Found by nettest.RacyWrite under -race, which mutates
-	// the buffer immediately after every Write; nothing in this repository had
-	// reason to do that.
-	//
-	// libutp does not retain either: utp_writev copies out of the caller's
+	// libutp does not retain them either: utp_writev copies out of the caller's
 	// iovec into packet buffers before it returns (utp_internal.cpp:1057-1066),
 	// so an embedder may reuse its buffer straight away. One copy per Write is
 	// what that costs, and on the fastest link the harness models it does not
 	// show up at all -- see "What the write copy cost" in BENCHMARKS.md.
+	// History: HISTORY.md, "UtpStream.Write: the copy".
 	if len(buf) <= s.writeChunk() {
 		s.writeMu.Lock()
 		defer s.writeMu.Unlock()
@@ -477,17 +463,12 @@ func (s *UtpStream) writeChunk() int {
 }
 
 // writeChunked writes total bytes, which fill copies out of the caller's
-// buffers, a chunk at a time: each copied once the last has been taken.
-//
-// A write used to copy everything it was given before queueing any of it, so
-// a 100 MB write held 100 MB on top of the caller's own, however small the
-// send buffer it was going into -- and concurrent writes each held theirs.
-// Now a write holds at most one send buffer's worth beyond what is already
-// in the send buffer. Release review of 9c44c4f.
+// buffers, a chunk at a time: each copied once the last has been taken. A
+// write holds at most one send buffer's worth beyond what is already in the
+// send buffer, however large it is.
 //
 // writeMu keeps the chunks of one write together: concurrent writes are each
-// still written whole, one after another, as they were when each was one
-// queued write.
+// written whole, one after another.
 func (s *UtpStream) writeChunked(ctx context.Context, total int, fill func(dst []byte, off int)) (int, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -787,16 +768,10 @@ func (s *UtpStream) Close() {
 		// Return, and let the connection finish in the background: libutp's
 		// utp_close queues the FIN, sets close_requested and returns
 		// (utp_internal.cpp:3358-3380), and the socket goes on sending until
-		// utp_check_timeouts retires it.
-		//
-		// This used to wait for the connection to flush what was queued,
-		// while its peer was still answering (waitForFlush): Write returns
-		// once the data is in the send buffer, so Write then Close then exit
-		// would otherwise lose the tail. That wait now happens when the
-		// socket is closed (UtpSocket.awaitLingering), which is where an
-		// exiting program loses whatever was still in flight; closing a
-		// stream never holds its caller. Measured before: a 512 KB tail over
-		// 2 Mbps held Close for 2.3 s.
+		// utp_check_timeouts retires it. Closing the socket waits for it
+		// (UtpSocket.awaitLingering), which is where an exiting program would
+		// otherwise lose whatever was still in flight. History: HISTORY.md,
+		// "UtpStream.Close: returning at once".
 		if s.linger != nil {
 			s.linger(s)
 			return

@@ -11,10 +11,8 @@ import (
 //
 // It is libutp's UTP_GET_UDP_MTU callback (utp.h:78), which `mtu_reset` uses
 // to set the ceiling the path-MTU search starts from
-// (utp_internal.cpp:1314-1322). This library had no equivalent: the ceiling
-// was a fixed 1400 for every connection, which is safe on an ordinary path
-// and too large on a tunnelled one -- and a ceiling above what the path
-// carries is the stall recorded in KNOWN-LIMITATIONS.md.
+// (utp_internal.cpp:1314-1322). A ceiling above what the path carries is the
+// stall recorded in KNOWN-LIMITATIONS.md.
 //
 // The Conn interface deliberately has only ReadFrom, WriteTo and Close, so
 // that an emulated network and the libutp driver satisfy it as easily as a
@@ -222,15 +220,6 @@ func datagramSizeForInterfaceMTU(mtu int, local net.IP) (int, bool) {
 	return size, true
 }
 
-// pathMTUCeiling is the datagram size a new connection to peer should start
-// its search from: the configured ceiling, lowered to what the local path
-// will carry when the Conn can say.
-//
-// Lowering only. libutp takes get_udp_mtu as the ceiling outright, which on
-// loopback is 65488 and on a jumbo-frame link 8972; MaxPacketSize stays a
-// hard cap here because a ceiling that high is a probe schedule this library
-// has never been measured at, and raising it is a separate decision from
-// fixing the case where 1400 is too big. Recorded in DEVIATIONS.md.
 // ipv6SafeDatagram is the largest uTP datagram every IPv6 path carries: the
 // 1280-byte IPv6 minimum link MTU less 40 bytes of IPv6 header and 8 of UDP.
 // libutp's UDP_TEREDO_MTU, the path MTU its default callback reports for any
@@ -245,10 +234,7 @@ const ipv6SafeDatagram = 1280 - ipv6HeaderAndUDPOverhead
 // are Teredo" -- and it is, but it is also what keeps it from stalling. IPv6
 // routers do not fragment, and with ICMPv6 filtered an oversized packet
 // simply vanishes: the "path MTU below the size already adopted" stall in
-// KNOWN-LIMITATIONS.md. Measured over a 1280-byte IPv6 link with no ICMP,
-// 1 MB, five runs each: this library at its 1400 ceiling stalled every time,
-// and at 1232 delivered 6.17-6.22 Mbps. Over a 1500-byte IPv6 link the cap
-// cost nothing measurable, 6.20-6.23 against 6.22-6.26 Mbps.
+// KNOWN-LIMITATIONS.md. The measurements: HISTORY.md, "ipv6Ceiling".
 //
 // An IPv4-mapped address travels as IPv4 and is left alone, as is any peer
 // that does not carry an address.
@@ -264,6 +250,14 @@ func ipv6Ceiling(peer ConnectionPeer, configured uint16) uint16 {
 	return ipv6SafeDatagram
 }
 
+// pathMTUCeiling is the datagram size a new connection to peer should start
+// its search from: the configured ceiling, lowered to what the local path
+// will carry when the Conn can say.
+//
+// Lowering only. libutp takes get_udp_mtu as the ceiling outright, which on
+// loopback is 65488 and on a jumbo-frame link 8972; MaxPacketSize stays a
+// hard cap here because a ceiling that high is a probe schedule this library
+// has never been measured at. Recorded in DEVIATIONS.md.
 func pathMTUCeiling(socket Conn, peer ConnectionPeer, configured uint16) uint16 {
 	provider, ok := socket.(PathMTUProvider)
 	if !ok || peer == nil {

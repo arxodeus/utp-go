@@ -393,15 +393,10 @@ func (s *Socket) ReadFrom(p []byte) (int, net.Addr, error) {
 // writer is already sending may still be, as one already given to the kernel
 // may. p is copied, so the caller has it back on return either way.
 //
-// It used to check the deadline once and then write directly, so a write
-// that blocked -- on a full send buffer, or a supplied PacketConn that
-// blocks -- ignored both the deadline and any move of it. Release review of
-// 9c44c4f (R8).
-//
-// A UDP socket with no deadline set is still written directly: there is
-// nothing to time out, and handing over costs 4us and eleven allocations a
-// datagram (BenchmarkWriteTo). The one thing that gives up is a deadline set
-// while such a write is blocked, which waits for the kernel's send buffer --
+// A UDP socket with no deadline set is written directly: there is nothing to
+// time out, and handing over costs 4us and eleven allocations a datagram
+// (BenchmarkWriteTo). The one thing that gives up is a deadline set while
+// such a write is blocked, which waits for the kernel's send buffer --
 // draining at the interface's rate -- rather than ending at once.
 func (s *Socket) WriteTo(p []byte, addr net.Addr) (int, error) {
 	select {

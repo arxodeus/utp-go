@@ -48,22 +48,18 @@ func (c *connection) onIdleRto(now time.Time) {
 // lingerAck is the acknowledgement the socket should re-send if the peer keeps
 // retransmitting its FIN after this connection is gone.
 //
-// It exists because a transfer can arrive whole and still end as a failure for
-// the peer. We acknowledge the peer's FIN, hand the application its end of
-// stream and tear down; if that acknowledgement is lost the peer retransmits
-// the FIN, the socket no longer has the connection, and it answers with a
-// RESET. libutp cannot do this in return: it keeps the socket in CS_GOT_FIN
-// until its own application closes, so a retransmitted FIN is simply
-// acknowledged again (utp_internal.cpp:2369-2370).
-//
-// Measured against real libutp on a 3% loss path with reordering, before this
-// existed: 4 of 20 runs ended in UTP_ECONNRESET on a transfer whose every byte
-// had already been read.
+// A transfer can arrive whole and still end as a failure for the peer: we
+// acknowledge the peer's FIN, hand the application its end of stream and tear
+// down; if that acknowledgement is lost the peer retransmits the FIN, the
+// socket no longer has the connection, and it would answer with a RESET.
+// libutp cannot do this: it keeps the socket in CS_GOT_FIN until its own
+// application closes, so a retransmitted FIN is simply acknowledged again
+// (utp_internal.cpp:2369-2370).
 //
 // Only a connection that reached the peer's FIN has anything to linger for.
 // Anything else -- a reset, an idle timeout, a local close with no FIN
 // received -- should still draw a RESET, which is what libutp does for a
-// packet it has no socket for.
+// packet it has no socket for. History: HISTORY.md, "lingerAck".
 func (c *connection) lingerAck() *packet {
 	// Only a connection that ended gracefully -- a FIN was sent, received, or
 	// both -- has anything to linger for. One killed by a RESET, an idle
@@ -245,44 +241,30 @@ func (c *connection) updateClosingState() {
 
 	// A connection whose peer has closed its sending side is *not* finished.
 	//
-	// This used to move to connClosed as soon as the remote FIN was reached
-	// and everything sent had been acknowledged -- without this end ever
-	// sending a FIN of its own, and whatever its application was doing. That
-	// is the half-close, and refusing it was the one place libutp could do
-	// something an application here could not: a peer closing its sending side
-	// took the whole connection with it, its own unread data included.
-	//
 	// libutp holds the socket in CS_GOT_FIN and keeps delivering
 	// (utp_internal.cpp:2314 drops only what arrives past the FIN it has
-	// reached), until its application closes too. So does this now: the reader
+	// reached), until its application closes too. So does this: the reader
 	// gets its end-of-stream marker from processReads when the receive buffer
 	// catches up to the FIN, and the writer carries on.
 	//
 	// Once the application *has* closed, though, this end is finished the
 	// moment everything it sent has been acknowledged. It does not wait for
-	// its own FIN to come back, and that is not laziness: the peer closed
-	// first, so by the time this FIN goes out the peer's connection is
-	// generally gone and nothing is left to acknowledge it. libutp reaches the
-	// same place by a different route -- the peer's socket answers the
-	// unmatched FIN with a RESET, and a socket with close_requested treats a
-	// RESET as a clean destroy rather than an error
-	// (utp_internal.cpp:2865-2868). This library cannot use that route,
-	// because its socket deliberately stays silent for a packet past a closed
-	// connection's FIN so that a peer doing a half-close is not told its
-	// connection broke. Ending here instead reaches the same state without
-	// needing the RESET.
+	// its own FIN to come back: the peer closed first, so by the time this FIN
+	// goes out the peer's connection is generally gone and nothing is left to
+	// acknowledge it. libutp reaches the same place by a different route -- the
+	// peer's socket answers the unmatched FIN with a RESET, and a socket with
+	// close_requested treats a RESET as a clean destroy rather than an error
+	// (utp_internal.cpp:2865-2868). This library's socket stays silent for a
+	// packet past a closed connection's FIN, so that a peer doing a half-close
+	// is not told its connection broke, and ending here reaches the same state
+	// without the RESET.
 	//
-	// Removing this entirely was the first attempt at the half-close, and the
-	// soak test caught it: 29 connections still tracked after 60 closed
-	// cycles, 48 goroutines grown, all of them the side that closed second.
 	// LocalFin != nil is doing real work in this condition. shutdown() only
 	// emits the FIN once the send buffer and the pending writes have drained,
-	// so its presence is the proof that there is nothing left to send. Without
+	// so its presence is the proof that there is nothing left to send; without
 	// it, "nothing unacknowledged" is true at every momentary gap between a
-	// window emptying and the next packet going out -- and closing there
-	// discards the rest. Measured: the half-close test stopped delivering its
-	// 512 KB reply, because Write returns when the data is buffered and the
-	// application closed straight after it.
+	// window emptying and the next packet going out. History: HISTORY.md,
+	// "updateClosingState: the half-close".
 	if c.state.stateType == connConnected && c.state.closing != nil &&
 		c.state.closing.RemoteFin != nil && c.state.closing.LocalFin != nil &&
 		c.closeRequested {

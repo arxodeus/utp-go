@@ -160,15 +160,9 @@ func ledbatPPGain(baseRTT time.Duration) float64 {
 // increase keeps pushing until the decrease, proportional to each flow's
 // window, takes more from the larger.
 //
-// This used to use RFC 6817's increase below the target, on the reading that
-// the draft gave only the decrease formula and left the increase ambiguous.
-// It does not: "In LEDBAT++, with multiplicative decrease, the per RTT window
-// when delay is less than target is: W += GAIN". With the proportional
-// increase, two LEDBAT++ flows that left slow start at different windows kept
-// most of the difference. See KNOWN-LIMITATIONS.md.
-//
 // A free function, so the shape of the response curve can be tested directly
-// at the interesting points rather than inferred from a transfer.
+// at the interesting points rather than inferred from a transfer. History:
+// HISTORY.md, "ledbatPPWindowDeltaPerRTT".
 func ledbatPPWindowDeltaPerRTT(gain float64, windowPackets float64, queueingDelay, target time.Duration) float64 {
 	targetMicros := float64(target.Microseconds())
 	if targetMicros <= 0 {
@@ -209,16 +203,12 @@ func (c *defaultController) pushLedbatPPRTT(rtt time.Duration, now time.Time) {
 // the 4 most recent delay samples"; the base is the lowest round trip within
 // the delay window, as the one-way base is for classic LEDBAT.
 //
-// This used to be the one-way delay classic LEDBAT uses. A round trip is
-// timed entirely on this end's clock, so it has no clock skew to correct and
-// no peer to trust, though it does include queueing on the return path and
-// any delay in acknowledging. Measured against the one-way delay, fifteen
-// runs each: deferring to a loss-based flow, LEDBAT++'s share while both
-// sent went from 27-30% in five runs and 50-73% in ten to 23-33% in fourteen
-// and 55% in one, and the bottleneck queue's median from 21 to 13 ms. It was
-// tried for the latecomer problem, and did not fix it (KNOWN-LIMITATIONS.md).
+// A round trip is timed entirely on this end's clock, so it has no clock skew
+// to correct and no peer to trust, though it does include queueing on the
+// return path and any delay in acknowledging.
 //
-// Both are zero until the first sample.
+// Both are zero until the first sample. History: HISTORY.md,
+// "ledbatPPRTTDelay".
 func (c *defaultController) ledbatPPRTTDelay() (base, current time.Duration) {
 	if c.ppRTTCount == 0 {
 		return 0, 0
@@ -288,19 +278,10 @@ func (c *defaultController) applyLedbatPP(
 		// draft §4.1: exit on a queueing delay over 3/4 of the target -- but
 		// "Exit slow start on excessive delay SHOULD be applied only during
 		// the initial slow start." The ramp out of a slowdown runs "until the
-		// congestion window reaches SSTHRESH" (§4.4) and nothing else.
-		//
-		// It used to exit the ramp on delay as well, and that is what split a
-		// link unevenly between two LEDBAT++ flows. Their slowdowns
-		// synchronise, as §4.4 intends; the one that ramps first refills the
-		// queue, or the queue has not finished draining from before the
-		// slowdown, and the other reads a delay over the threshold and leaves
-		// its ramp at two packets. It then climbs back at GAIN packets a
-		// round trip, and since the slowdown it measured was short, the next
-		// comes nine short durations later and knocks it back again.
-		// Measured on two flows through an 8Mb/s bottleneck with a 2MB
-		// queue: the squeezed flow took 17.8-33.9% of the link while both
-		// ran. See KNOWN-LIMITATIONS.md.
+		// congestion window reaches SSTHRESH" (§4.4) and nothing else: two
+		// flows' slowdowns synchronise, and a ramp that also left on delay would
+		// read the other's refilled queue and stop at two packets. History:
+		// HISTORY.md, "OnAck: LEDBAT++ slow-start exit".
 		if c.ppPhase == ppSlowStart &&
 			float64(queueingDelay) > ledbatPPSlowStartExitFraction*float64(target) {
 			c.exitLedbatPPSlowStart(now)
@@ -316,14 +297,10 @@ func (c *defaultController) applyLedbatPP(
 		// SSTHRESH", and separately that a slowdown should cost "not more
 		// than a 10% drop in the utilization of the bottleneck". Those two
 		// statements only hold together if the ramp doubles per round trip.
-		// Gain-scaled on a 20 ms path the gain is 1/6, so the window grows by
-		// a seventh per round trip and climbing back from two packets to
-		// fifty takes about twenty-one of them -- measured, that turned a
-		// 1.3 s transfer into 2.8 s and cost more than half the throughput.
-		//
-		// There is also no reason for the ramp to be cautious: it is
-		// returning to a window this connection was already using a moment
-		// ago, and it stops at exactly that window.
+		// And there is no reason for the ramp to be cautious: it is returning
+		// to a window this connection was already using a moment ago, and it
+		// stops at exactly that window. History: HISTORY.md, "OnAck: the ramp
+		// out of a slowdown".
 		rampGain := gain
 		if c.ppPhase == ppSlowdownRamp {
 			rampGain = 1

@@ -92,12 +92,7 @@ type idleBarrier interface {
 	// participant can hand a packet to another and park, leaving the system
 	// momentarily quiet by every observable measure while work is still
 	// outstanding. Time would then move before the receiver had reacted.
-	//
-	// Measured before it existed: the retransmission wheel delivers a timeout
-	// and parks, the clock judged the system quiet, and the connection's
-	// re-arm landed a tick or two later than it should -- giving a
-	// retransmission at 9.05s under one scheduler and 9.075s under another
-	// for the same virtual deadline.
+	// History: HISTORY.md, "NoteHandoff".
 	NoteHandoff()
 	TakeHandoff()
 }

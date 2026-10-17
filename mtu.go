@@ -11,12 +11,6 @@ import "time"
 // with the don't-fragment bit set, silently dropped. A connection that picks
 // too large a size and cannot detect it does not run slowly; it stops.
 //
-// That is why this library shipped a fixed 1024 rather than libutp's ~1400:
-// without discovery, the only safe fixed size is a small one. Measured, the
-// difference is +2.4% on a long transfer and +17% on a reordering profile --
-// worth having, but not worth a connection that fails outright on a PPPoE or
-// VPN path. Discovery is what makes the larger size safe to reach for.
-//
 // The algorithm is a binary search between a floor known to work and a ceiling
 // known or assumed not to. Each probe is an ordinary data packet, sized at the
 // midpoint and sent with fragmentation disabled where the platform allows it:
@@ -31,15 +25,10 @@ import "time"
 // (:1314-1322), the probe decision in send_packet (:890-925), the
 // probe-acknowledged path (:1969-1974), and the two failure paths --
 // retransmission timeout (:1152-1167) and duplicate acknowledgements
-// (:1927-1940).
-//
-// Both failure paths are implemented: the timeout one in connection's
-// retransmission handling, and the duplicate-acknowledgement one in
-// connection.noteDuplicateAck. The second is not optional -- the first
-// requires the probe to be the only packet outstanding, which a saturated
-// send window never leaves it, so without the second a probe dropped for
-// being too big is retransmitted fragmentable, arrives, and is read as the
-// size being fine.
+// (:1927-1940). Both failure paths are implemented: the timeout one in
+// connection's retransmission handling, and the duplicate-acknowledgement
+// one in connection.noteDuplicateAck, which is the only one a saturated send
+// window leaves working. History: HISTORY.md, "mtu.go".
 
 const (
 	// mtuAbsoluteFloor is the smallest datagram the search will settle on.
@@ -102,14 +91,10 @@ type mtuSearch struct {
 // ceiling, as libutp does: `mtu_last = mtu_ceiling` when a socket is created
 // (utp_internal.cpp:2561-2562). The first packet larger than the floor is
 // the probe; if it is lost the ceiling comes down and the search proceeds
-// from the midpoint.
-//
-// This used to start at the midpoint, 989 bytes against a 1402 ceiling, so
-// that an untested path got a small packet. libutp's start was faster on
-// every healthy path measured (DEVIATIONS.md, "The MTU search starts at the
-// ceiling"), which is nearly every path, and the ceiling itself is libutp's
-// conservative 1402 (or the local interface's, or 1232 for IPv6), which
-// leaves room for a tunnel.
+// from the midpoint. The ceiling itself is libutp's conservative 1402 (or the
+// local interface's, or 1232 for IPv6), which leaves room for a tunnel.
+// DEVIATIONS.md, "The MTU search starts at the ceiling"; history:
+// HISTORY.md, "newMtuSearch".
 func newMtuSearch(ceiling uint32, now time.Time) *mtuSearch {
 	m := &mtuSearch{}
 	m.reset(ceiling, now)
@@ -329,14 +314,11 @@ func (m *mtuSearch) onProbeLost(now time.Time) bool {
 // to send a new one` followed by `mtu_probe_seq = mtu_probe_size = 0`
 // (utp_internal.cpp:1166-1167).
 //
-// The distinction matters and its absence was a stuck search. The ceiling may
-// only come down when the probe was the *only* packet outstanding, because
-// only then does its loss say something about size rather than congestion. A
-// probe lost alongside other packets says nothing -- but it is still gone, and
-// if the search goes on waiting for it, it waits forever. Measured against a
-// path with a 1100-byte limit: the search parked at 1191 bytes, every packet
-// was refused for size, and a 1MB transfer delivered 4KB before the test timed
-// out at 60s.
+// The ceiling may only come down when the probe was the *only* packet
+// outstanding, because only then does its loss say something about size
+// rather than congestion. A probe lost alongside other packets says nothing
+// -- but it is still gone, and a search that went on waiting for it would
+// wait forever. History: HISTORY.md, "mtuSearch.clearProbe".
 func (m *mtuSearch) clearProbe() {
 	m.probing = false
 	m.probeSeq = 0

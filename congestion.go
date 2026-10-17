@@ -33,13 +33,9 @@ const (
 	// embedder callback its default for IPv4 is UDP_IPV4_MTU, 1402: a
 	// 1500-byte Ethernet MTU less the IPv4 and UDP headers and an allowance
 	// for GRE, PPPoE, MPPE and 36 bytes of "fudge" (utp_utils.cpp:211-228).
-	// This used to be 1400, two bytes short of it for no reason anyone
-	// recorded. IPv6 peers get libutp's 1232 (path_mtu.go).
-	//
-	// This was a flat 1024 before path-MTU discovery existed, because without
-	// discovery the only safe fixed size is a small one. With discovery the
-	// search starts here, as libutp's does, and comes down when a probe of
-	// this size is lost. See mtu.go.
+	// IPv6 peers get libutp's 1232 (path_mtu.go). The search starts here, as
+	// libutp's does, and comes down when a probe of this size is lost. See
+	// mtu.go; history: HISTORY.md, "defaultMaxPacketSizeBytes".
 	defaultMaxPacketSizeBytes = 1402
 	// defaultMaxWindowSizeIncBytes is the cap on how far the congestion
 	// window may grow in one RTT. libutp:
@@ -590,17 +586,15 @@ func (c *defaultController) undoSpuriousLoss(seq uint16) bool {
 }
 
 // forgetTransmission drops the record of an acknowledged packet that the
-// sender no longer holds, keeping it for the next packet sent.
-//
-// Records were only ever replaced, when the sequence number came round again,
-// so the map grew to one per sequence number: 65,536 records, 5.5 MB
-// measured, on every connection that had sent that many packets. libutp's
-// records are its outgoing packets, freed when acknowledged (the free(pkt) in
-// ack_packet, utp_internal.cpp:1397), so it holds only the window.
+// sender no longer holds, keeping it for the next packet sent, so the
+// records are the window, as libutp's are: its records are its outgoing
+// packets, freed when acknowledged (the free(pkt) in ack_packet,
+// utp_internal.cpp:1397).
 //
 // A record still unacknowledged is kept: the sender drops only packets it has
 // seen acknowledged, so this cannot happen from it, and a caller driving the
-// controller directly keeps what it has not finished with.
+// controller directly keeps what it has not finished with. History:
+// HISTORY.md, "forgetTransmission".
 func (c *defaultController) forgetTransmission(seqNum uint16) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -931,26 +925,22 @@ func (c *defaultController) decayOnLoss(now time.Time) {
 // would allow a halving now.
 //
 // Two rules beyond the rate limit, both about which window a loss belongs
-// to, and both found by logging two LEDBAT++ flows that split a shallow
-// bottleneck unevenly (KNOWN-LIMITATIONS.md). On that bottleneck slowdowns
-// and queue overflows coincide, and a flow that was charged for one overflow
-// twice, or charged it against the wrong window, came out of the slowdown
-// with a fraction of the window the other flow did.
+// to:
 //
 //   - A packet sent before the window was last cut belongs to the congestion
 //     event that cut it, and is not charged again. That is TCP NewReno's
-//     rule (RFC 6582's "recover"). The 100ms rate limit alone let one
-//     overflow halve the window twice when its losses were detected more
-//     than 100ms apart, as they are when a slowdown falls between them.
+//     rule (RFC 6582's "recover"); the rate limit alone lets one overflow
+//     halve the window twice when its losses are detected more than 100ms
+//     apart.
 //   - A packet sent before a slowdown was sent from the window the slowdown
 //     saved, not from the two packets of the freeze or the partial window of
 //     the ramp. Its loss halves the saved window, which is where the ramp is
-//     going; the window the ramp has reached is left alone. Halving the
-//     current window instead, and taking it as ssthresh, ended the ramp at a
-//     fraction of the window the connection had been using. RFC 5681 halves
+//     going; the window the ramp has reached is left alone. RFC 5681 halves
 //     the data in flight, and the data in flight is from the saved window.
 //
-// The draft does not cover a loss during a slowdown.
+// The draft does not cover a loss during a slowdown. History: HISTORY.md,
+// "onLedbatPPLoss"; KNOWN-LIMITATIONS.md, "LEDBAT++ split a link unevenly
+// between two of its own flows".
 func (c *defaultController) onLedbatPPLoss(pkt *packetRecord, decay bool, now time.Time) {
 	if !c.lastWindowDecay.IsZero() && pkt.SentAt.Before(c.lastWindowDecay) {
 		return
@@ -1136,22 +1126,16 @@ func (c *defaultController) applyCongestionControl(
 	// growth among that round trip's acknowledgements -- a full window of
 	// them adding MAX_CWND_INCREASE_BYTES_PER_RTT -- but each update grows
 	// the window the next one divides by, so the more acknowledgements a
-	// round trip is split into, the less it grows: by about G^2/2W, a
-	// quarter of G at a 6 KB window. Measured over the emulated network,
-	// classic LEDBAT on a 100 ms, 20 Mb/s path took 8.20 s for 2 MB when
-	// each acknowledgement covered one packet and 8.04 s when it covered
-	// two, the window a packet behind for the whole transfer; reckoned
-	// against the window at sending, 7.80 s either way. DEVIATIONS.md, "The
-	// window grows by a round trip's worth per round trip".
+	// round trip is split into, the less it grows: by about G^2/2W.
 	//
-	// The larger of the two, though, not the send-window figure alone. After
+	// The larger of the two, though, not the send-window figure alone: after
 	// a loss halves the window, libutp divides the next round trip's
-	// acknowledgements -- for packets sent from the old window -- by the new
-	// one, and that round trip grows about twice as fast. Reckoned against
-	// the window they were sent in, it lost that, and classic LEDBAT at 5%
-	// loss ran 9% slower. Taking the larger, the window never grows slower
-	// than libutp's would; above target it shrinks no slower either, the
-	// factor scaling the decrease the same way.
+	// acknowledgements by the new one, and that round trip grows about twice
+	// as fast. Taking the larger, the window never grows slower than
+	// libutp's would; above target it shrinks no slower either, the factor
+	// scaling the decrease the same way. DEVIATIONS.md, "The window grows by
+	// a round trip's worth per round trip"; history: HISTORY.md, "ApplyAck:
+	// the window at sending".
 	if credit > 0 {
 		windowFactor = math.Max(windowFactor, math.Min(credit, 1))
 	}
@@ -1205,14 +1189,11 @@ func (c *defaultController) applyCongestionControl(
 // reads current_ms from a clock that counts from boot, not from the process or
 // the connection (CLOCK_MONOTONIC on POSIX, utp_utils.cpp:158-175), so unless
 // the host booted within the last second the difference is already past 1000
-// and the gain is zeroed until the window first fills. This used to be the
-// other way round here, on the mistaken reading that libutp's counter starts
-// near zero; TestConformanceLedbatRules replays libutp's own trace and caught
-// it. A bulk sender is unaffected, because its first write fills the window
-// and records the time before any acknowledgement arrives. What changes is a
-// sender that never fills its window: it now grows only by the slow-start
-// step, and not at all after slow start, where it used to take the LEDBAT
-// gain as well.
+// and the gain is zeroed until the window first fills. A bulk sender is
+// unaffected, because its first write fills the window and records the time
+// before any acknowledgement arrives; a sender that never fills its window
+// grows only by the slow-start step. TestConformanceLedbatRules holds it to
+// libutp's trace. History: HISTORY.md, "applicationLimited".
 func (c *defaultController) applicationLimited(now time.Time) bool {
 	return c.lastMaxedOutWindow.IsZero() || now.Sub(c.lastMaxedOutWindow) > time.Second
 }
@@ -1276,25 +1257,15 @@ const peerDelayBuckets = 13
 // libutp's `their_hist`. Its only purpose is noticing that base fall, which
 // is how clock drift becomes visible.
 //
-// It is deliberately not a delayAccumulator, for one reason: these samples
-// must stay in wrapping 32-bit microsecond arithmetic.
-//
-// A clock drifting slow makes the measured inbound delay *shrink*, and it
-// keeps shrinking -- at 100ppm it loses 10ms every 100 seconds, so on an
-// ordinary path it passes zero within minutes and the subtraction wraps. In
-// Duration terms that wrapped value is about 4295 seconds, which the
-// connection then caps to one second as an unusable clock reading, and the
-// base stops moving: precisely when the drift has grown large enough to
-// matter, the evidence for it disappears.
-//
-// That was measured before this type existed. The correction reached about
-// 10ms and then plateaued in every run, whatever the drift rate -- which is
-// how long it took for the accumulated skew to pass the inbound one-way
-// delay of the emulated path.
-//
-// libutp has no such problem: `their_delay` is a raw wrapping uint32
-// throughout and every comparison in DelayHist goes through
-// wrapping_compare_less. This does the same.
+// It is deliberately not a delayAccumulator: these samples must stay in
+// wrapping 32-bit microsecond arithmetic. A clock drifting slow makes the
+// measured inbound delay shrink, and keep shrinking, so on an ordinary path
+// it passes zero within minutes and the subtraction wraps. Taken as a
+// Duration, the wrapped value would be capped as an unusable reading and the
+// base would stop moving just when the drift has grown large enough to
+// matter. libutp's `their_delay` is a raw wrapping uint32 throughout and
+// every comparison in DelayHist goes through wrapping_compare_less. This does
+// the same. History: HISTORY.md, "peerDelayHist".
 type peerDelayHist struct {
 	buckets     [peerDelayBuckets]uint32
 	idx         int
@@ -1357,20 +1328,12 @@ func (h *peerDelayHist) addSample(sample uint32, now time.Time) (prev, current u
 // the last rotation. With the default window a bucket is a minute, so the base
 // remembers twelve to thirteen minutes, as libutp's does, and an idle
 // connection's history does not age, since only a sample rotates it.
+// Thirteen buckets are 104 bytes, however many samples arrive.
 //
-// It was a sliding minimum over two minutes. That held every sample that
-// could still become the least, and under clock drift every sample can: the
-// delays climb at the drift rate. At 1000 ppm and a thousand acknowledgements
-// a second it held 120,001 samples, 3.75 MB, with no jitter, and 69 KB with
-// 5 ms of it, per connection; over thirteen minutes, six and a half times
-// that. Thirteen buckets are 104 bytes.
-//
-// Two minutes was chosen because drift inflates the base by the drift rate
-// times the window, before this library had libutp's correction for it
-// (OnPeerDelay). With the correction, phantom queueing delay from drift is
-// 0.3-0.5% of what it was (netem.TestClockSkewCorrectionCancelsThePhantomQueue),
-// and libutp's length is libutp's behaviour: a queue that stands for longer
-// than two minutes is no longer taken for the empty path.
+// Clock drift inflates a base kept this long by the drift rate times the
+// window; OnPeerDelay corrects for it, as libutp does
+// (netem.TestClockSkewCorrectionCancelsThePhantomQueue). History:
+// HISTORY.md, "baseDelayHist".
 type baseDelayHist struct {
 	buckets   [delayBaseHistory]time.Duration
 	idx       int
@@ -1495,15 +1458,9 @@ const maxSkewAdjustment = 10 * time.Millisecond
 //
 // So a falling base delay in the peer's direction is the visible half of a
 // bias that is inflating the invisible half. Raising this sender's base by
-// the same amount cancels it.
-//
-// # What it is worth here
-//
-// Measured, before it existed: the phantom queueing delay settles at the
-// delay window multiplied by the drift rate, and what it costs is fairness
-// rather than throughput -- a drifted flow took 32-33% of a shared bottleneck
-// against an undrifted flow's 67-68%, and 50-51% with the correction. See KNOWN-LIMITATIONS.md, and
-// netem.TestClockDriftYieldsShareAtASharedBottleneck.
+// the same amount cancels it. What it is worth:
+// netem.TestClockDriftYieldsShareAtASharedBottleneck, and HISTORY.md,
+// "OnPeerDelay".
 func (c *defaultController) OnPeerDelay(sample uint32, now time.Time) {
 	// libutp: `if (their_delay != 0)`. A zero means the peer has not stamped
 	// a usable timestamp, not that the path is instant.

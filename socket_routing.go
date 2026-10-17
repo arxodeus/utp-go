@@ -86,26 +86,20 @@ func (s *UtpSocket) routeLocked(packetPtr *packet, peerKey string) (send, recv u
 //
 //   - A SYN carries the sender's receive id, ours to send to, and is matched
 //     only as a retransmission of one already taken: receive id one above it
-//     (utp_internal.cpp:2957). The other derivations alias a SYN onto
-//     whatever local connection holds that number, and a SYN delivered into
-//     an established connection was answered with a RESET -- found by
-//     FuzzDifferentialInitiator; an off-path attacker who guessed an id could
-//     have injected one.
+//     (utp_internal.cpp:2957). Any other derivation would alias a SYN onto
+//     whatever local connection holds that number.
 //   - A RESET may carry either of our ids, so it is matched on the receive
 //     id first and then on the send id (:2856-2859).
 //   - Anything else carries our receive id and is matched on it alone
-//     (:2884-2892). Receive ids are unique per peer (GenerateCid, and the
+//     (:2884-2892). Receive ids are unique per peer (generateCid, and the
 //     SYN check in handleIncomingBuf), so at most one connection matches:
 //     ours if we dialled (send one above), the peer's if we accepted (send
 //     one below).
 //
-// Every packet used to be tried as if its id were also our *send* id, first.
-// Two connections to one peer whose ids are adjacent -- one receiving on R
-// and sending on R+1, the next receiving on R+1 -- then share a number, and
-// a packet for the second matched the first: its SYN-ACK went into the
-// first connection as an acknowledgement outside the window, and the second
-// never connected (TestPacketReachesTheConnectionItIsFor). The long soak drew
-// such a pair once every few thousand connections.
+// Trying a packet's id as our send id as well would let two connections to
+// one peer with adjacent ids share a number, and a packet for one reach the
+// other (TestPacketReachesTheConnectionItIsFor). History: HISTORY.md,
+// "routeCandidates".
 func routeCandidates(p *packet, pairs *[4][2]uint16) [][2]uint16 {
 	id := p.Header.ConnectionId
 	switch p.Header.PacketType {
