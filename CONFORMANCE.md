@@ -214,7 +214,7 @@ Mbps, packets sent 451 → 436, fast retransmits 56 in both. Full numbers in
 
 ### Our RESET for an unknown connection was missing two fields
 
-**Fixed** (`utp_socket.go`). libutp's `send_rst`
+**Fixed** (`socket_receive.go`). libutp's `send_rst`
 (`utp_internal.cpp:846-863`) sets `ack_nr` to the sequence number of the
 packet being rejected and `windowsize` to zero. We sent `ack_nr = 0`, naming
 no packet, and advertised a 100000-byte receive window for a connection that

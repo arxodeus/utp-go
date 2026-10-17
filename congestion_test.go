@@ -385,8 +385,8 @@ func TestWindowDecaysAtMostOncePerInterval(t *testing.T) {
 //
 // The delay it is clamping is not measured locally. It arrives in the
 // timestamp-difference field of every incoming packet and is passed to the
-// controller unaltered (conn.go: `delay := time.Duration(
-// packet.Header.TimestampDiff) * time.Microsecond`), so it is a 32-bit number
+// controller unaltered (conn_receive.go, onPacket: `delay :=
+// time.Duration(replyMicros) * time.Microsecond`), so it is a 32-bit number
 // under the remote peer's control. Nothing else between the wire and the
 // congestion window checks it.
 //

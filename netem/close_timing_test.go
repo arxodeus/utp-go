@@ -24,7 +24,7 @@ import (
 //
 // The obvious fix, a flat timeout, breaks the opposite case. Write returns
 // once the data is in the send buffer rather than once it is acknowledged
-// (conn.go, processWrites), so a write followed by a close has a tail still to
+// (conn_send.go, processWrites), so a write followed by a close has a tail still to
 // flush -- and on a slow link that tail takes longer than any timeout short
 // enough to be worth having. A clock cannot tell the two apart. Whether the
 // peer is still answering can, and that is what Close now watches.

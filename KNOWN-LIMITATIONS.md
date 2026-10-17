@@ -1908,7 +1908,7 @@ than it is.
 ### The two clocks were in different epochs
 
 The driver's virtual clock started at zero; this library stamps packets with
-`time.Now().UnixMicro()` (`conn.go:1245`). uTP peers exchange timestamps and
+`time.Now().UnixMicro()` (`conn.go`, `nowMicros`). uTP peers exchange timestamps and
 each subtracts to get the other's one-way delay, so what libutp read as its
 queueing delay was really the offset between two unrelated epochs. Its LEDBAT
 controller then did exactly what it should with a delay signal pinned far above
@@ -3090,7 +3090,7 @@ never held.
 
 The obvious fix -- cap the wait -- breaks the opposite case, and that is the
 part worth recording. `Write` returns once the data is in the send buffer, not
-once it is acknowledged (`conn.go`, `processWrites`), so a write followed by a
+once it is acknowledged (`conn_send.go`, `processWrites`), so a write followed by a
 close leaves a tail of up to a send buffer still to go -- and how long that
 takes is a property of the link rather than of the caller: 2.29 seconds for a
 512 KB transfer over 2 Mbps, which is past any cap short enough to be worth

@@ -92,7 +92,7 @@ libutp it was, and the tests named are what stands behind each verdict.
 | `DUPLICATE_ACKS_BEFORE_RESEND` 3 | `lossThreshold`, `duplicateAcksBeforeResend` | Matched, measured |
 | `ACK_NR_ALLOWED_WINDOW` 3 | `ackNrAllowedWindow` | Matched, differential |
 | `RST_INFO_TIMEOUT`, `RST_INFO_LIMIT` | `utp_socket.go` | Matched, flood corpus |
-| `KEEPALIVE_INTERVAL` 29000 | `conn.go` | Matched, measured |
+| `KEEPALIVE_INTERVAL` 29000 | `conn_send.go` | Matched, measured |
 | `PACKET_SIZE_*` buckets | none | N/A (statistics) |
 
 ### 185-392: containers, sequence arithmetic, `DelayHist`
@@ -124,7 +124,7 @@ libutp it was, and the tests named are what stands behind each verdict.
 | `send_data`: stamps, and leaves the ack list on any send (`:768`) | `transmit` | Fixed: a pending acknowledgement is now cleared by a data packet carrying the same number. Measured no change in acknowledgements per data packet (0.90 before and after, two-way transfer); an alignment, not an improvement |
 | `send_ack`: selective ack only while reordered and before the FIN, window of 30 | `statePacket` | Matched (`TestConformanceDataAfterReachedFin`); the window size is a deviation ("The selective-ack window") |
 | `send_keep_alive` | `keepAlivePacket` | Fixed (N2) |
-| `send_rst` | `utp_socket.go`, and a defensive branch in `conn.go` | Matched; the defensive branch is N3 |
+| `send_rst` | `socket_receive.go`, and a defensive branch in `conn_receive.go` | Matched; the defensive branch is N3 |
 | `send_packet`: window accounting, ack refresh, probe eligibility, don't-fragment | `transmit`, `mtuSearch.eligibleProbe` | Matched, measured (MTU rows). The `seq_nr != 1` guard is libutp's "no probe" sentinel; ours is a flag: N/A |
 | data packets carry no extension (`:1080`) | `transmit`, `retransmit`, `resendSentPacket` | Fixed (N13): ours carried a selective ack on data, FIN and resent packets; now only `ST_STATE` does (`TestConformanceDataPacketCarriesNoSelectiveAck`) |
 
@@ -237,13 +237,13 @@ libutp it was, and the tests named are what stands behind each verdict.
 | context and socket options: target delay, send and receive buffers | `ConnectionConfig` | Matched (KNOWN-LIMITATIONS.md, "The libutp API surface, audited function by function") |
 | `utp_connect`: random id and sequence number, SYN with no extension and our window, first timeout 3000 ms | `ConnectWithCid`, SYN path | Matched (initiator corpus); the attempt count is a recorded deviation |
 | `utp_process_udp`: short or non-version-1 datagram dropped | `decodePacket` | Matched |
-| RESET looked up by id, id + 1 or id - 1 with a matching send id; `ECONNREFUSED` while connecting | `utp_socket.go` | Matched (corpus) |
-| unknown non-SYN answered with a rate-limited RESET (`RST_INFO_*`) | `utp_socket.go` | Matched, flood corpus |
+| RESET looked up by id, id + 1 or id - 1 with a matching send id; `ECONNREFUSED` while connecting | `socket_receive.go`, `socket_routing.go` | Matched (corpus) |
+| unknown non-SYN answered with a rate-limited RESET (`RST_INFO_*`) | `socket_receive.go` | Matched, flood corpus |
 | SYN for an existing connection ignored (`:2955-2958`) | SYN-ACK repeated | Deviation (N27) |
 | more than 3000 sockets refuses new SYNs; firewall callback | `MaxIncomingConnections`, `Firewall` | Matched (DEVIATIONS.md, "No cap on incoming connections -- closed") |
 | new acceptor: ids from the SYN, random sequence number, `CS_SYN_RECV`, SYN-ACK sent | accept path | Matched (corpus); completion on the handshake is a recorded deviation |
 | `CS_SYN_RECV` timeout (`:1184-1188`) | none | Unreachable in libutp (N5) |
-| `parse_icmp_payload`: version gate, lookup as for RESET | `utp_socket.go` ICMP routing | Matched |
+| `parse_icmp_payload`: version gate, lookup as for RESET | `socket_receive.go` ICMP routing | Matched |
 | `utp_process_icmp_fragmentation` | `mtuSearch.icmpFragmentationNeeded` | Matched, except the unit conversion and a report below the floor (N28), both recorded |
 | `utp_process_icmp_error` | `onICMP` | Matched; the states are a recorded deviation ("ICMP: no CS_IDLE state") |
 | idle connection with a vanished peer | `MaxIdleTimeout`, off by default | Matched by default (N26) |
@@ -273,5 +273,5 @@ libutp it was, and the tests named are what stands behind each verdict.
 | `utp_utils.cpp`: `rand()` for ids and sequence numbers | `randomUint16` | Matched in effect: any uniform source |
 | `utp_callbacks.cpp`: each callback a no-op or 0 when unset; `get_read_buffer_size` 0, so the window is the whole `opt_rcvbuf` | the receive buffer | Matched (the advertised window is what the buffer has free) |
 | `utp_packedsockaddr.cpp`: IPv4 stored IPv4-mapped, compared with port; the IPv6 zone dropped | `UdpPeer.Hash` | IPv4 and mapped forms matched; the zone is N30 |
-| `utp_internal.h`: `RST_Info`; sockets keyed by address and receive id; the context | `utp_socket.go` | Matched (flood corpus; connection lookup corpus) |
+| `utp_internal.h`: `RST_Info`; sockets keyed by address and receive id; the context | `utp_socket.go`, `socket_routing.go` | Matched (flood corpus; connection lookup corpus) |
 | `utp_hash.cpp`, `utp_templates.h`: hash table, growable array, `min`/`max`/`clamp` | Go maps and slices | N/A (storage) |

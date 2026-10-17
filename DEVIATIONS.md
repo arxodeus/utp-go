@@ -1529,7 +1529,7 @@ before the resend was sent means the original did. One that covers the
 packet before it was resent at all says the same without a timestamp. That
 is RFC 3522's detection; the response is RFC 4015's, restoring the window
 and the threshold to what they were before the cut, without resuming slow
-start. `defaultController.undoSpuriousLoss`; `checkSpuriousLoss` in conn.go
+start. `defaultController.undoSpuriousLoss`; `checkSpuriousLoss` in conn_recovery.go
 decides.
 
 Every doubt leaves the cut standing, as libutp would: an echo of the resend
@@ -1577,7 +1577,7 @@ probe per episode, as RFC 8985 allows: another only after the cumulative
 acknowledgement moves, none once a retransmission timeout has fired, and none
 when the timeout is already due. Sending it does not move the timeout's
 deadline or touch the congestion window; what its acknowledgement shows is
-below. `onLossProbe` in `conn.go`; `ConnectionMetrics.LossProbes` counts
+below. `onLossProbe` in `conn_recovery.go`; `ConnectionMetrics.LossProbes` counts
 them.
 
 **Why.** On a 1 ms LAN path with a 64 KB queue, about 7% of 4 MB transfers
@@ -1769,7 +1769,7 @@ libutp's initiator behaviour substituted.
 
 ## Inherited notes that claim consistency with the reference
 
-Two comments in `conn.go` describe behaviour as matching the reference
+Two comments in the connection code describe behaviour as matching the reference
 implementation. **Both have now been verified** against `utp_internal.cpp` at
 the pinned commit, and the citations sit next to them in the source:
 

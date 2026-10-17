@@ -127,8 +127,8 @@ apart.
 Two caveats on what these rows do and do not say. **The delay clamp is measured
 at the controller, not on the wire.** The value it clamps arrives in the
 timestamp-difference field of every incoming packet and reaches the controller
-unaltered (`conn.go`: `delay := time.Duration(packet.Header.TimestampDiff) *
-time.Microsecond`), so the controller's clamp is the only thing standing
+unaltered (`conn_receive.go`, `onPacket`: `delay := time.Duration(replyMicros)
+* time.Microsecond`, only libutp's INT_MAX sentinel read as zero), so the controller's clamp is the only thing standing
 between a 32-bit field under the peer's control and the congestion window. That
 the wire value reaches the clamp unaltered is established by reading that one
 line, not by a test. **And the timeout row's two halves are not equally

@@ -85,7 +85,7 @@ type libutpEndpoint struct {
 // send_id = connSeed + 1, so the other end must accept on the mirror of that.
 func newLibutpEndpoint(ep *Endpoint, dst utp.ConnectionPeer, connSeed uint32, role libutpRole) (*libutpEndpoint, error) {
 	// libutp's clock is set to the same base this library stamps packets with,
-	// time.Now().UnixMicro() (conn.go:1245). It has to be: the two ends
+	// time.Now().UnixMicro() (conn.go, nowMicros). It has to be: the two ends
 	// exchange timestamps and each computes the other's queueing delay by
 	// subtracting them, so a driver whose clock starts at zero hands libutp a
 	// delay reading that is really the offset between two unrelated epochs.
