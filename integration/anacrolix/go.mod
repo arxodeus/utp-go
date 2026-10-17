@@ -6,7 +6,7 @@ require (
 	github.com/anacrolix/dht/v2 v2.23.0
 	github.com/anacrolix/log v0.17.1-0.20251118025802-918f1157b7bb
 	github.com/anacrolix/torrent v1.61.0
-	github.com/arxodeus/utp v0.0.0
+	github.com/arxodeus/utp v0.1.0
 )
 
 require (
