@@ -93,6 +93,12 @@ func udpAddrForPeer(peer ConnectionPeer) (*net.UDPAddr, bool) {
 	return addr, true
 }
 
+// pathMTUCacheMax bounds the cache. It is process-wide and keyed by
+// destination, so a process talking to ever more addresses -- a DHT node --
+// grew it for as long as it ran: expired entries were never removed, only
+// not reused. Release review of 9c44c4f (R10).
+const pathMTUCacheMax = 4096
+
 var pathMTUCache = struct {
 	sync.Mutex
 	entries map[string]pathMTUEntry
@@ -109,7 +115,11 @@ func pathMTUFor(addr *net.UDPAddr) (int, bool) {
 	if addr == nil || addr.IP == nil {
 		return 0, false
 	}
+	// The zone too: link-local addresses on two interfaces are two paths.
 	key := addr.IP.String()
+	if addr.Zone != "" {
+		key += "%" + addr.Zone
+	}
 
 	pathMTUCache.Lock()
 	if e, hit := pathMTUCache.entries[key]; hit && time.Since(e.at) < pathMTUCacheTTL {
@@ -120,10 +130,34 @@ func pathMTUFor(addr *net.UDPAddr) (int, bool) {
 
 	mtu, ok := discoverPathMTU(addr)
 
+	now := time.Now()
 	pathMTUCache.Lock()
-	pathMTUCache.entries[key] = pathMTUEntry{mtu: mtu, ok: ok, at: time.Now()}
+	if len(pathMTUCache.entries) >= pathMTUCacheMax {
+		prunePathMTUCache(now)
+	}
+	pathMTUCache.entries[key] = pathMTUEntry{mtu: mtu, ok: ok, at: now}
 	pathMTUCache.Unlock()
 	return mtu, ok
+}
+
+// prunePathMTUCache makes room in a full cache: the expired entries go, and
+// if none had, half of the rest, which are only rediscovered if used again.
+// Called with the cache locked.
+func prunePathMTUCache(now time.Time) {
+	for k, e := range pathMTUCache.entries {
+		if now.Sub(e.at) >= pathMTUCacheTTL {
+			delete(pathMTUCache.entries, k)
+		}
+	}
+	if len(pathMTUCache.entries) < pathMTUCacheMax {
+		return
+	}
+	for k := range pathMTUCache.entries {
+		if len(pathMTUCache.entries) < pathMTUCacheMax/2 {
+			break
+		}
+		delete(pathMTUCache.entries, k)
+	}
 }
 
 // discoverPathMTU finds the interface that routes to addr and converts its

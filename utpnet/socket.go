@@ -105,8 +105,11 @@ type Socket struct {
 	// stopRead ends the reader, once the uTP socket has finished with it.
 	stopRead chan struct{}
 	// readErr is the read error that closed the socket, if one did.
-	readErr  atomic.Pointer[error]
-	readLoop sync.WaitGroup
+	readErr atomic.Pointer[error]
+	// passOut is what WriteTo hands its writer, started on the first.
+	passOut        chan *passWrite
+	passWriterOnce sync.Once
+	readLoop       sync.WaitGroup
 }
 
 type datagram struct {
@@ -215,6 +218,7 @@ func newSocket(ctx context.Context, conn udpPacketConn, opts *Options) (*Socket,
 		writeDeadline: newDeadline(),
 		closed:        make(chan struct{}),
 		stopRead:      make(chan struct{}),
+		passOut:       make(chan *passWrite),
 	}
 	s.appCtx, s.appCancel = context.WithCancel(ctx)
 	s.config.Store(config)
@@ -379,27 +383,140 @@ func (s *Socket) ReadFrom(p []byte) (int, net.Addr, error) {
 //
 // It is the outbound half of sharing the port: a caller's DHT replies go out
 // through the same socket the uTP connections use.
+//
+// The write deadline applies for as long as the write waits, and moving it
+// moves the wait, as net.PacketConn's contract says. The datagram is handed
+// to one writer goroutine (see passthroughWriter), so the wait can end
+// without the write: the port is shared with the uTP connections, and a
+// deadline set on the port itself would end their writes too. A datagram
+// whose deadline passes before the writer reaches it is not sent; one the
+// writer is already sending may still be, as one already given to the kernel
+// may. p is copied, so the caller has it back on return either way.
+//
+// It used to check the deadline once and then write directly, so a write
+// that blocked -- on a full send buffer, or a supplied PacketConn that
+// blocks -- ignored both the deadline and any move of it. Release review of
+// 9c44c4f (R8).
+//
+// A UDP socket with no deadline set is still written directly: there is
+// nothing to time out, and handing over costs 4us and eleven allocations a
+// datagram (BenchmarkWriteTo). The one thing that gives up is a deadline set
+// while such a write is blocked, which waits for the kernel's send buffer --
+// draining at the interface's rate -- rather than ending at once.
 func (s *Socket) WriteTo(p []byte, addr net.Addr) (int, error) {
 	select {
 	case <-s.closed:
 		return 0, s.closedErr()
 	default:
 	}
-	// expired rather than wait: this path only needs the answer, and wait
-	// starts a goroutine to serve a channel WriteTo never reads.
+	// expired rather than wait for the common case: it needs only the
+	// answer, and wait starts a goroutine.
 	if s.writeDeadline.expired() {
 		return 0, timeoutError{}
 	}
-	if s.generic != nil {
-		// The caller's address goes to the PacketConn as it is: it is of
-		// the PacketConn's own kind, or one it can write to.
-		return s.generic.pc.WriteTo(p, addr)
+	var udpAddr *net.UDPAddr
+	if s.generic == nil {
+		var err error
+		if udpAddr, err = toUDPAddr(addr); err != nil {
+			return 0, err
+		}
+		if !s.writeDeadline.isSet() {
+			return s.udp.WriteToUDP(p, udpAddr)
+		}
 	}
-	udpAddr, err := toUDPAddr(addr)
-	if err != nil {
-		return 0, err
+	w := &passWrite{buf: append([]byte(nil), p...), addr: addr, udp: udpAddr, done: make(chan passResult, 1)}
+	s.passWriterOnce.Do(func() { go s.passthroughWriter() })
+
+	queued := false
+	for {
+		timeout, expired, stop := s.writeDeadline.wait()
+		if expired {
+			stop()
+			// Withdrawn if the writer has not reached it. If it has, it may
+			// yet be sent, as a datagram given to the kernel may be.
+			w.cancel()
+			return 0, timeoutError{}
+		}
+		if !queued {
+			select {
+			case s.passOut <- w:
+				queued = true
+			case <-s.closed:
+				stop()
+				return 0, s.closedErr()
+			case <-timeout:
+			}
+		}
+		if queued {
+			select {
+			case r := <-w.done:
+				stop()
+				return r.n, r.err
+			case <-s.closed:
+				stop()
+				w.cancel()
+				return 0, s.closedErr()
+			case <-timeout:
+			}
+		}
+		// The deadline passed or moved: the loop re-reads it.
+		stop()
 	}
-	return s.udp.WriteToUDP(p, udpAddr)
+}
+
+// passWrite is one WriteTo waiting for the writer.
+type passWrite struct {
+	buf  []byte
+	addr net.Addr
+	udp  *net.UDPAddr
+	done chan passResult
+
+	// done has room for the result, so the writer never waits on a caller
+	// that has gone.
+	mu      sync.Mutex
+	started bool
+	dropped bool
+}
+
+type passResult struct {
+	n   int
+	err error
+}
+
+// cancel withdraws a write the writer has not started.
+func (w *passWrite) cancel() {
+	w.mu.Lock()
+	w.dropped = !w.started
+	w.mu.Unlock()
+}
+
+// passthroughWriter sends what WriteTo queues, one datagram at a time, until
+// the socket closes. One goroutine, so a blocked write holds up the writes
+// behind it and nothing more.
+func (s *Socket) passthroughWriter() {
+	for {
+		select {
+		case w := <-s.passOut:
+			w.mu.Lock()
+			if w.dropped {
+				w.mu.Unlock()
+				continue
+			}
+			w.started = true
+			w.mu.Unlock()
+			var r passResult
+			if s.generic != nil {
+				// The caller's address goes to the PacketConn as it is: it
+				// is of the PacketConn's own kind, or one it can write to.
+				r.n, r.err = s.generic.pc.WriteTo(w.buf, w.addr)
+			} else {
+				r.n, r.err = s.udp.WriteToUDP(w.buf, w.udp)
+			}
+			w.done <- r
+		case <-s.stopRead:
+			return
+		}
+	}
 }
 
 // Accept waits for the next incoming uTP connection.
@@ -557,10 +674,9 @@ func (s *Socket) SetReadDeadline(t time.Time) error {
 	return nil
 }
 
-// SetWriteDeadline is accepted and has almost no effect: WriteTo hands the
-// datagram to the kernel without blocking, so there is nothing to time out.
-// A deadline already in the past is still honoured, because a caller that
-// sets one expects writes to fail rather than succeed.
+// SetWriteDeadline sets the deadline for WriteTo, including a WriteTo already
+// waiting. It does not apply to the uTP connections' own writes, which share
+// the port. See WriteTo.
 func (s *Socket) SetWriteDeadline(t time.Time) error {
 	s.writeDeadline.set(t)
 	return nil

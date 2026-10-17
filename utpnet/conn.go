@@ -224,6 +224,13 @@ func (d *deadline) context(parent context.Context) (context.Context, context.Can
 // serve its channel; a caller that discards the channel would leak it, which
 // is what WriteTo used to do -- once per datagram, for the life of the
 // process. See TestSharedPortDoesNotLeakGoroutines.
+// isSet reports whether there is a deadline at all.
+func (d *deadline) isSet() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return !d.at.IsZero()
+}
+
 func (d *deadline) expired() bool {
 	d.mu.Lock()
 	at := d.at

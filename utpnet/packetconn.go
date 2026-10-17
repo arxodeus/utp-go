@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -45,8 +46,29 @@ type packetConn struct {
 	// datagrams came from. Only addresses that are not *net.UDPAddr are
 	// kept.
 	mu     sync.Mutex
-	native map[string]net.Addr
+	native map[string]nativeAddr
 }
+
+// nativeAddr is an address of pc's own type and when a datagram last came
+// from it.
+type nativeAddr struct {
+	addr net.Addr
+	seen time.Time
+}
+
+// The native map is bounded. Every address a datagram arrives from is
+// remembered, before any protocol has looked at it, and nothing was ever
+// forgotten: a PacketConn carrying a DHT grew it for as long as it ran.
+// Release review of 9c44c4f (R10).
+//
+// An address forgotten while still in use is written to in its UDP form,
+// which pc may not accept, so what goes first is what has been silent
+// longest: nativeIdle is well past the 29 seconds within which a live uTP
+// connection, keepalives included, sends something.
+const (
+	nativeMax  = 8192
+	nativeIdle = 5 * time.Minute
+)
 
 var _ udpPacketConn = (*packetConn)(nil)
 
@@ -93,13 +115,40 @@ func (p *packetConn) udpForm(addr net.Addr) (*net.UDPAddr, bool) {
 		}
 		udp.Zone = zone
 	}
+	now := time.Now()
 	p.mu.Lock()
 	if p.native == nil {
-		p.native = make(map[string]net.Addr)
+		p.native = make(map[string]nativeAddr)
 	}
-	p.native[udp.String()] = addr
+	key := udp.String()
+	if _, known := p.native[key]; !known && len(p.native) >= nativeMax {
+		p.pruneLocked(now)
+	}
+	p.native[key] = nativeAddr{addr: addr, seen: now}
 	p.mu.Unlock()
 	return udp, true
+}
+
+// pruneLocked makes room in a full native map: what has been silent for
+// nativeIdle goes, and if that is not enough, the longest silent until half
+// is left.
+func (p *packetConn) pruneLocked(now time.Time) {
+	for k, e := range p.native {
+		if now.Sub(e.seen) >= nativeIdle {
+			delete(p.native, k)
+		}
+	}
+	if len(p.native) < nativeMax {
+		return
+	}
+	keys := make([]string, 0, len(p.native))
+	for k := range p.native {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return p.native[keys[i]].seen.Before(p.native[keys[j]].seen) })
+	for _, k := range keys[:len(keys)-nativeMax/2] {
+		delete(p.native, k)
+	}
 }
 
 // nativeOf is the address a UDP form was learned from, or the UDP form
@@ -108,7 +157,7 @@ func (p *packetConn) nativeOf(udp *net.UDPAddr) net.Addr {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if a, ok := p.native[udp.String()]; ok {
-		return a
+		return a.addr
 	}
 	return udp
 }
