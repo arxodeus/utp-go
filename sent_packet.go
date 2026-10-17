@@ -4,7 +4,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/google/btree"
 )
 
@@ -60,7 +59,7 @@ func (s *sentPacket) rtt(now time.Time) time.Duration {
 }
 
 type sentPackets struct {
-	logger log.Logger
+	logger *ulogger
 	// packets is the send window: packets[0] is sequence number base, and
 	// each one after it the next. Acknowledged packets at the front are
 	// dropped when a new one is added (trimAcked), so this holds what is
@@ -116,7 +115,7 @@ type sentPackets struct {
 	transmissions uint64
 }
 
-func newSentPackets(initSeqNum uint16, congestionCtrl controller, logger log.Logger) *sentPackets {
+func newSentPackets(initSeqNum uint16, congestionCtrl controller, logger *ulogger) *sentPackets {
 	return &sentPackets{
 		logger:      logger,
 		packets:     make([]*sentPacket, 0),
@@ -643,8 +642,8 @@ func (s *sentPackets) Ack(seqNum uint16, delay time.Duration, now time.Time) err
 	if err := s.congestionCtrl.OnAck(packetInst.seqNum, ack); err != nil {
 		return err
 	}
-	if s.logger != nil && s.logger.Enabled(baseContext, log.LevelTrace) {
-		log.Trace("record Acks", "seqNum", packetInst.seqNum, "acked", packetInst.acked)
+	if s.logger != nil && s.logger.Enabled(baseContext, LevelTrace) {
+		s.logger.Trace("record Acks", "seqNum", packetInst.seqNum, "acked", packetInst.acked)
 	}
 	if !packetInst.acked {
 		packetInst.acked = true
@@ -662,11 +661,11 @@ func (s *sentPackets) AckPriorUnacked(seqNum uint16, firstUnacked uint16, delay 
 	if start >= end {
 		return nil
 	}
-	if s.logger != nil && s.logger.Enabled(baseContext, log.LevelTrace) {
+	if s.logger != nil && s.logger.Enabled(baseContext, LevelTrace) {
 		s.logger.Trace("AckPriorUnacked", "sentPackets.len", len(s.packets), "start", start, "end", end)
 	}
 	for _, packetInst := range s.packets[start:end] {
-		if s.logger != nil && s.logger.Enabled(baseContext, log.LevelTrace) {
+		if s.logger != nil && s.logger.Enabled(baseContext, LevelTrace) {
 			s.logger.Trace("record Ack", "seqNum", packetInst.seqNum)
 		}
 		if err := s.Ack(packetInst.seqNum, delay, now); err != nil {
@@ -791,7 +790,7 @@ func (s *sentPackets) FirstUnackedSeqNum() (uint16, error) {
 
 	var seqNum uint16
 	lastAckNum, isNone := s.LastAckNum()
-	if s.logger != nil && s.logger.Enabled(baseContext, log.LevelTrace) {
+	if s.logger != nil && s.logger.Enabled(baseContext, LevelTrace) {
 		s.logger.Trace("get last innerMap num",
 			"lastAckNum", lastAckNum, "isNone", isNone)
 	}

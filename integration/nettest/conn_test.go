@@ -3,13 +3,13 @@ package nettest
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/arxodeus/utp/utpnet"
-	"github.com/ethereum/go-ethereum/log"
 	"golang.org/x/net/nettest"
 )
 
@@ -108,6 +108,6 @@ func (e errString) Error() string { return string(e) }
 
 const errAcceptTimeout = errString("utpnet: no connection was accepted")
 
-func quiet() log.Logger {
-	return log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelCrit, false))
+func quiet() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 4}))
 }

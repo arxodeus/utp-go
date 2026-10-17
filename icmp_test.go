@@ -3,17 +3,16 @@ package utp
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"os"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/ethereum/go-ethereum/log"
 )
 
-func icmpQuietLog() log.Logger {
-	return log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelCrit, false))
+func icmpQuietLog() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 4}))
 }
 
 // quotedDatagram builds the bytes an ICMP message would quote: a uTP datagram

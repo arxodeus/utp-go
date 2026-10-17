@@ -2,12 +2,11 @@ package utp
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/ethereum/go-ethereum/log"
 )
 
 // Fuzzing a live connection, not just the decoder.
@@ -98,8 +97,8 @@ func (c *fuzzConn) emittedCount() int {
 	return c.emitted
 }
 
-func fuzzLogger() log.Logger {
-	return log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelCrit, false))
+func fuzzLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 4}))
 }
 
 // splitPackets carves the fuzz input into a sequence of packets. The first

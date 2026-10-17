@@ -1,0 +1,118 @@
+# The release gates in RELEASING.md: the quick ones on every push and pull
+# request, the long ones nightly.
+name: ci
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l . | grep -v '^native/libutp/upstream/' | tee /dev/stderr)"
+      - name: vet
+        run: go vet ./...
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
+      - name: cross-build
+        run: |
+          for target in linux/amd64 linux/arm64 linux/386 darwin/arm64 darwin/amd64 freebsd/amd64 windows/amd64; do
+            echo "== $target"
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go vet ./...
+          done
+
+  test:
+    if: github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        go: [go.mod, stable]
+        cgo: ["0", "1"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.go == 'go.mod' && 'go.mod' || '' }}
+          go-version: ${{ matrix.go == 'stable' && 'stable' || '' }}
+      - run: go test -short -timeout 30m ./...
+        env:
+          CGO_ENABLED: ${{ matrix.cgo }}
+
+  race:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -race -short -timeout 30m ./...
+
+  modules:
+    if: github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [compat/golibutp, integration/nettest, integration/goutp, integration/anacrolix]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+      - run: go test -timeout 30m ./...
+        working-directory: ${{ matrix.module }}
+
+  platforms:
+    if: github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -short -timeout 30m ./...
+        env:
+          CGO_ENABLED: "0"
+
+  nightly:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: full suite
+        run: go test -timeout 120m ./...
+      - name: full race suite
+        run: go test -race -timeout 120m ./...
+        env:
+          UTP_TEST_TRANSFERS: "50"
+      - name: pinned libutp reference
+        run: scripts/check-libutp-reference.sh
+      - name: fuzz
+        run: |
+          for target in FuzzDecodePacketHeader FuzzDecodePacket FuzzDecodeSelectiveAck FuzzResponderPacketSequence FuzzDifferentialResponder FuzzDifferentialInitiator; do
+            echo "== $target at $(git rev-parse HEAD), $(go version)"
+            go test -run xxx -fuzz "^$target\$" -fuzztime 5m .
+          done

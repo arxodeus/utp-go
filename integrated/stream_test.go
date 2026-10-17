@@ -3,13 +3,13 @@ package integrated
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"sync"
 	"testing"
 	"time"
 
 	utp "github.com/arxodeus/utp"
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/stretchr/testify/require"
 )
 
@@ -20,10 +20,10 @@ const expectedIdleTimeout = 60 * time.Second
 func TestCloseWhenWriteCompletes(t *testing.T) {
 	// Initialize logging
 	//logFile, _ := os.OpenFile("test_close_when_write_completes.log", os.O_CREATE|os.O_RDWR|os.O_APPEND, 0666)
-	//handler := log.NewTerminalHandlerWithLevel(logFile, log.LevelTrace, false)
+	//handler := slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: utp.LevelTrace})
 
-	handler := log.NewTerminalHandler(os.Stdout, true)
-	log.SetDefault(log.NewLogger(handler))
+	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: utp.LevelTrace})
+	slog.SetDefault(slog.New(handler))
 
 	connConfig := utp.NewConnectionConfig()
 
@@ -33,10 +33,10 @@ func TestCloseWhenWriteCompletes(t *testing.T) {
 	ctx := context.Background()
 
 	// Create sockets
-	loggerA := log.Root().New("local", "peerA")
+	loggerA := slog.Default().With("local", "peerA")
 	aSocket := utp.WithSocket(ctx, aLink, loggerA)
-	loggerB := log.Root().New("local", "peerB")
-	//loggerB := log.NewLogger(log.DiscardHandler())
+	loggerB := slog.Default().With("local", "peerB")
+	//loggerB := slog.New(log.DiscardHandler())
 	bSocket := utp.WithSocket(ctx, bLink, loggerB)
 
 	var wg sync.WaitGroup
@@ -47,9 +47,9 @@ func TestCloseWhenWriteCompletes(t *testing.T) {
 	var recvErr error
 	go func() {
 		defer wg.Done()
-		log.Debug("accepting with cid", "src.peer", bCid.Peer)
+		slog.Debug("accepting with cid", "src.peer", bCid.Peer)
 		recvStream, recvErr = bSocket.AcceptWithCid(ctx, bCid, connConfig)
-		log.Debug("accepted with cid", "src.peer", bCid.Peer)
+		slog.Debug("accepted with cid", "src.peer", bCid.Peer)
 	}()
 
 	// Connect
@@ -57,12 +57,12 @@ func TestCloseWhenWriteCompletes(t *testing.T) {
 	var sendErr error
 	go func() {
 		defer wg.Done()
-		log.Debug("Connecting with cid", "dst.peer", aCid.Peer)
+		slog.Debug("Connecting with cid", "dst.peer", aCid.Peer)
 		sendStream, sendErr = aSocket.ConnectWithCid(ctx, aCid, connConfig)
 		if sendErr != nil {
 			t.Error("failed to connect with cid", "dst.peer", aCid.Peer)
 		}
-		log.Debug("Connected", "dst.peer", aCid.Peer)
+		slog.Debug("Connected", "dst.peer", aCid.Peer)
 	}()
 
 	wg.Wait()
@@ -83,7 +83,7 @@ func TestCloseWhenWriteCompletes(t *testing.T) {
 	sendWg.Add(1)
 	go func() {
 		defer sendWg.Done()
-		log.Debug("will write to", "dst.peer", sendStream.Cid().Peer)
+		slog.Debug("will write to", "dst.peer", sendStream.Cid().Peer)
 		written, err := sendStream.Write(ctx, data)
 		if err != nil {
 			t.Errorf("Error sending data: %v", err)
@@ -100,7 +100,7 @@ func TestCloseWhenWriteCompletes(t *testing.T) {
 	go func() {
 		defer recvWg.Done()
 		readBuf := make([]byte, 0)
-		log.Debug("will read from", "src.peer", recvStream.Cid().Peer)
+		slog.Debug("will read from", "src.peer", recvStream.Cid().Peer)
 		_, err := recvStream.ReadToEOF(ctx, &readBuf)
 		if err != nil {
 			t.Errorf("Error receiving data: %v", err)
@@ -136,8 +136,8 @@ func TestCloseWhenWriteCompletes(t *testing.T) {
 }
 
 func TestCloseErrorsIfAllPacketsDropped(t *testing.T) {
-	handler := log.NewTerminalHandler(os.Stdout, true)
-	log.SetDefault(log.NewLogger(handler))
+	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: utp.LevelTrace})
+	slog.SetDefault(slog.New(handler))
 	connConfig := utp.NewConnectionConfig()
 	connConfig.MaxIdleTimeout = expectedIdleTimeout
 
@@ -146,8 +146,8 @@ func TestCloseErrorsIfAllPacketsDropped(t *testing.T) {
 
 	// Create sockets
 	ctx := context.Background()
-	sendSocket := utp.WithSocket(ctx, aLink, log.Root().New("local", "sender"))
-	recvSocket := utp.WithSocket(ctx, bLink, log.Root().New("local", "receiver"))
+	sendSocket := utp.WithSocket(ctx, aLink, slog.Default().With("local", "sender"))
+	recvSocket := utp.WithSocket(ctx, bLink, slog.Default().With("local", "receiver"))
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -243,8 +243,8 @@ func TestCloseErrorsIfAllPacketsDropped(t *testing.T) {
 }
 
 func TestCloseSucceedsIfOnlyFinAckDropped(t *testing.T) {
-	handler := log.NewTerminalHandler(os.Stdout, true)
-	log.SetDefault(log.NewLogger(handler))
+	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: utp.LevelTrace})
+	slog.SetDefault(slog.New(handler))
 	connConfig := utp.NewConnectionConfig()
 	connConfig.MaxIdleTimeout = expectedIdleTimeout
 
@@ -253,8 +253,8 @@ func TestCloseSucceedsIfOnlyFinAckDropped(t *testing.T) {
 
 	// Create UTP sockets
 	ctx := context.Background()
-	sendSocket := utp.WithSocket(ctx, sendLink, log.Root().New("local", "sender"))
-	recvSocket := utp.WithSocket(ctx, recvLink, log.Root().New("local", "receiver"))
+	sendSocket := utp.WithSocket(ctx, sendLink, slog.Default().With("local", "sender"))
+	recvSocket := utp.WithSocket(ctx, recvLink, slog.Default().With("local", "receiver"))
 
 	// Create channels for coordination
 	var wg sync.WaitGroup
@@ -361,16 +361,16 @@ func TestCloseSucceedsIfOnlyFinAckDropped(t *testing.T) {
 }
 
 func TestDataValidWhenResendingSynStateResponse(t *testing.T) {
-	handler := log.NewTerminalHandler(os.Stdout, true)
-	log.SetDefault(log.NewLogger(handler))
+	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: utp.LevelTrace})
+	slog.SetDefault(slog.New(handler))
 	connConfig := utp.NewConnectionConfig()
 
 	connectorSocket, connectorCid, acceptorSocket, acceptorCid := buildLinkDropSentPair(1)
 
 	// Create UTP sockets
 	ctx := context.Background()
-	acceptor := utp.WithSocket(ctx, acceptorSocket, log.Root().New("local", "acceptor"))
-	connector := utp.WithSocket(ctx, connectorSocket, log.Root().New("local", "connector"))
+	acceptor := utp.WithSocket(ctx, acceptorSocket, slog.Default().With("local", "acceptor"))
+	connector := utp.WithSocket(ctx, connectorSocket, slog.Default().With("local", "connector"))
 
 	// Create channels for coordination
 	var wg sync.WaitGroup

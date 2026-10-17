@@ -3,7 +3,6 @@ module github.com/arxodeus/utp
 go 1.24.2
 
 require (
-	github.com/ethereum/go-ethereum v1.14.11
 	github.com/google/btree v1.1.3
 	github.com/stretchr/testify v1.9.0
 	github.com/valyala/fastrand v1.1.0
@@ -12,9 +11,8 @@ require (
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/holiman/uint256 v1.3.1 // indirect
+	github.com/kr/pretty v0.3.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	golang.org/x/exp v0.0.0-20231110203233-9a3e6036ecaa // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

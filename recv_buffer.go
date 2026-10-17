@@ -2,7 +2,6 @@ package utp
 
 import (
 	"errors"
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/google/btree"
 )
 
@@ -21,7 +20,7 @@ const (
 )
 
 type receiveBuffer struct {
-	logger log.Logger
+	logger *ulogger
 	// capacity is the configured size: what the window is advertised from
 	// and admission is checked against. buf grows towards it as data
 	// arrives, and holds the offset bytes not yet read at buf[head:].
@@ -90,10 +89,10 @@ func (rb *receiveBuffer) gapReserve() int {
 // holding twelve 300-byte packets behind a gap, 496 bytes are free and a
 // missing 1,400-byte packet never fit; nothing was readable, so no read could
 // free room, and the connection stalled for good. A buffer smaller than one
-// packet stalled the same way at its first packet. A peer within the window
-// cannot cause either, but the window is not the only thing that lets a peer
-// send: a zero-window probe, and the drain credit (see onReadDrained), both
-// let one packet past it.
+// packet stalled the same way at its first packet. A peer that keeps within
+// the advertised window cannot cause either -- everything it may have in
+// flight, the missing packet included, fits what that window leaves -- but
+// one that sends past it can, and the stall it caused was permanent.
 //
 // libutp has no receive buffer and never refuses the packet it is waiting
 // for. Here the buffer may exceed its capacity by that one packet, and only
@@ -111,7 +110,7 @@ func newReceiveBuffer(size int, initSeqNum uint16) *receiveBuffer {
 	return newReceiveBufferWithLogger(size, initSeqNum, nil)
 }
 
-func newReceiveBufferWithLogger(size int, initSeqNum uint16, logger log.Logger) *receiveBuffer {
+func newReceiveBufferWithLogger(size int, initSeqNum uint16, logger *ulogger) *receiveBuffer {
 	return &receiveBuffer{
 		logger:     logger,
 		capacity:   size,
@@ -245,7 +244,7 @@ func (rb *receiveBuffer) WasWritten(seqNum uint16) bool {
 		return true
 	}
 	exists := rb.pending.Len() > 0 && rb.pending.Has(&pendingItem{seqNum: seqNum})
-	if rb.logger != nil && rb.logger.Enabled(baseContext, log.LevelTrace) {
+	if rb.logger != nil && rb.logger.Enabled(baseContext, LevelTrace) {
 		rb.logger.Trace("checking written", "seqNum", seqNum, "initSeqNum", rb.initSeqNum, "consumed", rb.consumed, "exists", exists)
 	}
 	return exists
@@ -288,7 +287,7 @@ func (rb *receiveBuffer) Write(data []byte, seqNum uint16) error {
 	if rb.WasWritten(seqNum) {
 		return nil
 	}
-	if rb.logger != nil && rb.logger.Enabled(baseContext, log.LevelTrace) {
+	if rb.logger != nil && rb.logger.Enabled(baseContext, LevelTrace) {
 		rb.logger.Trace("will put a data to recv buffer", "seq", seqNum)
 	}
 	// The packet that fills the gap is admitted against the whole of what is
@@ -324,7 +323,7 @@ func (rb *receiveBuffer) Write(data []byte, seqNum uint16) error {
 	}
 	rb.pendingBytes += len(data)
 
-	if rb.logger != nil && rb.logger.Enabled(baseContext, log.LevelTrace) {
+	if rb.logger != nil && rb.logger.Enabled(baseContext, LevelTrace) {
 		rb.logger.Trace("will handle pending data in recv buffer", "startSeq", next)
 	}
 
@@ -340,12 +339,12 @@ func (rb *receiveBuffer) Write(data []byte, seqNum uint16) error {
 		rb.consumed += 1
 		rb.pending.Delete(pending)
 		rb.pendingBytes -= len(pending.data)
-		if rb.logger != nil && rb.logger.Enabled(baseContext, log.LevelTrace) {
+		if rb.logger != nil && rb.logger.Enabled(baseContext, LevelTrace) {
 			rb.logger.Trace("will delete a pending data in recv buffer", "seq", next, "pending.len", rb.pending.Len())
 		}
 		next += 1
 	}
-	if rb.logger != nil && rb.logger.Enabled(baseContext, log.LevelTrace) {
+	if rb.logger != nil && rb.logger.Enabled(baseContext, LevelTrace) {
 		rb.logger.Trace("handled pending data in recv buffer", "endSeq", next)
 	}
 	return nil
@@ -365,13 +364,6 @@ func (rb *receiveBuffer) SelectiveAck() *selectiveAck {
 	// (utp_internal.cpp:802-807).
 	base := rb.AckNum() + 2
 
-	pendingSeqs := make(map[uint16]bool, rb.pending.Len())
-	rb.pending.Ascend(func(i btree.Item) bool {
-		item := i.(*pendingItem)
-		pendingSeqs[item.seqNum] = true
-		return true
-	})
-
 	// A fixed window, as libutp uses, rather than one sized to reach the
 	// highest pending sequence number.
 	//
@@ -383,12 +375,28 @@ func (rb *receiveBuffer) SelectiveAck() *selectiveAck {
 	// and recovers by letting the window slide forward as the gap fills, so
 	// sending them buys nothing against a libutp peer and costs bandwidth on
 	// the ack path exactly when the path is already in trouble.
+	//
+	// Only the window is visited. Every packet held used to be copied into a
+	// map first, on every acknowledgement, to look up the window's few
+	// dozen: work and an allocation growing with the reorder buffer, which
+	// libutp's fixed-size scan of its own (utp_internal.cpp:800-830) does not
+	// have. Release review of 9c44c4f.
 	acked := make([]bool, selectiveAckWindow)
-	for i := 0; i < selectiveAckWindow; i++ {
-		acked[i] = pendingSeqs[base+uint16(i)]
+	mark := func(i btree.Item) bool {
+		acked[i.(*pendingItem).seqNum-base] = true
+		return true
+	}
+	// The tree is ordered by sequence number as an integer, so a window that
+	// wraps past 65535 is two ranges.
+	end := base + uint16(selectiveAckWindow)
+	if end > base {
+		rb.pending.AscendRange(&pendingItem{seqNum: base}, &pendingItem{seqNum: end}, mark)
+	} else {
+		rb.pending.AscendGreaterOrEqual(&pendingItem{seqNum: base}, mark)
+		rb.pending.AscendLessThan(&pendingItem{seqNum: end}, mark)
 	}
 
-	if rb.logger != nil && rb.logger.Enabled(baseContext, log.LevelTrace) {
+	if rb.logger != nil && rb.logger.Enabled(baseContext, LevelTrace) {
 		rb.logger.Trace("will new selective ack", "base", base, "acked.len", len(acked))
 	}
 

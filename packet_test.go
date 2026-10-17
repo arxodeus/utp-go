@@ -24,9 +24,9 @@ func (p *packetHeaderV1) Generate(rand *rand.Rand, size int) reflect.Value {
 		Version:       protocolVersionOne,
 		Extension:     extension,
 		ConnectionId:  uint16(rand.Intn(math.MaxUint16)),
-		Timestamp:     int64(rand.Intn(math.MaxUint32)),
-		TimestampDiff: uint32(rand.Intn(math.MaxUint32)),
-		WndSize:       uint32(rand.Intn(math.MaxUint32)),
+		Timestamp:     int64(rand.Uint32()),
+		TimestampDiff: rand.Uint32(),
+		WndSize:       rand.Uint32(),
 		SeqNum:        uint16(rand.Intn(math.MaxUint16)),
 		AckNum:        uint16(rand.Intn(math.MaxUint16)),
 	}

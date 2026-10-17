@@ -4,16 +4,15 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"log/slog"
 	"net"
 	"os"
 	"testing"
 	"time"
-
-	"github.com/ethereum/go-ethereum/log"
 )
 
-func duplexQuietLog() log.Logger {
-	return log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelCrit, false))
+func duplexQuietLog() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 4}))
 }
 
 // Reading and writing on the same stream at the same time, which is what

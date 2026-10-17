@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"sync"
 	"testing"
 	"time"
 )
@@ -64,7 +63,6 @@ func TestSocketCloseAfterWriteDeliversEverything(t *testing.T) {
 // told to.
 type failingPacketConn struct {
 	*net.UDPConn
-	once sync.Once
 	fail chan struct{}
 	err  error
 }

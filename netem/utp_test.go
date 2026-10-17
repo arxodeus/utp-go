@@ -2,16 +2,16 @@ package netem
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"testing"
 	"time"
 
 	utp "github.com/arxodeus/utp"
-	"github.com/ethereum/go-ethereum/log"
 )
 
-func quiet() log.Logger {
-	return log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelCrit, false))
+func quiet() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 4}))
 }
 
 // The harness has to actually carry uTP, and the connection-level metrics

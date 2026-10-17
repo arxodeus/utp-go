@@ -130,11 +130,13 @@ where it differs the difference is recorded and measured: see the repository's
 
 ## Publishing
 
-This module requires `github.com/arxodeus/utp`, and for development it uses
-the checkout it sits in (the `replace` in its go.mod). A `replace` in a
-dependency is ignored, so for a downloaded copy to build, the version it
-requires has to exist: a tagged release of `github.com/arxodeus/utp`, and a
-`compat/golibutp/vX.Y.Z` tag for this module, which lives in a subdirectory.
+This module requires `github.com/arxodeus/utp` v0.1.0, and for development it
+uses the checkout it sits in (the `replace` in its go.mod). A `replace` in a
+dependency is ignored, so a downloaded copy builds against the v0.1.0 it
+requires: that tag has to exist before this module's own,
+`compat/golibutp/v0.1.0` (it lives in a subdirectory, so its tags carry the
+directory as a prefix). The order, and the check that a clean consumer can
+build both, are in [RELEASING.md](../../RELEASING.md).
 
 ## Licence
 

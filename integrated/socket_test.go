@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"sync"
@@ -13,7 +14,6 @@ import (
 	"time"
 
 	utp "github.com/arxodeus/utp"
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -68,20 +68,20 @@ func TestManyConcurrentTransfers(t *testing.T) {
 	// Initialize logging
 	logFile1, _ := os.OpenFile("test_socket_many_concurrent_transfer_3400.log", os.O_CREATE|os.O_RDWR|os.O_APPEND, 0666)
 	logFile2, _ := os.OpenFile("test_socket_many_concurrent_transfer_3401.log", os.O_CREATE|os.O_RDWR|os.O_APPEND, 0666)
-	//handler := log.NewTerminalHandler(os.Stdout, true)
-	handler1 := log.NewTerminalHandlerWithLevel(logFile1, log.LevelError, false)
-	handler2 := log.NewTerminalHandlerWithLevel(logFile2, log.LevelError, false)
+	//handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: utp.LevelTrace})
+	handler1 := slog.NewTextHandler(logFile1, &slog.HandlerOptions{Level: slog.LevelError})
+	handler2 := slog.NewTextHandler(logFile2, &slog.HandlerOptions{Level: slog.LevelError})
 	//handler1 := log.NewTerminalHandler(logFile1, false)
 	//handler2 := log.NewTerminalHandler(logFile2, false)
-	logger1 := log.NewLogger(handler1)
-	logger2 := log.NewLogger(handler2)
+	logger1 := slog.New(handler1)
+	logger2 := slog.New(handler2)
 
-	//logger1 := log.Root()
-	//logger2 := log.Root()
-	t.Logf("opened trace: %v", logger2.Enabled(nil, log.LevelTrace))
-	t.Logf("opened info: %v", logger2.Enabled(nil, log.LevelInfo))
-	t.Logf("opened warn: %v", logger2.Enabled(nil, log.LevelWarn))
-	t.Logf("opened error: %v", logger2.Enabled(nil, log.LevelError))
+	//logger1 := slog.Default()
+	//logger2 := slog.Default()
+	t.Logf("opened trace: %v", logger2.Enabled(context.Background(), utp.LevelTrace))
+	t.Logf("opened info: %v", logger2.Enabled(context.Background(), slog.LevelInfo))
+	t.Logf("opened warn: %v", logger2.Enabled(context.Background(), slog.LevelWarn))
+	t.Logf("opened error: %v", logger2.Enabled(context.Background(), slog.LevelError))
 
 	t.Log("starting socket test")
 
@@ -95,15 +95,15 @@ func TestManyConcurrentTransfers(t *testing.T) {
 	ctx := context.Background()
 	//recv, _, send, _ := buildConnectedPair()
 	// Create sockets
-	//recvLink := utp.WithSocket(ctx, recv, logger1.New("local", ":3400"))
-	recvLink, err := utp.Bind(ctx, "udp4", recvAddr, logger1.New("local", ":3400"))
+	//recvLink := utp.WithSocket(ctx, recv, logger1.With("local", ":3400"))
+	recvLink, err := utp.Bind(ctx, "udp4", recvAddr, logger1.With("local", ":3400"))
 	if err != nil {
 		t.Fatalf("Failed to bind recv socket: %v", err)
 	}
 	defer recvLink.Close()
 
-	//sendLink := utp.WithSocket(ctx, send, logger2.New("local", ":3401"))
-	sendLink, err := utp.Bind(ctx, "udp4", sendAddr, logger2.New("local", ":3401"))
+	//sendLink := utp.WithSocket(ctx, send, logger2.With("local", ":3401"))
+	sendLink, err := utp.Bind(ctx, "udp4", sendAddr, logger2.With("local", ":3401"))
 	if err != nil {
 		t.Fatalf("Failed to bind send socket: %v", err)
 	}
@@ -169,8 +169,8 @@ func TestManyConcurrentTransfers(t *testing.T) {
 // benchmark of UDP loopback, not a test of this package. It has been rewritten
 // to exercise what its name claims. See KNOWN-LIMITATIONS.md.
 func TestUdpTransfer(t *testing.T) {
-	handler := log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelCrit, false)
-	logger := log.NewLogger(handler)
+	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 4})
+	logger := slog.New(handler)
 
 	recvAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3600}
 	sendAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3601}
@@ -297,19 +297,19 @@ func OneHugeDataTransfer(t *testing.T, i int) {
 	//// Initialize logging
 	//logFile1, _ := os.OpenFile(fmt.Sprintf("test_one_huge_data_transfer_%d.log", recvAddr.Port), os.O_CREATE|os.O_RDWR|os.O_APPEND, 0666)
 	//logFile2, _ := os.OpenFile(fmt.Sprintf("test_one_huge_data_transfer_%d.log", sendAddr.Port), os.O_CREATE|os.O_RDWR|os.O_APPEND, 0666)
-	////handler := log.NewTerminalHandler(os.Stdout, true)
+	////handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: utp.LevelTrace})
 	//handler1 := log.NewTerminalHandler(logFile1, false)
 	//handler2 := log.NewTerminalHandler(logFile2, false)
-	//logger1 := log.NewLogger(handler1)
-	//logger2 := log.NewLogger(handler2)
+	//logger1 := slog.New(handler1)
+	//logger2 := slog.New(handler2)
 
-	logger1 := log.Root()
-	logger2 := log.Root()
+	logger1 := slog.Default()
+	logger2 := slog.Default()
 
 	ctx := context.Background()
-	recv, err := utp.Bind(ctx, "udp", recvAddr, logger1.New("local", fmt.Sprintf(":%d", recvAddr.Port)))
+	recv, err := utp.Bind(ctx, "udp", recvAddr, logger1.With("local", fmt.Sprintf(":%d", recvAddr.Port)))
 	require.NoError(t, err, "Failed to bind recv socket")
-	send, err := utp.Bind(ctx, "udp", sendAddr, logger2.New("local", fmt.Sprintf(":%d", sendAddr.Port)))
+	send, err := utp.Bind(ctx, "udp", sendAddr, logger2.With("local", fmt.Sprintf(":%d", sendAddr.Port)))
 	require.NoError(t, err, "Failed to bind send socket")
 
 	defer func() {

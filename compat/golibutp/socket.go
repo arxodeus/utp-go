@@ -116,7 +116,7 @@ func NewSocketFromPacketConn(pc net.PacketConn, opts ...NewSocketOpt) (*Socket, 
 	}
 	s.minLogLevel.Store(int64(logLevelFor(s.options)))
 	us, err := utpnet.NewSocketFromPacketConn(context.Background(), pc, &utpnet.Options{
-		Logger:           newGethLogger(s),
+		Logger:           newSlogLogger(s),
 		ConnectionConfig: s.options.connectionConfig(),
 		Firewall:         s.firewall,
 		OnWriteError:     s.onWriteError,

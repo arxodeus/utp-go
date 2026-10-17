@@ -1951,6 +1951,20 @@ libutp's test (`utp_internal.cpp:2481`, `:2834`).
 Breaking for anyone using the removed names; none of them do anything a
 caller of the remaining API needs.
 
+## PR 73 — what an outside review found
+
+Ten defects from a review of 9c44c4f, each fixed with a test that fails
+without it: a cancelled write sent anyway (and twice through utpnet), utpnet's
+Close abandoning what closed connections held, a compat race on close, a FIN
+stranding data after 65,536 packets, a gap the receive buffer had no room to
+fill, CloseRead leaving a Read waiting, Accept outliving its socket, WriteTo
+ignoring its deadline once writing, a read error leaving utpnet's socket open,
+and two address caches that never forgot. With them: writes copied a send
+buffer at a time, the selective ack built from its window alone, logging on
+`log/slog` in place of go-ethereum's logger (an API change: `Bind`,
+`WithSocket` and `utpnet.Options.Logger` take a `*slog.Logger`), and a release
+procedure. KNOWN-LIMITATIONS.md, "The release review of 9c44c4f".
+
 ## Not for upstream
 
 - `DefaultSocketBufferSize` and the `Bind` buffer sizing — defensible, but it

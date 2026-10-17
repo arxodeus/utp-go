@@ -32,13 +32,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	utp "github.com/arxodeus/utp"
-	"github.com/ethereum/go-ethereum/log"
 )
 
 // ErrSocketClosed is returned by operations on a closed Socket.
@@ -78,7 +78,7 @@ type Socket struct {
 	udp    udpPacketConn
 	sock   *utp.UtpSocket
 	inner  *demuxConn
-	logger log.Logger
+	logger *slog.Logger
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -123,7 +123,7 @@ type datagram struct {
 // Options configures a Socket.
 type Options struct {
 	// Logger receives the uTP socket's logging. A nil Logger discards it.
-	Logger log.Logger
+	Logger *slog.Logger
 	// ConnectionConfig is applied to every stream this socket accepts or
 	// dials. A nil value uses utp.NewConnectionConfig().
 	//
@@ -195,7 +195,7 @@ func newSocket(ctx context.Context, conn udpPacketConn, opts *Options) (*Socket,
 	}
 	logger := opts.Logger
 	if logger == nil {
-		logger = log.New("utp", "utpnet")
+		logger = slog.New(slog.DiscardHandler)
 	}
 	config := opts.ConnectionConfig
 	if config == nil {

@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,7 +38,7 @@ func CreateTestConnection(endpoint endpointInfo) *connection {
 	unackTimeoutCh := make(chan *packet, 1000)
 	timers := newRetransmitTimers(TEST_INITIAL_TIMEOUT/4, 8)
 	conn := &connection{
-		logger:         log.Root(),
+		logger:         newLogger(nil),
 		state:          newConnState(make(chan error, 1)),
 		cid:            &cid,
 		config:         NewConnectionConfig(),

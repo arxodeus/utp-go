@@ -6,9 +6,9 @@ import (
 	"log/slog"
 	"strings"
 
-	gethlog "github.com/ethereum/go-ethereum/log"
-
 	"github.com/anacrolix/log"
+
+	utpgo "github.com/arxodeus/utp"
 )
 
 // Logger is the default Socket logger. Override it per Socket with
@@ -28,8 +28,8 @@ type logHandler struct {
 
 var _ slog.Handler = (*logHandler)(nil)
 
-func newGethLogger(s *Socket) gethlog.Logger {
-	return gethlog.NewLogger(&logHandler{s: s})
+func newSlogLogger(s *Socket) *slog.Logger {
+	return slog.New(&logHandler{s: s})
 }
 
 func (h *logHandler) Enabled(_ context.Context, level slog.Level) bool {
@@ -59,9 +59,13 @@ func (h *logHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 
 func (h *logHandler) WithGroup(string) slog.Handler { return h }
 
+// levelCrit is the level the engine logged at for what go-libutp calls
+// critical, go-ethereum's crit: above slog's error.
+const levelCrit = slog.LevelError + 4
+
 func anacrolixLevel(l slog.Level) log.Level {
 	switch {
-	case l >= gethlog.LevelCrit:
+	case l >= levelCrit:
 		return log.Critical
 	case l >= slog.LevelError:
 		return log.Error
@@ -78,7 +82,7 @@ func anacrolixLevel(l slog.Level) log.Level {
 func logLevelFor(o contextOptions) slog.Level {
 	switch {
 	case o.logDebug:
-		return gethlog.LevelTrace
+		return utpgo.LevelTrace
 	case o.logMtu:
 		return slog.LevelDebug
 	case o.logNormal:

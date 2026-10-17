@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 	"time"
 
 	utp "github.com/arxodeus/utp"
-	"github.com/ethereum/go-ethereum/log"
 )
 
 // UtpPair is two uTP sockets joined by an emulated network, ready to carry
@@ -21,7 +21,7 @@ type UtpPair struct {
 
 // NewUtpPair wraps two endpoints in uTP sockets. Close the Network to shut
 // everything down.
-func NewUtpPair(ctx context.Context, n *Network, a, b *Endpoint, logger log.Logger) *UtpPair {
+func NewUtpPair(ctx context.Context, n *Network, a, b *Endpoint, logger *slog.Logger) *UtpPair {
 	return &UtpPair{
 		Net:   n,
 		A:     a,

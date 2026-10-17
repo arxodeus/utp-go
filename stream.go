@@ -9,8 +9,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/ethereum/go-ethereum/log"
 )
 
 var (
@@ -25,13 +23,23 @@ var (
 	ErrSocketClosed = fmt.Errorf("utp: socket closed: %w", net.ErrClosed)
 )
 
+// UtpStream is one uTP connection, as UtpSocket's Connect and Accept return
+// it.
+//
+// Its lifetime is the socket's, not the call's that made it: cancelling a
+// dial's or an accept's context after it returns does not end the stream.
+// Read and Write each take a context that governs that one call. CloseWrite
+// sends a FIN once what is written has gone, CloseRead stops delivery, and
+// Close does both and returns at once, the connection delivering what it
+// holds in the background; UtpSocket.Close waits for that, while the peer
+// still answers. Done is closed when the connection has ended.
 type UtpStream struct {
 	// socketCtx is the context of the socket the stream runs on; streamCtx
 	// is the stream's own, which ends with it. See endWait.
 	socketCtx    context.Context
 	streamCtx    context.Context
 	streamCancel context.CancelFunc
-	logger       log.Logger
+	logger       *ulogger
 	cid          *ConnectionId
 	reads        chan *readOrWriteResult
 	writes       chan *queuedWrite
@@ -48,6 +56,8 @@ type UtpStream struct {
 	// never read from carries none. Guarded by readShutMu.
 	readShutMu sync.Mutex
 	readShutCh chan struct{}
+	// writeMu holds one write's chunks together. See writeChunked.
+	writeMu    sync.Mutex
 	connHandle *sync.WaitGroup
 	conn       *connection
 	// linger, set by the socket that made this stream, takes it over at
@@ -88,7 +98,7 @@ const writeQueueLen = 16
 
 func newUtpStream(
 	ctx context.Context,
-	logger log.Logger,
+	logger *ulogger,
 	cid *ConnectionId,
 	config *ConnectionConfig,
 	syn *packet,
@@ -98,7 +108,7 @@ func newUtpStream(
 	connected chan error,
 	timers *retransmitTimers,
 ) *UtpStream {
-	if logger.Enabled(baseContext, log.LevelTrace) {
+	if logger.Enabled(baseContext, LevelTrace) {
 		logger.Trace("new a utp stream", "dst.peer", cid.Peer, "dst.send", cid.Send, "dst.recv", cid.Recv)
 	}
 	connHandle := &sync.WaitGroup{}
@@ -317,7 +327,7 @@ func (s *UtpStream) ReadToEOF(ctx context.Context, buf *[]byte) (int, error) {
 				return n, s.terminalErr()
 			}
 			s.notifyRead()
-			if s.logger.Enabled(baseContext, log.LevelTrace) {
+			if s.logger.Enabled(baseContext, LevelTrace) {
 				s.logger.Trace("read a new buf", "len", res.Len)
 			}
 			if len(res.Data) == 0 {
@@ -404,6 +414,18 @@ func (s *UtpStream) Read(ctx context.Context, buf []byte) (int, error) {
 	return n, nil
 }
 
+// Write queues all of buf to be sent and returns once the connection has
+// taken every byte of it into its send buffer, which may be before any has
+// been sent: delivery continues in the background, through Close.
+//
+// The count is what the connection took, and what it took will be sent. If
+// ctx ends first, Write returns what had been taken with ctx's error, and
+// withdraws the rest, which is not sent; retrying with what was not taken
+// sends each byte once. Writes from several goroutines are each sent whole,
+// one after another.
+//
+// After CloseWrite or Close it returns ErrNotConnected, and once the
+// connection has ended, the reason it ended.
 func (s *UtpStream) Write(ctx context.Context, buf []byte) (int, error) {
 	if s.writeClosed.Load() {
 		return 0, ErrNotConnected
@@ -435,9 +457,52 @@ func (s *UtpStream) Write(ctx context.Context, buf []byte) (int, error) {
 	// so an embedder may reuse its buffer straight away. One copy per Write is
 	// what that costs, and on the fastest link the harness models it does not
 	// show up at all -- see "What the write copy cost" in BENCHMARKS.md.
-	queued := make([]byte, len(buf))
-	copy(queued, buf)
-	return s.writeQueued(ctx, queued, resCh)
+	if len(buf) <= s.writeChunk() {
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
+		queued := make([]byte, len(buf))
+		copy(queued, buf)
+		return s.writeQueued(ctx, queued, resCh)
+	}
+	return s.writeChunked(ctx, len(buf), func(dst []byte, off int) { copy(dst, buf[off:]) })
+}
+
+// writeChunk is the most a write copies at once: the send buffer's size,
+// which is the most the connection can take from it at once anyway.
+func (s *UtpStream) writeChunk() int {
+	if n := s.conn.config.BufferSize; n > 0 {
+		return n
+	}
+	return DefaultBufferSize
+}
+
+// writeChunked writes total bytes, which fill copies out of the caller's
+// buffers, a chunk at a time: each copied once the last has been taken.
+//
+// A write used to copy everything it was given before queueing any of it, so
+// a 100 MB write held 100 MB on top of the caller's own, however small the
+// send buffer it was going into -- and concurrent writes each held theirs.
+// Now a write holds at most one send buffer's worth beyond what is already
+// in the send buffer. Release review of 9c44c4f.
+//
+// writeMu keeps the chunks of one write together: concurrent writes are each
+// still written whole, one after another, as they were when each was one
+// queued write.
+func (s *UtpStream) writeChunked(ctx context.Context, total int, fill func(dst []byte, off int)) (int, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	chunk := s.writeChunk()
+	written := 0
+	for written < total {
+		queued := make([]byte, min(chunk, total-written))
+		fill(queued, written)
+		n, err := s.writeQueued(ctx, queued, make(chan *readOrWriteResult, 1))
+		written += n
+		if err != nil {
+			return written, err
+		}
+	}
+	return written, nil
 }
 
 // WriteV writes several buffers as one stream write, without the caller
@@ -479,12 +544,22 @@ func (s *UtpStream) WriteV(ctx context.Context, bufs [][]byte) (int, error) {
 	if total == 0 {
 		return 0, nil
 	}
-	// One allocation, one copy per byte -- the whole point of the call.
-	queued := make([]byte, 0, total)
-	for _, b := range bufs {
-		queued = append(queued, b...)
-	}
-	return s.writeQueued(ctx, queued, make(chan *readOrWriteResult, 1))
+	// One copy per byte -- the whole point of the call -- into one
+	// allocation, or, for more than a send buffer, one per chunk.
+	return s.writeChunked(ctx, total, func(dst []byte, off int) {
+		for _, b := range bufs {
+			if off >= len(b) {
+				off -= len(b)
+				continue
+			}
+			n := copy(dst, b[off:])
+			dst = dst[n:]
+			off = 0
+			if len(dst) == 0 {
+				return
+			}
+		}
+	})
 }
 
 // writeQueued hands an already-copied buffer to the connection and waits for
@@ -506,7 +581,7 @@ func (s *UtpStream) writeQueued(ctx context.Context, queued []byte, resCh chan *
 	case <-s.ended:
 		return 0, s.writeErr()
 	}
-	if s.logger.Enabled(baseContext, log.LevelTrace) {
+	if s.logger.Enabled(baseContext, LevelTrace) {
 		s.logger.Trace("created a new queued write to writes channel",
 			"dst.peer", s.cid.Peer,
 			"buf.len", len(queued),
@@ -685,7 +760,7 @@ func (s *UtpStream) WindowSize() uint32 {
 // that (UtpSocket.Close). libutp's utp_close (utp_internal.cpp:3358-3380).
 func (s *UtpStream) Close() {
 	s.closeOnce.Do(func() {
-		if s.logger.Enabled(baseContext, log.LevelTrace) {
+		if s.logger.Enabled(baseContext, LevelTrace) {
 			s.logger.Trace("call close utp stream", "dst.Peer", s.cid.Peer, "dst.send", s.cid.Send, "dst.recv", s.cid.Recv)
 		}
 		s.shutdown.Store(true)

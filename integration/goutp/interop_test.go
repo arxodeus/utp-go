@@ -16,12 +16,11 @@ import (
 
 	"github.com/anacrolix/go-utp/purego"
 	utp "github.com/arxodeus/utp"
-	"github.com/ethereum/go-ethereum/log"
 )
 
 // quietLogger is ours, quiet below critical.
-func quietLogger() log.Logger {
-	return log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelCrit, false))
+func quietLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 4}))
 }
 
 // puregoLogger is theirs, quiet below error.

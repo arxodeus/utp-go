@@ -2,8 +2,6 @@ package utp
 
 import (
 	"testing"
-
-	"github.com/ethereum/go-ethereum/log"
 )
 
 // A FIN that overtakes the last data must not strand it, however long the
@@ -22,7 +20,7 @@ func TestFinOvertakingDataAfterAFullSequenceCycle(t *testing.T) {
 		t.Fatal("invalid fixture")
 	}
 	c := &connection{
-		logger: log.New(),
+		logger: newLogger(nil),
 		cid:    &ConnectionId{},
 		state:  &connState{stateType: connConnected, RecvBuf: rb},
 	}
@@ -45,7 +43,7 @@ func TestDataPastTheFinIsStillDropped(t *testing.T) {
 		rb := newReceiveBuffer(4096, init)
 		rb.consumed = 65534
 		c := &connection{
-			logger: log.New(),
+			logger: newLogger(nil),
 			cid:    &ConnectionId{},
 			state:  &connState{stateType: connConnected, RecvBuf: rb},
 		}

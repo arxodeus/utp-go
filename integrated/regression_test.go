@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"sync"
@@ -12,15 +13,14 @@ import (
 	"time"
 
 	utp "github.com/arxodeus/utp"
-	"github.com/ethereum/go-ethereum/log"
 )
 
 // Regression tests for the transfer-path defects fixed in this fork.
 // Each test names the defect it covers; see the root-cause notes in
 // KNOWN-LIMITATIONS.md and the commit history.
 
-func quietLogger() log.Logger {
-	return log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelCrit, false))
+func quietLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 4}))
 }
 
 func envInt(k string, def int) int {

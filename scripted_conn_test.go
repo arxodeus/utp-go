@@ -8,6 +8,7 @@ package utp
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"runtime"
 	"strings"
@@ -15,12 +16,10 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/ethereum/go-ethereum/log"
 )
 
-func conformanceLogger() log.Logger {
-	return log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelCrit, false))
+func conformanceLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 4}))
 }
 
 // --- a scripted transport for our implementation ----------------------------

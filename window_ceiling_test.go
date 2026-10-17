@@ -62,7 +62,7 @@ func TestSetWindowSizeCapsALiveConnection(t *testing.T) {
 	if got := client.WindowSize(); got != ceiling {
 		t.Fatalf("WindowSize after the call = %d, want %d", got, ceiling)
 	}
-	maxWindow, maxInFlight := streamWindow(client)
+	maxWindow, _ := streamWindow(client)
 	if maxWindow > ceiling {
 		t.Fatalf("window %d right after the call, above the ceiling %d", maxWindow, ceiling)
 	}
@@ -72,7 +72,7 @@ func TestSetWindowSizeCapsALiveConnection(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		write()
 	}
-	maxInFlight = 0
+	maxInFlight := uint32(0)
 	for i := 0; i < 32; i++ {
 		write()
 		w, f := streamWindow(client)

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -14,7 +15,6 @@ import (
 
 	utp "github.com/arxodeus/utp"
 	"github.com/arxodeus/utp/native/libutp"
-	"github.com/ethereum/go-ethereum/log"
 )
 
 // Real libutp, running as an endpoint on the emulated network.
@@ -455,9 +455,9 @@ func libutpErrName(code int) string {
 
 // flowLogger is quiet unless UTP_FLOW_LOG asks otherwise, for diagnosing
 // interop failures.
-func flowLogger() log.Logger {
+func flowLogger() *slog.Logger {
 	if os.Getenv("UTP_FLOW_LOG") != "" {
-		return log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelWarn, false))
+		return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	}
 	return quiet()
 }

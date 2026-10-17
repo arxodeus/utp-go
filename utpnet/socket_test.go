@@ -8,17 +8,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/ethereum/go-ethereum/log"
 )
 
-func quiet() log.Logger {
-	return log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelCrit, false))
+func quiet() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 4}))
 }
 
 func listenPair(t *testing.T) (server, client *Socket) {

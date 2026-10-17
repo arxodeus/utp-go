@@ -6,20 +6,53 @@ Read this before trusting any part of this fork. It is honest about what has
 been done, what has only been done on loopback, and what has not been done at
 all.
 
+Most of what follows is history: a defect, its root cause, and the fix, kept
+so the reasoning survives. What still applies is this list, and each entry
+names the section with the detail.
+
+## What still applies
+
+- **Nothing has run over a wide-area path.** Every measurement is on one
+  machine, over loopback or the emulated network (README.md).
+- **Tests have run on Linux only.** The other platforms are built in CI;
+  their tests run there from the first CI run on (RELEASING.md). Until that
+  has passed on a platform, it is not claimed.
+- **Acknowledgements leave 10-20 us later than libutp's**: medians of 70-80 us
+  against 50-60 at 10 Mb/s, 40 against 30 at 100 Mb/s, the Go runtime waking
+  the reader and the handling. Accepted (COMPATIBILITY.md, "Ack turnaround";
+  DEVIATIONS.md).
+- **LEDBAT++'s latecomer takes most of the link** from a LEDBAT++ flow
+  already running: "LEDBAT++'s latecomer takes most of the link — open".
+  LEDBAT++ and RACK are opt-in; the default is classic LEDBAT and libutp's
+  loss detection, and what is claimed for libutp compatibility is claimed for
+  the default.
+- **Classic LEDBAT takes about 69% of a link from a loss-based flow**, as
+  libutp's does: a property of the protocol libutp implements, not of the
+  port. "Classic LEDBAT does not yield, and that is the point of the
+  protocol".
+- **A packet is dropped when its connection's event queue is full**, counted
+  in `UtpSocket.PacketsDroppedFullConnQueue`, and **the event loop takes
+  incoming packets before anything else**: "Things found but deliberately not
+  fixed".
+- **The accept expiry is a fixed 20 s**: "API notes".
+- **utpnet's WriteTo, on a UDP socket with no write deadline, writes
+  directly**, so a deadline set while such a write is blocked waits for the
+  kernel's send buffer to drain: "The release review of 9c44c4f".
+
 ## Status against the brief's milestones
 
 | Milestone | State |
 | --- | --- |
 | **M0** — pin the reference, prove the two libutp copies agree | **Done.** See [REFERENCE.md](REFERENCE.md) and `scripts/check-libutp-reference.sh`. |
 | **M1** — emulated network harness | **Done.** See [HARNESS.md](HARNESS.md) and `netem/`. |
-| **M2** — conformance harness against real libutp | **Done.** Corpus comparing emitted packets field by field, including malformed and hostile headers, plus retransmission-schedule and ack-count comparisons measured against libutp on each run; see [CONFORMANCE.md](CONFORMANCE.md). Both roles are covered: `conformance_initiator_corpus_test.go` adds ten curated cases in the dialling role, on the virtual clock, comparing the SYN itself. Ack *latency* is the one thing the corpus cannot compare -- both implementations flush deferred acks when something outside says so, so on the virtual clock it would time the harness -- and it is compared over real sockets instead, each implementation on its production trigger: `native/libutp.TestAckTurnaround`, a median of 70 us here against libutp's 40 us at 10 Mb/s, a recorded shortfall ([COMPATIBILITY.md](COMPATIBILITY.md), "Ack turnaround"). This row said "partly done" on that account after the comparison existed. |
+| **M2** — conformance harness against real libutp | **Done.** Corpus comparing emitted packets field by field, including malformed and hostile headers, plus retransmission-schedule and ack-count comparisons measured against libutp on each run; see [CONFORMANCE.md](CONFORMANCE.md). Both roles are covered: `conformance_initiator_corpus_test.go` adds ten curated cases in the dialling role, on the virtual clock, comparing the SYN itself. Ack *latency* is the one thing the corpus cannot compare -- both implementations flush deferred acks when something outside says so, so on the virtual clock it would time the harness -- and it is compared over real sockets instead, each implementation on its production trigger: `native/libutp.TestAckTurnaround`, medians of 70-80 us here against libutp's 50-60 us at 10 Mb/s, a recorded shortfall ([COMPATIBILITY.md](COMPATIBILITY.md), "Ack turnaround"). This row said "partly done" on that account after the comparison existed. |
 | **M3** — fix the failing transfer tests | **Done.** Root causes below; gates in "Verification". |
 | **M4** — audit transfer paths against libutp | **Done.** The ack path, the loss-recovery path, the retransmission timers and the send path are all audited against libutp — the timers by measurement rather than by reading, see [CONFORMANCE.md](CONFORMANCE.md). Three findings from the send path below; the packet-size one is deliberately left to M6. |
 | **M4b** — exhaustive libutp compatibility sweep | **Done, line by line**: [LIBUTP-AUDIT.md](LIBUTP-AUDIT.md). This row used to say the line-by-line sweep had been done when what had been done was a sweep of the paths that carry packets (see "The M4b sweep" below); reading every line of `utp_internal.cpp` and its support files has since found thirty-three more differences, all fixed or recorded, two of them serious ("The line-by-line audit" below). It found the clock-drift penalty missing, now implemented and measured, and `utp_read_drained` missing, now implemented after two reverts that rested on a misattributed hang, and measured: a stalled reader's transfer finishes in 2.16s with it against 29.7s under libutp's own behaviour without it. Measuring it found two more defects: our sender overran the peer's window (fixed), and our keep-alive could leave 29 seconds late (also fixed). [COMPATIBILITY.md](COMPATIBILITY.md) records every protocol area, the *kind* of evidence behind it — differential, measured, interop, cited, or none — and what is unchecked. Writing it found one defect (an ack per data packet, below), and the largest gap it named — libutp had never been run over the emulated network — has since been closed: `netem.TestLibutpOverEmulatedNetwork` runs real libutp over the same links as the benchmark suite, which found three more defects. All were in the harness, and all made libutp look worse than it is. |
 | **M5** — verify LEDBAT, add LEDBAT++ | **Done.** Classic LEDBAT verified against `apply_ccontrol` and corrected (seven defects, +42% to +89% goodput). LEDBAT++ implemented from the draft, opt-in. Deference measured against a loss-based competitor over a shared bottleneck: while both send, classic LEDBAT takes about 69% of the link from it, LEDBAT++ usually 21-33% (re-measured; the first figures were 60% and 44% by goodput share). See [BENCHMARKS.md](BENCHMARKS.md). |
 | **M6** — MTU path discovery | **Done.** Binary search between a 576-byte floor and a 1400-byte ceiling, probing with ordinary data packets, as libutp does. The ceiling could be raised from 1024 only because discovery makes it safe: an untested path still gets 988 bytes. Probes now carry the don't-fragment bit through `utp.DontFragmentWriter`, implemented for a real UDP socket on Linux, Darwin, the BSDs and Windows without adding a dependency, and compiling everywhere else against a stub. Implementing the bit exposed a second gap, since closed: libutp's duplicate-acknowledgement route to lowering the ceiling (`:1927-1940`) was missing, so a probe dropped for size during a bulk transfer taught the search nothing. With both, the search comes down from 1384 to 996 on a 1000-byte path and fragmentation falls from 3809 datagrams to 32. |
 | **M7** — anacrolix/torrent integration | **Done.** `utpnet` presents a uTP socket as `net.PacketConn`/`net.Conn` and satisfies torrent's uTP interface, checked against the real interface by reflection in `integration/anacrolix`. torrent selects its uTP implementation at build time, which used to leave a gap; [compat/golibutp](compat/golibutp/README.md) closes it. It is go-libutp's API on this library, so one `replace` line in an application's go.mod puts torrent's default build on it, with torrent's own socket layer, firewall and DHT. `integration/anacrolix.TestTorrentOverTheGoLibutpDropIn` transfers a hash-verified torrent that way. |
-| **M8** — soak and hardening | **Partly done.** Six fuzz targets — three on the decoder, one driving a live connection, and two differential against real libutp covering both the responder and initiator roles — plus three soak tests. Six defects found and fixed. See [FUZZING.md](FUZZING.md). Not done: anything running for hours. |
+| **M8** — soak and hardening | **Partly done.** Six fuzz targets — three on the decoder, one driving a live connection, and two differential against real libutp covering both the responder and initiator roles — plus three soak tests. Six defects found and fixed. See [FUZZING.md](FUZZING.md). The longest soak has run two hours ("What a two-hour soak found"); nothing longer has. |
 
 **The interoperability gate now passes.** libutp is vendored at the pinned
 commit in `native/libutp/`, with a bridge that gives it a UDP socket and an
@@ -5597,3 +5630,99 @@ rather than this library, failed on one sample. One of 20 took 69 ms on a
 requires every sample to be at least the configured delay, and the median
 excess to be under 5 ms. A link given 6 ms more than it claims fails it,
 and so does one given 2 ms less.
+
+## The release review of 9c44c4f
+
+An outside review of that revision, from reading its source, listed ten
+runtime defects and a publication gap. All ten were real; each is fixed below,
+with a test that fails without the fix. Its three proposed tests are among
+them, adapted to the code as it is.
+
+- **R1: a cancelled write was sent anyway, and utpnet sent it twice.** Once a
+  write was queued, its context ending returned 0 bytes while the connection
+  went on taking the rest; utpnet retries a write whose deadline moved and
+  that reported nothing, so the payload went out again -- four times over in
+  the test, which moves the deadline three times. A write now withdraws what
+  the connection has not taken and reports what it has, under a lock the
+  connection takes before taking any bytes; utpnet carries on from there.
+  `TestCancelledWriteReportsWhatWillBeSent`,
+  `utpnet.TestMovingTheWriteDeadlineDoesNotRepeatBytes`.
+- **R2: utpnet's Close stopped reading before the connections had finished.**
+  It closed the channel its reader runs on, then waited in the uTP socket's
+  Close for closed connections to deliver what they held -- which needs the
+  acknowledgements the reader was no longer reading. A 4 MB write closed at
+  once never finished. The application-facing calls now end first, the
+  reader runs while the socket drains, and stops after.
+  `utpnet.TestSocketCloseAfterWriteDeliversEverything`.
+- **R3: compat could panic when a socket closed as a connection completed.**
+  `newConn` read `c.us` outside the lock after publishing the connection, and
+  `Socket.Close` sets it to nil. `TestCloseWhileAConnIsBeingPublished`, with a
+  hook that closes the socket in that gap.
+- **R4: a FIN overtaking the last data could strand it after 65,536
+  packets.** Whether a packet precedes the FIN was decided from the
+  connection's first sequence number, which bounds nothing once the sequence
+  space has gone round; it is decided from the acknowledgement number now.
+  libutp compares `pk_seq_nr > eof_pkt` without wrapping, which is wrong
+  around 65535 too. `TestFinOvertakingDataAfterAFullSequenceCycle`.
+- **R5: the room kept for a gap could be too small.** It was the largest
+  packet received, and the packet that fills a gap is one that was not
+  received. A peer keeping within the advertised window cannot reach the
+  state, since what it may have in flight fits what the window leaves; one
+  sending past it could, and the stall was permanent. With nothing readable, the
+  next packet in order is now taken whatever its size, up to a datagram, the
+  buffer exceeding its capacity by that much until it is read: libutp has no
+  receive buffer and never refuses it. `TestGapLargerThanAnyPacketReceivedIsFilled`,
+  `TestPacketLargerThanTheWholeBufferIsTakenWhenEmpty`.
+- **R6: CloseRead neither woke a waiting Read nor survived a full event
+  queue.** It now closes a channel a waiting Read selects on, and the
+  connection applies it from the flag each pass, not from the event.
+  `TestCloseReadWakesABlockedRead`, `TestCloseReadAppliesWithoutItsEvent`.
+- **R7: Accept outlived its socket, and abandoned accepts accumulated.** The
+  wait watched only the caller's context; a cid-less request was dropped only
+  when a SYN came to claim one, so 500 timed-out accepts left 500 behind. Both
+  lifetimes are watched, and abandoned requests are pruned as new ones arrive.
+  `TestAcceptObservesSocketCancellation`, `TestAcceptReturnsWhenTheSocketCloses`,
+  `TestTimedOutAcceptsAreNotRetained`.
+- **R8: utpnet's WriteTo checked its deadline only before writing.** A
+  datagram now goes to one writer goroutine, and the caller waits under the
+  deadline, which may move. A UDP socket with no deadline set is still written
+  directly: the hand-over costs about 4 us and eleven allocations a datagram
+  (`utpnet.BenchmarkWriteTo`), and on such a socket a write blocks only until
+  the kernel's send buffer drains, so the one thing given up is a deadline set
+  while that write is blocked. `utpnet.TestWriteToObservesItsDeadlineWhileBlocked`.
+- **R9: a read error that will not clear left utpnet's socket open.** It
+  closes the socket now, and what was waiting returns `ErrSocketClosed`
+  wrapping the error. `utpnet.TestTerminalReadErrorClosesTheSocket`.
+- **R10: two address caches never removed anything.** The process-wide path
+  MTU cache (now bounded, expired entries first, and keyed by IPv6 zone so two
+  interfaces' link-local peers are two entries) and the generic PacketConn's
+  map back to its own address type (bounded, the longest silent first).
+  `TestPathMTUCacheIsBounded`, `TestPathMTUCacheKeysByZone`,
+  `utpnet.TestNativeAddressesAreBounded`.
+
+It also asked for more than defects, and these are done:
+
+- **A write is copied a send buffer at a time.** A 32 MB write to a peer not
+  reading held all 32 MB; it holds one send buffer's worth now, and
+  concurrent writes are still each sent whole. `TestALargeWriteHoldsOneChunk`.
+- **The selective ack visits only its window.** It copied the number of every
+  packet held into a map on every acknowledgement: 10,952 bytes with 1000
+  held, now under 2 KB however many. `TestSelectiveAckCostDoesNotGrowWithTheReorderBuffer`.
+- **Logging is `log/slog`.** go-ethereum's logger, in the public signatures of
+  `Bind`, `WithSocket` and `utpnet.Options`, brought go-ethereum and its
+  dependencies into every program using this library; `LevelTrace` is its
+  trace level. No module depends on go-ethereum now.
+- **Publication** (R11): compat/golibutp requires the root at v0.1.0 rather
+  than v0.0.0, which no consumer could resolve; RELEASING.md gives the order
+  and `scripts/check-release.sh` builds a clean consumer from the tags. The
+  module path is `github.com/arxodeus/utp`, so the repository has to carry
+  that name before tagging.
+- **CI** (`.github/workflows/ci.yml`): the quick gates on every push, the long
+  ones nightly, as RELEASING.md lists them.
+
+A separate review of the same revision found `randomUint16` drawing from
+[0, 65535), so 65535 was never a connection id or initial sequence number;
+libutp's `get_random` covers all 65536 (`TestRandomUint16CoversTheWholeRange`).
+It also said a second selective-ack extension silently replaced the first and
+libutp took the first. libutp keeps the last as well (`utp_internal.cpp:1846`,
+`selack_ptr = data` inside the loop), so that is unchanged.

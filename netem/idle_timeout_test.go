@@ -2,6 +2,7 @@ package netem
 
 import (
 	"context"
+	"log/slog"
 	"math/rand"
 	"os"
 	"sync"
@@ -9,7 +10,6 @@ import (
 	"time"
 
 	utp "github.com/arxodeus/utp"
-	elog "github.com/ethereum/go-ethereum/log"
 )
 
 // A connection that goes quiet must not time out.
@@ -126,11 +126,11 @@ func TestQuietConnectionDoesNotTimeOut(t *testing.T) {
 		quietPhase, timedOut, retxDuringQuiet, cwndAfterBulk, final.CwndBytes)
 }
 
-func debugIfSet() elog.Logger {
+func debugIfSet() *slog.Logger {
 	if os.Getenv("UTP_IDLE_DEBUG") == "" {
 		return quiet()
 	}
-	return elog.NewLogger(elog.NewTerminalHandlerWithLevel(os.Stderr, elog.LevelDebug, false))
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
 func lastSample(samples []utp.ConnectionMetrics) utp.ConnectionMetrics {

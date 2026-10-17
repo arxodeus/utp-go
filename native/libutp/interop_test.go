@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"testing"
@@ -13,7 +14,6 @@ import (
 
 	utp "github.com/arxodeus/utp"
 	"github.com/arxodeus/utp/native/libutp"
-	"github.com/ethereum/go-ethereum/log"
 )
 
 // The M7 interoperability gate.
@@ -26,8 +26,8 @@ import (
 // Both directions matter. A bug in connection-id allocation, for instance,
 // can leave one role working and the other unroutable.
 
-func quietLogger() log.Logger {
-	return log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelCrit, false))
+func quietLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 4}))
 }
 
 func makePayload(n int) []byte {

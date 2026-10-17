@@ -2,12 +2,11 @@ package utp
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/ethereum/go-ethereum/log"
 )
 
 // A socket must not answer every packet addressed to a connection it does not
@@ -97,8 +96,8 @@ func (c *recordingConn) stampsOfType(t packetType) []time.Time {
 	return out
 }
 
-func testSocketLogger() log.Logger {
-	return log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelCrit, false))
+func testSocketLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 4}))
 }
 
 // dataPacketFor builds an ST_DATA packet addressed to a connection id that no

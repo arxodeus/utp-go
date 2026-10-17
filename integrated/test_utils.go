@@ -4,10 +4,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync/atomic"
 
 	utp "github.com/arxodeus/utp"
-	"github.com/ethereum/go-ethereum/log"
 )
 
 var (
@@ -72,7 +72,7 @@ func (s *MockUdpSocket) ReadFrom(b []byte) (int, utp.ConnectionPeer, error) {
 	if len(b) < len(buf) {
 		return 0, nil, ErrChClosed
 	}
-	log.Debug("read a raw packet from mocksocket", "from", s.onlyPeer, "len(buf)", len(buf), "buf", hex.EncodeToString(buf))
+	slog.Debug("read a raw packet from mocksocket", "from", s.onlyPeer, "len(buf)", len(buf), "buf", hex.EncodeToString(buf))
 	copy(b[:n], buf)
 	return n, s.onlyPeer, nil
 }
@@ -87,7 +87,7 @@ func (s *MockUdpSocket) WriteTo(b []byte, dst utp.ConnectionPeer) (int, error) {
 		panic(fmt.Sprintf("MockUdpSocket only supports Writing To one peer: dst.peer = %s, onlyPeer = %s", dst.Hash(), s.onlyPeer.Hash()))
 	}
 	if !s.linkDecider.shouldSend() {
-		log.Debug("Dropping packet", "dst.peer", dst.Hash(), "onlyPeer", s.onlyPeer.Hash())
+		slog.Debug("Dropping packet", "dst.peer", dst.Hash(), "onlyPeer", s.onlyPeer.Hash())
 		return len(b), nil
 	}
 	// Like a UDP socket, never wait for the peer: a datagram that finds the
@@ -99,10 +99,10 @@ func (s *MockUdpSocket) WriteTo(b []byte, dst utp.ConnectionPeer) (int, error) {
 	select {
 	case s.sendCh <- b:
 	default:
-		log.Debug("link queue full, dropping packet", "dst.peer", dst.Hash())
+		slog.Debug("link queue full, dropping packet", "dst.peer", dst.Hash())
 		return len(b), nil
 	}
-	log.Debug("Sent a packet out to dest", "dest.peer", dst, "len", len(b), "data", hex.EncodeToString(b))
+	slog.Debug("Sent a packet out to dest", "dest.peer", dst, "len", len(b), "data", hex.EncodeToString(b))
 	return len(b), nil
 }
 func (s *MockUdpSocket) Close() error {
