@@ -243,6 +243,21 @@ func (c *connection) setupLoop(stream *UtpStream) {
 // finishLoop is everything the event loop does once it has ended, on
 // whichever goroutine ran its last pass. Called without mu.
 func (c *connection) finishLoop() {
+	// Timers first, while a virtual clock still counts this loop as busy: it
+	// moves time only once every participant is parked, so nothing fires
+	// until they are stopped. Stopped after the loop unregistered, a timer
+	// could fire in between into a loop no longer there -- the rest timer's
+	// wake does nothing to a connection that is not resting -- and the clock
+	// waited for a reaction for ever: TestDeadConnection*, under load.
+	t := &c.loopTimers
+	t.rack.stop()
+	t.lossProbe.stop()
+	t.idleRto.stop()
+	t.ackHold.stop()
+	t.probe.stop()
+	t.keepAlive.Stop()
+	t.idle.stop()
+	c.endDormancy()
 	if c.barrier != nil {
 		// A connection that ends -- reset by its peer, timed out, closed --
 		// can never park again, and a virtual clock waiting for it would
@@ -268,15 +283,6 @@ func (c *connection) finishLoop() {
 			u.Unregister()
 		}
 	}
-	t := &c.loopTimers
-	t.rack.stop()
-	t.lossProbe.stop()
-	t.idleRto.stop()
-	t.ackHold.stop()
-	t.probe.stop()
-	t.keepAlive.Stop()
-	t.idle.stop()
-	c.endDormancy()
 	// Tell the socket to drop this connection on *every* exit, not only the
 	// one where the state machine reached connClosed: a connection torn down
 	// by a cancelled context -- which is what an abandoned or failed

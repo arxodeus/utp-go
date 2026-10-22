@@ -20,9 +20,10 @@ import (
 //
 // So the assertion is on the path that cannot keep up: 20 Mb/s of data
 // draws about 1,750 acknowledgements a second, and 160 kb/s carries about
-// 1,000. Measured 0.51-0.52 acknowledgements per data packet there, three
-// runs, and 1.00 with ackEvery returning 1. The symmetric rows are reported
-// only: 0.84, 1.00 and 0.94 at 20 Mb/s, 100 Mb/s and 1 Gb/s.
+// 1,000. Measured 0.61-0.62 acknowledgements per data packet there, three
+// runs on Linux at 69e2b75 (0.51-0.52 when first written), and 1.00 with
+// ackEvery returning 1; once 0.83 on a macOS CI runner. The symmetric rows
+// are reported only: 1.00 at 20 Mb/s, 100 Mb/s and 1 Gb/s.
 func TestAckCoalescingUnderLoad(t *testing.T) {
 	cases := []struct {
 		name     string
