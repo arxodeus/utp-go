@@ -73,6 +73,13 @@ func TestManyConcurrentTransfers(t *testing.T) {
 	logFile1, _ := os.OpenFile(filepath.Join(t.TempDir(), "recv.log"), os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0666)
 	logFile2, _ := os.OpenFile(filepath.Join(t.TempDir(), "send.log"), os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0666)
 	transferLogs = []string{logFile1.Name(), logFile2.Name()}
+	// Closed before TempDir removes them -- cleanups run last first -- and
+	// after the sockets, which the deferred Closes below shut first. Windows
+	// will not delete a file that is open.
+	t.Cleanup(func() {
+		_ = logFile1.Close()
+		_ = logFile2.Close()
+	})
 	//handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: utp.LevelTrace})
 	handler1 := slog.NewTextHandler(logFile1, &slog.HandlerOptions{Level: slog.LevelWarn})
 	handler2 := slog.NewTextHandler(logFile2, &slog.HandlerOptions{Level: slog.LevelWarn})
