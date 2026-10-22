@@ -281,7 +281,8 @@ func (s *UtpStream) start() {
 // on (dormant.go).
 func (s *UtpStream) loopEnded(err error) {
 	if err != nil {
-		s.logger.Error("utp stream evenLoop has error and return", "err", err)
+		s.logger.Error("utp stream evenLoop has error and return", "err", err,
+			"cid.send", s.cid.Send, "cid.recv", s.cid.Recv)
 	}
 	close(s.ended)
 	s.connHandle.Done()

@@ -298,7 +298,25 @@ func (c *connection) updateClosingState() {
 }
 
 func (c *connection) onReset() {
-	c.logger.Warn("RESET from remote")
+	// With what had arrived: a RESET before the peer's FIN has been reached
+	// takes the rest of the stream with it, and is worth telling apart from
+	// the routine one that follows a peer closing first (readEndErr).
+	var remoteFin, localFin any
+	if cl := c.state.closing; cl != nil {
+		if cl.RemoteFin != nil {
+			remoteFin = *cl.RemoteFin
+		}
+		if cl.LocalFin != nil {
+			localFin = *cl.LocalFin
+		}
+	}
+	var ackNum any
+	if c.state.RecvBuf != nil {
+		ackNum = c.state.RecvBuf.AckNum()
+	}
+	c.logger.Warn("RESET from remote", "cid.send", c.cid.Send, "cid.recv", c.cid.Recv,
+		"ackNum", ackNum, "remoteFin", remoteFin, "localFin", localFin,
+		"receivedThroughFin", c.receivedThroughFin())
 
 	if c.state.stateType == connClosed {
 		return

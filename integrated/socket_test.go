@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -66,11 +68,14 @@ func TestManyConcurrentTransfers(t *testing.T) {
 	//}()
 
 	// Initialize logging
-	logFile1, _ := os.OpenFile("test_socket_many_concurrent_transfer_3400.log", os.O_CREATE|os.O_RDWR|os.O_APPEND, 0666)
-	logFile2, _ := os.OpenFile("test_socket_many_concurrent_transfer_3401.log", os.O_CREATE|os.O_RDWR|os.O_APPEND, 0666)
+	// Warnings and up, from this run only: a failed transfer prints its
+	// connection's lines from both (logLinesFor).
+	logFile1, _ := os.OpenFile(filepath.Join(t.TempDir(), "recv.log"), os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0666)
+	logFile2, _ := os.OpenFile(filepath.Join(t.TempDir(), "send.log"), os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0666)
+	transferLogs = []string{logFile1.Name(), logFile2.Name()}
 	//handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: utp.LevelTrace})
-	handler1 := slog.NewTextHandler(logFile1, &slog.HandlerOptions{Level: slog.LevelError})
-	handler2 := slog.NewTextHandler(logFile2, &slog.HandlerOptions{Level: slog.LevelError})
+	handler1 := slog.NewTextHandler(logFile1, &slog.HandlerOptions{Level: slog.LevelWarn})
+	handler2 := slog.NewTextHandler(logFile2, &slog.HandlerOptions{Level: slog.LevelWarn})
 	//handler1 := log.NewTerminalHandler(logFile1, false)
 	//handler2 := log.NewTerminalHandler(logFile2, false)
 	logger1 := slog.New(handler1)
@@ -465,6 +470,7 @@ func initiateTransfer(
 		if err != nil && err != io.EOF {
 			assert.NoError(t, err, "CID send=%d recv=%d read to eof error: %v",
 				recvCid.Send, recvCid.Recv, err)
+			logLinesFor(t, recvCid.Send, recvCid.Recv)
 		}
 		t.Logf("CID send=%d recv=%d read %d bytes from uTP stream",
 			recvCid.Send, recvCid.Recv, n)
@@ -499,4 +505,29 @@ func transferBudget() time.Duration {
 		return 10 * time.Minute
 	}
 	return 120 * time.Second
+}
+
+// transferLogs are the files TestManyConcurrentTransfers logs to, receiver's
+// first.
+var transferLogs []string
+
+// logLinesFor prints what both sockets logged about one transfer: the
+// receiving connection's lines, which carry its ids as they are, and the
+// sending one's, which carry them the other way round.
+func logLinesFor(t *testing.T, send, recv uint16) {
+	t.Helper()
+	ours := fmt.Sprintf("cid.send=%d cid.recv=%d", send, recv)
+	theirs := fmt.Sprintf("cid.send=%d cid.recv=%d", recv, send)
+	for _, name := range transferLogs {
+		data, err := os.ReadFile(name)
+		if err != nil {
+			t.Logf("%s: %v", name, err)
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.Contains(line, ours) || strings.Contains(line, theirs) {
+				t.Logf("%s: %s", filepath.Base(name), line)
+			}
+		}
+	}
 }
