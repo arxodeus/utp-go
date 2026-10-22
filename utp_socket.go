@@ -616,8 +616,11 @@ func (s *UtpSocket) sendShutdownEventToConns() {
 // whoever built it and may be reused across connections, so this copies
 // before changing anything. See pathMTUCeiling.
 func (s *UtpSocket) configForPeer(config *ConnectionConfig, peer ConnectionPeer) *ConnectionConfig {
+	// Nil is the defaults, for a dial as for an accept (configForAccept). It
+	// was passed on as it was, and a Connect or ConnectWithCid given nil
+	// panicked making the connection.
 	if config == nil {
-		return config
+		config = NewConnectionConfig()
 	}
 	// A socket-wide clock reaches its connections here, so a caller that
 	// configured one does not have to remember to set it on every config it

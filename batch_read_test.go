@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // batchPair is a udpConn and a socket sending to it.
@@ -29,6 +31,32 @@ func batchPair(t *testing.T, network string, ip net.IP) (*udpConn, *net.UDPConn)
 	return c, src
 }
 
+// readQueued reads the k datagrams just sent to c, copied out of its arena.
+//
+// Linux delivers on loopback before the send returns, so all k are queued
+// and one batch must take them. Darwin may still be delivering -- CI saw 11
+// of 16 -- so there they are read until all have come, still in order and
+// each whole.
+func readQueued(t *testing.T, c *udpConn, k int) []datagram {
+	t.Helper()
+	var dgs []datagram
+	deadline := time.Now().Add(2 * time.Second)
+	for len(dgs) < k && time.Now().Before(deadline) {
+		got, err := c.readBatch()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range got {
+			d.payload = append([]byte(nil), d.payload...)
+			dgs = append(dgs, d)
+		}
+		if runtime.GOOS == "linux" {
+			break
+		}
+	}
+	return dgs
+}
+
 // readBatch hands over every datagram already queued, in order, each whole,
 // however many system calls that takes.
 func TestReadBatchTakesEverythingQueued(t *testing.T) {
@@ -42,10 +70,7 @@ func TestReadBatchTakesEverythingQueued(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			dgs, err := c.readBatch()
-			if err != nil {
-				t.Fatal(err)
-			}
+			dgs := readQueued(t, c, k)
 			if len(dgs) != k {
 				t.Fatalf("read %d datagrams of %d queued", len(dgs), k)
 			}
@@ -91,10 +116,7 @@ func TestReadBatchTakesLargeDatagramWhole(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	dgs, err := c.readBatch()
-	if err != nil {
-		t.Fatal(err)
-	}
+	dgs := readQueued(t, c, 3)
 	if len(dgs) != 3 || !bytes.Equal(dgs[0].payload, big) || !bytes.Equal(dgs[1].payload, small) ||
 		!bytes.Equal(dgs[2].payload, big) {
 		var lens []int

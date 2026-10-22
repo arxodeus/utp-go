@@ -58,5 +58,7 @@ go-libutp's own dependencies. govulncheck finds none in any module on Go
 1.26.9 or 1.27.3. Build with a current release.
 
 govulncheck is pinned (v1.9.0): an older one, v1.1.4, crashed building
-its program on Go 1.27, so the version moves with the Go release CI uses. `go list -m all` in each module is the dependency
-inventory; `govulncheck ./...` in each is the vulnerability scan.
+its program on Go 1.27, so the version moves with the Go release CI uses.
+
+`go list -m all` in each module is the dependency inventory; `govulncheck
+./...` in each is the vulnerability scan.

@@ -2,6 +2,7 @@ package utp
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 )
@@ -84,4 +85,26 @@ func TestTimedOutAcceptsAreNotRetained(t *testing.T) {
 	if held > 1 {
 		t.Fatalf("%d abandoned accepts retained after 500 timeouts, want at most 1", held)
 	}
+}
+
+// A dial given a nil config gets the defaults, as an accept does. It panicked
+// making the connection.
+func TestConnectWithANilConfig(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	bind := func() *UtpSocket {
+		s, err := Bind(ctx, "udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(s.Close)
+		return s
+	}
+	sa, sb := bind(), bind()
+	go sb.Accept(ctx, nil)
+	s, err := sa.Connect(ctx, NewUdpPeer(sb.LocalAddr().(*net.UDPAddr)), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
 }

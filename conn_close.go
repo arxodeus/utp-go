@@ -247,17 +247,19 @@ func (c *connection) updateClosingState() {
 	// gets its end-of-stream marker from processReads when the receive buffer
 	// catches up to the FIN, and the writer carries on.
 	//
-	// Once the application *has* closed, though, this end is finished the
-	// moment everything it sent has been acknowledged. It does not wait for
-	// its own FIN to come back: the peer closed first, so by the time this FIN
-	// goes out the peer's connection is generally gone and nothing is left to
-	// acknowledge it. libutp reaches the same place by a different route -- the
-	// peer's socket answers the unmatched FIN with a RESET, and a socket with
-	// close_requested treats a RESET as a clean destroy rather than an error
-	// (utp_internal.cpp:2865-2868). This library's socket stays silent for a
-	// packet past a closed connection's FIN, so that a peer doing a half-close
-	// is not told its connection broke, and ending here reaches the same state
-	// without the RESET.
+	// Once the application *has* closed, this end is finished when everything
+	// it sent, its FIN included, has been acknowledged and the reader has
+	// everything up to the peer's FIN: libutp destroys a socket with
+	// close_requested once its FIN is acknowledged (fin_sent_acked,
+	// utp_internal.cpp:2174-2181). A peer that closed fully has gone by then,
+	// and answers this FIN with a RESET, which ends this connection too.
+	//
+	// It used to end the moment both FINs existed as well, in a second block
+	// with this one's conditions and none of its checks: whatever was still
+	// unacknowledged -- the end of the data, and the FIN -- was abandoned,
+	// and a peer that had only half-closed, still reading, never got it.
+	// TestCloseAfterThePeersFinDeliversWhatWasWritten (netem); review of
+	// 294cc2e.
 	//
 	// LocalFin != nil is doing real work in this condition. shutdown() only
 	// emits the FIN once the send buffer and the pending writes have drained,
@@ -274,18 +276,6 @@ func (c *connection) updateClosingState() {
 			c.state.stateType = connClosed
 			c.state.Err = nil
 		}
-	}
-
-	// Both sides have sent a FIN. That still does not end it on its own: the
-	// application may not have read what arrived before the peer's FIN, and
-	// tearing down here would discard it. The same close_requested rule
-	// applies -- a connection whose application never closes ends on the idle
-	// timeout, which is what libutp does with a socket its embedder forgets.
-	if c.state.stateType == connConnected && c.state.closing != nil &&
-		c.state.closing.RemoteFin != nil && c.state.closing.LocalFin != nil &&
-		c.closeRequested {
-		c.state.stateType = connClosed
-		c.state.Err = nil
 	}
 }
 

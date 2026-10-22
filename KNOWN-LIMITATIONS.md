@@ -5779,3 +5779,22 @@ The first CI run failed four tests off Linux:
 CI now also runs the nested modules under the race detector, where they all
 pass, and govulncheck on every module; see RELEASING.md for what it found in
 older standard libraries.
+
+## A closed connection abandoned data the peer was still reading
+
+A third review, of 294cc2e, read `updateClosingState` and found two blocks
+with the same conditions -- both FINs sent, the application closed -- the
+first ending the connection once everything was acknowledged and the reader
+had reached the peer's FIN, the second ending it unconditionally. The second
+always won, so a connection closed after its peer's FIN stopped as soon as
+its own FIN went out, abandoning whatever was unacknowledged. A peer that had
+only half-closed, and was still reading, lost the end of the data: on a 5%
+loss path, one run in eight delivered 257,052 of 262,144 bytes, and another
+delivered everything but no clean end of stream. The second block is gone.
+The connection now ends as libutp's does, once its FIN is acknowledged
+(utp_internal.cpp:2174-2181) -- or on the RESET a peer that closed fully, and
+so has gone, answers it with. `netem.TestCloseAfterThePeersFinDeliversWhatWasWritten`.
+
+Writing that test found that Connect and ConnectWithCid panicked given a nil
+config, which Accept takes as the defaults. They take it the same way now.
+`TestConnectWithANilConfig`.
