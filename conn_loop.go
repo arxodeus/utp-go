@@ -211,7 +211,13 @@ func (c *connection) setupLoop(stream *UtpStream) {
 	}
 
 	t.lossProbe = c.newLazyTimer()
-	c.armLossProbe = t.lossProbe.arm
+	c.armLossProbe = func(d time.Duration) {
+		if d > 0 {
+			t.lossProbe.arm(d)
+		} else {
+			t.lossProbe.stop()
+		}
+	}
 
 	t.rack = c.newLazyTimer()
 	c.armRack = func(d time.Duration) {
@@ -789,6 +795,13 @@ func (c *connection) endBatch() {
 	}
 	more := c.afterPass()
 	if more || c.state.stateType == connClosed {
+		c.kickLoop()
+	} else if !c.asleep && c.mayRest() {
+		// Resting is the loop's to do, and a loop parked behind this pass
+		// would otherwise wait for its next timer to find it has nothing
+		// left: with the loss probe stopped once nothing is outstanding, a
+		// sender whose last acknowledgement the reader handled would never
+		// rest.
 		c.kickLoop()
 	}
 }

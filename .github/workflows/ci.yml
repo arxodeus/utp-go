@@ -34,6 +34,24 @@ jobs:
             GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go vet ./...
           done
 
+  # On the current Go release, not go.mod's minimum: a vulnerability in an
+  # older standard library is the toolchain's, fixed by building with a
+  # current one, and would fail this on every run.
+  vulncheck:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: govulncheck
+        run: |
+          for m in . compat/golibutp integration/nettest integration/goutp integration/anacrolix; do
+            echo "== $m"
+            (cd "$m" && go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...)
+          done
+
   test:
     if: github.event_name != 'schedule'
     strategy:
@@ -76,6 +94,10 @@ jobs:
           go-version-file: ${{ matrix.module }}/go.mod
       - run: go test -timeout 30m ./...
         working-directory: ${{ matrix.module }}
+      - name: race
+        run: go test -race -timeout 30m ./...
+        working-directory: ${{ matrix.module }}
+
 
   platforms:
     if: github.event_name != 'schedule'

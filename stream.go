@@ -56,8 +56,9 @@ type UtpStream struct {
 	// never read from carries none. Guarded by readShutMu.
 	readShutMu sync.Mutex
 	readShutCh chan struct{}
-	// writeMu holds one write's chunks together. See writeChunked.
-	writeMu    sync.Mutex
+	// writeSem holds one write's chunks together: a write holds it while it
+	// is queued, and waits for it under its own context. See lockWrite.
+	writeSem   chan struct{}
 	connHandle *sync.WaitGroup
 	conn       *connection
 	// linger, set by the socket that made this stream, takes it over at
@@ -128,6 +129,7 @@ func newUtpStream(
 		shutdown:     &atomic.Bool{},
 		abandoned:    make(chan struct{}),
 		ended:        make(chan struct{}),
+		writeSem:     make(chan struct{}, 1),
 	}
 
 	utpStream.conn = newConnection(streamCtx, logger, cid, config, syn, connected, socketEvents, utpStream.reads, utpStream.abandoned, timers)
@@ -444,14 +446,48 @@ func (s *UtpStream) Write(ctx context.Context, buf []byte) (int, error) {
 	// show up at all -- see "What the write copy cost" in BENCHMARKS.md.
 	// History: HISTORY.md, "UtpStream.Write: the copy".
 	if len(buf) <= s.writeChunk() {
-		s.writeMu.Lock()
-		defer s.writeMu.Unlock()
+		if err := s.lockWrite(ctx); err != nil {
+			return 0, err
+		}
+		defer s.unlockWrite()
 		queued := make([]byte, len(buf))
 		copy(queued, buf)
 		return s.writeQueued(ctx, queued, resCh)
 	}
 	return s.writeChunked(ctx, len(buf), func(dst []byte, off int) { copy(dst, buf[off:]) })
 }
+
+// lockWrite waits for the write before this one to finish, for as long as
+// ctx, the stream and its write side allow.
+//
+// It was a mutex, so a write waiting behind another one that the peer's
+// window held up waited however long that took, its own context ended or
+// not. Review of 294cc2e, finding 1.
+func (s *UtpStream) lockWrite(ctx context.Context) error {
+	select {
+	case s.writeSem <- struct{}{}:
+	default:
+		select {
+		case s.writeSem <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-s.ended:
+			return s.writeErr()
+		}
+	}
+	// The write side may have closed while this waited.
+	if s.writeClosed.Load() {
+		s.unlockWrite()
+		return ErrNotConnected
+	}
+	if s.shutdown.Load() {
+		s.unlockWrite()
+		return s.shutErr(ctx)
+	}
+	return nil
+}
+
+func (s *UtpStream) unlockWrite() { <-s.writeSem }
 
 // writeChunk is the most a write copies at once: the send buffer's size,
 // which is the most the connection can take from it at once anyway.
@@ -467,11 +503,13 @@ func (s *UtpStream) writeChunk() int {
 // write holds at most one send buffer's worth beyond what is already in the
 // send buffer, however large it is.
 //
-// writeMu keeps the chunks of one write together: concurrent writes are each
+// lockWrite keeps the chunks of one write together: concurrent writes are each
 // written whole, one after another.
 func (s *UtpStream) writeChunked(ctx context.Context, total int, fill func(dst []byte, off int)) (int, error) {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	if err := s.lockWrite(ctx); err != nil {
+		return 0, err
+	}
+	defer s.unlockWrite()
 	chunk := s.writeChunk()
 	written := 0
 	for written < total {
@@ -527,17 +565,17 @@ func (s *UtpStream) WriteV(ctx context.Context, bufs [][]byte) (int, error) {
 	}
 	// One copy per byte -- the whole point of the call -- into one
 	// allocation, or, for more than a send buffer, one per chunk.
-	return s.writeChunked(ctx, total, func(dst []byte, off int) {
-		for _, b := range bufs {
-			if off >= len(b) {
-				off -= len(b)
-				continue
-			}
-			n := copy(dst, b[off:])
+	//
+	// Chunks are filled in order, so a cursor -- which buffer, how far into
+	// it -- carries on where the last chunk stopped rather than counting
+	// through every buffer before it again.
+	bi, bo := 0, 0
+	return s.writeChunked(ctx, total, func(dst []byte, _ int) {
+		for len(dst) > 0 && bi < len(bufs) {
+			n := copy(dst, bufs[bi][bo:])
 			dst = dst[n:]
-			off = 0
-			if len(dst) == 0 {
-				return
+			if bo += n; bo == len(bufs[bi]) {
+				bi, bo = bi+1, 0
 			}
 		}
 	})

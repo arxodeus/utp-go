@@ -16,7 +16,8 @@ workflow, and are run by hand on the release commit and their logs kept.
 | Cross-build | `GOOS=… GOARCH=… go vet ./...` for linux (amd64, arm64, 386), darwin, freebsd, windows | every push |
 | Root tests, cgo and not | `go test -short ./...` with `CGO_ENABLED=1` and `=0` | every push |
 | Race | `go test -race -short ./...` | every push |
-| Each nested module | `go test ./...` in `compat/golibutp`, `integration/nettest`, `integration/goutp`, `integration/anacrolix` -- `go test ./...` at the root does not enter them | every push |
+| Each nested module | `go test ./...` and `go test -race ./...` in `compat/golibutp`, `integration/nettest`, `integration/goutp`, `integration/anacrolix` -- neither at the root enters them | every push |
+| Vulnerabilities | `govulncheck ./...` in the root and each nested module, on the current Go release | every push |
 | Transport tests on macOS and Windows | `go test -short ./...` | every push |
 | Full root suite | `go test -timeout 120m ./...` | nightly |
 | Full race suite | `UTP_TEST_TRANSFERS=50 go test -race -timeout 120m ./...` | nightly |
@@ -49,5 +50,10 @@ by anyone depending on it), so the root's tag has to exist first.
 ## After
 
 The Go version in each go.mod is the minimum, and CI builds with it and with
-the current release. `go list -m all` in each module is the dependency
+the current release. It is not a recommendation: the standard library of
+older releases has vulnerabilities this code reaches -- GO-2026-4971 (`net`
+on Windows, fixed in Go 1.25.10) from the root module, and four in
+`net/http` (fixed in Go 1.26.9) that compat/golibutp reaches through
+go-libutp's own dependencies. govulncheck finds none in any module on Go
+1.26.9. Build with a current release. `go list -m all` in each module is the dependency
 inventory; `govulncheck ./...` in each is the vulnerability scan.

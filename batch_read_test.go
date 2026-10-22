@@ -4,8 +4,10 @@ package utp
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net"
+	"syscall"
 	"testing"
 )
 
@@ -61,11 +63,30 @@ func TestReadBatchTakesEverythingQueued(t *testing.T) {
 
 // A datagram as large as loopback carries arrives whole: MaxPacketSize may be
 // set that high, and a truncated packet would be lost.
+//
+// On Darwin the sender's send buffer also bounds the datagram it may send --
+// net.inet.udp.maxdgram, 9216 by default -- so the sender's is raised first,
+// and the size is the largest of a few the platform then accepts. That
+// refusal is the sender's, before the receive path runs at all.
 func TestReadBatchTakesLargeDatagramWhole(t *testing.T) {
 	c, src := batchPair(t, "udp4", net.IPv4(127, 0, 0, 1))
-	big := bytes.Repeat([]byte{0xab, 0xcd}, 30000)
+	_ = src.SetWriteBuffer(1 << 20)
+	var big []byte
+	for _, size := range []int{60000, 32768, 16384} {
+		b := bytes.Repeat([]byte{0xab}, size)
+		if _, err := src.Write(b); err == nil {
+			big = b
+			break
+		} else if !errors.Is(err, syscall.EMSGSIZE) {
+			t.Fatal(err)
+		}
+	}
+	if big == nil {
+		t.Skip("this platform sends no UDP datagram of 16 KB or more on loopback")
+	}
+	t.Logf("%d-byte datagrams", len(big))
 	small := []byte("after")
-	for _, b := range [][]byte{big, small, big} {
+	for _, b := range [][]byte{small, big} {
 		if _, err := src.Write(b); err != nil {
 			t.Fatal(err)
 		}
@@ -80,7 +101,7 @@ func TestReadBatchTakesLargeDatagramWhole(t *testing.T) {
 		for _, d := range dgs {
 			lens = append(lens, len(d.payload))
 		}
-		t.Fatalf("read datagrams of %v bytes, want [60000 5 60000]", lens)
+		t.Fatalf("read datagrams of %v bytes, want [%d 5 %d]", lens, len(big), len(big))
 	}
 }
 

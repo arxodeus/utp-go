@@ -299,7 +299,10 @@ func TestBaseDelay(t *testing.T) {
 	// The smallest sample first, received a window ago and so expired;
 	// then three newer ones, in the order acknowledgements arrive.
 	delayExpired := 1 * time.Millisecond
-	delayExpiredReceivedAt := time.Now().Add(-window)
+	// Past the window by a margin: exactly a window ago is the boundary,
+	// and a clock that has not moved since (Windows' can be that coarse)
+	// leaves it in.
+	delayExpiredReceivedAt := time.Now().Add(-window - time.Millisecond)
 	acc.Push(delayExpired, delayExpiredReceivedAt)
 
 	delaySmallest := 5 * time.Millisecond

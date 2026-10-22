@@ -418,7 +418,14 @@ func (c *connection) rearmLossProbe(ackNum uint16) {
 		c.lossProbeAckNum = ackNum
 		c.lossProbeSent = false
 	}
-	if c.lossProbeSent || c.fastTimeout || !c.state.SentPackets.HasUnackedPackets() {
+	if !c.state.SentPackets.HasUnackedPackets() {
+		// Nothing left to probe for. A probe left armed would fire to find
+		// nothing outstanding, and until it did the connection could not
+		// rest (mayRest): 10 ms on Linux, past 400 ms on Windows CI.
+		c.armLossProbe(0)
+		return
+	}
+	if c.lossProbeSent || c.fastTimeout {
 		return
 	}
 	if pto := c.lossProbeTimeout(); pto > 0 {

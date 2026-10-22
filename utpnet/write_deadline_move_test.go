@@ -17,6 +17,21 @@ import (
 // for bytes it had taken, so the peer got the start of the payload twice.
 // From the release review of 9c44c4f (R1).
 func TestMovingTheWriteDeadlineDoesNotRepeatBytes(t *testing.T) {
+	moveDeadlineDuringWrite(t, func(c net.Conn, p []byte) (int, error) { return c.Write(p) })
+}
+
+// The same for WriteBuffers, which took the vector write straight through and
+// returned "context canceled" once part of it had been taken and the deadline
+// moved. Review of 294cc2e, finding 3.
+func TestMovingTheWriteDeadlineDuringWriteBuffers(t *testing.T) {
+	moveDeadlineDuringWrite(t, func(c net.Conn, p []byte) (int, error) {
+		n, err := c.(*Conn).WriteBuffers(net.Buffers{p[:100], p[100 : len(p)/2], p[len(p)/2:]})
+		return int(n), err
+	})
+}
+
+func moveDeadlineDuringWrite(t *testing.T, write func(c net.Conn, payload []byte) (int, error)) {
+	t.Helper()
 	cfg := utp.NewConnectionConfig()
 	cfg.BufferSize = 64 * 1024
 	opts := &Options{Logger: quiet(), ConnectionConfig: cfg}
@@ -57,7 +72,7 @@ func TestMovingTheWriteDeadlineDoesNotRepeatBytes(t *testing.T) {
 	conn.SetWriteDeadline(time.Now().Add(time.Minute))
 	wrote := make(chan error, 1)
 	go func() {
-		n, err := conn.Write(payload)
+		n, err := write(conn, payload)
 		if err == nil && n != len(payload) {
 			err = io.ErrShortWrite
 		}

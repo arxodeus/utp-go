@@ -73,3 +73,48 @@ func TestWriteToObservesItsDeadlineWhileBlocked(t *testing.T) {
 		t.Fatal("WriteTo ignored a deadline set while it was blocked")
 	}
 }
+
+// blockingUDP is a UDP socket whose WriteToUDP waits until released.
+type blockingUDP struct {
+	udpPacketConn
+	release chan struct{}
+}
+
+func (b *blockingUDP) WriteToUDP(p []byte, addr *net.UDPAddr) (int, error) {
+	<-b.release
+	return b.udpPacketConn.WriteToUDP(p, addr)
+}
+
+// On a UDP socket too, a WriteTo that blocks ends at a deadline set after it
+// began. With no deadline set it wrote directly, so a deadline set while it
+// was blocked could not end it. Review of 294cc2e, finding 2. The kernel's
+// send buffer cannot be made to block on demand, so the socket's write is
+// made to, and the attempt that never waits is made to find it busy.
+func TestUDPWriteToObservesADeadlineSetWhileBlocked(t *testing.T) {
+	s, err := Listen(context.Background(), "udp", "127.0.0.1:0", &Options{Logger: quiet()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	release := make(chan struct{})
+	defer close(release)
+	s.passUDP = &blockingUDP{udpPacketConn: s.passUDP, release: release}
+	s.raw = nil // as if the kernel could not take it at once
+
+	errs := make(chan error, 1)
+	go func() {
+		_, err := s.WriteTo([]byte("x"), &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9})
+		errs <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	s.SetWriteDeadline(time.Now())
+	select {
+	case err := <-errs:
+		var ne net.Error
+		if !errors.As(err, &ne) || !ne.Timeout() {
+			t.Fatalf("WriteTo returned %v, want a timeout", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a blocked UDP WriteTo ignored a deadline set after it began")
+	}
+}

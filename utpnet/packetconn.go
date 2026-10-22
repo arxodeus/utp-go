@@ -47,6 +47,10 @@ type packetConn struct {
 	// kept.
 	mu     sync.Mutex
 	native map[string]nativeAddr
+	// pins counts the live connections to each address in native. A pinned
+	// address is never pruned: its connection writes to it, and its UDP form
+	// is not something pc need accept. Review of 294cc2e, finding 4.
+	pins map[string]int
 }
 
 // nativeAddr is an address of pc's own type and when a datagram last came
@@ -134,7 +138,7 @@ func (p *packetConn) udpForm(addr net.Addr) (*net.UDPAddr, bool) {
 // is left.
 func (p *packetConn) pruneLocked(now time.Time) {
 	for k, e := range p.native {
-		if now.Sub(e.seen) >= nativeIdle {
+		if now.Sub(e.seen) >= nativeIdle && p.pins[k] == 0 {
 			delete(p.native, k)
 		}
 	}
@@ -143,12 +147,39 @@ func (p *packetConn) pruneLocked(now time.Time) {
 	}
 	keys := make([]string, 0, len(p.native))
 	for k := range p.native {
-		keys = append(keys, k)
+		if p.pins[k] == 0 {
+			keys = append(keys, k)
+		}
 	}
 	sort.Slice(keys, func(i, j int) bool { return p.native[keys[i]].seen.Before(p.native[keys[j]].seen) })
-	for _, k := range keys[:len(keys)-nativeMax/2] {
+	for _, k := range keys[:max(len(keys)-nativeMax/2, 0)] {
 		delete(p.native, k)
 	}
+}
+
+// pin keeps udp's native address for as long as a connection to it lives;
+// the matching unpin lets it be pruned again.
+func (p *packetConn) pin(udp *net.UDPAddr) {
+	key := udp.String()
+	p.mu.Lock()
+	if p.pins == nil {
+		p.pins = make(map[string]int)
+	}
+	p.pins[key]++
+	p.mu.Unlock()
+}
+
+func (p *packetConn) unpin(udp *net.UDPAddr) {
+	key := udp.String()
+	p.mu.Lock()
+	if n, ok := p.pins[key]; ok {
+		if n <= 1 {
+			delete(p.pins, key)
+		} else {
+			p.pins[key] = n - 1
+		}
+	}
+	p.mu.Unlock()
 }
 
 // nativeOf is the address a UDP form was learned from, or the UDP form

@@ -14,9 +14,9 @@ names the section with the detail.
 
 - **Nothing has run over a wide-area path.** Every measurement is on one
   machine, over loopback or the emulated network (README.md).
-- **Tests have run on Linux only.** The other platforms are built in CI;
-  their tests run there from the first CI run on (RELEASING.md). Until that
-  has passed on a platform, it is not claimed.
+- **Tests have passed on Linux only.** CI runs them on macOS and Windows
+  too; the first run failed four tests there, all fixed since ("The review
+  of 294cc2e"). A platform is claimed once a run passes on it.
 - **Acknowledgements leave 10-20 us later than libutp's**: medians of 70-80 us
   against 50-60 at 10 Mb/s, 40 against 30 at 100 Mb/s, the Go runtime waking
   the reader and the handling. Accepted (COMPATIBILITY.md, "Ack turnaround";
@@ -35,9 +35,6 @@ names the section with the detail.
   incoming packets before anything else**: "Things found but deliberately not
   fixed".
 - **The accept expiry is a fixed 20 s**: "API notes".
-- **utpnet's WriteTo, on a UDP socket with no write deadline, writes
-  directly**, so a deadline set while such a write is blocked waits for the
-  kernel's send buffer to drain: "The release review of 9c44c4f".
 
 ## Status against the brief's milestones
 
@@ -5726,3 +5723,59 @@ libutp's `get_random` covers all 65536 (`TestRandomUint16CoversTheWholeRange`).
 It also said a second selective-ack extension silently replaced the first and
 libutp took the first. libutp keeps the last as well (`utp_internal.cpp:1846`,
 `selack_ptr = data` inside the loop), so that is unchanged.
+
+## The review of 294cc2e
+
+A second review, of the revision with the fixes above, found four more
+defects and read the first CI run. Each is fixed, with a test that fails
+without it.
+
+- **A write waiting behind another ignored its own context.** Writes were
+  serialised by a mutex, held while the first waited for the peer's window,
+  so a second write's cancelled or expired context did nothing until the
+  first finished. The lock is a one-slot channel now, waited for under the
+  caller's context and the stream's end, and the write side is checked again
+  once it is held. `TestAWriteWaitingForAnotherHonoursItsContext`.
+- **utpnet's WriteTo, on a UDP socket with no deadline set, wrote directly**,
+  so a deadline set while it was blocked could not end it -- the exception
+  recorded above, which the review would not accept as a speed trade. On Unix
+  a datagram is now offered to the kernel once without waiting (a single
+  non-blocking `sendto` through the socket's RawConn), and only one it cannot
+  take at once goes to the writer, whose wait the deadline ends. That keeps
+  the direct write's cost: `BenchmarkWriteTo` 4.0-5.2 us against 4.3-5.6
+  before, one allocation each. On Windows every datagram is handed over.
+  `utpnet.TestUDPWriteToObservesADeadlineSetWhileBlocked`.
+- **utpnet's WriteBuffers did not carry on across a deadline move**, as Write
+  had been made to: part of the buffers taken and the deadline extended, it
+  returned "context canceled". It shares Write's continuation now.
+  `utpnet.TestMovingTheWriteDeadlineDuringWriteBuffers`.
+- **A live connection's native address could be pruned** from the bounded map
+  a non-UDP PacketConn keeps, by a burst of other addresses, and its writes
+  then went to a UDP form the PacketConn need not accept. A connection pins
+  its peer's address while it lives. `utpnet.TestNativeAddressOfALiveConnectionIsKept`,
+  `utpnet.TestAConnectionPinsItsPeersNativeAddress`.
+
+The first CI run failed four tests off Linux:
+
+- **TestRestingConnectionIdleTimeout, on Windows**, found a real gap. When the
+  last outstanding packet was acknowledged, the loss probe's timer stayed
+  armed, and a connection cannot rest with a timer armed: it waited for the
+  probe to fire and find nothing, about 10 ms on Linux and past the test's
+  400 ms on Windows. Stopping the probe exposed the second half: resting is
+  the event loop's decision, and a sender whose last acknowledgement the
+  socket's reader handled had nothing left to wake its loop, so it never
+  rested. Now the probe stops with nothing outstanding, and a pass the reader
+  ran that leaves the connection able to rest wakes its loop to do so. Nothing
+  on the wire changes; the sender rests about 1 ms after its last
+  acknowledgement. `TestSenderRestsOnceEverythingIsAcknowledged`.
+- **TestBaseDelay and TestOnTransmitRetransmit, on Windows**, assumed two
+  readings of the clock differ, or that one taken exactly a window ago has
+  expired. Their timestamps are distinct by construction now.
+- **TestReadBatchTakesLargeDatagramWhole, on macOS**, failed at the sender:
+  Darwin bounds a datagram by the send buffer, 9216 bytes by default. The
+  sender's buffer is raised, and the size is the largest of 60,000, 32,768 and
+  16,384 that the platform then sends.
+
+CI now also runs the nested modules under the race detector, where they all
+pass, and govulncheck on every module; see RELEASING.md for what it found in
+older standard libraries.

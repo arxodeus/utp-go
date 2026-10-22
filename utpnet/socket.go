@@ -75,10 +75,16 @@ var _ udpPacketConn = (*net.UDPConn)(nil)
 
 // Socket is a uTP endpoint on a UDP port, presented as net types.
 type Socket struct {
-	udp    udpPacketConn
-	sock   *utp.UtpSocket
-	inner  *demuxConn
-	logger *slog.Logger
+	udp udpPacketConn
+	// raw is the UDP socket under udp, when it is one, for WriteTo's
+	// attempt that never waits (sendNow).
+	raw *rawSender
+	// passUDP is what the passthrough writer sends on: udp, kept apart so
+	// that nothing else reads it.
+	passUDP udpPacketConn
+	sock    *utp.UtpSocket
+	inner   *demuxConn
+	logger  *slog.Logger
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -223,6 +229,10 @@ func newSocket(ctx context.Context, conn udpPacketConn, opts *Options) (*Socket,
 	s.appCtx, s.appCancel = context.WithCancel(ctx)
 	s.config.Store(config)
 	s.generic, _ = conn.(*packetConn)
+	s.passUDP = conn
+	if raw, ok := conn.(*net.UDPConn); ok {
+		s.raw = newRawSender(raw)
+	}
 	s.inner = newDemuxConn(conn)
 	if f := opts.OnWriteError; f != nil {
 		s.inner.onWriteError = func(to *net.UDPAddr, err error) { f(s.nativeAddr(to), err) }
@@ -393,11 +403,15 @@ func (s *Socket) ReadFrom(p []byte) (int, net.Addr, error) {
 // writer is already sending may still be, as one already given to the kernel
 // may. p is copied, so the caller has it back on return either way.
 //
-// A UDP socket with no deadline set is written directly: there is nothing to
-// time out, and handing over costs 4us and eleven allocations a datagram
-// (BenchmarkWriteTo). The one thing that gives up is a deadline set while
-// such a write is blocked, which waits for the kernel's send buffer --
-// draining at the interface's rate -- rather than ending at once.
+// On a UDP socket a datagram is first offered to the kernel once, without
+// waiting (sendNow, on Unix): the common case, at the cost of a direct
+// write. Only one the kernel cannot take at once goes to the writer, so a
+// blocked write is always one the deadline can end, including a deadline
+// set after it began. It used to write directly whenever no deadline was
+// set, and a deadline set during such a write waited for the kernel. Review
+// of 294cc2e, finding 2. Elsewhere every datagram is handed over: the
+// request is pooled, and there is no timer or goroutine while no deadline
+// is set (BenchmarkWriteTo).
 func (s *Socket) WriteTo(p []byte, addr net.Addr) (int, error) {
 	select {
 	case <-s.closed:
@@ -415,48 +429,80 @@ func (s *Socket) WriteTo(p []byte, addr net.Addr) (int, error) {
 		if udpAddr, err = toUDPAddr(addr); err != nil {
 			return 0, err
 		}
-		if !s.writeDeadline.isSet() {
-			return s.udp.WriteToUDP(p, udpAddr)
+		// What the kernel takes at once needs no hand-over and no wait.
+		if n, sent, err := s.raw.sendNow(p, udpAddr); sent {
+			return n, err
 		}
 	}
-	w := &passWrite{buf: append([]byte(nil), p...), addr: addr, udp: udpAddr, done: make(chan passResult, 1)}
+	w := passWritePool.Get().(*passWrite)
+	w.buf, w.addr, w.udp = append(w.buf[:0], p...), addr, udpAddr
 	s.passWriterOnce.Do(func() { go s.passthroughWriter() })
 
 	queued := false
 	for {
-		timeout, expired, stop := s.writeDeadline.wait()
-		if expired {
-			stop()
-			// Withdrawn if the writer has not reached it. If it has, it may
-			// yet be sent, as a datagram given to the kernel may be.
-			w.cancel()
-			return 0, timeoutError{}
+		// No timer and no goroutine while there is no deadline: the changed
+		// channel alone says when one is set.
+		at, changed := s.writeDeadline.snapshot()
+		var timer *time.Timer
+		var timeout <-chan time.Time
+		if !at.IsZero() {
+			d := time.Until(at)
+			if d <= 0 {
+				// Withdrawn if the writer has not reached it. If it has, it
+				// may yet be sent, as a datagram given to the kernel may be.
+				w.cancel()
+				return 0, timeoutError{}
+			}
+			timer = time.NewTimer(d)
+			timeout = timer.C
 		}
 		if !queued {
 			select {
 			case s.passOut <- w:
 				queued = true
 			case <-s.closed:
-				stop()
+				stopTimer(timer)
+				passWritePool.Put(w.reset())
 				return 0, s.closedErr()
+			case <-changed:
 			case <-timeout:
 			}
 		}
 		if queued {
 			select {
 			case r := <-w.done:
-				stop()
+				stopTimer(timer)
+				// The writer is done with it, so it can be used again.
+				passWritePool.Put(w.reset())
 				return r.n, r.err
 			case <-s.closed:
-				stop()
+				stopTimer(timer)
 				w.cancel()
 				return 0, s.closedErr()
+			case <-changed:
 			case <-timeout:
 			}
 		}
 		// The deadline passed or moved: the loop re-reads it.
-		stop()
+		stopTimer(timer)
 	}
+}
+
+func stopTimer(t *time.Timer) {
+	if t != nil {
+		t.Stop()
+	}
+}
+
+// passWritePool holds WriteTo's requests, each with its result channel and a
+// buffer grown to the datagrams it has carried. One goes back only once its
+// result has been taken: a request given up on may still be in the writer's
+// hands.
+var passWritePool = sync.Pool{New: func() any { return &passWrite{done: make(chan passResult, 1)} }}
+
+func (w *passWrite) reset() *passWrite {
+	w.addr, w.udp, w.started, w.dropped = nil, nil, false, false
+	return w
 }
 
 // passWrite is one WriteTo waiting for the writer.
@@ -505,7 +551,7 @@ func (s *Socket) passthroughWriter() {
 				// is of the PacketConn's own kind, or one it can write to.
 				r.n, r.err = s.generic.pc.WriteTo(w.buf, w.addr)
 			} else {
-				r.n, r.err = s.udp.WriteToUDP(w.buf, w.udp)
+				r.n, r.err = s.passUDP.WriteToUDP(w.buf, w.udp)
 			}
 			w.done <- r
 		case <-s.stopRead:

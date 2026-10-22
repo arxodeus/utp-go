@@ -32,6 +32,15 @@ func newConn(sock *Socket, stream *utp.UtpStream) *Conn {
 	if cid := stream.Cid(); cid != nil {
 		if addr, err := peerUDPAddr(cid.Peer); err == nil {
 			remote = sock.nativeAddr(addr)
+			if g := sock.generic; g != nil {
+				// The connection writes to its peer's native address for as
+				// long as it lives, so that address is kept until it ends.
+				g.pin(addr)
+				go func() {
+					<-stream.Done()
+					g.unpin(addr)
+				}()
+			}
 		}
 	}
 	return &Conn{
@@ -63,9 +72,18 @@ func (c *Conn) Read(b []byte) (int, error) {
 // blocked write sent its bytes twice. From the release review of 9c44c4f
 // (R1).
 func (c *Conn) Write(b []byte) (int, error) {
+	return c.writeContinuing(func(ctx context.Context, from int) (int, error) {
+		return c.stream.Write(ctx, b[from:])
+	})
+}
+
+// writeContinuing runs a write under the write deadline, carrying on from
+// what has been written when the deadline moves: op writes what is left from
+// byte from, and reports how much of it the stream took.
+func (c *Conn) writeContinuing(op func(ctx context.Context, from int) (int, error)) (int, error) {
 	written := 0
 	_, err := c.withDeadline(c.writeDeadline, func(ctx context.Context) (int, error) {
-		n, err := c.stream.Write(ctx, b[written:])
+		n, err := op(ctx, written)
 		written += n
 		if err != nil {
 			// Nothing reported, so that withDeadline goes on with the rest
@@ -224,11 +242,12 @@ func (d *deadline) context(parent context.Context) (context.Context, context.Can
 // serve its channel; a caller that discards the channel would leak it, which
 // is what WriteTo used to do -- once per datagram, for the life of the
 // process. See TestSharedPortDoesNotLeakGoroutines.
-// isSet reports whether there is a deadline at all.
-func (d *deadline) isSet() bool {
+// snapshot is the deadline as it stands, and the channel that closes when it
+// moves.
+func (d *deadline) snapshot() (time.Time, <-chan struct{}) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return !d.at.IsZero()
+	return d.at, d.changed
 }
 
 func (d *deadline) expired() bool {
@@ -311,11 +330,28 @@ func (c *Conn) CloseWrite() error {
 // net.Buffers.WriteTo cannot reach this on its own -- the standard library
 // dispatches to an unexported interface only *net.TCPConn satisfies -- so a
 // caller that wants the saving calls it directly.
+//
+// A deadline moved while it waits is carried on from, as Write does: it went
+// straight to withDeadline, which retries only a write that took nothing, so
+// one that had taken part of the buffers returned "context canceled" on an
+// ordinary deadline extension. Review of 294cc2e, finding 3.
 func (c *Conn) WriteBuffers(bufs net.Buffers) (int64, error) {
-	n, err := c.withDeadline(c.writeDeadline, func(ctx context.Context) (int, error) {
-		return c.stream.WriteV(ctx, bufs)
+	n, err := c.writeContinuing(func(ctx context.Context, from int) (int, error) {
+		return c.stream.WriteV(ctx, buffersFrom(bufs, from))
 	})
 	return int64(n), err
+}
+
+// buffersFrom is bufs without its first n bytes, sharing their storage.
+func buffersFrom(bufs net.Buffers, n int) [][]byte {
+	for i, b := range bufs {
+		if n < len(b) {
+			rest := append([][]byte{b[n:]}, bufs[i+1:]...)
+			return rest
+		}
+		n -= len(b)
+	}
+	return nil
 }
 
 // CloseRead finishes the receiving side and leaves the sending side open, as

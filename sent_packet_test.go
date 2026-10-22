@@ -54,8 +54,10 @@ func TestOnTransmitRetransmit(t *testing.T) {
 	seqNum := sentPackets.NextSeqNum()
 	data := []byte{0}
 	length := uint32(len(data))
+	// Distinct by construction: two readings of the clock in a row can be
+	// equal, as they were on Windows CI.
 	first := time.Now()
-	second := time.Now()
+	second := first.Add(time.Millisecond)
 
 	sentPackets.OnTransmit(seqNum, st_data, data, length, first)
 	sentPackets.OnTransmit(seqNum, st_data, data, length, second)

@@ -168,8 +168,8 @@ type connection struct {
 	// armIdleRto schedules the wake-up that lets an idle connection's window
 	// decay. Set by the event loop, which owns the timer.
 	armIdleRto func(d time.Duration)
-	// armLossProbe schedules the loss probe; lossProbeBackoff is how many
-	// times it has fired since the last acknowledgement. See onLossProbe.
+	// armLossProbe schedules the loss probe, or stops it for a zero
+	// duration. See onLossProbe.
 	armLossProbe func(d time.Duration)
 	// armRack schedules RACK's reordering timer, or stops it for a zero
 	// duration. See onRackTimer.
