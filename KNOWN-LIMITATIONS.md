@@ -5795,6 +5795,30 @@ The connection now ends as libutp's does, once its FIN is acknowledged
 (utp_internal.cpp:2174-2181) -- or on the RESET a peer that closed fully, and
 so has gone, answers it with. `netem.TestCloseAfterThePeersFinDeliversWhatWasWritten`.
 
+Removing it exposed what it had covered for: the second FIN -- the peer's,
+sent after ours was acknowledged -- went unanswered on four paths, and the
+peer, now waiting for that acknowledgement before it ended, retransmitted it
+until it gave up. libutp acknowledges a FIN whatever its socket's state
+(utp_internal.cpp:2369-2370). Each path now does:
+
+- A FIN that also acknowledged ours closed the connection in processAck
+  before its own acknowledgement was built, and a closed connection built
+  none. It is built from the linger acknowledgement (`closedFinAck`).
+- A FIN reaching a connection that had closed, before or after its teardown,
+  was dropped on arrival. It is acknowledged there.
+- The socket's linger acknowledgement, which answers once the connection is
+  gone, took the FIN for data past what it acknowledged and stayed silent. A
+  FIN one past it is acknowledged, and the stored acknowledgement moves on to
+  cover it.
+- That acknowledgement carried a sequence number at or before our FIN, which
+  the peer drops as old. It carries the one after our FIN, as libutp's
+  send_ack does (`seq_nr`, utp_internal.cpp:783).
+
+Over 60 transfers on loopback, each sender closing first, every receiver
+ends within 300 ms of closing. Before, the first receiver never ended; with
+every path fixed but the one after teardown, 3 of 60 waited for a
+retransmission. `TestTheSecondFinIsAcknowledgedPromptly`.
+
 Writing that test found that Connect and ConnectWithCid panicked given a nil
 config, which Accept takes as the defaults. They take it the same way now.
 `TestConnectWithANilConfig`.

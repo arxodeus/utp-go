@@ -455,6 +455,23 @@ func (s *UtpSocket) reAckLingering(pkt *packet, peer ConnectionPeer) bool {
 		// UTP_ECONNRESET, three runs out of three. Silence matches the
 		// reference and costs the peer nothing but a few retransmissions it
 		// was going to make anyway.
+		// The peer's FIN, numbered just past everything we took, is the end
+		// of a stream we have whole: it is acknowledged, and the stored
+		// acknowledgement moves to cover it. Silence here -- the rule for data
+		// below -- left a peer that closed second retransmitting its FIN for
+		// ever, each retransmission refreshing this entry; ending a closed
+		// connection only once its FIN is acknowledged, as libutp does, made
+		// that every such connection (review of 294cc2e).
+		if pkt.Header.PacketType == st_fin && pkt.Header.SeqNum == ack.Header.AckNum+1 {
+			finAck := *ack
+			header := *ack.Header
+			header.AckNum = pkt.Header.SeqNum
+			finAck.Header = &header
+			s.lingerAcks.put(cid.Hash(), &finAck)
+			s.lingerExpirations.put(cid.Hash(), cid.Hash(), lingerAckTimeout)
+			s.sendEvent(newOutgoingSocketEvent(&finAck, cid.Peer))
+			return true
+		}
 		if wrappingLessThan(ack.Header.AckNum, pkt.Header.SeqNum) {
 			if s.logger.Enabled(baseContext, slog.LevelDebug) {
 				s.logger.Debug("ignoring data past a closed connection's FIN",

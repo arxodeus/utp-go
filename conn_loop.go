@@ -753,7 +753,43 @@ const maxWritesPerPass = 64
 func (c *connection) receiveInline(pkt *packet) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.finished || (c.ready && c.state.stateType == connClosed) {
+	if c.finished {
+		// Except a FIN, which is acknowledged: the peer closing second is
+		// waiting for it, and dropped here, between the teardown and the
+		// socket forgetting the connection, it was answered only by its
+		// retransmission, a timeout on. Sent without touching the
+		// connection, which the teardown reads unlocked.
+		if pkt.Header.PacketType == st_fin {
+			if ack := c.closedFinAck(pkt.Header.SeqNum); ack != nil {
+				ev := newOutgoingSocketEvent(ack, c.cid)
+				if c.out != nil {
+					c.out(ev)
+				} else {
+					b, _ := c.timeSource().(idleBarrier)
+					if b != nil {
+						b.NoteHandoff()
+					}
+					select {
+					case c.socketEvents <- ev:
+					default:
+						if b != nil {
+							b.TakeHandoff()
+						}
+					}
+				}
+			}
+		}
+		return true
+	}
+	if c.ready && c.state.stateType == connClosed {
+		// Except a FIN, which is acknowledged, as above. Kept as the FIN's
+		// acknowledgement, so the socket's linger state covers it too.
+		if pkt.Header.PacketType == st_fin {
+			if ack := c.closedFinAck(pkt.Header.SeqNum); ack != nil {
+				c.finAck = ack
+				c.emit(ack)
+			}
+		}
 		return true
 	}
 	if !c.ready {

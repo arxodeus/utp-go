@@ -68,14 +68,32 @@ func (c *connection) lingerAck() *packet {
 	if c.state.closing == nil {
 		return nil
 	}
-	if c.finAck != nil {
-		return c.finAck
+	ack := c.finAck
+	if ack == nil {
+		// We sent the FIN and never received one, so there is no FIN
+		// acknowledgement to repeat. The last acknowledgement we did send
+		// serves: it tells a peer retransmitting what we already have, and its
+		// ack number is what distinguishes a retransmission from data written
+		// past our FIN.
+		ack = c.lastStateSent
 	}
-	// We sent the FIN and never received one, so there is no FIN
-	// acknowledgement to repeat. The last acknowledgement we did send serves:
-	// it tells a peer retransmitting what we already have, and its ack number
-	// is what distinguishes a retransmission from data written past our FIN.
-	return c.lastStateSent
+	// Numbered past our FIN, as every packet after it is: libutp's send_ack
+	// stamps seq_nr, the next to send (utp_internal.cpp:783). Both sources
+	// can be older -- the last state is captured as the FIN goes out, the
+	// FIN's acknowledgement may precede it -- and a peer that has our FIN
+	// takes an acknowledgement numbered at or before it for an old packet
+	// and drops it: re-acknowledging its FIN never ended it.
+	if ack != nil && c.state.closing.LocalFin != nil {
+		next := *c.state.closing.LocalFin + 1
+		if ack.Header.SeqNum != next {
+			renumbered := *ack
+			header := *ack.Header
+			header.SeqNum = next
+			renumbered.Header = &header
+			ack = &renumbered
+		}
+	}
+	return ack
 }
 
 // rememberLingerState captures an acknowledgement for the socket to repeat
