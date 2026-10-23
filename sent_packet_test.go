@@ -95,14 +95,8 @@ func TestOnTransmitOutOfOrder(t *testing.T) {
 	length := uint32(len(data))
 	now := time.Now()
 
-	// This should panic due to out of order transmit
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic for out of order transmit")
-		}
-	}()
-
-	sentPackets.OnTransmit(outOfOrderSeqNum, st_data, data, length, now)
+	err := sentPackets.OnTransmit(outOfOrderSeqNum, st_data, data, length, now)
+	require.ErrorIs(t, err, errOutOfOrderTransmit)
 }
 
 func TestOnSelectiveAck(t *testing.T) {
@@ -295,15 +289,8 @@ func TestAckUnsent(t *testing.T) {
 	unsentAckNum := initSeqNum + 2 // wrapping addition for uint16
 	now := time.Now()
 
-	// This should panic when trying to acknowledge an unsent packet
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic when acknowledging unsent packet")
-		}
-	}()
-
 	err := sentPackets.Ack(unsentAckNum, DELAY, now)
-	require.Error(t, err, "expected error when acknowledging unsent packet")
+	require.ErrorIs(t, err, errAckOfUnsent)
 }
 
 func TestSeqNumIndex(t *testing.T) {

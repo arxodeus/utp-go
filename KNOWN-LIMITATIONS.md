@@ -5822,3 +5822,59 @@ retransmission. `TestTheSecondFinIsAcknowledgedPromptly`.
 Writing that test found that Connect and ConnectWithCid panicked given a nil
 config, which Accept takes as the defaults. They take it the same way now.
 `TestConnectWithANilConfig`.
+
+## The review of f875fd5
+
+A review of the branch at f875fd5 raised these; each was checked against the
+code.
+
+**Panics on the send path.** `sentPackets.OnTransmit` panicked on a packet
+sent out of order, on one larger than the window, and on any error from the
+controller's own record of it; `setupLoop` panicked on an acceptor with no
+channel to report to. The review called them reachable from a peer's input.
+That is not shown: the send path numbers packets in order and sends nothing
+the window refuses (`conn_send.go`, maxSend), and the fuzzers that drive a
+live connection with arbitrary packets -- `FuzzResponderPacketSequence` and
+the two differential targets -- have not reached them. Its point stands
+anyway: a panic in one connection's goroutine ends the process, every other
+connection and the application with it, for what is at worst one
+connection's bug. libutp asserts the same conditions, and its release builds
+compile the asserts out and carry on regardless. Now OnTransmit returns the
+error, before recording anything, and the connection ends with it, wrapped as
+an internal error, sending nothing more. The acceptor with no channel cannot
+be made (both acceptor paths give one) and nothing would be waiting on it, so
+it is skipped rather than panicked over. `sentPackets.Ack` had the same flaw
+without the word: an acknowledgement past what was sent indexed past the
+window. Its callers drop those first (FUZZING.md, "Packets acking data we
+never sent were processed"); it returns an error now too.
+`TestABrokenSendBookkeepingEndsTheConnectionNotTheProcess`,
+`TestOnTransmitPastTheWindowIsRefusedAndNotRecorded`, `TestAckUnsent`.
+
+**An id search without end.** `generateCid` drew receive ids until one was
+free, as libutp does (utp_internal.cpp:2533-2538), with nothing to stop it
+when none was. A connection takes two ids and keeps them from its
+neighbours, and from new connections for idQuarantine after it ends: 28,365
+connections to one peer used every id. The draw ran inside Connect, under
+the lock the socket's reader takes for every datagram, so the whole socket
+would have stopped. It now draws 64 times and then tries every receive id
+once, and a dial with none free fails. `TestDialWithNoFreeIdFails`, which
+without the bound was still looking after 50 seconds.
+
+**A result channel per chunk.** A write larger than one chunk made a channel
+for every chunk, and Write made one more that the chunked path never used.
+One serves the whole write now: each chunk is answered before the next is
+queued.
+
+Raised and left as they are:
+
+- `sendBuffer.Take` allocates when a packet spans two writes. libutp
+  allocates every packet it writes (write_outgoing_packet); this allocates
+  only the ones that span.
+- The read loop gives up after 100 errors in a row with no pause between
+  them. They take microseconds, a successful read resets the count, and a
+  pause would only delay closing a socket that cannot read.
+- `restingEnabled` is a plain bool. Nothing writes it after initialisation,
+  so there is nothing to race.
+- `UtpStream` does not satisfy net.Conn. utpnet.Conn does, over it;
+  UtpStream's context-taking methods are the layer below.
+

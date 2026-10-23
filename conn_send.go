@@ -1,6 +1,8 @@
 package utp
 
 import (
+	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -419,6 +421,10 @@ func (c *connection) synPacket(seqNum uint16) *packet {
 // just to get through, which is the opposite of what a probe is for
 // (utp_internal.cpp:900-904).
 func (c *connection) transmit(packet *packet, now time.Time, firstTransmission bool) {
+	if c.state.stateType == connClosed && errors.Is(c.state.Err, errInternal) {
+		// Ended by a failure below, with packets of the same pass still to go.
+		return
+	}
 	var payload []byte
 	var length uint32
 
@@ -482,7 +488,19 @@ func (c *connection) transmit(packet *packet, now time.Time, firstTransmission b
 		}
 	}
 
-	c.state.SentPackets.OnTransmit(packet.Header.SeqNum, packet.Header.PacketType, payload, length, now)
+	if err := c.state.SentPackets.OnTransmit(packet.Header.SeqNum, packet.Header.PacketType, payload, length, now); err != nil {
+		// This connection's accounts no longer agree with what it is
+		// sending. It ends, with the reason; nothing else does. See
+		// sentPackets.OnTransmit.
+		if isProbe {
+			c.mtu.clearProbe()
+		}
+		c.logger.Error("send bookkeeping failed; ending the connection", "err", err,
+			"seq", packet.Header.SeqNum, "cid.send", c.cid.Send, "cid.recv", c.cid.Recv)
+		c.state.stateType = connClosed
+		c.state.Err = fmt.Errorf("%w: %w", errInternal, err)
+		return
+	}
 	c.armRetransmit(packet, c.state.SentPackets.Timeout())
 
 	// A packet carrying the current acknowledgement -- and the current

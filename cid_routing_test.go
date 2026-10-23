@@ -154,7 +154,10 @@ func TestDialledConnectionAvoidsAReceiveIdInUse(t *testing.T) {
 	}
 	prev := randomUint16Source.Load()
 	randomUint16Source.Store(&next)
-	cid := sock.generateCid(conn.peer, true, nil)
+	cid, err := sock.generateCid(conn.peer, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	randomUint16Source.Store(prev)
 	if cid.Recv == taken {
 		t.Fatalf("a dialled connection was given receive id %d, which an accepted one already has", taken)
@@ -207,7 +210,10 @@ func TestClosedConnectionIdsAreNotReusedAtOnce(t *testing.T) {
 	}
 	prev := randomUint16Source.Load()
 	randomUint16Source.Store(&next)
-	cid := sock.generateCid(conn.peer, true, nil)
+	cid, err := sock.generateCid(conn.peer, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	randomUint16Source.Store(prev)
 	if cid.Recv == recv {
 		t.Fatalf("receive id %d reused the moment the connection holding it ended", recv)
@@ -245,7 +251,10 @@ func TestDialledConnectionDoesNotSendOnAnIdInUse(t *testing.T) {
 	}
 	prev := randomUint16Source.Load()
 	randomUint16Source.Store(&next)
-	cid := sock.generateCid(conn.peer, true, nil)
+	cid, err := sock.generateCid(conn.peer, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	randomUint16Source.Store(prev)
 	if cid.Send == recv {
 		t.Fatalf("a dialled connection sends on %d, which another connection to the peer receives on", recv)

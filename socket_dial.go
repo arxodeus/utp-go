@@ -2,18 +2,47 @@ package utp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
-func (s *UtpSocket) generateCid(peer ConnectionPeer, isInitiator bool, eventCh chan *streamEvent) *ConnectionId {
+// cidRandomDraws is how many random receive ids generateCid tries before it
+// looks at every one in turn.
+const cidRandomDraws = 64
+
+// errNoFreeConnectionId is a dial to a peer that already uses, or used in the
+// last idQuarantine, every pair of ids a new connection could take.
+var errNoFreeConnectionId = errors.New("utp: no free connection id for this peer")
+
+// generateCid picks ids for a new connection to peer, and registers eventCh
+// under them if it is given.
+//
+// Random draws first, as libutp draws (utp_internal.cpp:2533-2538), and then
+// every receive id in turn from a random one: libutp's loop, and this one,
+// had no end, and a socket whose peer held or had recently held enough of its
+// ids would have spun for ever inside Connect, which holds dispatchMu: the
+// lock the socket's reader takes for every datagram, so every connection on
+// the socket stalled with it. A connection takes two ids and keeps them from
+// its neighbours,
+// so 28,365 connections to one peer, live or quarantined, used every id
+// (TestDialWithNoFreeIdFails).
+func (s *UtpSocket) generateCid(peer ConnectionPeer, isInitiator bool, eventCh chan *streamEvent) (*ConnectionId, error) {
 	cid := &ConnectionId{
 		Peer: peer,
 	}
 
-	generationAttemptCount := 0
-	for {
-		// Generate random recv ID
-		recv := randomUint16()
+	var start uint16
+	for attempt := 0; attempt < cidRandomDraws+1<<16; attempt++ {
+		var recv uint16
+		switch {
+		case attempt < cidRandomDraws:
+			recv = randomUint16()
+		case attempt == cidRandomDraws:
+			start = randomUint16()
+			recv = start
+		default:
+			recv = start + uint16(attempt-cidRandomDraws) // wrapping
+		}
 		var send uint16
 		// Calculate send ID based on initiator status
 		if isInitiator {
@@ -59,12 +88,11 @@ func (s *UtpSocket) generateCid(peer ConnectionPeer, isInitiator bool, eventCh c
 				s.connsGen.Add(1)
 			}
 			s.connsMutex.Unlock()
-			break
+			return cid, nil
 		}
 		s.connsMutex.Unlock()
-		generationAttemptCount++
 	}
-	return cid
+	return nil, errNoFreeConnectionId
 }
 
 func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *ConnectionConfig) (*UtpStream, error) {
@@ -78,7 +106,11 @@ func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *Co
 	// has set it up waits on the connection's own lock. See newUtpStream.
 	s.dispatchMu.Lock()
 	// Generate connection ID
-	cid := s.generateCid(peer, true, streamEvents)
+	cid, err := s.generateCid(peer, true, streamEvents)
+	if err != nil {
+		s.dispatchMu.Unlock()
+		return nil, err
+	}
 	s.logger.Info("connecting", "dst.peer.hash", peer.Hash(), "dst.send", cid.Send, "dst.recv", cid.Recv, "dst.hash", cid.Hash(), "dst.peer", peer)
 	// Create new UTP stream
 	s.putConnStream(cid.Hash(), streamEvents)

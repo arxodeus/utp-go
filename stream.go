@@ -434,7 +434,6 @@ func (s *UtpStream) Write(ctx context.Context, buf []byte) (int, error) {
 		return 0, s.writeErr()
 	default:
 	}
-	resCh := make(chan *readOrWriteResult, 1)
 	// The connection goroutine keeps hold of what is queued here until it has
 	// copied it into the send buffer, which may be long after this call
 	// returns, and the caller is then free to reuse its buffer -- net.Conn
@@ -453,7 +452,7 @@ func (s *UtpStream) Write(ctx context.Context, buf []byte) (int, error) {
 		defer s.unlockWrite()
 		queued := make([]byte, len(buf))
 		copy(queued, buf)
-		return s.writeQueued(ctx, queued, resCh)
+		return s.writeQueued(ctx, queued, make(chan *readOrWriteResult, 1))
 	}
 	return s.writeChunked(ctx, len(buf), func(dst []byte, off int) { copy(dst, buf[off:]) })
 }
@@ -513,10 +512,13 @@ func (s *UtpStream) writeChunked(ctx context.Context, total int, fill func(dst [
 	defer s.unlockWrite()
 	chunk := s.writeChunk()
 	written := 0
+	// One for every chunk: each is answered before the next is queued, and
+	// one that is not ends the write.
+	resCh := make(chan *readOrWriteResult, 1)
 	for written < total {
 		queued := make([]byte, min(chunk, total-written))
 		fill(queued, written)
-		n, err := s.writeQueued(ctx, queued, make(chan *readOrWriteResult, 1))
+		n, err := s.writeQueued(ctx, queued, resCh)
 		written += n
 		if err != nil {
 			return written, err

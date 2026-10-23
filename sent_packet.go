@@ -322,13 +322,22 @@ func (s *sentPackets) TakeLostPackets() []*lostPacket {
 	return result
 }
 
+// OnTransmit records a packet going out, new or sent again.
+//
+// The send path sends nothing the window does not allow and numbers packets in
+// order, so none of its errors should happen; each says this connection's
+// bookkeeping has gone wrong. They panicked, and took the whole process -- every
+// other connection, and the application -- with them. The connection now ends
+// with the error instead (connection.transmit). libutp asserts the same
+// conditions, and its release builds compile the asserts out and carry on.
+// The packet is recorded only once nothing has refused it.
 func (s *sentPackets) OnTransmit(
 	seqNum uint16,
 	packetType packetType,
 	data []byte,
 	dataLen uint32,
 	now time.Time,
-) {
+) error {
 	if seqNum == s.NextSeqNum() {
 		s.trimAcked()
 	}
@@ -340,14 +349,24 @@ func (s *sentPackets) OnTransmit(
 		if index >= 1<<15 {
 			// Behind the window: a packet already acknowledged and dropped.
 			// Nothing to account.
-			return
+			return nil
 		}
-		panic("out of order transmit")
+		return errOutOfOrderTransmit
 	}
 
 	// Check window size for new transmissions
 	if !isRetransmission && dataLen > s.Window() {
-		panic("transmit exceeds available send window")
+		return errTransmitExceedsWindow
+	}
+
+	var transmit transmitKind
+	if isRetransmission {
+		transmit = transmitRetransmission
+	} else {
+		transmit = transmitInitial
+	}
+	if err := s.congestionCtrl.OnTransmit(seqNum, transmit, dataLen); err != nil {
+		return err
 	}
 
 	if index < len(s.packets) {
@@ -377,17 +396,7 @@ func (s *sentPackets) OnTransmit(
 		sent.sentOrder = s.transmissions
 		s.packets = append(s.packets, sent)
 	}
-
-	var transmit transmitKind
-	if isRetransmission {
-		transmit = transmitRetransmission
-	} else {
-		transmit = transmitInitial
-	}
-
-	if err := s.congestionCtrl.OnTransmit(seqNum, transmit, dataLen); err != nil {
-		panic(err)
-	}
+	return nil
 }
 
 // onAckOfNothingNew is onAck for an acknowledgement of the number just before
@@ -621,6 +630,13 @@ func (s *sentPackets) Ack(seqNum uint16, delay time.Duration, now time.Time) err
 	if index >= 1<<15 {
 		// Behind the window: already acknowledged and dropped.
 		return nil
+	}
+	if index >= len(s.packets) {
+		// Past what was sent. The connection drops such acknowledgements
+		// before they get here (FUZZING.md, "Packets acking data we never
+		// sent were processed"); this indexed past the window and panicked
+		// if one ever did.
+		return errAckOfUnsent
 	}
 	packetInst := s.packets[index]
 	ack := ackSample{

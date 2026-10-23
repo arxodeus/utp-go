@@ -90,6 +90,13 @@ var (
 	errInsufficientWindowSize = errors.New("insufficient window size")
 	errUnknownSeqNum          = errors.New("unknown sequence number")
 	errDuplicateTransmission  = errors.New("duplicate transmission")
+	errOutOfOrderTransmit     = errors.New("out of order transmit")
+	errTransmitExceedsWindow  = errors.New("transmit exceeds available send window")
+	errAckOfUnsent            = errors.New("acknowledgement of a packet never sent")
+
+	// errInternal ends a connection whose own bookkeeping has failed: a
+	// bug here, not anything the peer did or the network lost.
+	errInternal = errors.New("utp: internal error")
 )
 
 type ctrlConfig struct {

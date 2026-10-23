@@ -134,10 +134,12 @@ func (c *connection) setupLoop(stream *UtpStream) {
 		sentPacketsHolder := newSentPackets(synAck-1, congestionCtrl, c.logger) // wrapping subtraction
 		sentPacketsHolder.rack.active = c.config.RACK
 
-		if c.state != nil && c.state.connectedCh != nil {
+		// Every acceptor is made with a channel to report on (newUtpStream's
+		// callers in the socket), and nothing waits on one made without.
+		// This panicked when there was none, which said nothing worth losing
+		// the process for.
+		if c.state.connectedCh != nil {
 			c.state.connectedCh <- nil
-		} else {
-			panic("connection in invalid statePacket prior to event loop beginning")
 		}
 
 		c.state.stateType = connConnected
