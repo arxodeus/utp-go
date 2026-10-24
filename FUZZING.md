@@ -315,6 +315,29 @@ goroutines had noticed. It is the map entry and its channel that leaked. The
 event loop now reports shutdown on every exit path, with a bounded wait so a
 connection outliving its socket cannot block on the report.
 
+### The harness read the libutp driver's clock after freeing it
+
+**Fixed, in the harness.** The first release workflow run, at 68c5fd2, failed
+`FuzzDifferentialInitiator` with "fuzzing process hung or terminated
+unexpectedly while minimizing", and so did a local run of the same five
+minutes. The input it saved passed alone, as did every input in the corpus.
+The whole corpus run sixty times in one process failed one time in three with
+a SIGSEGV in cgo: a connection of ours, woken from resting by its socket's
+close, made its last pass and read its clock -- which the differential
+harness had made the libutp driver's (`pinnedClockConfig`) -- after the run
+had closed the socket and then destroyed the driver. A crash in a fuzz worker
+ends the process, which the coordinator reports as a hang.
+
+The driver was documented as not safe for concurrent use, and its clock was
+being read concurrently all along. Now its clock -- `Now`, `SetTime`,
+`Advance` and `Close` -- is safe from any goroutine, and `Now` after `Close`
+is the time it was closed at. `TestDriverClockOutlivesTheDriver`, which
+crashes without it, and three sixty-fold runs of both differential targets
+clean after.
+
+Nothing in the library changed: a connection reading its clock after its
+socket has closed is what it should do.
+
 ## What this does not cover
 
 - **No fuzzing of the initiator role.** `FuzzResponderPacketSequence` drives

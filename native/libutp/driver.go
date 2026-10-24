@@ -10,6 +10,7 @@ import "C"
 
 import (
 	"errors"
+	"sync"
 	"unsafe"
 )
 
@@ -22,9 +23,19 @@ import (
 // same bytes on every run, which is what makes a conformance corpus possible.
 //
 // Not safe for concurrent use. That is deliberate -- every call runs to
-// completion before returning, so there is no scheduling to reason about.
+// completion before returning, so there is no scheduling to reason about --
+// except for the clock: Now, SetTime, Advance and Close may be called from
+// any goroutine. A connection of this library given the driver's clock as its
+// own (ConnectionConfig.NowMicros) reads it from its own goroutine, and goes
+// on reading it after its test has closed the driver: a resting connection
+// woken by its socket's close finishes on its own time. That read went to
+// freed memory and crashed the process -- FuzzDifferentialInitiator's
+// workers, as "hung or terminated unexpectedly" -- and Now after Close is the
+// time the driver was closed at.
 type Driver struct {
-	c *C.libutp_driver
+	mu       sync.Mutex
+	c        *C.libutp_driver
+	closedAt uint64
 }
 
 // NewDriver creates a driver whose virtual clock starts at nowMicros.
@@ -38,7 +49,10 @@ func NewDriver(nowMicros uint64) (*Driver, error) {
 
 // Close releases the driver.
 func (d *Driver) Close() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.c != nil {
+		d.closedAt = uint64(C.libutp_driver_now(d.c))
 		C.libutp_driver_destroy(d.c)
 		d.c = nil
 	}
@@ -100,9 +114,26 @@ func (d *Driver) WindowLog() []uint32 {
 func (d *Driver) ClearWindowLog() { C.libutp_driver_window_log_clear(d.c) }
 
 // SetTime and Advance move the virtual clock, in microseconds.
-func (d *Driver) SetTime(micros uint64) { C.libutp_driver_set_time(d.c, C.uint64_t(micros)) }
-func (d *Driver) Advance(micros uint64) { C.libutp_driver_advance(d.c, C.uint64_t(micros)) }
-func (d *Driver) Now() uint64           { return uint64(C.libutp_driver_now(d.c)) }
+func (d *Driver) SetTime(micros uint64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	C.libutp_driver_set_time(d.c, C.uint64_t(micros))
+}
+
+func (d *Driver) Advance(micros uint64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	C.libutp_driver_advance(d.c, C.uint64_t(micros))
+}
+
+func (d *Driver) Now() uint64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.c == nil {
+		return d.closedAt
+	}
+	return uint64(C.libutp_driver_now(d.c))
+}
 
 // Connect starts an outgoing connection, emitting a SYN.
 func (d *Driver) Connect() error {
