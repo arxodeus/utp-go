@@ -27,6 +27,10 @@ func TestRouteCacheFollowsTheTables(t *testing.T) {
 	}
 	peerKey := conn.peer.Hash()
 	key := string(appendConnKey(nil, id-1, id, peerKey))
+	cid := NewConnectionId(conn.peer, id, id-1)
+	if cid.Hash() != key {
+		t.Fatalf("the connection id is keyed %q, not %q", cid.Hash(), key)
+	}
 	route := func() (chan *streamEvent, *connection) {
 		sock.dispatchMu.Lock()
 		defer sock.dispatchMu.Unlock()
@@ -35,7 +39,7 @@ func TestRouteCacheFollowsTheTables(t *testing.T) {
 	}
 
 	first := make(chan *streamEvent, 1)
-	sock.putConnStream(key, first)
+	sock.putConnStream(cid, first)
 	if ch, _ := route(); ch != first {
 		t.Fatal("a registered connection was not found")
 	}
@@ -46,7 +50,7 @@ func TestRouteCacheFollowsTheTables(t *testing.T) {
 	}
 
 	second := make(chan *streamEvent, 1)
-	sock.putConnStream(key, second)
+	sock.putConnStream(cid, second)
 	if ch, _ := route(); ch != second {
 		t.Fatal("a connection registered under a key just freed was not found")
 	}
@@ -54,7 +58,7 @@ func TestRouteCacheFollowsTheTables(t *testing.T) {
 	// Registered over a route still remembered: a key reused before the
 	// old entry's removal reached the tables.
 	third := make(chan *streamEvent, 1)
-	sock.putConnStream(key, third)
+	sock.putConnStream(cid, third)
 	if ch, _ := route(); ch != third {
 		t.Fatal("a connection registered over a remembered route was not found")
 	}

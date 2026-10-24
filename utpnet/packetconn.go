@@ -97,6 +97,16 @@ func (p *packetConn) WriteToUDP(b []byte, addr *net.UDPAddr) (int, error) {
 
 // udpForm is addr as a *net.UDPAddr, remembering addr to write back to.
 func (p *packetConn) udpForm(addr net.Addr) (*net.UDPAddr, bool) {
+	return p.remember(addr, false)
+}
+
+// retain is udpForm, and keeps addr as pin does until the matching unpin: in
+// one hold of the lock, so that nothing can forget it between the two.
+func (p *packetConn) retain(addr net.Addr) (*net.UDPAddr, bool) {
+	return p.remember(addr, true)
+}
+
+func (p *packetConn) remember(addr net.Addr, pin bool) (*net.UDPAddr, bool) {
 	if udp, ok := addr.(*net.UDPAddr); ok {
 		return udp, true
 	}
@@ -129,6 +139,9 @@ func (p *packetConn) udpForm(addr net.Addr) (*net.UDPAddr, bool) {
 		p.pruneLocked(now)
 	}
 	p.native[key] = nativeAddr{addr: addr, seen: now}
+	if pin {
+		p.pinLocked(key)
+	}
 	p.mu.Unlock()
 	return udp, true
 }
@@ -160,13 +173,16 @@ func (p *packetConn) pruneLocked(now time.Time) {
 // pin keeps udp's native address for as long as a connection to it lives;
 // the matching unpin lets it be pruned again.
 func (p *packetConn) pin(udp *net.UDPAddr) {
-	key := udp.String()
 	p.mu.Lock()
+	p.pinLocked(udp.String())
+	p.mu.Unlock()
+}
+
+func (p *packetConn) pinLocked(key string) {
 	if p.pins == nil {
 		p.pins = make(map[string]int)
 	}
 	p.pins[key]++
-	p.mu.Unlock()
 }
 
 func (p *packetConn) unpin(udp *net.UDPAddr) {

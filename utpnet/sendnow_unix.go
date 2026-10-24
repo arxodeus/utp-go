@@ -15,9 +15,14 @@ import (
 // made this way, and then the caller hands the datagram to the writer, whose
 // wait the write deadline can end.
 //
-// A Go socket is non-blocking underneath, and a RawConn.Write whose function
-// always reports done is a single attempt: it never waits for the socket to
-// become writable, which is the wait no deadline set afterwards could end.
+// A Go socket is non-blocking underneath, so one sendto on its descriptor
+// cannot wait. It is made under RawConn.Control, which only keeps the
+// descriptor open, and not RawConn.Write: Write takes the descriptor's write
+// lock first (internal/poll, FD.RawWrite), and waits for it while any other
+// write on the port -- the uTP sender's, or the writer blocked on a full send
+// buffer -- is under way, which is a wait no deadline can end either. The
+// lock orders writes on a stream; a UDP datagram goes to the kernel whole, so
+// concurrent sends need nothing of it. Release review of 224c363, finding 1.
 func (r *rawSender) sendNow(p []byte, to *net.UDPAddr) (n int, sent bool, err error) {
 	if r == nil {
 		return 0, false, nil
@@ -28,13 +33,14 @@ func (r *rawSender) sendNow(p []byte, to *net.UDPAddr) (n int, sent bool, err er
 		return 0, false, nil
 	}
 	a.p, a.err = p, nil
-	cerr := r.rc.Write(a.do)
+	cerr := r.rc.Control(a.do)
 	serr := a.err
 	a.p, a.sa = nil, nil
 	if cerr != nil {
 		return 0, true, cerr
 	}
-	if errors.Is(serr, syscall.EAGAIN) || errors.Is(serr, syscall.EWOULDBLOCK) {
+	// Interrupted, too, goes to the writer, which retries as net does.
+	if errors.Is(serr, syscall.EAGAIN) || errors.Is(serr, syscall.EWOULDBLOCK) || errors.Is(serr, syscall.EINTR) {
 		return 0, false, nil
 	}
 	if serr != nil {
@@ -43,7 +49,7 @@ func (r *rawSender) sendNow(p []byte, to *net.UDPAddr) (n int, sent bool, err er
 	return len(p), true, nil
 }
 
-// sendAttempt is one sendNow's state, pooled with the function RawConn.Write
+// sendAttempt is one sendNow's state, pooled with the function RawConn.Control
 // calls bound to it once, so that an attempt allocates nothing: a closure or
 // a sockaddr made per datagram cost four allocations a send.
 type sendAttempt struct {
@@ -52,14 +58,13 @@ type sendAttempt struct {
 	sa  syscall.Sockaddr
 	sa4 syscall.SockaddrInet4
 	sa6 syscall.SockaddrInet6
-	do  func(fd uintptr) bool
+	do  func(fd uintptr)
 }
 
 var sendAttempts = sync.Pool{New: func() any {
 	a := &sendAttempt{}
-	a.do = func(fd uintptr) bool {
+	a.do = func(fd uintptr) {
 		a.err = syscall.Sendto(int(fd), a.p, 0, a.sa)
-		return true
 	}
 	return a
 }}

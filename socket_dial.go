@@ -84,8 +84,7 @@ func (s *UtpSocket) generateCid(peer ConnectionPeer, isInitiator bool, eventCh c
 		peerKey := peer.Hash()
 		if !s.idInUseLocked(recv, peerKey) && !s.idInUseLocked(send, peerKey) {
 			if eventCh != nil {
-				s.conns[cid.Hash()] = eventCh
-				s.connsGen.Add(1)
+				s.registerLocked(cid.Hash(), eventCh, peer)
 			}
 			s.connsMutex.Unlock()
 			return cid, nil
@@ -113,7 +112,7 @@ func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *Co
 	}
 	s.logger.Info("connecting", "dst.peer.hash", peer.Hash(), "dst.send", cid.Send, "dst.recv", cid.Recv, "dst.hash", cid.Hash(), "dst.peer", peer)
 	// Create new UTP stream
-	s.putConnStream(cid.Hash(), streamEvents)
+	s.putConnStream(cid, streamEvents)
 	// The connection's lifetime is the socket's, not the dial's.
 	//
 	// This passed `ctx` -- the caller's dial context -- and so gave every
@@ -189,7 +188,7 @@ func (s *UtpSocket) ConnectWithCid(
 	connected := make(chan error, 1)
 	streamEvents := make(chan *streamEvent, connEventQueueLen)
 
-	s.putConnStream(cid.Hash(), streamEvents)
+	s.putConnStream(cid, streamEvents)
 	// The socket's context, not the dial's -- see the note in Connect.
 	stream := newUtpStream(
 		s.ctx,

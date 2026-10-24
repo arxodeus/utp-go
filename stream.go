@@ -56,6 +56,11 @@ type UtpStream struct {
 	// never read from carries none. Guarded by readShutMu.
 	readShutMu sync.Mutex
 	readShutCh chan struct{}
+	// readBusy is set while a read is in progress, and readWake, made only
+	// by a read that has to wait for it, is closed when it ends. Guarded by
+	// readShutMu. See lockRead.
+	readBusy bool
+	readWake chan struct{}
 	// writeSem holds one write's chunks together: a write holds it while it
 	// is queued, and waits for it under its own context. See lockWrite.
 	writeSem   chan struct{}
@@ -67,13 +72,12 @@ type UtpStream struct {
 	closeOnce sync.Once
 	// abandoned is closed by Close, telling the connection that whatever is
 	// still buffered for this reader is owed to nobody.
-	abandoned  chan struct{}
-	readLocker sync.Mutex
+	abandoned chan struct{}
 	// readRemainder holds bytes from a chunk that a Read call could not fit
-	// in the caller's buffer. Guarded by readLocker.
+	// in the caller's buffer. Guarded by the read lock (lockRead).
 	readRemainder []byte
 	// readErr is the terminal read error, kept so every Read after the first
-	// one returns it rather than blocking. Guarded by readLocker.
+	// one returns it rather than blocking. Guarded by the read lock.
 	readErr error
 	// ended is closed once the connection's event loop has returned, after
 	// it has published terminalErr. Nothing serves writes after that, so a
@@ -298,8 +302,10 @@ func (s *UtpStream) ReadToEOF(ctx context.Context, buf *[]byte) (int, error) {
 	if s.readClosed.Load() {
 		return 0, ErrReadClosed
 	}
-	s.readLocker.Lock()
-	defer s.readLocker.Unlock()
+	if err := s.lockRead(ctx); err != nil {
+		return 0, err
+	}
+	defer s.unlockRead()
 	n := 0
 	data := (*buf)[:0]
 	streamDone := s.streamCtx.Done()
@@ -355,8 +361,10 @@ func (s *UtpStream) Read(ctx context.Context, buf []byte) (int, error) {
 	if s.readClosed.Load() {
 		return 0, ErrReadClosed
 	}
-	s.readLocker.Lock()
-	defer s.readLocker.Unlock()
+	if err := s.lockRead(ctx); err != nil {
+		return 0, err
+	}
+	defer s.unlockRead()
 
 	// Anything left over from the last chunk comes first.
 	if len(s.readRemainder) > 0 {
@@ -488,6 +496,56 @@ func (s *UtpStream) lockWrite(ctx context.Context) error {
 }
 
 func (s *UtpStream) unlockWrite() { <-s.writeSem }
+
+// lockRead waits for the reads ahead of this one, under its own context, as
+// lockWrite does for writes. It was a mutex, so a read behind one blocked on
+// a quiet stream waited with it for as long as that one did, whatever its own
+// context said: each read's context governs that call, and the second one's
+// had no say. A read that waits gives up if the read side closes, and one let
+// in after it has closed is told so. Release review of 224c363, finding 2.
+//
+// A flag and a channel made only for a read that has to wait, rather than
+// lockWrite's semaphore: every stream would carry the channel, and an idle
+// connection's memory is measured against libutp's (COMPATIBILITY.md, "Memory
+// per idle connection"; netem.TestIdleConnectionMemory).
+func (s *UtpStream) lockRead(ctx context.Context) error {
+	for {
+		s.readShutMu.Lock()
+		if !s.readBusy {
+			s.readBusy = true
+			s.readShutMu.Unlock()
+			break
+		}
+		if s.readWake == nil {
+			s.readWake = make(chan struct{})
+		}
+		wake := s.readWake
+		s.readShutMu.Unlock()
+		select {
+		case <-wake:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-s.readClosedSignal():
+			return ErrReadClosed
+		}
+	}
+	if s.readClosed.Load() {
+		s.unlockRead()
+		return ErrReadClosed
+	}
+	return nil
+}
+
+// unlockRead ends a read, and lets the reads waiting for it try again.
+func (s *UtpStream) unlockRead() {
+	s.readShutMu.Lock()
+	s.readBusy = false
+	if s.readWake != nil {
+		close(s.readWake)
+		s.readWake = nil
+	}
+	s.readShutMu.Unlock()
+}
 
 // writeChunk is the most a write copies at once: the send buffer's size,
 // which is the most the connection can take from it at once anyway.

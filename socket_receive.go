@@ -350,7 +350,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *incomingPacketRaw) *connectio
 		s.removeAwaiting(cidHash)
 		connected := make(chan error, 1)
 		newConnStream := make(chan *streamEvent, connEventQueueLen)
-		s.putConnStream(cidHash, newConnStream)
+		s.putConnStream(cid, newConnStream)
 		stream := newUtpStream(s.ctx, s.logger, cid, s.configForAccept(accept, cid.Peer), packetPtr, nil, s.sendEvent, newConnStream, connected, s.retransmitTimers)
 		s.attachInline(cidHash, newConnStream, stream.conn)
 		stream.linger = s.linger

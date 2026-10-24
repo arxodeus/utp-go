@@ -66,10 +66,32 @@ var (
 // a buffer it reuses, as libutp's send callback is handed one it reuses
 // (utp_call_sendto, utp_internal.cpp:713). net.PacketConn already works this
 // way; a transport that queues a datagram must copy it.
+//
+// A Conn may also have the methods
+//
+//	HoldPeer(peer ConnectionPeer)
+//	ReleasePeer(peer ConnectionPeer)
+//
+// and then the socket calls HoldPeer when it starts a connection with peer --
+// a dial, as it sends its SYN, or a peer's SYN, as it is taken in -- and
+// ReleasePeer when the socket forgets that connection, once it has ended. A
+// transport that keeps something per peer, as utpnet keeps the address a
+// datagram came from to write back to, keeps it while it is held: it is needed
+// from the first packet of the handshake to the last of the close, which only
+// the socket sees. Each HoldPeer is matched by one ReleasePeer, for a peer
+// with as many connections as it is held. They are called with the socket's
+// connection table locked, and must not call back into the socket.
 type Conn interface {
 	ReadFrom(b []byte) (int, ConnectionPeer, error)
 	WriteTo(b []byte, dst ConnectionPeer) (int, error)
 	Close() error
+}
+
+// peerHolder is a Conn that is told which peers the socket has connections
+// with. See Conn.
+type peerHolder interface {
+	HoldPeer(peer ConnectionPeer)
+	ReleasePeer(peer ConnectionPeer)
 }
 
 type UtpSocket struct {
@@ -97,9 +119,13 @@ type UtpSocket struct {
 	logger      *ulogger
 	// clk is this socket's clock, handed to every connection it creates.
 	// Nil means the real one.
-	clk                      Clock
-	connsMutex               sync.RWMutex
-	conns                    map[string]chan *streamEvent
+	clk        Clock
+	connsMutex sync.RWMutex
+	conns      map[string]chan *streamEvent
+	// holder is socket, if it is a peerHolder, and held the peer each entry
+	// in conns holds it for. Guarded by connsMutex. See registerLocked.
+	holder                   peerHolder
+	held                     map[string]ConnectionPeer
 	accepts                  chan *acceptRequest
 	acceptsWithCidCh         chan *acceptRequest
 	awaiting                 *syncMap[*acceptRequest]
@@ -422,6 +448,9 @@ func WithSocket(ctx context.Context, socket Conn, logger *slog.Logger, opts ...S
 		incomingConnsExpirations:  incomingExpirations,
 		socket:                    socket,
 		maxConns:                  DefaultMaxConnections,
+	}
+	if h, ok := socket.(peerHolder); ok {
+		utp.holder = h
 	}
 
 	// Applied before the loops start, so nothing can observe a half-built

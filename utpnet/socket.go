@@ -609,9 +609,13 @@ func (s *Socket) DialAddr(ctx context.Context, addr net.Addr) (net.Conn, error) 
 	var udpAddr *net.UDPAddr
 	if s.generic != nil {
 		var ok bool
-		if udpAddr, ok = s.generic.udpForm(addr); !ok {
+		// Kept from here, not from the uTP socket's first SYN: the address
+		// is remembered now, and churn before the socket holds it
+		// (demuxConn.HoldPeer) could forget it again.
+		if udpAddr, ok = s.generic.retain(addr); !ok {
 			return nil, fmt.Errorf("utpnet: %v has no host and port", addr)
 		}
+		defer s.generic.unpin(udpAddr)
 	} else {
 		var err error
 		if udpAddr, err = toUDPAddr(addr); err != nil {

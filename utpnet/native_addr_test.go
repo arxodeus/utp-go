@@ -3,7 +3,9 @@ package utpnet
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -139,5 +141,117 @@ func TestAConnectionPinsItsPeersNativeAddress(t *testing.T) {
 			t.Fatalf("pins left after the connections ended: client %d, server %d", pins(client), pins(server))
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// firstLost is otherPacketConn losing the first datagram it is asked to send,
+// and saying so.
+type firstLost struct {
+	otherPacketConn
+	once *sync.Once
+	lost chan struct{}
+}
+
+func (c firstLost) WriteTo(b []byte, addr net.Addr) (int, error) {
+	dropped := false
+	c.once.Do(func() { dropped = true; close(c.lost) })
+	if dropped {
+		return len(b), nil
+	}
+	return c.otherPacketConn.WriteTo(b, addr)
+}
+
+// churn has p learn more than it can remember of other addresses, as a busy
+// port would.
+func churn(p *packetConn) {
+	for i := 0; i < 2*nativeMax; i++ {
+		p.udpForm(otherAddr(fmt.Sprintf("10.%d.%d.%d:6881", i>>16&0xff, i>>8&0xff, i&0xff)))
+	}
+}
+
+func otherSocket(t *testing.T, wrap func(otherPacketConn) net.PacketConn) *Socket {
+	t.Helper()
+	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pc net.PacketConn = otherPacketConn{udp}
+	if wrap != nil {
+		pc = wrap(otherPacketConn{udp})
+	}
+	s, err := NewSocketFromPacketConn(context.Background(), pc, &Options{Logger: quiet()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+// A dial keeps its peer's native address through the handshake. It was kept
+// from when the dial returned, so a SYN lost and resent after other addresses
+// had crowded it out went out in the UDP form, which this PacketConn refuses,
+// and the dial never completed. Release review of 224c363, finding 3.
+func TestADialKeepsItsPeersNativeAddressThroughTheHandshake(t *testing.T) {
+	server := otherSocket(t, nil)
+	lost := make(chan struct{})
+	client := otherSocket(t, func(c otherPacketConn) net.PacketConn {
+		return firstLost{otherPacketConn: c, once: new(sync.Once), lost: lost}
+	})
+	go func() {
+		if c, err := server.Accept(); err == nil {
+			c.Close()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	dialled := make(chan error, 1)
+	go func() {
+		c, err := client.DialAddr(ctx, otherAddr(server.LocalAddr().String()))
+		if err == nil {
+			c.Close()
+		}
+		dialled <- err
+	}()
+	<-lost
+	churn(client.generic)
+	if err := <-dialled; err != nil {
+		t.Fatalf("the dial failed after its first SYN was lost and other addresses arrived: %v", err)
+	}
+}
+
+// A connection waiting to be accepted keeps its peer's native address. It was
+// kept from when Accept took it, by when it could already have been crowded
+// out, and the accepted connection's packets then went out in the UDP form.
+func TestAConnectionWaitingToBeAcceptedKeepsItsPeersNativeAddress(t *testing.T) {
+	server, client := otherSocket(t, nil), otherSocket(t, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, err := client.DialAddr(ctx, otherAddr(server.LocalAddr().String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for server.AcceptBacklog() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the dialled connection never reached the backlog")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	churn(server.generic)
+	peer, err := server.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	if _, err := peer.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	buf := make([]byte, 5)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("the accepted connection's data never arrived: %v", err)
 	}
 }

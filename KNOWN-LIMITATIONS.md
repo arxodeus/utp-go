@@ -14,9 +14,12 @@ names the section with the detail.
 
 - **Nothing has run over a wide-area path.** Every measurement is on one
   machine, over loopback or the emulated network (README.md).
-- **Tests have passed on Linux only.** CI runs them on macOS and Windows
-  too; the first run failed four tests there, all fixed since ("The review
-  of 294cc2e"). A platform is claimed once a run passes on it.
+- **Only the short suite runs on macOS and Windows.** CI runs
+  `go test -short ./...` there on every push, and it passes on both since
+  the fixes in "The review of 294cc2e". The full suite, the race detector
+  and fuzzing run on Linux only. The emulated-network timing tests are the
+  least reliable on the macOS runner: the ack-coalescing and clock-skew
+  tests have each failed once there, and passed on the next run.
 - **Acknowledgements leave 10-20 us later than libutp's**: medians of 70-80 us
   against 50-60 at 10 Mb/s, 40 against 30 at 100 Mb/s, the Go runtime waking
   the reader and the handling. Accepted (COMPATIBILITY.md, "Ack turnaround";
@@ -5877,4 +5880,64 @@ Raised and left as they are:
   so there is nothing to race.
 - `UtpStream` does not satisfy net.Conn. utpnet.Conn does, over it;
   UtpStream's context-taking methods are the layer below.
+
+## The release review of 224c363
+
+Three findings, each confirmed in the code and each fixed with a regression
+that fails without it.
+
+**A UDP datagram's first attempt could wait on another write.** WriteTo
+offers a datagram to the kernel once before handing it to the writer whose
+wait a deadline can end (sendNow). The attempt went through RawConn.Write,
+whose function reporting done makes it one attempt -- but Write takes the
+descriptor's write lock before it calls the function (internal/poll,
+FD.RawWrite), and holds out for it while any other write on the port has
+it: the uTP sender's, or the writer's, blocked on a full send buffer. That
+wait no deadline could end, and the datagram went out after its deadline.
+The attempt is made under RawConn.Control now, which keeps the descriptor
+open and takes no lock; the socket is non-blocking, so the sendto cannot
+wait either, and a UDP datagram goes to the kernel whole, so concurrent
+sends need nothing from the lock. EINTR goes to the writer with EAGAIN.
+BenchmarkWriteTo is unchanged, 2.74 us a datagram either way, five runs
+each. The existing test set the direct path aside; the new one holds the
+write lock in another RawConn.Write and requires WriteTo to return.
+`utpnet.TestUDPWriteToDoesNotWaitForAnotherWrite`, which with Write waited
+until it gave up.
+
+**A read waiting for another could not honour its own context.** Read and
+ReadToEOF took a mutex before looking at their context, so a read behind
+one waiting on a quiet stream waited as long as that one did. It is the read
+side of the writer's lock fixed for the review of 294cc2e, and is fixed the
+same way, except that the wait uses a flag and a channel made only when a
+read has to wait: lockWrite's semaphore would put a channel in every stream,
+and an idle connection's memory is measured against libutp's (9,953-10,117
+bytes an end over three runs, against 9,994 before). A read let in after the
+read side closed, or waiting when it does, returns ErrReadClosed.
+`TestAReadWaitingForAnotherHonoursItsContext`, which with the mutex waited
+until the socket closed; `TestAReadWaitingForAnotherEndsAtCloseRead`.
+
+**A peer's native address could be forgotten during the handshake.** On a
+Socket over a PacketConn of its own, a peer's address is remembered in the
+PacketConn's form to write back to, in a bounded map, and kept from
+forgetting while a connection uses it. It was kept from when the application
+had the connection -- the dial returned, or an Accept took it -- so a dial
+whose first SYN was lost, or a connection waiting in the backlog, could lose
+it to other addresses arriving. Its packets then went out in the UDP form,
+which such a PacketConn may refuse, and nothing could bring the address back.
+Now the uTP socket says when a connection to a peer starts and when it
+forgets it: a Conn with HoldPeer and ReleasePeer methods is told, as each
+connection enters and leaves the socket's table (utp.Conn). utpnet holds the
+address from the first SYN, dialled or answered, to the end of the close.
+DialAddr remembers and holds the address in one step before it dials, and
+keeps its own hold until the dial returns, so nothing between the two can
+forget it. The goroutine each connection ran to let its address go is gone.
+`utpnet.TestADialKeepsItsPeersNativeAddressThroughTheHandshake` and
+`TestAConnectionWaitingToBeAcceptedKeepsItsPeersNativeAddress`, which
+without this timed out; `TestADialHoldsItsPeerUntilTheSocketForgetsIt` for
+the hold being let go when a dial is abandoned.
+
+The review's release gates are not code, and are the release's: the full
+workflow (workflow_dispatch) on the release commit, and
+`scripts/check-release.sh` against both tags once the repository is
+`github.com/arxodeus/utp` (RELEASING.md).
 

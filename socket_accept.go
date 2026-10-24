@@ -379,7 +379,7 @@ func (s *UtpSocket) selectAcceptHelper(
 	if s.logger.Enabled(baseContext, LevelTrace) {
 		s.logger.Trace("put a conn stream at selectAcceptHelper", "cid.Peer", cid.Peer, "cid", cid)
 	}
-	s.putConnStream(cid.Hash(), streamEvents)
+	s.putConnStream(cid, streamEvents)
 
 	stream := newUtpStream(
 		s.ctx,

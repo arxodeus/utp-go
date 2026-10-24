@@ -12,6 +12,26 @@ func (s *UtpSocket) removeConnStream(key string) {
 		s.recentlyClosedExpirations.put(key, key, idQuarantine)
 	}
 	delete(s.conns, key)
+	if peer, ok := s.held[key]; ok {
+		delete(s.held, key)
+		s.holder.ReleasePeer(peer)
+	}
+	s.connsGen.Add(1)
+}
+
+// registerLocked enters a connection to peer in the table under key, and,
+// the first time key is entered, tells a transport that keeps something per
+// peer that this one is in use (Conn, HoldPeer). Called with connsMutex held
+// for writing.
+func (s *UtpSocket) registerLocked(key string, ch chan *streamEvent, peer ConnectionPeer) {
+	if _, ok := s.conns[key]; !ok && s.holder != nil {
+		if s.held == nil {
+			s.held = make(map[string]ConnectionPeer)
+		}
+		s.held[key] = peer
+		s.holder.HoldPeer(peer)
+	}
+	s.conns[key] = ch
 	s.connsGen.Add(1)
 }
 
@@ -156,14 +176,14 @@ func (s *UtpSocket) getConnStream(key string) (chan *streamEvent, bool) {
 	return ch, ok
 }
 
-func (s *UtpSocket) putConnStream(key string, streamCh chan *streamEvent) {
+func (s *UtpSocket) putConnStream(cid *ConnectionId, streamCh chan *streamEvent) {
 	s.connsMutex.Lock()
 	defer s.connsMutex.Unlock()
+	key := cid.Hash()
 	if s.logger.Enabled(baseContext, LevelTrace) {
 		s.logger.Trace("put conn stream", "key", key)
 	}
-	s.conns[key] = streamCh
-	s.connsGen.Add(1)
+	s.registerLocked(key, streamCh, cid.Peer)
 }
 
 type idType int

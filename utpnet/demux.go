@@ -48,6 +48,35 @@ func newDemuxConn(udp udpPacketConn) *demuxConn {
 	}
 }
 
+// HoldPeer keeps the address peer's datagrams came from, which may not be a
+// *net.UDPAddr, for as long as the uTP socket has a connection with it: from
+// the first packet of the handshake, dialled or accepted, to the last of the
+// close (utp.Conn). Only a Socket on a PacketConn of its own has such
+// addresses (packetConn).
+//
+// It was kept from when the application had the connection -- the dial
+// returned, or an Accept took it -- to the end of its stream. Before that, a
+// dial's handshake and a connection waiting to be accepted could lose it to
+// other addresses arriving, and their packets then went out in the UDP form,
+// which such a PacketConn may refuse. Release review of 224c363, finding 3.
+func (c *demuxConn) HoldPeer(peer utp.ConnectionPeer) {
+	if pc, ok := c.udp.(*packetConn); ok {
+		if addr, err := peerUDPAddr(peer); err == nil {
+			pc.pin(addr)
+		}
+	}
+}
+
+// ReleasePeer lets go of what HoldPeer kept, once the uTP socket has
+// forgotten the connection.
+func (c *demuxConn) ReleasePeer(peer utp.ConnectionPeer) {
+	if pc, ok := c.udp.(*packetConn); ok {
+		if addr, err := peerUDPAddr(peer); err == nil {
+			pc.unpin(addr)
+		}
+	}
+}
+
 // deliver hands a uTP datagram to the uTP socket. It never blocks: a full
 // queue means the uTP socket is not keeping up, and stalling the single UDP
 // reader would hold up every other connection on the port as well.

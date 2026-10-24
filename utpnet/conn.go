@@ -31,16 +31,9 @@ func newConn(sock *Socket, stream *utp.UtpStream) *Conn {
 	var remote net.Addr
 	if cid := stream.Cid(); cid != nil {
 		if addr, err := peerUDPAddr(cid.Peer); err == nil {
+			// Kept for as long as the uTP socket has the connection, from
+			// before this was made (demuxConn.HoldPeer).
 			remote = sock.nativeAddr(addr)
-			if g := sock.generic; g != nil {
-				// The connection writes to its peer's native address for as
-				// long as it lives, so that address is kept until it ends.
-				g.pin(addr)
-				go func() {
-					<-stream.Done()
-					g.unpin(addr)
-				}()
-			}
 		}
 	}
 	return &Conn{
