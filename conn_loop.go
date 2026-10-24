@@ -768,7 +768,7 @@ func (c *connection) receiveInline(pkt *packet) bool {
 		// retransmission, a timeout on. Sent without touching the
 		// connection, which the teardown reads unlocked.
 		if pkt.Header.PacketType == st_fin {
-			if ack := c.closedFinAck(pkt.Header.SeqNum); ack != nil {
+			if ack := c.closedFinAck(pkt); ack != nil {
 				ev := newOutgoingSocketEvent(ack, c.cid)
 				if c.out != nil {
 					c.out(ev)
@@ -793,7 +793,7 @@ func (c *connection) receiveInline(pkt *packet) bool {
 		// Except a FIN, which is acknowledged, as above. Kept as the FIN's
 		// acknowledgement, so the socket's linger state covers it too.
 		if pkt.Header.PacketType == st_fin {
-			if ack := c.closedFinAck(pkt.Header.SeqNum); ack != nil {
+			if ack := c.closedFinAck(pkt); ack != nil {
 				c.finAck = ack
 				c.emit(ack)
 			}

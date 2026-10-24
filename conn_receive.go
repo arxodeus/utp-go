@@ -366,7 +366,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 		}
 		statePacket := c.statePacket()
 		if statePacket == nil && c.state.stateType == connClosed {
-			statePacket = c.closedFinAck(packet.Header.SeqNum)
+			statePacket = c.closedFinAck(packet)
 		}
 		if statePacket != nil {
 			// Kept so the socket can send it again if the peer retransmits
@@ -591,24 +591,20 @@ func (c *connection) onData(seqNum uint16, data []byte) error {
 // seconds on to be re-acknowledged from the socket's linger state. libutp
 // acknowledges a FIN whatever its socket's state (send_ack,
 // utp_internal.cpp:2369-2370). It is the linger acknowledgement, covering the
-// FIN if it completes the stream. Review of 294cc2e.
-func (c *connection) closedFinAck(finSeq uint16) *packet {
+// FIN if it completes the stream, stamped now (freshlyStamped). Review of
+// 294cc2e.
+func (c *connection) closedFinAck(fin *packet) *packet {
 	ack := c.lingerAck()
 	if ack == nil || c.state.RecvBuf == nil {
 		return nil
 	}
 	ackNum := c.state.RecvBuf.AckNum()
-	if finSeq == ackNum+1 {
+	if finSeq := fin.Header.SeqNum; finSeq == ackNum+1 {
 		ackNum = finSeq
 	}
-	if ack.Header.AckNum == ackNum {
-		return ack
-	}
-	finAck := *ack
-	header := *ack.Header
-	header.AckNum = ackNum
-	finAck.Header = &header
-	return &finAck
+	finAck := freshlyStamped(ack, c.nowMicros(), fin)
+	finAck.Header.AckNum = ackNum
+	return finAck
 }
 
 func (c *connection) onFin(seqNum uint16, data []byte) error {

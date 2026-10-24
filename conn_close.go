@@ -45,6 +45,26 @@ func (c *connection) onIdleRto(now time.Time) {
 	}
 }
 
+// freshlyStamped is ack as if it were built now, answering in: libutp stamps
+// every packet as it sends it, with the time and with the delay it last
+// measured of the peer's (send_data, utp_internal.cpp:733-738). An
+// acknowledgement kept to be sent again -- a FIN's, a lingering one -- kept
+// the stamps it was built with, and the peer's delay estimate took that old
+// sample from every copy. The delay is the one in, the packet being answered,
+// measured: a zero timestamp is none, as for a live connection (onPacket).
+// Review of 224c363.
+func freshlyStamped(ack *packet, now uint32, in *packet) *packet {
+	out := *ack
+	header := *ack.Header
+	header.Timestamp = int64(now)
+	header.TimestampDiff = 0
+	if peer := uint32(in.Header.Timestamp); peer != 0 {
+		header.TimestampDiff = uint32(timestampDiffMicros(now, peer).Microseconds())
+	}
+	out.Header = &header
+	return &out
+}
+
 // lingerAck is the acknowledgement the socket should re-send if the peer keeps
 // retransmitting its FIN after this connection is gone.
 //

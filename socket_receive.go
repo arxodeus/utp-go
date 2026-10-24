@@ -462,14 +462,14 @@ func (s *UtpSocket) reAckLingering(pkt *packet, peer ConnectionPeer) bool {
 		// ever, each retransmission refreshing this entry; ending a closed
 		// connection only once its FIN is acknowledged, as libutp does, made
 		// that every such connection (review of 294cc2e).
+		// Stamped as it is sent (freshlyStamped), on the wire clock: the
+		// connection, and any clock its config gave it, has gone.
 		if pkt.Header.PacketType == st_fin && pkt.Header.SeqNum == ack.Header.AckNum+1 {
-			finAck := *ack
-			header := *ack.Header
-			header.AckNum = pkt.Header.SeqNum
-			finAck.Header = &header
-			s.lingerAcks.put(cid.Hash(), &finAck)
+			finAck := freshlyStamped(ack, nowMicro(), pkt)
+			finAck.Header.AckNum = pkt.Header.SeqNum
+			s.lingerAcks.put(cid.Hash(), finAck)
 			s.lingerExpirations.put(cid.Hash(), cid.Hash(), lingerAckTimeout)
-			s.sendEvent(newOutgoingSocketEvent(&finAck, cid.Peer))
+			s.sendEvent(newOutgoingSocketEvent(finAck, cid.Peer))
 			return true
 		}
 		if wrappingLessThan(ack.Header.AckNum, pkt.Header.SeqNum) {
@@ -491,7 +491,7 @@ func (s *UtpSocket) reAckLingering(pkt *packet, peer ConnectionPeer) bool {
 		}
 		// Refresh the entry: a peer still retransmitting is still waiting.
 		s.lingerExpirations.put(cid.Hash(), cid.Hash(), lingerAckTimeout)
-		s.sendEvent(newOutgoingSocketEvent(ack, cid.Peer))
+		s.sendEvent(newOutgoingSocketEvent(freshlyStamped(ack, nowMicro(), pkt), cid.Peer))
 		return true
 	}
 	return false

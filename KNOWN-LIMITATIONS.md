@@ -5941,3 +5941,24 @@ workflow (workflow_dispatch) on the release commit, and
 `scripts/check-release.sh` against both tags once the repository is
 `github.com/arxodeus/utp` (RELEASING.md).
 
+## Acknowledgements sent again kept their old stamps
+
+A review of the branch at 224c363 found that the acknowledgements kept to be
+sent again -- the socket's for a connection that has gone (reAckLingering),
+and a closed connection's for a peer's FIN (closedFinAck) -- went out with
+the timestamp and echoed delay they were built with. libutp stamps every
+packet as it sends it, with the time and the delay it last measured
+(send_data, utp_internal.cpp:733-738); a peer retransmitting its FIN fed its
+delay estimate the same stale sample from every copy. They are stamped as
+they are sent now, the delay measured from the packet being answered: a
+closed connection on its own clock, the socket on the wire clock, the
+connection's having gone with it. libutp has no lingering acknowledgement at
+all -- a destroyed socket's packets draw a RESET -- so there is nothing to
+match beyond the stamping. `TestALingeringAcknowledgementIsStampedAsItIsSent`,
+which without it found the stored stamps on the wire.
+
+The review's other points were withdrawn on its own reading (writeChunked)
+or are documented trade-offs: the bounded id search sweeps every id under
+the reader's lock in the case that used to hang for ever ("The review of
+f875fd5").
+
