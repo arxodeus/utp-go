@@ -227,9 +227,20 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 		// precedes the increment there, so the connection dies on the RTO
 		// after the fourth retransmission.
 		if c.retransmitCount >= maxConsecutiveTimeouts {
+			// With what it knew of the peer: whether it had heard nothing at
+			// all, or heard only that the peer's window was shut, is what tells
+			// a dead path from a peer that stopped reading.
+			lastAck, _ := c.state.SentPackets.LastAckNum()
 			c.logger.Warn("giving up on connection",
 				"consecutiveTimeouts", c.retransmitCount,
-				"cid.send", c.cid.Send, "cid.recv", c.cid.Recv)
+				"cid.send", c.cid.Send, "cid.recv", c.cid.Recv,
+				"seq", originPacket.Header.SeqNum, "lastAck", lastAck,
+				"inFlight", c.state.SentPackets.BytesInFlight(),
+				"cwnd", c.state.SentPackets.CongestionWindow(),
+				"peerWindow", c.peerRecvWindow,
+				"rto", c.state.SentPackets.Timeout(),
+				"sinceActivity", now.Sub(c.lastActivity).Round(time.Millisecond),
+				"packetsReceived", c.peerActivity.Load())
 			c.state.stateType = connClosed
 			c.state.Err = ErrTimedOut
 			return
