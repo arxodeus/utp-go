@@ -1,9 +1,11 @@
 package utp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
+	"runtime/pprof"
 	"testing"
 	"time"
 )
@@ -126,11 +128,7 @@ func TestRestingConnectionEndsWithItsSocket(t *testing.T) {
 	// deadline -- the retransmission timeout, at least libutp's 1s floor --
 	// would wake it anyway.
 	sa.Close()
-	select {
-	case <-client.Done():
-	case <-time.After(300 * time.Millisecond):
-		t.Fatal("a resting connection outlived its socket's Close by 300ms")
-	}
+	awaitEnded(t, client, "its socket's Close")
 }
 
 // Cancelling the context the socket was made with ends a resting connection
@@ -147,11 +145,29 @@ func TestRestingConnectionEndsWithItsContext(t *testing.T) {
 	awaitRest(t, 2*time.Second, client, server)
 	sockCancel()
 	for _, s := range []*UtpStream{client, server} {
-		select {
-		case <-s.Done():
-		case <-time.After(300 * time.Millisecond):
-			t.Fatal("a resting connection outlived its socket's context by 300ms")
-		}
+		awaitEnded(t, s, "its socket's context")
+	}
+}
+
+// awaitEnded requires s to end within 300ms of what should end it at once.
+// One that does not is waited for a while longer, to tell a slow end from a
+// stuck one: how long it took is reported, and the goroutines if it is still
+// running. Windows CI has missed the 300ms twice, and nothing here does.
+func awaitEnded(t *testing.T, s *UtpStream, cause string) {
+	t.Helper()
+	start := time.Now()
+	select {
+	case <-s.Done():
+		return
+	case <-time.After(300 * time.Millisecond):
+	}
+	select {
+	case <-s.Done():
+		t.Fatalf("a resting connection outlived %s by %v", cause, time.Since(start).Round(time.Millisecond))
+	case <-time.After(5 * time.Second):
+		var stacks bytes.Buffer
+		_ = pprof.Lookup("goroutine").WriteTo(&stacks, 1)
+		t.Fatalf("a resting connection outlived %s by more than 5s:\n%s", cause, stacks.String())
 	}
 }
 
