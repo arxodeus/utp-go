@@ -68,9 +68,21 @@ func TestSetWindowSizeCapsALiveConnection(t *testing.T) {
 	}
 
 	// Bytes already in flight when the ceiling dropped drain first; after
-	// that nothing goes past it.
-	for i := 0; i < 8; i++ {
+	// that nothing goes past it. Drained is waited for: it was eight writes,
+	// but a write returns once the send buffer has it, not once anything is
+	// acknowledged, and a slow moment in CI left the flight sent under the
+	// old window still outstanding when the measuring began. A connection
+	// that went on sending past the ceiling never gets here.
+	drained := time.Now().Add(20 * time.Second)
+	for {
 		write()
+		if _, f := streamWindow(client); f <= ceiling {
+			break
+		}
+		if time.Now().After(drained) {
+			_, f := streamWindow(client)
+			t.Fatalf("%d bytes still in flight 20s after the ceiling dropped to %d", f, ceiling)
+		}
 	}
 	maxInFlight := uint32(0)
 	for i := 0; i < 32; i++ {
