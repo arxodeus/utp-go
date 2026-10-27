@@ -24,12 +24,18 @@ type demuxConn struct {
 
 	closeOnce sync.Once
 	closed    chan struct{}
+
+	// handed is the address of the datagram ReadFrom last returned, held
+	// until the next ReadFrom. Used only by the uTP socket's reader, the one
+	// caller of ReadFrom. See ReadFrom.
+	handed *net.UDPAddr
 }
 
 type inbound struct {
 	payload []byte
 	pooled  *[]byte // see datagram.pooled
 	from    *net.UDPAddr
+	native  net.Addr // see datagram.native
 }
 
 // demuxDepth is how many uTP datagrams may be queued for the uTP socket
@@ -80,9 +86,9 @@ func (c *demuxConn) ReleasePeer(peer utp.ConnectionPeer) {
 // deliver hands a uTP datagram to the uTP socket. It never blocks: a full
 // queue means the uTP socket is not keeping up, and stalling the single UDP
 // reader would hold up every other connection on the port as well.
-func (c *demuxConn) deliver(payload []byte, pooled *[]byte, from *net.UDPAddr) {
+func (c *demuxConn) deliver(payload []byte, pooled *[]byte, from *net.UDPAddr, native net.Addr) {
 	select {
-	case c.incoming <- inbound{payload: payload, pooled: pooled, from: from}:
+	case c.incoming <- inbound{payload: payload, pooled: pooled, from: from, native: native}:
 	case <-c.closed:
 		releaseDatagram(pooled)
 	default:
@@ -90,11 +96,31 @@ func (c *demuxConn) deliver(payload []byte, pooled *[]byte, from *net.UDPAddr) {
 	}
 }
 
+// ReadFrom hands the uTP socket the next datagram, and on a PacketConn of the
+// Socket's own, puts the address it came from back in the map and holds it
+// there until the next ReadFrom.
+//
+// The datagram waited in the queue after the map last saw its address, and a
+// busy port could make the map forget it in the meantime: a SYN's, before the
+// connection it starts holds it (HoldPeer), and the SYN-ACK then went out in
+// the UDP form, which such a PacketConn may refuse. The uTP socket handles a
+// datagram, connection made and answer sent, before it reads the next, so
+// what this holds the next ReadFrom can let go of; one address at most, and
+// none for a datagram still queued or dropped. Review of 99ce302.
 func (c *demuxConn) ReadFrom(b []byte) (int, utp.ConnectionPeer, error) {
+	pc, _ := c.udp.(*packetConn)
+	if c.handed != nil {
+		pc.unpin(c.handed)
+		c.handed = nil
+	}
 	select {
 	case pkt := <-c.incoming:
 		n := copy(b, pkt.payload)
 		releaseDatagram(pkt.pooled)
+		if pc != nil && pkt.native != nil {
+			pc.restoreHeld(pkt.from, pkt.native)
+			c.handed = pkt.from
+		}
 		return n, utp.NewUdpPeer(pkt.from), nil
 	case <-c.closed:
 		return 0, nil, ErrSocketClosed

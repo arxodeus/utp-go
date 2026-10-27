@@ -77,18 +77,44 @@ const (
 var _ udpPacketConn = (*packetConn)(nil)
 
 func (p *packetConn) ReadFromUDP(b []byte) (int, *net.UDPAddr, error) {
+	n, udp, _, err := p.readNative(b)
+	return n, udp, err
+}
+
+// readNative is ReadFromUDP, and the address as pc gave it. A datagram waits
+// in a queue before anything answers it, and the map can forget its address
+// in the meantime; the address travels with it instead (Socket.run).
+func (p *packetConn) readNative(b []byte) (int, *net.UDPAddr, net.Addr, error) {
 	for {
 		n, addr, err := p.pc.ReadFrom(b)
 		if err != nil {
-			return n, nil, err
+			return n, nil, nil, err
 		}
 		if udp, ok := p.udpForm(addr); ok {
-			return n, udp, nil
+			return n, udp, addr, nil
 		}
 		// An address with no host and port cannot be answered or told
 		// apart from another; the datagram is dropped, as one from an
 		// address the kernel could not parse would be.
 	}
+}
+
+// restoreHeld remembers native as udp's address again, as when a datagram
+// from it arrives, and keeps it until the matching unpin. See
+// demuxConn.ReadFrom.
+func (p *packetConn) restoreHeld(udp *net.UDPAddr, native net.Addr) {
+	now := time.Now()
+	key := udp.String()
+	p.mu.Lock()
+	if p.native == nil {
+		p.native = make(map[string]nativeAddr)
+	}
+	if _, known := p.native[key]; !known && len(p.native) >= nativeMax {
+		p.pruneLocked(now)
+	}
+	p.native[key] = nativeAddr{addr: native, seen: now}
+	p.pinLocked(key)
+	p.mu.Unlock()
 }
 
 func (p *packetConn) WriteToUDP(b []byte, addr *net.UDPAddr) (int, error) {

@@ -5962,3 +5962,27 @@ or are documented trade-offs: the bounded id search sweeps every id under
 the reader's lock in the case that used to hang for ever ("The review of
 f875fd5").
 
+## A queued datagram's address could be forgotten before it was answered
+
+The review of 99ce302 found one more gap in the native-address lifetime of a
+Socket over a PacketConn of its own. A datagram's address is remembered when
+it is read, but the datagram then waits in a queue -- the uTP socket's, or
+ReadFrom's -- and the bounded map could forget the address in the meantime:
+a SYN's before the connection it starts holds it (HoldPeer), so the SYN-ACK
+went out in the UDP form, which such a PacketConn may refuse; and a datagram
+for ReadFrom was handed to the caller with its address rebuilt as a
+*net.UDPAddr. "A peer's native address could be forgotten during the
+handshake" had covered a dial's handshake and the backlog, both after the
+connection is registered, and not this.
+
+The address now travels with the datagram, as the PacketConn gave it.
+ReadFrom returns it as it came. The uTP socket's queue, handing a datagram
+over, remembers its address again and holds it until the socket reads the
+next: the socket handles each datagram -- connection registered, SYN-ACK
+sent -- before reading another, so the connection's own hold has taken over
+by then. One address is held this way at most; a datagram still queued, or
+dropped, holds nothing. `utpnet.TestAQueuedDatagramKeepsItsNativeAddress`
+and `TestAPassthroughDatagramKeepsItsNativeAddress`, each failing without its
+half of the change. A plain UDP socket never had the problem: its addresses
+are UDP addresses.
+

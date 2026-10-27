@@ -255,3 +255,77 @@ func TestAConnectionWaitingToBeAcceptedKeepsItsPeersNativeAddress(t *testing.T) 
 		t.Fatalf("the accepted connection's data never arrived: %v", err)
 	}
 }
+
+// A uTP datagram keeps the address it came from while it waits to be handled.
+// The map of such addresses could forget it while it was queued, before the
+// connection it starts holds the address, and the answer then went out in
+// the UDP form. Handed to the uTP socket, its address is remembered again and
+// held until the socket reads the next one. Review of 99ce302.
+func TestAQueuedDatagramKeepsItsNativeAddress(t *testing.T) {
+	p := &packetConn{}
+	d := newDemuxConn(p)
+	native := otherAddr("192.0.2.7:6881")
+	udp, ok := p.udpForm(native)
+	if !ok {
+		t.Fatal("no UDP form")
+	}
+	d.deliver([]byte("syn"), nil, udp, native)
+
+	churn(p) // while it waits
+	if got := p.nativeOf(udp); got != net.Addr(udp) {
+		t.Fatalf("the churn left %v remembered; this test needs it forgotten", got)
+	}
+
+	if _, _, err := d.ReadFrom(make([]byte, 16)); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.nativeOf(udp); got != net.Addr(native) {
+		t.Fatalf("handed to the uTP socket, the datagram's address is %v (%T), want %v", got, got, native)
+	}
+	churn(p) // while the socket handles it
+	if got := p.nativeOf(udp); got != net.Addr(native) {
+		t.Fatalf("forgotten while the uTP socket was handling its datagram: %v", got)
+	}
+
+	// The next read lets it go.
+	d.deliver([]byte("next"), nil, &net.UDPAddr{IP: net.IPv4(192, 0, 2, 8), Port: 1}, nil)
+	if _, _, err := d.ReadFrom(make([]byte, 16)); err != nil {
+		t.Fatal(err)
+	}
+	p.mu.Lock()
+	pins := len(p.pins)
+	p.mu.Unlock()
+	if pins != 0 {
+		t.Fatalf("%d addresses still held after the next read", pins)
+	}
+}
+
+// A datagram for ReadFrom keeps the address it came from in the PacketConn's
+// own form, however busy the port is while it waits.
+func TestAPassthroughDatagramKeepsItsNativeAddress(t *testing.T) {
+	s := otherSocket(t, nil)
+	sender, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sender.Close()
+	if _, err := sender.WriteTo([]byte("dht"), s.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(s.passthrough) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the datagram never reached the passthrough queue")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	churn(s.generic)
+	s.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, from, err := s.ReadFrom(make([]byte, 16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := from.(otherAddr); !ok {
+		t.Fatalf("ReadFrom gave the sender as a %T, want the PacketConn's own otherAddr", from)
+	}
+}

@@ -124,6 +124,9 @@ type datagram struct {
 	// once ReadFrom has copied it out.
 	pooled *[]byte
 	from   *net.UDPAddr
+	// native is the address the datagram came from as a PacketConn of the
+	// Socket's own gave it (packetConn), or nil.
+	native net.Addr
 }
 
 // Options configures a Socket.
@@ -277,7 +280,19 @@ func (s *Socket) run() {
 		default:
 		}
 
-		n, from, err := s.udp.ReadFromUDP(buf)
+		// On a PacketConn of the Socket's own, the address the datagram
+		// came from is kept as it was given, to go with the datagram: it
+		// waits in a queue before anything answers it, and the map of such
+		// addresses could forget it meanwhile (review of 99ce302).
+		var n int
+		var from *net.UDPAddr
+		var native net.Addr
+		var err error
+		if g, ok := s.udp.(*packetConn); ok {
+			n, from, native, err = g.readNative(buf)
+		} else {
+			n, from, err = s.udp.ReadFromUDP(buf)
+		}
 		if err != nil {
 			select {
 			case <-s.stopRead:
@@ -301,12 +316,12 @@ func (s *Socket) run() {
 		payload, pooled := copyDatagram(buf[:n])
 
 		if isUtpPacket(payload) {
-			s.inner.deliver(payload, pooled, from)
+			s.inner.deliver(payload, pooled, from, native)
 			continue
 		}
 
 		select {
-		case s.passthrough <- datagram{payload: payload, pooled: pooled, from: from}:
+		case s.passthrough <- datagram{payload: payload, pooled: pooled, from: from, native: native}:
 		default:
 			// The caller is not draining ReadFrom. Drop, as a UDP socket
 			// does, rather than stalling uTP behind it.
@@ -379,6 +394,9 @@ func (s *Socket) ReadFrom(p []byte) (int, net.Addr, error) {
 			stop()
 			n := copy(p, d.payload)
 			releaseDatagram(d.pooled)
+			if d.native != nil {
+				return n, d.native, nil
+			}
 			return n, s.nativeAddr(d.from), nil
 		case <-timeout:
 			// The deadline may have been moved rather than reached; the loop
