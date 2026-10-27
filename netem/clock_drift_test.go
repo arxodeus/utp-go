@@ -3,6 +3,7 @@ package netem
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -22,28 +23,34 @@ type driftResult struct {
 	// predicts; a mean over the whole transfer includes the ramp towards it
 	// and is necessarily lower.
 	lateQueueMean time.Duration
-	lateSamples   int
-	sent          int
-	skewFinal     time.Duration
-	skewMax       time.Duration
-	driftFinal    int64
-	penaltyFinal  time.Duration
-	penaltyMax    time.Duration
-	meanCwnd      uint32
-	minCwnd       uint32
-	finalCwnd     uint32
-	linkQueueMean time.Duration
-	samples       int
-	throughputBps float64
+	// lateQueueMedian is the median of the same samples. The phantom queue
+	// the correction cancels is a steady offset, a sawtooth that grows
+	// between corrections, whose median and mean agree; a stall in the
+	// runner's scheduling -- a 139ms spike in one macOS run -- moves the
+	// mean of 600 samples by a millisecond and the median not at all.
+	lateQueueMedian time.Duration
+	lateSamples     int
+	sent            int
+	skewFinal       time.Duration
+	skewMax         time.Duration
+	driftFinal      int64
+	penaltyFinal    time.Duration
+	penaltyMax      time.Duration
+	meanCwnd        uint32
+	minCwnd         uint32
+	finalCwnd       uint32
+	linkQueueMean   time.Duration
+	samples         int
+	throughputBps   float64
 }
 
 func (r driftResult) String() string {
 	return fmt.Sprintf(
-		"%+.0fppm: %d bytes in %v (%.2f Mb/s); settled queue %v max %v "+
+		"%+.0fppm: %d bytes in %v (%.2f Mb/s); settled queue %v median %v max %v "+
 			"(link actually queued %v); skew correction final %v max %v; drift %d penalty final %v max %v; cwnd mean %d min %d final %d; %d samples",
 		r.ppm, r.delivered, r.elapsed.Round(time.Millisecond), r.throughputBps/1e6,
-		r.lateQueueMean.Round(time.Microsecond), r.maxQueueSeen.Round(time.Microsecond),
-		r.linkQueueMean.Round(time.Microsecond),
+		r.lateQueueMean.Round(time.Microsecond), r.lateQueueMedian.Round(time.Microsecond),
+		r.maxQueueSeen.Round(time.Microsecond), r.linkQueueMean.Round(time.Microsecond),
 		r.skewFinal.Round(time.Microsecond), r.skewMax.Round(time.Microsecond),
 		r.driftFinal, r.penaltyFinal.Round(time.Microsecond), r.penaltyMax.Round(time.Microsecond),
 		r.meanCwnd, r.minCwnd, r.finalCwnd, r.samples)
@@ -96,6 +103,7 @@ func runDriftedWith(t *testing.T, ppm float64, runFor time.Duration, cid uint16,
 		res         driftResult
 		queueSum    time.Duration
 		lateSum     time.Duration
+		late        []time.Duration
 		cwndSum     uint64
 		delivered   int
 		sent        int
@@ -123,6 +131,7 @@ func runDriftedWith(t *testing.T, ppm float64, runFor time.Duration, cid uint16,
 		if m.At.Sub(firstSample) >= settleAfter {
 			res.lateSamples++
 			lateSum += q
+			late = append(late, q)
 		}
 		if q > res.maxQueueSeen {
 			res.maxQueueSeen = q
@@ -228,6 +237,8 @@ func runDriftedWith(t *testing.T, ppm float64, runFor time.Duration, cid uint16,
 	}
 	if res.lateSamples > 0 {
 		res.lateQueueMean = lateSum / time.Duration(res.lateSamples)
+		sort.Slice(late, func(i, j int) bool { return late[i] < late[j] })
+		res.lateQueueMedian = late[len(late)/2]
 	}
 	if res.elapsed > 0 {
 		res.throughputBps = float64(delivered) * 8 / res.elapsed.Seconds()
@@ -314,7 +325,9 @@ func TestClockSkewCorrectionCancelsThePhantomQueue(t *testing.T) {
 				p.ppm, p.got.skewFinal, wantSkew)
 		}
 
-		excess := p.got.lateQueueMean - baseline.lateQueueMean
+		// The median, not the mean: see lateQueueMedian. The mean was what
+		// failed on macOS, twice, at -5000ppm, with one stall each time.
+		excess := p.got.lateQueueMedian - baseline.lateQueueMedian
 		if excess < 0 {
 			excess = 0
 		}
