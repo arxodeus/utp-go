@@ -75,7 +75,11 @@ func TestAsymmetricAckPath(t *testing.T) {
 		payload := makePayload(c.size)
 		var times = map[bool][]time.Duration{}
 		var acks = map[bool][]uint64{}
-		for run := 0; run < asymmetricRuns; run++ {
+		runs := asymmetricRuns
+		if !c.thin {
+			runs = asymmetricAckRuns
+		}
+		for run := 0; run < runs; run++ {
 			for _, toGo := range []bool{false, true} {
 				el, offered := libutpSendsTo(t, toGo, c.data, c.back, payload)
 				times[toGo] = append(times[toGo], el)
@@ -109,6 +113,14 @@ const (
 	asymmetricThinGain = 0.85
 	asymmetricSlack    = 0.02
 	asymmetricAckShare = 1.05
+	// asymmetricAckRuns is how many runs a case gated on its count of
+	// acknowledgements takes. The count is at parity with libutp's -- at
+	// 100 Mb/s, eight medians of three runs each, four at 0f05aff and four
+	// at 5a932e4, came to 0.960-1.045 of libutp's, about 1.00 on average --
+	// but a median of three moves about 4% from run to run, and the release
+	// run at 5a932e4 drew 1.054 by chance. Seven runs halve the movement and
+	// keep the limit where it was.
+	asymmetricAckRuns = 7
 )
 
 // libutpSendsTo times libutp sending payload to a receiver -- this library's
