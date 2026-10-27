@@ -101,8 +101,16 @@ func TestAsymmetricAckPath(t *testing.T) {
 		}
 		if !c.thin {
 			if o, r := medianCount(acks[true]), medianCount(acks[false]); float64(o) > asymmetricAckShare*float64(r) {
-				// A count, not a time: held under the race detector too.
-				t.Errorf("%s: our receiver sent %d packets back, libutp's %d; want under %.2f of it", c.name, o, r, asymmetricAckShare)
+				// Gated as the times are, and only without the race detector.
+				// A count, but of acknowledgements, one per read batch, and a
+				// batch is however many datagrams the reader finds waiting:
+				// it follows the reader's timing, which the race detector
+				// changes for ours and not for libutp's, uninstrumented C.
+				// Under it our receiver sent 0.65 of libutp's here and 1.054
+				// and 1.057 on CI's runners, where plain runs, CI's included,
+				// are at parity: 0.90-1.05 here. This used to hold it under
+				// the race detector too, as a count independent of speed.
+				gate("%s: our receiver sent %d packets back, libutp's %d; want under %.2f of it", c.name, o, r, asymmetricAckShare)
 			}
 		}
 	}
@@ -117,9 +125,10 @@ const (
 	// acknowledgements takes. The count is at parity with libutp's -- at
 	// 100 Mb/s, eight medians of three runs each, four at 0f05aff and four
 	// at 5a932e4, came to 0.960-1.045 of libutp's, about 1.00 on average --
-	// but a median of three moves about 4% from run to run, and the release
-	// run at 5a932e4 drew 1.054 by chance. Seven runs halve the movement and
-	// keep the limit where it was.
+	// but a median of three moves about 4% from run to run. Seven runs halve
+	// the movement and keep the limit where it was. (The release runs at
+	// 5a932e4 and e2804ff failed it at 1.054 and 1.057 under the race
+	// detector, which is not what it measures: see the gate.)
 	asymmetricAckRuns = 7
 )
 
