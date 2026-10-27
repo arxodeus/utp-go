@@ -12,7 +12,8 @@ workflow, and are run by hand on the release commit and their logs kept.
 
 | Gate | Command | CI |
 | --- | --- | --- |
-| Formatting, vet, staticcheck | `gofmt -l .`, `go vet ./...`, `staticcheck ./...` | every push |
+| Formatting, vet | `gofmt -l .`, `go vet ./...` | every push |
+| Static analysis | `staticcheck ./...` (v0.8.2), on the current Go release | every push |
 | Cross-build | `GOOS=… GOARCH=… go vet ./...` for linux (amd64, arm64, 386), darwin, freebsd, windows | every push |
 | Root tests, cgo and not | `go test -short ./...` with `CGO_ENABLED=1` and `=0` | every push |
 | Race | `go test -race -short ./...` | every push |
@@ -59,6 +60,9 @@ go-libutp's own dependencies. govulncheck finds none in any module on Go
 
 govulncheck is pinned (v1.9.0): an older one, v1.1.4, crashed building
 its program on Go 1.27, so the version moves with the Go release CI uses.
+So is staticcheck (v0.8.2), and for the same reason: 2025.1.1 cannot read
+Go 1.27's export data. v0.8.2 needs Go 1.26 or later, so it runs on the
+current release, not on go.mod's minimum.
 
 `go list -m all` in each module is the dependency inventory; `govulncheck
 ./...` in each is the vulnerability scan.

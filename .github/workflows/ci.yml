@@ -25,14 +25,27 @@ jobs:
         run: test -z "$(gofmt -l . | grep -v '^native/libutp/upstream/' | tee /dev/stderr)"
       - name: vet
         run: go vet ./...
-      - name: staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
       - name: cross-build
         run: |
           for target in linux/amd64 linux/arm64 linux/386 darwin/arm64 darwin/amd64 freebsd/amd64 windows/amd64; do
             echo "== $target"
             GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go vet ./...
           done
+
+  # On the current Go release, as vulncheck is: a staticcheck reads the export
+  # data of the Go it runs on, and one old enough to build on go.mod's minimum
+  # (2025.1.1) cannot read Go 1.27's ("export data version 5 is greater than
+  # maximum supported version 2"), so a contributor on a current Go could not
+  # run the gate this job runs. v0.8.2 needs Go 1.26 or later to build.
+  staticcheck:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
 
   # On the current Go release, not go.mod's minimum: a vulnerability in an
   # older standard library is the toolchain's, fixed by building with a
