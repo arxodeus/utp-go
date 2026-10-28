@@ -2,24 +2,12 @@ package utp
 
 import "time"
 
-// Clock is where a connection reads time and gets its timers.
-//
-// It exists so a test can run a connection on a clock it controls. The
-// conformance corpus drives real libutp through a driver whose clock is
-// virtual and whose execution is synchronous, so libutp's emissions happen at
-// exact, known instants; ours happened whenever a goroutine was scheduled,
-// which is why the corpus compares what a packet contained and never when it
-// was sent. Closing that needs the timers on the same clock as the
-// timestamps, not just the timestamps.
-//
-// ConnectionConfig.NowMicros already made the *wall clock* injectable -- the
-// microseconds stamped into packets. This is the other half: the deadlines
-// and intervals that decide when anything happens at all.
-//
-// The real implementation is the package default and wraps the standard
-// library one for one. Nothing outside a test should need to set this.
+// Clock is the source of time and timers for a connection. It exists so
+// tests can run connections on a virtual clock; the default, RealClock, uses
+// the time package. ConnectionConfig.NowMicros controls the timestamps sent
+// on the wire; Clock controls deadlines and intervals.
 type Clock interface {
-	// Now is the current time, used for every deadline comparison.
+	// Now returns the current time.
 	Now() time.Time
 	// NewTimer returns a timer that fires once after d.
 	NewTimer(d time.Duration) Timer
@@ -27,10 +15,8 @@ type Clock interface {
 	NewTicker(d time.Duration) Ticker
 }
 
-// Timer is the subset of *time.Timer this package uses.
-//
-// C is a method rather than a field because an interface cannot carry one;
-// every call site reads `<-t.C()` where it read `<-t.C`.
+// Timer is the subset of *time.Timer this package uses. C is a method
+// because an interface cannot have fields.
 type Timer interface {
 	C() <-chan time.Time
 	Reset(d time.Duration) bool
@@ -43,36 +29,16 @@ type Ticker interface {
 	Stop()
 }
 
-// idleBarrier is implemented by a Clock that needs to know when the
-// connection has finished reacting, so that it can advance time safely.
+// idleBarrier is implemented by a Clock that must know when every
+// participant has finished reacting before it advances time.
 //
-// Advancing a virtual clock is trivial; knowing that the connection has
-// *finished* with the previous instant is not. It runs on its own goroutine,
-// and from outside there is no way to distinguish "parked with nothing to do"
-// from "about to emit a packet".
+// An event loop reports each time it is about to block, and the clock waits
+// for those reports after delivering a timer. The loop's select receives
+// without acting and marks itself busy in one place, so no case can be
+// missed. The retransmission wheel reports for itself as well, since most of
+// its ticks reach no connection.
 //
-// So the event loop reports each time it is about to block, and the clock
-// counts those reports. After delivering a timer it waits for the count to
-// rise: the loop it just woke must come all the way round and park again
-// before time moves further.
-//
-// **One call site each, deliberately.** The obvious design marks busy in
-// every case body of the loop's select, and that select has ten cases -- miss
-// one and the clock advances while the loop is working, which is precisely
-// the nondeterminism this exists to remove. So the select was restructured to
-// receive without acting: it records which case fired, the barrier is marked
-// busy once, and the bodies run from a switch afterwards. The invariant is
-// then structural rather than a rule to remember.
-//
-// A counter of parks alone is not enough, which is worth recording because it
-// was tried: a clock that fires a timer and then waits for the *connection*
-// to park deadlocks the moment a timer belongs to something else. The
-// retransmission wheel ticks on its own goroutine and most of its ticks
-// expire nothing, so they wake the wheel and never reach a connection at all.
-// Both participants report both edges.
-//
-// The real clock does not implement this, and the cost there is a nil check
-// per pass against an interface resolved once when the loop starts.
+// RealClock does not implement it.
 type idleBarrier interface {
 	// Register announces a participant whose parking matters. Called once,
 	// when the loop starts.
@@ -82,25 +48,20 @@ type idleBarrier interface {
 	// participant is idle.
 	MarkIdle()
 	MarkBusy()
-	// NoteHandoff reports that something is being queued for another
-	// participant, and TakeHandoff that it has been picked up. Called by the
-	// sender before the send and by the receiver once it holds the item, so
-	// that every outstanding handoff is accounted for by exactly one of them.
-	//
-	// Without it "every participant is parked" is not the same as "nothing is
-	// in flight". A channel send returns long before the receiver runs, so a
-	// participant can hand a packet to another and park, leaving the system
-	// momentarily quiet by every observable measure while work is still
-	// outstanding. Time would then move before the receiver had reacted.
-	// History: HISTORY.md, "NoteHandoff".
+	// NoteHandoff reports that an item is being queued for another
+	// participant, and TakeHandoff that it has been received. The sender
+	// calls the first before sending and the receiver the second once it
+	// holds the item. A channel send returns before the receiver runs, so
+	// without this every participant could be parked while work is still
+	// in flight.
 	NoteHandoff()
 	TakeHandoff()
 }
 
-// realClock is the standard library, and the default for every connection.
+// realClock uses the time package.
 type realClock struct{}
 
-// RealClock is the clock a connection uses unless one is configured.
+// RealClock is the clock a connection uses unless another is configured.
 var RealClock Clock = realClock{}
 
 func (realClock) Now() time.Time { return time.Now() }
@@ -109,7 +70,7 @@ func (realClock) NewTimer(d time.Duration) Timer {
 	return &realTimer{t: time.NewTimer(d)}
 }
 
-// AfterFunc runs f on a goroutine of its own once d has passed. Its timer's
+// AfterFunc runs f in its own goroutine after d. The returned timer's
 // channel is nil. See funcTimerClock.
 func (realClock) AfterFunc(d time.Duration, f func()) Timer {
 	return &realTimer{t: time.AfterFunc(d, f)}

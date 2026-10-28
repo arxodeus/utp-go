@@ -10,22 +10,16 @@ import (
 // looks at every one in turn.
 const cidRandomDraws = 64
 
-// errNoFreeConnectionId is a dial to a peer that already uses, or used in the
-// last idQuarantine, every pair of ids a new connection could take.
+// errNoFreeConnectionId is returned when every pair of ids a new connection
+// to the peer could take is in use, or was used within idQuarantine.
 var errNoFreeConnectionId = errors.New("utp: no free connection id for this peer")
 
-// generateCid picks ids for a new connection to peer, and registers eventCh
-// under them if it is given.
+// generateCid picks ids for a new connection to peer and, if eventCh is not
+// nil, registers it under them.
 //
-// Random draws first, as libutp draws (utp_internal.cpp:2533-2538), and then
-// every receive id in turn from a random one: libutp's loop, and this one,
-// had no end, and a socket whose peer held or had recently held enough of its
-// ids would have spun for ever inside Connect, which holds dispatchMu: the
-// lock the socket's reader takes for every datagram, so every connection on
-// the socket stalled with it. A connection takes two ids and keeps them from
-// its neighbours,
-// so 28,365 connections to one peer, live or quarantined, used every id
-// (TestDialWithNoFreeIdFails).
+// It tries random ids first and then every receive id in turn from a random
+// start, so it terminates even when the peer holds every id. A connection
+// takes two ids, so about 28,000 connections to one peer exhaust them.
 func (s *UtpSocket) generateCid(peer ConnectionPeer, isInitiator bool, eventCh chan *streamEvent) (*ConnectionId, error) {
 	cid := &ConnectionId{
 		Peer: peer,
@@ -44,7 +38,7 @@ func (s *UtpSocket) generateCid(peer ConnectionPeer, isInitiator bool, eventCh c
 			recv = start + uint16(attempt-cidRandomDraws) // wrapping
 		}
 		var send uint16
-		// Calculate send ID based on initiator status
+		// The send id is derived from the receive id.
 		if isInitiator {
 			send = recv + 1
 		} else {
@@ -55,31 +49,15 @@ func (s *UtpSocket) generateCid(peer ConnectionPeer, isInitiator bool, eventCh c
 		cid.Recv = recv
 		cid.hash = genHash(cid)
 
-		// Free means no connection to this peer receives on the id yet,
-		// whichever side opened it: packets are routed on the receive id
-		// alone (routeCandidates). libutp draws until the (address, receive
-		// id) key is free (utp_internal.cpp:2533-2538). This checked only the
-		// exact pair, so a new connection could take the receive id an
-		// accepted one already had.
-		//
-		// Nor one that ended in the last idQuarantine: what is still in
-		// flight for it, or still coming from a peer finishing its side of
-		// it, would reach the new connection. A RESET for the old one
-		// arriving while the new one dialled refused it -- the long soak
-		// drew that once a minute or so, the same ids picked 0.18s after
-		// the last connection to hold them closed. TCP keeps a closed
-		// connection's ports out of use for the same reason (TIME_WAIT);
-		// libutp does not. See DEVIATIONS.md, "A closed connection's ids
-		// are not reused at once".
-		//
-		// And neither of its ids may be one another connection to the peer
-		// uses in either direction. A RESET is matched on the receive id
-		// first, as libutp matches it, so a connection sending on the id
-		// another receives on has its RESETs taken by the other: in the soak
-		// a dialling connection was refused by a RESET meant for one that
-		// sent on its receive id and had just closed. libutp draws only the
-		// receive id free and has the same ambiguity. With every id used by
-		// one connection at most, no packet can be for two.
+		// An id pair is free when:
+		//   - no connection to this peer receives on the receive id, since
+		//     packets are routed on it alone (routeCandidates);
+		//   - no connection to this peer that ended within idQuarantine
+		//     used it, so packets still in flight for that connection cannot
+		//     reach the new one;
+		//   - neither id is used in either direction by another connection
+		//     to the peer, since a RESET is matched on either id. With each
+		//     id used by at most one connection, no packet can be for two.
 		s.connsMutex.Lock()
 		peerKey := peer.Hash()
 		if !s.idInUseLocked(recv, peerKey) && !s.idInUseLocked(send, peerKey) {
@@ -95,38 +73,27 @@ func (s *UtpSocket) generateCid(peer ConnectionPeer, isInitiator bool, eventCh c
 }
 
 func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *ConnectionConfig) (*UtpStream, error) {
-	// Create channels for connection status and events
+	// Create channels for connection status and events.
 	connectedCh := make(chan error, 1)
 	streamEvents := make(chan *streamEvent, connEventQueueLen)
 
-	// Registered under the reader's lock, so the reader never finds the
-	// connection's queue without the connection behind it. Nothing here
-	// waits: a packet for the connection that arrives before its event loop
-	// has set it up waits on the connection's own lock. See newUtpStream.
+	// Register under the reader's lock, so the reader never finds the
+	// connection's queue without the connection. A packet that arrives
+	// before the event loop is set up waits on the connection's lock; see
+	// newUtpStream.
 	s.dispatchMu.Lock()
-	// Generate connection ID
+	// Generate connection ids.
 	cid, err := s.generateCid(peer, true, streamEvents)
 	if err != nil {
 		s.dispatchMu.Unlock()
 		return nil, err
 	}
 	s.logger.Info("connecting", "dst.peer.hash", peer.Hash(), "dst.send", cid.Send, "dst.recv", cid.Recv, "dst.hash", cid.Hash(), "dst.peer", peer)
-	// Create new UTP stream
+	// Create the stream.
 	s.putConnStream(cid, streamEvents)
-	// The connection's lifetime is the socket's, not the dial's.
-	//
-	// This passed `ctx` -- the caller's dial context -- and so gave every
-	// connection a lifetime that ended when the dial did. net.Dialer
-	// documents the opposite ("Canceling ctx does not affect the connection
-	// after it is established") and Go callers rely on it: the standard shape
-	// is a dial under a timeout with `defer cancel()`, which fires the moment
-	// the dial returns. anacrolix/torrent does exactly that, and the result
-	// was a connection that completed its BitTorrent handshake and then died
-	// mid-stream with "context canceled" -- a torrent that never moved a
-	// byte. See TestDialContextCancelDoesNotCloseTheConnection.
-	//
-	// The caller's context still governs the wait below, which is the part it
-	// is for.
+	// The connection lives on the socket's context, not the dial's:
+	// canceling ctx after the dial returns does not affect the connection,
+	// as with net.Dialer. ctx still bounds the wait below.
 	stream := newUtpStream(
 		s.ctx,
 		s.logger,
@@ -143,7 +110,7 @@ func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *Co
 	s.dispatchMu.Unlock()
 	stream.linger = s.linger
 
-	// Wait for connection result
+	// Wait for the result.
 	select {
 	case err, ok := <-connectedCh:
 		if ok && err == nil {
@@ -151,15 +118,11 @@ func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *Co
 		} else if err != nil {
 			return nil, err
 		}
-		// A closed channel with nothing in it means the connection went away
-		// without ever reporting an outcome. Saying "timed out" here was
-		// wrong twice over: it was not a timeout, and until the connection
-		// started reporting success by sending rather than by closing, this
-		// was the branch every successful connection took.
+		// The connection ended without reporting an outcome.
 		return nil, fmt.Errorf("connection closed before it was established")
 	case <-ctx.Done():
-		// The attempt is the caller's to abandon even though the stream no
-		// longer shares its context.
+		// The caller may still abandon the attempt, although the stream does
+		// not share its context.
 		stream.abandonDial()
 		return nil, ctx.Err()
 	case <-s.ctx.Done():
@@ -189,7 +152,7 @@ func (s *UtpSocket) ConnectWithCid(
 	streamEvents := make(chan *streamEvent, connEventQueueLen)
 
 	s.putConnStream(cid, streamEvents)
-	// The socket's context, not the dial's -- see the note in Connect.
+	// The socket's context, not the dial's; see Connect.
 	stream := newUtpStream(
 		s.ctx,
 		s.logger,
@@ -205,23 +168,14 @@ func (s *UtpSocket) ConnectWithCid(
 	s.attachInline(cid.Hash(), streamEvents, stream.conn)
 	s.dispatchMu.Unlock()
 	stream.linger = s.linger
-	// Honour the caller's context, as Connect does. A bare receive here meant
-	// that cancelling the context during connection setup never returned: the
-	// connection's event loop exits on the same cancellation without
-	// signalling this channel, so the caller waited forever.
+	// Honor the caller's context, as Connect does.
 	select {
 	case err := <-connected:
 		if err == nil {
 			return stream, nil
 		}
 		s.logger.Error("failed to open connection", "cid.send", cid.Send, "cid.recv", cid.Recv, "cid.peer", cid.Peer.Hash(), "err", err)
-		// Report the reason rather than assuming one. This used to return a
-		// flat "connection timed out" whatever had happened, which was true
-		// while running out of SYN attempts was the only way to fail; an
-		// ICMP error is a second way, and "refused" and "timed out" are
-		// exactly the distinction libutp draws with UTP_ECONNREFUSED against
-		// UTP_ECONNRESET (utp_internal.cpp:3122). Wrapped, so errors.Is finds
-		// ErrConnRefused and ErrTimedOut.
+		// Wrap the reason, so errors.Is finds ErrConnRefused or ErrTimedOut.
 		return nil, fmt.Errorf("utp_socket: connect failed: %w", err)
 	case <-ctx.Done():
 		stream.abandonDial()
@@ -237,9 +191,8 @@ func (s *UtpSocket) awaitConnected(
 	accept *acceptRequest,
 	connected chan error,
 ) {
-	// Report against the stream's connection id, not the accept's. A cid-less
-	// Accept has no cid of its own, and reading accept.cid here crashed the
-	// moment anyone used that path.
+	// Report against the stream's connection id: a cid-less Accept has
+	// none of its own.
 	cid := stream.Cid()
 
 	s.logger.Debug("waiting for answering the new connections", "dst.peer", cid.Peer.Hash(), "cid.Send", cid.Send, "cid.Recv", cid.Recv)
