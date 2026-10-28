@@ -16,6 +16,11 @@ import "github.com/arxodeus/utp/utpnet"     // as net.PacketConn and net.Conn
 For a program that uses `anacrolix/go-libutp`, `compat/golibutp` is go-libutp's
 API on this library; see [compat/golibutp/README.md](compat/golibutp/README.md).
 
+Before v0.1.0 the module was `github.com/arxodeus/utp-go`, never tagged. Code
+that imported it at a commit changes its imports to `github.com/arxodeus/utp`;
+the exported API was also narrowed before the release, to what a caller can
+reach (commit 9c44c4f).
+
 ## Where it came from
 
 It began as a fork of [`zen-eth/utp-go`](https://github.com/zen-eth/utp-go),
