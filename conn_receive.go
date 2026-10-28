@@ -519,7 +519,6 @@ func (c *connection) onICMP(notice *icmpNotice, now time.Time) {
 // See mtuSearch.icmpFragmentationNeeded.
 func (c *connection) onICMPFragmentationNeeded(nextHopMTU uint32, now time.Time) {
 	c.mtu.icmpFragmentationNeeded(nextHopMTU, now)
-	// Log the router's figure.
 	c.logger.Debug("MTU [ICMP]", "floor", c.mtu.floor, "ceiling", c.mtu.ceiling,
 		"current", c.mtu.current, "nextHopMTU", nextHopMTU)
 }

@@ -10,48 +10,32 @@ import (
 
 const (
 	defaultTargetMicros = 100000 * time.Microsecond
-	// defaultInitialTimeout matches libutp's initial rto and its connect
-	// timer, both 3000ms (utp_internal.cpp:2609 and :2762).
+	// defaultInitialTimeout is the initial retransmission timeout and the
+	// connect timer, 3 seconds.
 	defaultInitialTimeout = 3 * time.Second
-	// defaultMinTimeout is the RTO floor. libutp computes
-	// rto = max(rtt + rtt_var * 4, 1000) in milliseconds
-	// (utp_internal.cpp:1380), so the floor is one second.
+	// defaultMinTimeout is the RTO floor: rto = max(rtt + rtt_var*4, 1s).
 	defaultMinTimeout = 1000 * time.Millisecond
-	// defaultMaxTimeout is no cap, as libutp has none: its timeout is
-	// max(rtt + rtt_var * 4, 1000) with no upper bound (utp_internal.cpp:1380)
-	// and doubles on each timeout without one (:1179), and the connection gives
-	// up at the fifth (:1191). This was 60 seconds, which bound only the last
-	// wait on a path whose timeout was past 3.75 seconds, where it gave up a
-	// little sooner than libutp. ConnectionConfig.MaxTimeout sets one.
+	// defaultMaxTimeout is zero: no cap. The timeout doubles on each
+	// expiry and the connection gives up at the fifth.
+	// ConnectionConfig.MaxTimeout sets a cap.
 	defaultMaxTimeout = 0
-	// defaultMaxPacketSizeBytes is the largest datagram this library will
-	// ever try -- the ceiling of the path-MTU search, not a size it sends
-	// straight away.
-	//
-	// libutp derives its ceiling from the interface MTU (`get_udp_mtu`,
-	// utp_internal.cpp:1316) and searches downward from there. With no
-	// embedder callback its default for IPv4 is UDP_IPV4_MTU, 1402: a
-	// 1500-byte Ethernet MTU less the IPv4 and UDP headers and an allowance
-	// for GRE, PPPoE, MPPE and 36 bytes of "fudge" (utp_utils.cpp:211-228).
-	// IPv6 peers get libutp's 1232 (path_mtu.go). The search starts here, as
-	// libutp's does, and comes down when a probe of this size is lost. See
-	// mtu.go; history: HISTORY.md, "defaultMaxPacketSizeBytes".
+	// defaultMaxPacketSizeBytes is the largest datagram the connection will
+	// try: the ceiling of the path-MTU search, which starts here and comes
+	// down when a probe of this size is lost. 1402 bytes is a 1500-byte
+	// Ethernet MTU less the IPv4 and UDP headers and an allowance for
+	// tunnel encapsulation. IPv6 peers start at 1232 (path_mtu.go). See
+	// mtu.go.
 	defaultMaxPacketSizeBytes = 1402
-	// defaultMaxWindowSizeIncBytes is the cap on how far the congestion
-	// window may grow in one RTT. libutp:
-	// `#define MAX_CWND_INCREASE_BYTES_PER_RTT 3000` (utp_internal.cpp:43).
-	// This was 1024, one packet per RTT, which on a 100 ms path meant about
-	// ten kilobytes of window per second -- a 20 Mbps link needs 500 KB.
+	// defaultMaxWindowSizeIncBytes is the most the congestion window may
+	// grow in one RTT.
 	defaultMaxWindowSizeIncBytes = 3000
 	defaultGain                  = 1.0
-	// defaultDelayWindow is how far back the base delay reaches: libutp's
-	// thirteen one-minute buckets (DELAY_BASE_HISTORY, utp_internal.cpp:50).
-	// It was two minutes, a sliding minimum, chosen to bound clock drift
-	// before this library had libutp's correction for it; see baseDelayHist.
+	// defaultDelayWindow is how far back the base delay reaches: thirteen
+	// one-minute buckets. See baseDelayHist.
 	defaultDelayWindow = 13 * time.Minute
 	// ppRTTWindow is how far back LEDBAT++'s minimum round trip reaches. A
-	// round trip is measured on one clock and cannot drift, so it keeps the
-	// two minutes it was tuned with.
+	// round trip is measured on one clock and cannot drift, so a shorter
+	// window serves.
 	ppRTTWindow = 2 * time.Minute
 )
 
@@ -64,16 +48,15 @@ type transmitKind int
 
 type packetRecord struct {
 	// SentWindow is the congestion window when the packet was last
-	// transmitted: what its acknowledgement's share of a round trip's growth
-	// is reckoned against. See ackBatch.credit.
+	// transmitted, against which its acknowledgement's share of a round
+	// trip's growth is reckoned. See ackBatch.credit.
 	SentWindow       uint32
 	SizeBytes        uint32
 	NumTransmissions uint32
 	Acked            bool
-	// NeedResend is libutp's need_resend: the packet was given up as lost
-	// and its bytes no longer count in flight. Resending it counts them
-	// again (utp_internal.cpp:877-881); acknowledging it does not subtract
-	// them a second time (:1390-1396).
+	// NeedResend marks a packet declared lost: its bytes no longer count in
+	// flight. Resending it counts them again; acknowledging it does not
+	// subtract them a second time.
 	NeedResend bool
 	// SentAt is when the packet was last transmitted. LEDBAT++ uses it to
 	// tell which window a loss belongs to; see OnLostPacket.
@@ -95,7 +78,7 @@ var (
 	errAckOfUnsent            = errors.New("acknowledgement of a packet never sent")
 
 	// errInternal ends a connection whose own bookkeeping has failed: a
-	// bug here, not anything the peer did or the network lost.
+	// bug, not anything the peer did or the network lost.
 	errInternal = errors.New("utp: internal error")
 )
 
@@ -109,7 +92,7 @@ type ctrlConfig struct {
 	Gain                  float32
 	Algorithm             CongestionAlgorithm
 	DelayWindow           time.Duration
-	// Clock is where the controller reads time: the delay window's expiry
+	// Clock is the controller's source of time: the delay window's expiry
 	// and the age of the application-limited mark. Defaults to RealClock.
 	Clock      Clock
 	WindowSize uint32
@@ -126,10 +109,7 @@ func defaultCtrlConfig() *ctrlConfig {
 		Gain:                  defaultGain,
 		DelayWindow:           defaultDelayWindow,
 		Clock:                 RealClock,
-		// The window ceiling, libutp's opt_sndbuf, whose default is also
-		// 1 MB (utp_api.cpp:91). This was absent, which was harmless while
-		// nothing read the field and a zero ceiling the moment something
-		// did.
+		// The window ceiling, 1 MB by default.
 		WindowSize: DefaultWindowSize,
 	}
 }
@@ -143,47 +123,35 @@ type controller interface {
 	// OnTick lets a controller act on the passage of time when no acks are
 	// arriving. Only LEDBAT++ needs it, for its slowdowns.
 	OnTick(now time.Time)
-	// OnPeerDelay reports the one-way delay this end measured on a packet
-	// arriving from the peer -- libutp's `their_delay`, in raw wrapping
-	// microseconds. It is not a congestion signal for this sender; it is how
-	// clock drift between the two ends is detected. See
+	// OnPeerDelay reports the one-way delay measured on a packet from the
+	// peer, in raw wrapping microseconds. It is not a congestion signal for
+	// this sender; it is used to detect clock drift. See
 	// defaultController.OnPeerDelay.
 	OnPeerDelay(sample uint32, now time.Time)
 	// OnAckDelay reports the delay the peer measured on our packets, as
 	// carried by one incoming acknowledgement, once per acknowledgement and
-	// before OnAck for the packets it covers. libutp adds it to our_hist
-	// once per incoming packet (utp_internal.cpp:2017-2024), not once per
-	// packet acknowledged.
+	// before OnAck for the packets it covers.
 	OnAckDelay(delay time.Duration, now time.Time)
 	// ApplyAck ends one incoming acknowledgement: after OnAck for every
 	// packet it covers, and before any loss it reveals is reported. Classic
 	// LEDBAT updates the window here, once, for all the bytes the
-	// acknowledgement covered -- libutp's single apply_ccontrol call per
-	// incoming packet (utp_internal.cpp:2139-2140), which comes before
-	// selective_ack can decay the window (:2289).
+	// acknowledgement covered.
 	ApplyAck()
 	Timeout() time.Duration
 	BytesAvailableInWindow() uint32
-	// BytesInFlight is libutp's cur_window: payload bytes sent and neither
-	// acknowledged nor given up as lost.
+	// BytesInFlight returns the payload bytes sent and neither acknowledged
+	// nor declared lost.
 	BytesInFlight() uint32
-	// CongestionWindow is libutp's max_window.
+	// CongestionWindow returns the congestion window in bytes.
 	CongestionWindow() uint32
 	// OnRTTSample feeds a round trip measured outside OnAck: the SYN's, on
-	// the dialling side. libutp takes it through the same ack_packet as any
-	// other (utp_internal.cpp:1362-1380).
+	// the dialing side.
 	OnRTTSample(rtt time.Duration)
-	// MarkForResend gives a packet up as lost: its bytes stop counting in
-	// flight until it is sent again. libutp does this to every packet in
-	// flight on a retransmission timeout (utp_internal.cpp:1230-1237). A
-	// packet already acknowledged or already marked is left alone.
+	// MarkForResend declares a packet lost: its bytes stop counting in
+	// flight until it is sent again. A packet already acknowledged or
+	// already marked is left alone.
 	MarkForResend(seqNum uint16)
 	// Stats returns a snapshot of the controller's internal state.
-	//
-	// It exists so a test harness can plot the congestion window and RTT
-	// estimate over time. A controller that can only be observed through its
-	// effect on throughput cannot be told apart from one that is doing
-	// nothing -- which is not hypothetical here; see KNOWN-LIMITATIONS.md.
 	Stats() controllerStats
 }
 
@@ -196,16 +164,16 @@ type controllerStats struct {
 	MaxWindowSizeBytes uint32
 	// MinWindowSizeBytes is the floor the window will not drop below.
 	MinWindowSizeBytes uint32
-	// RTT is the smoothed round-trip time estimate: libutp's, in whole
-	// milliseconds, and so zero on a path faster than one.
+	// RTT is the smoothed round-trip estimate in whole milliseconds, and so
+	// zero on a path faster than one.
 	RTT time.Duration
-	// FineRTT is the same estimator run in microseconds, for what libutp does
-	// not have and needs a round trip below a millisecond to be nonzero: the
-	// loss probe's timeout.
+	// FineRTT is the same estimator run in microseconds, for the loss
+	// probe's timeout, which needs a nonzero value on sub-millisecond
+	// paths.
 	FineRTT time.Duration
 	// MinFineRTT is the lowest round-trip sample, in microseconds, from a
-	// packet sent once. The loss probe reads it to tell an acknowledgement of
-	// the packet it resent from one of the original (see probeAnswered).
+	// packet sent once. The loss probe uses it to tell an acknowledgement of
+	// its resend from one of the original (see probeAnswered).
 	MinFineRTT time.Duration
 	// SpuriousLossesUndone counts cuts for lost packets undone because the
 	// packet proved only late. See defaultController.undoSpuriousLoss.
@@ -214,58 +182,34 @@ type controllerStats struct {
 	RTTVarianceMicros int64
 	// Timeout is the current retransmission timeout.
 	Timeout time.Duration
-	// BaseDelay is the lowest one-way delay observed in the delay window --
-	// LEDBAT's estimate of the path with no queue. Queueing delay is the
-	// difference between CurrentDelay and this.
-	//
-	// The series both are drawn from is the peer's measurement of *our*
-	// outgoing path: the timestamp_difference field it puts on every packet,
-	// which is libutp's `our_hist` (utp_internal.cpp:2016-2021). That is the
-	// direction LEDBAT controls, because it is the direction this sender's
-	// packets travel.
+	// BaseDelay is the lowest one-way delay observed in the delay window,
+	// LEDBAT's estimate of the path with no queue. Queuing delay is
+	// CurrentDelay minus this. Both are the peer's measurement of our
+	// outbound path, the direction LEDBAT controls.
 	BaseDelay time.Duration
 	// ClockSkewCorrection is how much has been added to the base delay to
-	// cancel clock drift between the two ends. Zero on a pair of clocks
-	// running at the same rate, which is every pair that has not been
-	// deliberately skewed.
-	//
-	// Exposed because a correction that cannot be observed cannot be tested,
-	// and this repository has already learned that the expensive way.
+	// cancel clock drift between the two ends. Zero when the clocks run at
+	// the same rate.
 	ClockSkewCorrection time.Duration
-	// ClockDrift and ClockDriftPenalty are libutp's clock_drift and the delay
-	// penalty it earns. See ConnectionMetrics for what they mean.
+	// ClockDrift and ClockDriftPenalty are the drift estimate and the delay
+	// penalty it incurs. See ConnectionMetrics.
 	ClockDrift        int64
 	ClockDriftPenalty time.Duration
-	// CurrentDelay is the most recent sample of that same series.
-	//
-	// It is here because there was no way to compute a queueing delay
-	// without it. ConnectionMetrics.QueueingDelay used to subtract BaseDelay
-	// from the *other* direction's measurement, which is not a queue in
-	// either direction. See the note there.
+	// CurrentDelay is the most recent sample of the same series.
 	CurrentDelay time.Duration
-	// FilteredQueueingDelay is the queue our packets are meeting on the way
-	// to the peer: the least of the last three samples, each over the base
-	// as it stood (libutp's our_hist.get_value(), utp_internal.cpp:383-391).
-	// For a connection that only receives, these are its acknowledgements.
+	// FilteredQueueingDelay is the queue our packets meet on the way to the
+	// peer: the least of the last three samples, each relative to the base
+	// at the time. For a connection that only receives, these are its
+	// acknowledgements.
 	FilteredQueueingDelay time.Duration
 	// TargetDelayMicros is the standing queue the controller aims for.
 	TargetDelayMicros uint32
-	// SlowStart reports whether the controller is still in slow start.
-	//
-	// It is here because two very different behaviours are indistinguishable
-	// without it. libutp's application-limited guard zeroes the LEDBAT gain
-	// (utp_internal.cpp:1681-1686), but in slow start the window is
-	// `max(ss_cwnd, ledbat_cwnd)` (:1699) and `ss_cwnd` is not gated -- so a
-	// window growing while the application sends nothing is correct in slow
-	// start and a defect after it. A test that cannot tell which phase it is
-	// in cannot measure the guard at all; see
-	// netem.TestApplicationLimitedWindowDoesNotGrow.
+	// SlowStart reports whether the controller is still in slow start, where
+	// the window grows whether or not the application fills it.
 	SlowStart bool
-	// AppLimitedSince is how long it has been since the sender last had data
-	// to send and no window to send it in -- the age of libutp's
-	// `last_maxed_out_window` (:945, :957, read at :1681). Growth is
-	// suppressed once this exceeds one second. Zero means the window has
-	// never been filled.
+	// AppLimitedSince is how long since the sender last had data to send
+	// and no window to send it in. Growth is suppressed once this exceeds
+	// one second. Zero means the window has never been filled.
 	AppLimitedSince time.Duration
 }
 
@@ -293,68 +237,54 @@ type defaultController struct {
 	fineRTT              time.Duration // see controllerStats.FineRTT
 	minFineRTT           time.Duration // see controllerStats.MinFineRTT
 	delayAcc             *baseDelayHist
-	// curDelayHist is libutp's cur_delay_hist: the last curDelaySize
-	// queueing-delay samples, each taken against the base as it stood when
-	// it arrived, zero until filled (DelayHist, utp_internal.cpp:247-248,
-	// :269-271, :364-365). Classic LEDBAT's delay is their minimum.
+	// curDelayHist holds the last curDelaySize queuing-delay samples, each
+	// relative to the base when it arrived, zero until filled. Classic
+	// LEDBAT's delay is their minimum.
 	curDelayHist [curDelaySize]uint32
 	curDelayIdx  int
 	// ackBatch is what the acknowledgement being processed has covered so
 	// far, for ApplyAck. Classic LEDBAT only.
 	ackBatch ackBatch
 	// lastWindowDecay is when the congestion window was last halved for
-	// loss. libutp's `last_rwin_decay` (utp_internal.cpp:461).
+	// loss.
 	lastWindowDecay time.Time
 	// slowStart and ssthreshBytes are the slow-start phase and its exit
-	// threshold. libutp starts every connection in slow start with
-	// `ssthresh = opt_sndbuf` (utp_internal.cpp:2620-2621) and grows the
-	// window by a packet per acked packet until either the threshold is
-	// crossed or the delay approaches the target (:1691-1702).
-	//
-	// This fork had no slow start at all: every connection began at two
-	// packets and crept up by the LEDBAT increment alone.
+	// threshold. Every connection starts in slow start, growing the window
+	// by a packet per acknowledged packet until the threshold is crossed or
+	// the delay approaches the target.
 	slowStart     bool
 	ssthreshBytes uint32
-	// maxWindowUpperBytes is the ceiling on the congestion window --
-	// libutp's `opt_sndbuf`, which it clamps against at
-	// utp_internal.cpp:1710.
+	// maxWindowUpperBytes is the upper bound on the congestion window.
 	maxWindowUpperBytes uint32
 	// lastMaxedOutWindow is when the sender last had data to send and no
-	// window to send it in. libutp's `last_maxed_out_window`, set by
-	// `is_full` (utp_internal.cpp:945, :957) and read at :1681: a sender
-	// that has not filled its window in the last second is limited by the
-	// application rather than the path, and growing the window further would
-	// be measuring nothing.
+	// window to send it in. A sender that has not filled its window in the
+	// last second is limited by the application, and growing the window
+	// further would measure nothing.
 	lastMaxedOutWindow time.Time
 
-	// peerDelayHist is the base delay of packets arriving *from* the peer,
-	// libutp's `their_hist` (utp_internal.cpp:507). It is not a congestion
-	// signal for this sender -- it describes the other direction -- and its
-	// only use is detecting clock drift. See OnPeerDelay.
+	// peerDelayHist is the base delay of packets arriving from the peer. It
+	// is not a congestion signal for this sender; its only use is detecting
+	// clock drift. See OnPeerDelay.
 	peerDelayHist *peerDelayHist
 
 	// drift estimates the long-run slope of the delay the peer reports for
-	// our packets: the second of libutp's two clock-drift mechanisms. See
-	// driftEstimator, and applyCongestionControl for what it is used for.
+	// our packets. See driftEstimator and applyCongestionControl.
 	drift *driftEstimator
 
-	// clk is where this controller reads time. Never nil after
-	// newDefaultController; read through now().
+	// clk is the controller's source of time. Never nil after
+	// newDefaultController; read it through now.
 	clk Clock
 
-	// currentDelay is the most recent delay sample pushed into delayAcc --
-	// the newest value of the series BaseDelay is the minimum of. Reported,
-	// not acted on: the control path already has the sample in hand when it
-	// needs it.
+	// currentDelay is the most recent delay sample, the newest value of the
+	// series BaseDelay is the minimum of. Reported only.
 	currentDelay time.Duration
 
 	// algorithm selects the congestion controller. Everything above is
 	// shared; the LEDBAT++ state below is used only when it is selected.
 	algorithm CongestionAlgorithm
-	// minRTT is LEDBAT++'s base round trip -- the lowest seen within the
-	// delay window -- which its gain is computed from
-	// (draft-irtf-iccrg-ledbat-plus-plus-01 §4.2) and its queueing delay
-	// measured against (§4.5).
+	// minRTT is LEDBAT++'s base round trip, the lowest within the delay
+	// window, from which its gain is computed (§4.2) and against which its
+	// queuing delay is measured (§4.5).
 	minRTT time.Duration
 	// ppRTTBase holds the round-trip samples minRTT is the minimum of.
 	ppRTTBase *delayAccumulator
@@ -365,14 +295,14 @@ type defaultController struct {
 	ppRTTCount  int
 	ppRTTNext   int
 	// ppPhase and the four fields after it drive the periodic slowdowns that
-	// keep the base-delay estimate honest (§4.4).
+	// keep the base-delay estimate accurate (§4.4).
 	ppPhase             ledbatPPPhase
 	ppSlowdownStartedAt time.Time
 	ppFreezeUntil       time.Time
 	ppNextSlowdownAt    time.Time
 	ppSlowdownSsthresh  uint32
-	// ppWindowFraction is the part of a byte LEDBAT++'s last update in
-	// congestion avoidance added to the window and could not store in it.
+	// ppWindowFraction is the fraction of a byte LEDBAT++'s last update in
+	// congestion avoidance added to the window but could not store in it.
 	ppWindowFraction float64
 
 	mu sync.Mutex
@@ -394,51 +324,43 @@ func newDefaultController(config *ctrlConfig) *defaultController {
 		maxWindowSizeIncBytes: config.MaxWindowSizeIncBytes,
 		gain:                  config.Gain,
 		rtt:                   0,
-		// libutp starts rtt_var at 800 (utp_internal.cpp:2610). Its rtt and
-		// rtt_var are milliseconds -- the RTT sample is computed as
-		// microseconds/1000 at utp_internal.cpp:1364 -- so that is 800ms.
-		// It is superseded by the first RTT sample below, and exists so a
-		// timeout computed before any ack is conservative rather than zero.
+		// The initial RTT variance, 800 ms, so a timeout computed before any
+		// sample is conservative. The first sample supersedes it.
 		rttVarianceMicros: (800 * time.Millisecond).Microseconds(),
 		transmissions:     make(map[uint16]*packetRecord),
 		clk:               clk,
 		delayAcc:          newBaseDelayHist(config.DelayWindow, clk),
 		ppRTTBase:         newDelayAccumulatorWithClock(ppRTTWindow, clk),
 		peerDelayHist:     newPeerDelayHist(config.DelayWindow),
-		// libutp starts the first averaging slot five seconds after the
-		// socket is created, not after the first sample arrives
-		// (utp_internal.cpp:2553).
+		// The first averaging slot ends five seconds after the connection is
+		// created, not after the first sample.
 		drift: newDriftEstimator(clk.Now()),
-		// libutp starts every connection in slow start with
-		// `ssthresh = opt_sndbuf` (utp_internal.cpp:2620-2621), and its
-		// default opt_sndbuf is 1 MB (utp_api.cpp:91) -- the same value as
-		// DefaultWindowSize here.
+		// Every connection starts in slow start with the threshold at the
+		// window ceiling.
 		slowStart:           true,
 		ssthreshBytes:       config.WindowSize,
 		maxWindowUpperBytes: config.WindowSize,
 		algorithm:           config.Algorithm,
 	}
-	// A ceiling below the floor pins the window shut on the first ack, which
-	// is what an unset WindowSize used to produce.
+	// A ceiling below the floor would pin the window shut.
 	if ctrl.maxWindowUpperBytes == 0 {
 		ctrl.maxWindowUpperBytes = DefaultWindowSize
 		ctrl.ssthreshBytes = DefaultWindowSize
 	}
 	if ctrl.maxWindowUpperBytes < ctrl.minWindowSizeBytes {
-		// A caller asking for a window smaller than two packets gets two
-		// packets: below that nothing can be sent at all. Their intent to be
-		// small is respected rather than replaced with the default.
+		// A window smaller than two packets is raised to two: below that
+		// nothing can be sent.
 		ctrl.maxWindowUpperBytes = ctrl.minWindowSizeBytes
 		if ctrl.ssthreshBytes < ctrl.minWindowSizeBytes {
 			ctrl.ssthreshBytes = ctrl.minWindowSizeBytes
 		}
 	}
 	if config.Algorithm == AlgorithmLEDBATPP {
-		// draft §4.5: LEDBAT++ targets 60ms of queueing delay where RFC 6817
-		// and libutp use 100ms.
+		// draft §4.5: LEDBAT++ targets 60 ms of queuing delay rather than
+		// RFC 6817's 100 ms.
 		ctrl.targetDelayMicros = uint32(ledbatPPTargetDelay.Microseconds())
-		// draft §4.1: "LEDBAT++ sender limits the initial window to 2
-		// packets" -- which is already minWindowSizeBytes here.
+		// draft §4.1: the initial window is 2 packets, which is already
+		// minWindowSizeBytes.
 		ctrl.maxWindowSizeBytes = ctrl.minWindowSizeBytes
 		ctrl.ppPhase = ppSlowStart
 	}
@@ -496,14 +418,10 @@ func (c *defaultController) BytesInFlight() uint32 {
 	return c.windowSizeBytes
 }
 
-// setWindowCeiling moves the ceiling on the congestion window of a live
-// connection: libutp's utp_setsockopt(UTP_SNDBUF), which sets the socket's
-// opt_sndbuf (utp_internal.cpp:2699-2702). libutp sends no more than it from
-// then on -- is_full takes the least of it and the window (:936) -- and
-// clamps the window to it at the next acknowledgement (:1710); clamping now
-// sends the same. The slow-start threshold is left where it is, as libutp
-// leaves ssthresh. Zero restores the default, and a ceiling below the floor
-// is raised to it, as the constructor does.
+// setWindowCeiling changes the upper bound on a live connection's congestion
+// window. Nothing more is sent beyond it, and the window is clamped to it at
+// once. The slow-start threshold is left alone. Zero restores the default,
+// and a ceiling below the floor is raised to it.
 func (c *defaultController) setWindowCeiling(bytes uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -536,9 +454,8 @@ func (c *defaultController) MarkForResend(seqNum uint16) {
 	c.windowSizeBytes -= packetInst.SizeBytes
 }
 
-// lossUndoEnabled switches undoing a cut whose loss proved spurious. It is
-// not libutp's: see DEVIATIONS.md, "A cut for a loss that was only
-// reordering is undone".
+// lossUndoEnabled enables undoing a cut whose loss proved spurious. Tests
+// switch it off.
 var lossUndoEnabled = func() *atomic.Bool {
 	b := new(atomic.Bool)
 	b.Store(true)
@@ -564,18 +481,16 @@ func (c *defaultController) lossCause() (uint16, bool) {
 	return c.undo.seq, c.undo.valid
 }
 
-// undoSpuriousLoss puts back the window that a cut for seq replaced: the
-// packet was not lost after all, only late, and the original arrived. It
-// reports whether there was such a cut to undo.
+// undoSpuriousLoss restores the window that a cut for seq replaced, because
+// the packet was only late and the original arrived. It reports whether
+// there was such a cut to undo.
 //
-// RFC 4015's response to a spurious retransmission (RFC 3522 detects it),
-// restoring the window and the threshold to what they were. libutp has no
-// undo: a packet displaced by reordering halves its window as a loss would.
-// On a link that reorders, every displaced packet that the selective acks
-// overtake is taken for lost, and each such halving is undone here once the
-// acknowledgement shows the original arrived first. Slow start is not
-// resumed, and a newer cut, another loss, or a timeout in between leaves
-// the cut standing.
+// This is RFC 4015's response to a spurious retransmission, as detected by
+// RFC 3522: the window and threshold go back to what they were. On a link
+// that reorders, a packet overtaken by later ones is taken for lost and the
+// window halved; this undoes that once the acknowledgement shows the
+// original arrived first. Slow start is not resumed, and a newer cut,
+// another loss or a timeout in between leaves the cut standing.
 func (c *defaultController) undoSpuriousLoss(seq uint16) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -592,16 +507,9 @@ func (c *defaultController) undoSpuriousLoss(seq uint16) bool {
 	return true
 }
 
-// forgetTransmission drops the record of an acknowledged packet that the
-// sender no longer holds, keeping it for the next packet sent, so the
-// records are the window, as libutp's are: its records are its outgoing
-// packets, freed when acknowledged (the free(pkt) in ack_packet,
-// utp_internal.cpp:1397).
-//
-// A record still unacknowledged is kept: the sender drops only packets it has
-// seen acknowledged, so this cannot happen from it, and a caller driving the
-// controller directly keeps what it has not finished with. History:
-// HISTORY.md, "forgetTransmission".
+// forgetTransmission drops the record of an acknowledged packet the sender no
+// longer holds and keeps it for reuse, so the records track the send window.
+// A record still unacknowledged is kept.
 func (c *defaultController) forgetTransmission(seqNum uint16) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -621,8 +529,7 @@ func (c *defaultController) OnTransmit(seqNum uint16, transmission transmitKind,
 	if transmission == transmitInitial {
 		// A record already acknowledged is from 65,536 packets ago: sequence
 		// numbers wrap, and the new packet takes its place. Only one still
-		// outstanding is a real duplicate. (This map is never otherwise
-		// pruned, so it holds at most one record per sequence number.)
+		// outstanding is a real duplicate.
 		old, exists := c.transmissions[seqNum]
 		if exists && !old.Acked {
 			return errDuplicateTransmission
@@ -653,11 +560,8 @@ func (c *defaultController) OnTransmit(seqNum uint16, transmission transmitKind,
 		packetInst.NumTransmissions++
 		packetInst.SentAt = c.now()
 		packetInst.SentWindow = c.maxWindowSizeBytes
-		// A packet given up as lost counts in flight again once it is
-		// resent: `if (pkt->transmissions == 0 || pkt->need_resend)
-		// cur_window += pkt->payload` (utp_internal.cpp:877-881). Not
-		// window-checked, as libutp's send_packet is not: the caller has
-		// already decided it may go.
+		// A packet declared lost counts in flight again once resent. It is not
+		// window-checked: the caller has already decided it may go.
 		if packetInst.NeedResend {
 			packetInst.NeedResend = false
 			c.windowSizeBytes += packetInst.SizeBytes
@@ -673,12 +577,12 @@ func (c *defaultController) OnTransmit(seqNum uint16, transmission transmitKind,
 	return nil
 }
 
-// ackBatch is libutp's acked_bytes and min_rtt for one incoming packet
-// (utp_internal.cpp:1956-1987, :1403-1436).
+// ackBatch accumulates what one incoming acknowledgement covers: bytes and
+// the minimum round trip.
 type ackBatch struct {
 	// credit is each acknowledged packet's bytes over the window it was
 	// sent in, summed: the share of a round trip's growth this
-	// acknowledgement is owed. See applyCongestionControl.
+	// acknowledgement earns. See applyCongestionControl.
 	credit  float64
 	packets int
 	bytes   uint32
@@ -687,21 +591,18 @@ type ackBatch struct {
 	at      time.Time
 }
 
-// ackBatchRTTFallback is what libutp takes as a packet's round trip when the
-// clock has not moved since it was sent: `min_rtt = min<int64>(min_rtt,
-// 50000)` (utp_internal.cpp:1982-1985, :1428-1431).
+// ackBatchRTTFallback is the round trip assumed for a packet when the clock
+// has not moved since it was sent.
 const ackBatchRTTFallback = 50 * time.Millisecond
 
-// curDelaySize is libutp's CUR_DELAY_SIZE (utp_internal.cpp:44).
+// curDelaySize is how many recent delay samples the filtered delay is the
+// minimum of.
 const curDelaySize = 3
 
-// OnAckDelay is one incoming acknowledgement's delay sample. See the
-// controller interface.
-//
-// A zero is no measurement -- the peer has not timed one of our packets yet,
-// or reported the MaxInt32 sentinel -- and libutp neither records it nor
-// runs its congestion control on that acknowledgement (`if (actual_delay !=
-// 0)`, utp_internal.cpp:2023, :2139).
+// OnAckDelay records one incoming acknowledgement's delay sample. See the
+// controller interface. Zero means no measurement (the peer has not timed
+// one of our packets yet, or sent the MaxInt32 sentinel); it is not recorded
+// and congestion control does not run for that acknowledgement.
 func (c *defaultController) OnAckDelay(delay time.Duration, now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -709,8 +610,8 @@ func (c *defaultController) OnAckDelay(delay time.Duration, now time.Time) {
 		return
 	}
 	c.delayAcc.Push(delay, now)
-	// The same sample drives the clock-drift estimate (utp_internal.cpp:
-	// 2025-2107), on the same condition.
+	// The same sample drives the clock-drift estimate, on the same
+	// condition.
 	c.drift.push(uint32(delay.Microseconds()), now)
 	queueing := delay - c.delayAcc.BaseDelay()
 	if queueing < 0 {
@@ -720,10 +621,9 @@ func (c *defaultController) OnAckDelay(delay time.Duration, now time.Time) {
 	c.curDelayIdx = (c.curDelayIdx + 1) % curDelaySize
 }
 
-// filteredDelayMicros is libutp's our_hist.get_value(): the least of the last
-// curDelaySize queueing-delay samples (utp_internal.cpp:383-391), which is
-// what apply_ccontrol works from (:1621). One late packet does not move it;
-// three do.
+// filteredDelayMicros returns the least of the last curDelaySize queuing-delay
+// samples, the delay congestion control works from. One late packet does not
+// move it; three do.
 func (c *defaultController) filteredDelayMicros() uint32 {
 	v := c.curDelayHist[0]
 	for _, d := range c.curDelayHist[1:] {
@@ -734,38 +634,35 @@ func (c *defaultController) filteredDelayMicros() uint32 {
 	return v
 }
 
-// QueueingDelay is Stats().FilteredQueueingDelay without the rest of the
-// snapshot, for the receiver's acknowledgement rule, which reads it for every
-// data packet.
+// QueueingDelay returns Stats().FilteredQueueingDelay without building the
+// rest of the snapshot, for the receiver's acknowledgement rule, which reads
+// it for every data packet.
 func (c *defaultController) QueueingDelay() time.Duration {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return time.Duration(c.filteredDelayMicros()) * time.Microsecond
 }
 
-// ApplyAck is the once-per-acknowledgement end of classic LEDBAT. See the
-// controller interface.
+// ApplyAck ends one acknowledgement for classic LEDBAT. See the controller
+// interface.
 func (c *defaultController) ApplyAck() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	b := c.ackBatch
 	c.ackBatch = ackBatch{}
 	if b.packets == 0 {
-		// libutp's min_rtt stays INT64_MAX, so neither step below runs.
+		// No RTT sample in this acknowledgement, so neither step below runs.
 		return
 	}
 	filtered := c.filteredDelayMicros()
-	// "if the delay estimate exceeds the RTT, adjust the base_delay to
-	// compensate" (utp_internal.cpp:2127-2133). A one-way delay longer than
-	// the round trip is a clock that has moved, and raising the base takes
-	// it back out of the samples that follow. The value the window update
-	// below sees is not affected: libutp's shift moves delay_base, not
-	// cur_delay_hist (:277-289).
+	// If the delay estimate exceeds the round trip, a clock has moved:
+	// raise the base delay to take it out of the samples that follow. The
+	// value the window update below sees is unaffected.
 	if minRTT := b.minRTT.Microseconds(); int64(filtered) > minRTT {
 		c.delayAcc.shift(time.Duration(int64(filtered)-minRTT) * time.Microsecond)
 	}
-	// "if we don't have a delay measurement, there's no point in invoking
-	// the congestion control" (:2136-2140).
+	// Without a delay measurement there is nothing for congestion control
+	// to act on.
 	if b.delay > 0 && b.bytes >= 1 {
 		credit := 0.0
 		if sendWindowCredit.Load() {
@@ -775,10 +672,9 @@ func (c *defaultController) ApplyAck() {
 	}
 }
 
-// sendWindowCredit switches the window factor between libutp's, reckoned
-// against the window as it stands, and the one reckoned against the window
-// each packet was sent in. See applyCongestionControl. A switch so the two
-// can be measured against each other.
+// sendWindowCredit selects reckoning each acknowledged packet's share of a
+// round trip's growth against the window it was sent in, rather than only
+// the current window. See applyCongestionControl. Tests switch it.
 var sendWindowCredit = func() *atomic.Bool {
 	b := new(atomic.Bool)
 	b.Store(true)
@@ -799,13 +695,13 @@ func (c *defaultController) OnAck(seqNum uint16, ack ackSample) error {
 	packetInst.Acked = true
 	c.transmissions[seqNum] = packetInst
 
-	// The delay sample itself was recorded once for the whole
-	// acknowledgement, by OnAckDelay.
+	// The delay sample was recorded once for the whole acknowledgement, by
+	// OnAckDelay.
 	c.currentDelay = ack.Delay
 
 	if c.algorithm == AlgorithmLEDBATPP {
-		// §4.5: LEDBAT++ measures its queueing delay from round trips, not
-		// from the one-way delay the peer reports. See ledbatPPRTTDelay.
+		// §4.5: LEDBAT++ measures its queuing delay from round trips, not from
+		// the one-way delay the peer reports. See ledbatPPRTTDelay.
 		if packetInst.NumTransmissions == 1 {
 			c.pushLedbatPPRTT(ack.RTT, ack.ReceivedAt)
 		}
@@ -813,7 +709,7 @@ func (c *defaultController) OnAck(seqNum uint16, ack ackSample) error {
 		c.applyLedbatPP(uint32(base.Microseconds()), uint32(current.Microseconds()),
 			packetInst.SizeBytes, packetInst.SentWindow, ack.RTT, ack.ReceivedAt)
 	} else {
-		// Counted towards the acknowledgement's single update, in ApplyAck.
+		// Counted towards the acknowledgement's single update in ApplyAck.
 		rtt := ack.RTT
 		if rtt <= 0 {
 			rtt = ackBatchRTTFallback
@@ -830,17 +726,13 @@ func (c *defaultController) OnAck(seqNum uint16, ack ackSample) error {
 		b.delay, b.at = ack.Delay, ack.ReceivedAt
 	}
 
-	// "if need_resend is set, this packet has already been considered
-	// timed-out, and is not included in the cur_window anymore"
-	// (utp_internal.cpp:1390-1396).
+	// A packet already declared lost is no longer counted in flight.
 	if !packetInst.NeedResend {
 		c.windowSizeBytes -= packetInst.SizeBytes
 	}
 
-	// Only unretransmitted packets update the RTT estimate: an ack for a
-	// packet sent more than once cannot be attributed to a particular
-	// transmission. libutp applies the same rule
-	// (`if (pk->transmissions == 1)`, utp_internal.cpp:1362).
+	// Only packets sent once update the RTT estimate: an ack for a packet
+	// sent more than once cannot be attributed to one transmission.
 	if packetInst.NumTransmissions == 1 {
 		c.updateRTT(ack.RTT.Microseconds())
 	}
@@ -854,15 +746,9 @@ func (c *defaultController) OnRTTSample(rtt time.Duration) {
 	c.updateRTT(rtt.Microseconds())
 }
 
-// updateRTT is libutp's RTT estimator and timeout (utp_internal.cpp:1362-1380),
-// for one sample in microseconds. Called with the lock held.
-//
-// The arithmetic is libutp's, in whole milliseconds: the sample is truncated
-// to them (`ertt = (now - time_sent) / 1000`, :1364), rtt and rtt_var are
-// unsigned millisecond counts, and each division truncates. Kept in
-// microseconds, as it used to be, the estimate differed from libutp's by the
-// fractions it drops -- a few milliseconds of RTO once the round trip is
-// large enough to lift it off its 1000ms floor.
+// updateRTT updates the RTT estimate and timeout from one sample in
+// microseconds. Called with the lock held. The estimate is kept in whole
+// milliseconds, truncating each division; FineRTT keeps a microsecond one.
 func (c *defaultController) updateRTT(erttMicros int64) {
 	// The microsecond estimate, for the loss probe; see FineRTT.
 	if sample := time.Duration(erttMicros) * time.Microsecond; sample > 0 &&
@@ -882,15 +768,12 @@ func (c *defaultController) updateRTT(erttMicros int64) {
 	}
 	var rtt, rttVar int64
 	if c.rtt == 0 {
-		// First sample: adopt it outright rather than easing an average
-		// up from zero, which would take about twenty samples to
-		// converge and leave the RTO wrong for all of them
-		// (utp_internal.cpp:1364-1367). A sub-millisecond sample is 0,
-		// so the next one counts as the first again, as in libutp.
+		// First sample: adopt it outright rather than easing an average up from
+		// zero. A sub-millisecond sample is 0, so the next one counts as the
+		// first again.
 		rtt, rttVar = ertt, ertt/2
 	} else {
-		// utp_internal.cpp:1370-1372. The variance step is signed and
-		// truncates toward zero, as Go's division does.
+		// The variance step is signed and truncates toward zero.
 		rtt, rttVar = c.rtt.Milliseconds(), c.rttVarianceMicros/1000
 		delta := rtt - ertt
 		rttVar += (absInt64(delta) - rttVar) / 4
@@ -903,22 +786,17 @@ func (c *defaultController) updateRTT(erttMicros int64) {
 }
 
 // maxWindowDecayInterval is the shortest gap between two halvings of the
-// congestion window.
-//
-// libutp: `MAX_WINDOW_DECAY 100 // ms` (utp_internal.cpp:51), enforced by
-// `can_decay_win` (:602-605) and applied once per ack that resent anything,
-// not once per packet resent (:1609-1610).
+// congestion window. A halving happens at most once per acknowledgement that
+// resent anything, not once per packet resent.
 const maxWindowDecayInterval = 100 * time.Millisecond
 
-// decayOnLoss halves the window for a loss, libutp's decay (utp_internal.cpp:
-// 606-617). Called with the lock held.
+// decayOnLoss halves the window for a loss. Called with the lock held.
 func (c *defaultController) decayOnLoss(now time.Time) {
 	c.maxWindowSizeBytes = uint32(math.Max(float64(c.maxWindowSizeBytes/2), float64(c.minWindowSizeBytes)))
 	c.lastWindowDecay = now
-	// libutp leaves slow start on any decay and sets the threshold to
-	// where the window ended up (utp_internal.cpp:616-617). LEDBAT++
-	// leaves its own slow start on the same signal: a loss is congestion
-	// however the delay looked.
+	// Any decay ends slow start and sets the threshold to the new window.
+	// LEDBAT++ leaves its own slow start on the same signal: a loss is
+	// congestion however the delay looked.
 	c.slowStart = false
 	c.ssthreshBytes = c.maxWindowSizeBytes
 	if c.algorithm == AlgorithmLEDBATPP &&
@@ -928,26 +806,22 @@ func (c *defaultController) decayOnLoss(now time.Time) {
 }
 
 // onLedbatPPLoss is LEDBAT++'s response to a lost packet. Called with the
-// lock held; decay is whether the 100ms rate limit classic LEDBAT applies
+// lock held; decay reports whether the rate limit classic LEDBAT applies
 // would allow a halving now.
 //
-// Two rules beyond the rate limit, both about which window a loss belongs
-// to:
+// Two further rules decide which window a loss belongs to:
 //
-//   - A packet sent before the window was last cut belongs to the congestion
-//     event that cut it, and is not charged again. That is TCP NewReno's
-//     rule (RFC 6582's "recover"); the rate limit alone lets one overflow
-//     halve the window twice when its losses are detected more than 100ms
+//   - A packet sent before the window was last cut belongs to the
+//     congestion event that cut it and is not charged again, as in NewReno
+//     (RFC 6582's "recover"). The rate limit alone would let one overflow
+//     halve the window twice when its losses are detected more than 100 ms
 //     apart.
 //   - A packet sent before a slowdown was sent from the window the slowdown
-//     saved, not from the two packets of the freeze or the partial window of
-//     the ramp. Its loss halves the saved window, which is where the ramp is
-//     going; the window the ramp has reached is left alone. RFC 5681 halves
-//     the data in flight, and the data in flight is from the saved window.
+//     saved, not from the freeze's two packets or the ramp's partial window.
+//     Its loss halves the saved window, which is where the ramp is going;
+//     the window the ramp has reached is left alone.
 //
-// The draft does not cover a loss during a slowdown. History: HISTORY.md,
-// "onLedbatPPLoss"; KNOWN-LIMITATIONS.md, "LEDBAT++ split a link unevenly
-// between two of its own flows".
+// The draft does not cover a loss during a slowdown.
 func (c *defaultController) onLedbatPPLoss(pkt *packetRecord, decay bool, now time.Time) {
 	if !c.lastWindowDecay.IsZero() && pkt.SentAt.Before(c.lastWindowDecay) {
 		return
@@ -957,9 +831,9 @@ func (c *defaultController) onLedbatPPLoss(pkt *packetRecord, decay bool, now ti
 	}
 	inSlowdown := c.ppPhase == ppSlowdownFreeze || c.ppPhase == ppSlowdownRamp
 	if inSlowdown && (c.ppPhase == ppSlowdownFreeze || pkt.SentAt.Before(c.ppSlowdownStartedAt)) {
-		// During the freeze everything lost was sent from the saved window
-		// or from the two packets the freeze allows, and charging either to
-		// those two packets gives the same wrong answer.
+		// During the freeze everything lost was sent from the saved window or
+		// from the two packets the freeze allows, and charging either to
+		// those two packets would be wrong.
 		c.ppSlowdownSsthresh = maxUint32(c.ppSlowdownSsthresh/2, c.minWindowSizeBytes)
 		c.ssthreshBytes = c.ppSlowdownSsthresh
 		c.lastWindowDecay = now
@@ -980,13 +854,8 @@ func (c *defaultController) OnLostPacket(seqNum uint16, retransmitting bool, now
 		return errUnknownSeqNum
 	}
 
-	// Halve the window at most once per maxWindowDecayInterval.
-	//
-	// This was halving once for every packet declared lost. A burst of four
-	// losses -- one queue overflow -- took the window to a sixteenth in a
-	// single event, and with the window already at its floor the connection
-	// then crawled. libutp decays once per ack that resent anything, and not
-	// again for 100 ms however many acks arrive in between.
+	// Halve the window at most once per maxWindowDecayInterval, so a burst
+	// of losses from one queue overflow is one congestion event.
 	decay := c.lastWindowDecay.IsZero() || now.Sub(c.lastWindowDecay) >= maxWindowDecayInterval
 	// Another loss while one is still undoable: the cut stands for both,
 	// and one turning out spurious does not excuse the other.
@@ -1016,36 +885,29 @@ func (c *defaultController) OnLostPacket(seqNum uint16, retransmitting bool, now
 	return nil
 }
 
-// OnTimeout is libutp's timeout branch (utp_internal.cpp:1206-1228).
-//
-// hasPacketsInFlight distinguishes the two cases libutp treats differently.
-// This fork collapsed the window to its floor in both, so an application that
-// paused long enough to hit an RTO -- routine -- restarted from two packets,
-// and with no slow start took hundreds of round trips to recover on a
-// high-bandwidth path.
+// OnTimeout applies a retransmission timeout to the window.
+// hasPacketsInFlight distinguishes an idle connection, whose window decays
+// by a third, from one with data outstanding, whose window collapses to one
+// packet and restarts slow start.
 func (c *defaultController) OnTimeout(hasPacketsInFlight bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// A timeout's cut is not undone, and the loss cut before it is no longer
-	// the window's last word.
+	// A timeout's cut is not undone, and the loss cut before it no longer
+	// stands as the last.
 	c.undo.valid = false
 
 	packetSize := c.minWindowSizeBytes / 2
 	if !hasPacketsInFlight && c.maxWindowSizeBytes > packetSize {
-		// "we don't have any packets in-flight, even though we could. This
-		// implies that the connection is just idling. No need to be
-		// aggressive about resetting the congestion window. Just let it decay
-		// by a 3:rd." (utp_internal.cpp:1216-1222)
+		// Nothing in flight: the connection is idle, so decay the window by a
+		// third rather than reset it.
 		c.maxWindowSizeBytes = maxUint32(c.maxWindowSizeBytes*2/3, packetSize)
 	} else {
-		// "our delay was so high that our congestion window was shrunk below
-		// one packet ... reset the congestion window to fit one packet, to
-		// start over again" (:1223-1228). libutp re-enters slow start here.
+		// Reset the window to one packet and start over in slow start.
 		c.maxWindowSizeBytes = packetSize
 		c.slowStart = true
 		if c.algorithm == AlgorithmLEDBATPP {
-			// Back to the start of the cycle: ramp up again, and let the
-			// slowdown schedule be set when that ramp ends.
+			// Back to the start of the cycle: ramp up again, and schedule the
+			// slowdowns when that ramp ends.
 			c.ppPhase = ppSlowStart
 			c.ppNextSlowdownAt = time.Time{}
 		}
@@ -1056,12 +918,10 @@ func (c *defaultController) OnTimeout(hasPacketsInFlight bool) {
 	c.timeout = capTimeout(c.timeout*2, c.maxTimeout)
 }
 
-// applyMaxWindowSizeAdjustment adjusts the maximum window size based on the given adjustment.
-// applyCongestionControl is libutp's apply_ccontrol (utp_internal.cpp:1615-1712),
-// run once per acked packet rather than once per ack packet. The two are
-// equivalent: the window factor scales each step by that packet's share of
-// the window, so a full window of acks sums to one RTT's worth of increase
-// either way.
+// applyCongestionControl is classic LEDBAT's window update (RFC 6817), run
+// once per acknowledged packet. The window factor scales each step by that
+// packet's share of the window, so a full window of acks adds one RTT's
+// worth of increase.
 //
 // It is called with the controller's lock held.
 func (c *defaultController) applyCongestionControl(
@@ -1072,37 +932,26 @@ func (c *defaultController) applyCongestionControl(
 	now time.Time,
 	credit float64,
 ) {
-	// The queueing delay this ack reports: how far above the lowest delay
+	// The queuing delay this ack reports: how far above the lowest delay
 	// seen on this path the packet ran.
 	ourDelayMicros := int64(packetDelayMicros) - int64(baseDelayMicros)
 	if ourDelayMicros < 0 {
 		ourDelayMicros = 0
 	}
 
-	// "the delay can never be greater than the rtt" (utp_internal.cpp:1617-1621):
-	// libutp clamps our_delay to the minimum RTT of the packets this ack
-	// covers, and so does ApplyAck. Without the clamp a peer that reports a
-	// wild timestamp -- by malice, by a clock step, or by a timestamp wrap --
-	// drives off_target arbitrarily negative and collapses the window in one
-	// ack.
+	// The delay can never exceed the round trip: clamp it to the minimum
+	// RTT of the packets this ack covers, as ApplyAck does. Otherwise a peer
+	// reporting a wild timestamp, by malice, clock step or wrap, could
+	// collapse the window in one ack.
 	if rttMicros := rtt.Microseconds(); rttMicros > 0 && ourDelayMicros > rttMicros {
 		ourDelayMicros = rttMicros
 	}
 
 	// A clock drifting fast enough to be dishonest gets a penalty added to
-	// the delay it measures.
-	//
-	// libutp (utp_internal.cpp:1646-1650), applied after the RTT clamp above
-	// and deliberately so: the penalty is allowed to push the delay past the
-	// round trip, because its purpose is to make the flow yield rather than
-	// to describe the path.
-	//
-	// This is the second of libutp's two clock-drift mechanisms and does a
-	// different job from the first. baseDelayHist's shift corrects the
-	// measurement for ordinary drift between honest clocks, bounded and aged
-	// out. This one does not correct anything: past 40,000 ppm, which is
-	// three orders of magnitude beyond crystal drift, it inflates the delay
-	// so that a peer running its clock slow gains nothing by it.
+	// the delay it measures. It is applied after the RTT clamp, since its
+	// purpose is to make the flow yield rather than to describe the path.
+	// Beyond 40,000 ppm, far outside crystal drift, it inflates the delay
+	// so a peer running its clock slow gains nothing.
 	if penalty := c.drift.penaltyMicros(); penalty > 0 {
 		ourDelayMicros += penalty
 	}
@@ -1116,33 +965,19 @@ func (c *defaultController) applyCongestionControl(
 	offTarget := target - ourDelayMicros
 	delayFactor := float64(offTarget) / float64(target)
 
-	// libutp: min(bytes_acked, max_window) / max(max_window, bytes_acked)
-	// (utp_internal.cpp:1668). Two things this fork had wrong. It divided by
-	// the bytes currently *in flight* rather than by the congestion window,
-	// which is a smaller denominator and so a larger factor -- with one
-	// packet outstanding the factor was 1, and a single ack claimed a whole
-	// RTT's worth of increase. And it had no min/max, so the factor could
-	// exceed 1 outright.
+	// The window factor: min(bytes_acked, max_window) / max(max_window,
+	// bytes_acked), at most 1.
 	maxWindow := float64(c.maxWindowSizeBytes)
 	acked := float64(bytesAcked)
 	windowFactor := math.Min(acked, maxWindow) / math.Max(maxWindow, acked)
 
-	// Deviation: each acknowledged packet counts against the window it was
-	// sent in, not the window as it stands now, when the caller knows it
-	// (credit > 0). libutp's factor is meant to share one round trip's
-	// growth among that round trip's acknowledgements -- a full window of
-	// them adding MAX_CWND_INCREASE_BYTES_PER_RTT -- but each update grows
-	// the window the next one divides by, so the more acknowledgements a
-	// round trip is split into, the less it grows: by about G^2/2W.
-	//
-	// The larger of the two, though, not the send-window figure alone: after
-	// a loss halves the window, libutp divides the next round trip's
-	// acknowledgements by the new one, and that round trip grows about twice
-	// as fast. Taking the larger, the window never grows slower than
-	// libutp's would; above target it shrinks no slower either, the factor
-	// scaling the decrease the same way. DEVIATIONS.md, "The window grows by
-	// a round trip's worth per round trip"; history: HISTORY.md, "ApplyAck:
-	// the window at sending".
+	// When the caller knows it (credit > 0), each acknowledged packet counts
+	// against the window it was sent in. Reckoned only against the current
+	// window, each update grows the window the next divides by, so a round
+	// trip split into more acknowledgements grows less. The larger of the
+	// two factors is used, so after a loss halves the window the next round
+	// trip still grows as fast as it would against the new window, and
+	// above target the window shrinks no slower.
 	if credit > 0 {
 		windowFactor = math.Max(windowFactor, math.Min(credit, 1))
 	}
@@ -1150,11 +985,10 @@ func (c *defaultController) applyCongestionControl(
 	scaledGain := float64(c.gain) * float64(c.maxWindowSizeIncBytes) * windowFactor * delayFactor
 
 	// A sender that has not filled its window in the last second is limited
-	// by the application, not by the path, so the delay it measures says
-	// nothing about how much more the path would carry. libutp refuses to
-	// grow the window in that case (utp_internal.cpp:1681-1686). Without
-	// this, an idle-but-trickling connection grows its window without bound
-	// and then dumps it all at once when the application speeds up.
+	// by the application, not the path, so the delay it measures says
+	// nothing about how much more the path would carry; do not grow the
+	// window. Otherwise a trickling connection would grow its window without
+	// bound and then send it all at once when the application speeds up.
 	//
 	if scaledGain > 0 && c.applicationLimited(now) {
 		scaledGain = 0
@@ -1166,14 +1000,14 @@ func (c *defaultController) applyCongestionControl(
 	}
 
 	if c.slowStart {
-		// utp_internal.cpp:1691-1702.
+		// Slow start.
 		ssCwnd := float64(c.maxWindowSizeBytes) + windowFactor*float64(c.minWindowSizeBytes/2)
 		switch {
 		case ssCwnd > float64(c.ssthreshBytes):
 			c.slowStart = false
 		case ourDelayMicros > int64(float64(target)*0.9):
-			// "even if we're a little under the target delay, we
-			// conservatively discontinue the slow start phase".
+			// Even slightly under the target delay, conservatively end slow
+			// start.
 			c.slowStart = false
 			c.ssthreshBytes = c.maxWindowSizeBytes
 		default:
@@ -1183,30 +1017,21 @@ func (c *defaultController) applyCongestionControl(
 		c.maxWindowSizeBytes = uint32(ledbatCwnd)
 	}
 
-	// utp_internal.cpp:1710.
+	// Clamp to the window ceiling.
 	c.maxWindowSizeBytes = clampUint32(c.maxWindowSizeBytes, c.minWindowSizeBytes, c.maxWindowUpperBytes)
 }
 
 // applicationLimited reports whether the sender has gone more than a second
-// without filling its window: libutp's `current_ms - last_maxed_out_window >
-// 1000` (utp_internal.cpp:1681).
-//
-// A sender that has never filled its window counts as application-limited, as
-// it does in libutp. libutp initialises last_maxed_out_window to 0 (:2603) and
-// reads current_ms from a clock that counts from boot, not from the process or
-// the connection (CLOCK_MONOTONIC on POSIX, utp_utils.cpp:158-175), so unless
-// the host booted within the last second the difference is already past 1000
-// and the gain is zeroed until the window first fills. A bulk sender is
-// unaffected, because its first write fills the window and records the time
-// before any acknowledgement arrives; a sender that never fills its window
-// grows only by the slow-start step. TestConformanceLedbatRules holds it to
-// libutp's trace. History: HISTORY.md, "applicationLimited".
+// without filling its window. A sender that has never filled its window
+// counts as application-limited. A bulk sender is unaffected, because its
+// first write fills the window before any acknowledgement arrives; a sender
+// that never fills its window grows only by the slow-start step.
 func (c *defaultController) applicationLimited(now time.Time) bool {
 	return c.lastMaxedOutWindow.IsZero() || now.Sub(c.lastMaxedOutWindow) > time.Second
 }
 
 // OnWindowFull records that the sender had data to send and no window to send
-// it in. libutp's `is_full` (utp_internal.cpp:945, :957).
+// it in.
 func (c *defaultController) OnWindowFull(now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1227,12 +1052,8 @@ func clampUint32(v, lo, hi uint32) uint32 {
 }
 
 // applyTimeoutAdjustment recomputes the retransmission timeout from the RTT
-// estimate, as libutp does: rto = max(rtt + rtt_var * 4, min), capped at max.
-//
-// rttVarianceMicros is a microsecond count, so it has to be scaled before
-// being added to a Duration. It was previously passed to time.Duration
-// directly, which reads it as nanoseconds -- understating the variance term
-// by a factor of 1000 and leaving the timeout pinned to minTimeout.
+// estimate: rto = max(rtt + rtt_var*4, min), capped at max. The variance is
+// in microseconds and is scaled accordingly.
 func (c *defaultController) applyTimeoutAdjustment() {
 	rto := c.rtt + time.Duration(c.rttVarianceMicros*4)*time.Microsecond
 	if rto < c.minTimeout {
@@ -1241,38 +1062,25 @@ func (c *defaultController) applyTimeoutAdjustment() {
 	c.timeout = capTimeout(rto, c.maxTimeout)
 }
 
-// wrappingLessThanUint32 is libutp's wrapping_compare_less over the 32-bit
-// microsecond timestamp space:
-//
-//	bool wrapping_compare_less(uint32 l, uint32 r, uint32 mask) {
-//	    uint32 dist_down = (l - r) & mask;
-//	    uint32 dist_up = (r - l) & mask;
-//	    return dist_up < dist_down;
-//	}
-//	                                        (utp_utils.h)
+// wrappingLessThanUint32 reports whether l precedes r in the wrapping 32-bit
+// microsecond timestamp space: the distance up from l to r is shorter than
+// the distance down.
 func wrappingLessThanUint32(a, b uint32) bool {
 	return (b - a) < (a - b)
 }
 
 // peerDelayBuckets is how many buckets the peer-direction base delay is kept
-// in. libutp uses DELAY_BASE_HISTORY = 13 one-minute buckets
-// (utp_internal.cpp:50, rotated at :367-380); the count is kept and the
-// bucket length is the configured window divided by it.
+// in. Each bucket is the configured window divided by this.
 const peerDelayBuckets = 13
 
-// peerDelayHist tracks the base delay of packets arriving *from* the peer:
-// libutp's `their_hist`. Its only purpose is noticing that base fall, which
-// is how clock drift becomes visible.
+// peerDelayHist tracks the base delay of packets arriving from the peer. Its
+// only purpose is noticing that base fall, which reveals clock drift.
 //
-// It is deliberately not a delayAccumulator: these samples must stay in
-// wrapping 32-bit microsecond arithmetic. A clock drifting slow makes the
-// measured inbound delay shrink, and keep shrinking, so on an ordinary path
-// it passes zero within minutes and the subtraction wraps. Taken as a
-// Duration, the wrapped value would be capped as an unusable reading and the
-// base would stop moving just when the drift has grown large enough to
-// matter. libutp's `their_delay` is a raw wrapping uint32 throughout and
-// every comparison in DelayHist goes through wrapping_compare_less. This does
-// the same. History: HISTORY.md, "peerDelayHist".
+// It is not a delayAccumulator because the samples must stay in wrapping
+// 32-bit microsecond arithmetic: a slow clock makes the measured inbound
+// delay shrink until it passes zero and wraps, and treating the wrapped
+// value as an unusable reading would freeze the base just as the drift
+// becomes large enough to matter.
 type peerDelayHist struct {
 	buckets     [peerDelayBuckets]uint32
 	idx         int
@@ -1291,9 +1099,8 @@ func newPeerDelayHist(window time.Duration) *peerDelayHist {
 }
 
 // addSample records one inbound delay and returns the base before and after,
-// so a caller can see how far it fell. Mirrors DelayHist.add_sample
-// (utp_internal.cpp:291-381), with the bucket rotation driven by the
-// configured window rather than a hard-coded minute.
+// so the caller can see how far it fell. Buckets rotate according to the
+// configured window.
 func (h *peerDelayHist) addSample(sample uint32, now time.Time) (prev, current uint32, ok bool) {
 	if !h.initialised {
 		for i := range h.buckets {
@@ -1302,7 +1109,7 @@ func (h *peerDelayHist) addSample(sample uint32, now time.Time) (prev, current u
 		h.base = sample
 		h.rotatedAt = now
 		h.initialised = true
-		// No previous base to have fallen from. libutp's `prev_delay_base != 0`.
+		// No previous base to have fallen from.
 		return sample, sample, false
 	}
 
@@ -1328,19 +1135,15 @@ func (h *peerDelayHist) addSample(sample uint32, now time.Time) (prev, current u
 	return prev, h.base, true
 }
 
-// baseDelayHist is libutp's DelayHist for this sender's own delay samples,
-// our_hist (utp_internal.cpp:260-381): the base delay is the least of
-// thirteen buckets, the newest taking each sample that is lower than it,
-// rotated onto a fresh bucket when a sample arrives a bucket's length after
-// the last rotation. With the default window a bucket is a minute, so the base
-// remembers twelve to thirteen minutes, as libutp's does, and an idle
-// connection's history does not age, since only a sample rotates it.
-// Thirteen buckets are 104 bytes, however many samples arrive.
+// baseDelayHist holds this sender's own delay samples. The base delay is the
+// least of thirteen buckets; the newest bucket takes each sample lower than
+// it, and the history rotates onto a fresh bucket when a sample arrives a
+// bucket's length after the last rotation. With the default window a bucket
+// is a minute. An idle connection's history does not age, since only a
+// sample rotates it. The memory is fixed however many samples arrive.
 //
 // Clock drift inflates a base kept this long by the drift rate times the
-// window; OnPeerDelay corrects for it, as libutp does
-// (netem.TestClockSkewCorrectionCancelsThePhantomQueue). History:
-// HISTORY.md, "baseDelayHist".
+// window; OnPeerDelay corrects for it.
 type baseDelayHist struct {
 	buckets   [delayBaseHistory]time.Duration
 	idx       int
@@ -1353,12 +1156,11 @@ type baseDelayHist struct {
 	skew time.Duration
 }
 
-// delayBaseHistory is libutp's DELAY_BASE_HISTORY (utp_internal.cpp:50).
+// delayBaseHistory is the number of buckets in the base-delay history.
 const delayBaseHistory = 13
 
-// newBaseDelayHist starts the history at now, as libutp's DelayHist::clear
-// does when the socket is made (utp_internal.cpp:262-271), so the first
-// rotation is a bucket's length after the connection began.
+// newBaseDelayHist starts the history at now, so the first rotation is a
+// bucket's length after the connection began.
 func newBaseDelayHist(window time.Duration, clk Clock) *baseDelayHist {
 	bucketLen := window / delayBaseHistory
 	if bucketLen <= 0 {
@@ -1370,8 +1172,7 @@ func newBaseDelayHist(window time.Duration, clk Clock) *baseDelayHist {
 	return &baseDelayHist{bucketLen: bucketLen, rotatedAt: clk.Now()}
 }
 
-// Push records a sample taken at now: DelayHist::add_sample
-// (utp_internal.cpp:291-381).
+// Push records a sample taken at now.
 func (h *baseDelayHist) Push(sample time.Duration, now time.Time) {
 	if !h.init {
 		for i := range h.buckets {
@@ -1399,7 +1200,7 @@ func (h *baseDelayHist) Push(sample time.Duration, now time.Time) {
 	}
 }
 
-// BaseDelay is the least delay in the history, never below zero.
+// BaseDelay returns the least delay in the history, never below zero.
 func (h *baseDelayHist) BaseDelay() time.Duration {
 	if !h.init || h.base < 0 {
 		return 0
@@ -1407,14 +1208,11 @@ func (h *baseDelayHist) BaseDelay() time.Duration {
 	return h.base
 }
 
-// shift raises the base delay, cancelling drift that has inflated every
-// sample in it: libutp's DelayHist::shift, which adds the offset to every
-// bucket and to the base (utp_internal.cpp:277-289). Each bucket is replaced
-// by a fresh, unshifted sample when the history rotates onto it, so a
-// correction lasts only as long as the history does -- which is what keeps
-// shifts that arrive for as long as the drift lasts from adding up without
-// bound. (An unbounded correction was measured once: a drifted flow saw 4 ms
-// of queue against its neighbour's 40 ms and took 56.6% of a shared link.)
+// shift raises the base delay by adding offset to every bucket, canceling
+// drift that has inflated the samples. Each bucket is replaced by a fresh,
+// unshifted sample when the history rotates onto it, so a correction lasts
+// only as long as the history, and shifts that keep arriving while drift
+// continues cannot accumulate without bound.
 func (h *baseDelayHist) shift(offset time.Duration) {
 	if offset <= 0 {
 		return
@@ -1426,51 +1224,26 @@ func (h *baseDelayHist) shift(offset time.Duration) {
 	h.skew += offset
 }
 
-// maxSkewAdjustment bounds a single clock-drift correction.
-//
-// libutp: "never adjust more than 10 milliseconds" (utp_internal.cpp:2011).
-// A larger apparent fall in the peer's base delay is far more likely to be
-// the reverse path genuinely getting faster -- a route change, or a queue
-// draining -- than a clock jumping, and treating that as skew would blind
-// this sender's own delay signal by however much it moved.
+// maxSkewAdjustment bounds a single clock-drift correction. A larger apparent
+// fall in the peer's base delay is more likely the reverse path getting
+// faster, such as a route change or a queue draining, than clock drift, and
+// treating it as drift would blind this sender's delay signal.
 const maxSkewAdjustment = 10 * time.Millisecond
 
-// OnPeerDelay reports the one-way delay measured on a packet arriving from
-// the peer, and corrects this sender's delay signal for clock drift.
-//
-// libutp:
-//
-//	uint32 prev_delay_base = conn->their_hist.delay_base;
-//	if (their_delay != 0) conn->their_hist.add_sample(their_delay, conn->ctx->current_ms);
-//
-//	// if their new delay base is less than their previous one
-//	// we should shift our delay base in the other direction in order
-//	// to take the clock skew into account
-//	if (prev_delay_base != 0 &&
-//	    wrapping_compare_less(conn->their_hist.delay_base, prev_delay_base, TIMESTAMP_MASK)) {
-//	    // never adjust more than 10 milliseconds
-//	    if (prev_delay_base - conn->their_hist.delay_base <= 10000)
-//	        conn->our_hist.shift(prev_delay_base - conn->their_hist.delay_base);
-//	}
-//	                                        (utp_internal.cpp:2002-2014)
-//
-// # Why a fall in the other direction means drift in this one
+// OnPeerDelay records the one-way delay measured on a packet from the peer,
+// and corrects this sender's delay signal for clock drift.
 //
 // A one-way delay is a difference between two clocks, so it carries their
-// relative rate error. If this end's clock runs slow, the time it stamps into
-// its own packets falls further behind, and the peer's measurement of this
-// sender's path -- which is what LEDBAT here runs on -- grows without bound.
-// The same slow clock makes packets *from* the peer appear to arrive sooner,
-// so the delay measured in that direction shrinks by exactly as much.
-//
-// So a falling base delay in the peer's direction is the visible half of a
-// bias that is inflating the invisible half. Raising this sender's base by
-// the same amount cancels it. What it is worth:
-// netem.TestClockDriftYieldsShareAtASharedBottleneck, and HISTORY.md,
-// "OnPeerDelay".
+// relative rate error. If this end's clock runs slow, the peer's measurement
+// of our outbound path, which LEDBAT runs on, grows without bound; the same
+// slow clock makes packets from the peer appear to arrive sooner, so the
+// delay in that direction shrinks by as much. A fall in the peer-direction
+// base delay is therefore the visible half of a bias inflating the other
+// half, and raising this sender's base by the same amount, up to
+// maxSkewAdjustment, cancels it.
 func (c *defaultController) OnPeerDelay(sample uint32, now time.Time) {
-	// libutp: `if (their_delay != 0)`. A zero means the peer has not stamped
-	// a usable timestamp, not that the path is instant.
+	// Zero means the peer has not stamped a usable timestamp, not that the
+	// path is instant.
 	if sample == 0 {
 		return
 	}
@@ -1481,7 +1254,7 @@ func (c *defaultController) OnPeerDelay(sample uint32, now time.Time) {
 	if !ok {
 		return
 	}
-	// Only a *fall* is evidence of drift. A rise is a queue building in the
+	// Only a fall is evidence of drift. A rise is a queue building in the
 	// other direction, which says nothing about either clock.
 	if !wrappingLessThanUint32(current, prev) {
 		return
@@ -1492,8 +1265,8 @@ func (c *defaultController) OnPeerDelay(sample uint32, now time.Time) {
 	}
 }
 
-// now is this controller's current time, nil-safe for controllers built
-// directly in unit tests.
+// now returns the controller's current time, or time.Now for a controller
+// built without a clock.
 func (c *defaultController) now() time.Time {
 	if c.clk != nil {
 		return c.clk.Now()
@@ -1509,8 +1282,6 @@ func absInt64(x int64) int64 {
 	return x
 }
 
-// Additional methods for handling acknowledgments, lost packets, and timeouts would follow...
-
 type delay struct {
 	Value    time.Duration
 	Deadline time.Time
@@ -1520,7 +1291,7 @@ type delayAccumulator struct {
 	delays *delayWindow
 	window time.Duration
 	// clk decides when a sample has aged out of the window. Nil means the
-	// real clock; read it through now().
+	// real clock; read it through now.
 	clk Clock
 }
 
@@ -1539,7 +1310,8 @@ func newDelayAccumulatorWithClock(window time.Duration, clk Clock) *delayAccumul
 	}
 }
 
-// now is nil-safe, for the accumulators built directly in unit tests.
+// now returns the current time, or time.Now for an accumulator built
+// without a clock.
 func (da *delayAccumulator) now() time.Time {
 	if da.clk != nil {
 		return da.clk.Now()
@@ -1567,17 +1339,11 @@ func (da *delayAccumulator) BaseDelay() time.Duration {
 	return time.Duration(0)
 }
 
-// delayWindow is the minimum of the samples within the window: a sliding
-// window minimum. Samples are kept in the order they arrived, and a new one
-// first drops every sample before it that is no smaller -- that one leaves the
-// window first and can never be the least while the new one is in it -- so
-// the front is always the minimum, and the oldest, and expires first.
-//
-// It was a heap of every sample, popped only when its least had expired:
-// every acknowledgement of the last two minutes held, 32 bytes each, which at
-// a few thousand acknowledgements a second is megabytes per connection, and a
-// boxed allocation for each push through container/heap. With samples
-// arriving in time order, the minimum it gives is the same.
+// delayWindow is a sliding-window minimum of samples. Samples are kept in
+// arrival order, and a new one first drops every earlier sample that is no
+// smaller, since such a sample leaves the window first and can never again
+// be the least. The front is therefore always the minimum, and the oldest,
+// and expires first.
 type delayWindow struct {
 	items []delay
 	head  int
@@ -1586,9 +1352,9 @@ type delayWindow struct {
 func (w *delayWindow) len() int     { return len(w.items) - w.head }
 func (w *delayWindow) front() delay { return w.items[w.head] }
 
-// push adds a sample. Callers pass the time an acknowledgement arrived, which
-// only moves forward; a deadline earlier than the last is taken as the last,
-// so the front stays the first to expire whatever the caller does.
+// push adds a sample. Callers pass the arrival time of an acknowledgement,
+// which only moves forward; a deadline earlier than the last is treated as
+// the last, so the front stays the first to expire.
 func (w *delayWindow) push(d delay) {
 	if w.len() > 0 && d.Deadline.Before(w.items[len(w.items)-1].Deadline) {
 		d.Deadline = w.items[len(w.items)-1].Deadline
@@ -1613,8 +1379,8 @@ func (w *delayWindow) popFront() {
 	}
 }
 
-// capTimeout bounds a timeout by max, where max is positive; zero or less is
-// no bound, the default.
+// capTimeout bounds a timeout by max when max is positive; zero or less
+// means no bound, the default.
 func capTimeout(d, max time.Duration) time.Duration {
 	if max > 0 && d > max {
 		return max
