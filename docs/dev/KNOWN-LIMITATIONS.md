@@ -174,7 +174,7 @@ The estimator now matches libutp's arithmetic exactly
 - **Initial `rtt_var` is 800 ms**, matching libutp, so a timeout computed
   before any ack is conservative rather than zero.
 
-`libutp_conformance_test.go` pins each of these, including Karn's algorithm --
+`protocol_rules_test.go` pins each of these, including Karn's algorithm --
 an ack for a retransmitted packet must not move the estimate, since it cannot
 be attributed to a particular transmission.
 
@@ -802,7 +802,7 @@ moves on like any other. Both checks are removed, and the receive buffer
 already did the right thing: a zero-length write advances the ack number
 without copying anything.
 
-`libutp_conformance_test.go` covers the decoder accepting it, the ack number
+`protocol_rules_test.go` covers the decoder accepting it, the ack number
 advancing, and data after an empty packet still being delivered.
 
 ## ConnectWithCID ignored its own context
