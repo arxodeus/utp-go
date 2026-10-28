@@ -30,21 +30,17 @@ type sentPacket struct {
 	data           []byte
 	transmission   time.Time
 	retransmission time.Time
-	// acked is whether the packet has been acknowledged. It was a slice of
-	// the times it was, appended to on the first and only ever asked
-	// whether it was empty: an allocation per packet for a boolean.
+	// acked reports whether the packet has been acknowledged.
 	acked bool
-	// needResend is libutp's need_resend: given up as lost by a
-	// retransmission timeout and waiting to be sent again. See
-	// MarkAllForResend.
+	// needResend marks a packet declared lost by a retransmission timeout
+	// and waiting to be sent again. See MarkAllForResend.
 	needResend bool
 	// rackLostAt is the transmission RACK last declared lost, and
 	// rackPending whether it is waiting to be resent. See rack.go.
 	rackLostAt  time.Time
 	rackPending bool
-	// sentOrder is when this packet was last sent, as a count of the
-	// transmissions before it: its true place in the send order. See
-	// rackState.xmitOrder.
+	// sentOrder is the number of transmissions before this packet's last
+	// one: its position in send order. See rackState.xmitOrder.
 	sentOrder uint64
 }
 
@@ -60,19 +56,17 @@ func (s *sentPacket) rtt(now time.Time) time.Duration {
 
 type sentPackets struct {
 	logger *ulogger
-	// packets is the send window: packets[0] is sequence number base, and
-	// each one after it the next. Acknowledged packets at the front are
-	// dropped when a new one is added (trimAcked), so this holds what is
-	// outstanding and little else -- libutp's outbuf, which holds
-	// cur_window_packets (utp_internal.cpp:1071-1077) -- and indexes by
-	// distance from base, which stays right however far the sequence number
-	// has wrapped. History: HISTORY.md, "sentPackets.packets".
+	// packets is the send window: packets[0] has sequence number base and
+	// each following one the next. Acknowledged packets at the front are
+	// dropped when a new one is added (trimAcked), so it holds little but
+	// what is outstanding, and is indexed by distance from base, which is
+	// unaffected by wraparound.
 	packets []*sentPacket
 	// fullAcked is what onAck last returned as cumulatively acknowledged.
 	fullAcked circularRangeInclusive
-	// spare holds records of acknowledged packets, for the next sent. A
-	// record is looked at only while its packet is in the window, so one
-	// trimmed from the front is free.
+	// spare holds records of acknowledged packets for reuse. A record is
+	// read only while its packet is in the window, so one trimmed from the
+	// front is free.
 	spare []*sentPacket
 	// base is the sequence number of packets[0], or the next to be sent
 	// when packets is empty.
@@ -85,20 +79,15 @@ type sentPackets struct {
 	initSeqNum  uint16
 	lostPackets *btree.BTreeG[uint16]
 	// fastResendSeqNum is the lowest sequence number still eligible for fast
-	// retransmission. Everything below it has either been acked or been fast
-	// retransmitted once already, and only the retransmission timer will send
-	// it again.
-	//
-	// This is libutp's `fast_resend_seq_nr` (utp_internal.cpp:470), advanced
-	// past each packet as it is resent (:1603) and forward with the
-	// cumulative ack (:2186-2188), and tested before any fast retransmit
-	// (:1537, :1560). Without it each acknowledgement that still reported a
-	// packet missing would resend it again and halve the window again.
-	// History: HISTORY.md, "sentPackets.fastResendSeqNum".
+	// retransmission. Everything below it has been acknowledged or fast
+	// retransmitted once already, and only the retransmission timer will
+	// send it again. It advances past each packet as it is resent and with
+	// the cumulative ack. Without it, every acknowledgement still reporting
+	// a packet missing would resend it and halve the window again.
 	fastResendSeqNum uint16
 	congestionCtrl   controller
-	// rack is RFC 8985's loss detection, used in place of the rule above
-	// when rack.active. See rack.go.
+	// rack is RFC 8985 loss detection, used instead of the rule above when
+	// rack.active. See rack.go.
 	rack rackState
 	// transmissions counts every packet sent, first or again; see
 	// sentPacket.sentOrder.
@@ -113,12 +102,9 @@ func newSentPackets(initSeqNum uint16, congestionCtrl controller, logger *ulogge
 		lastAck:     initSeqNum,
 		initSeqNum:  initSeqNum,
 		lostPackets: btree.NewWithFreeListG(2, btree.Less[uint16](), lostFreeList),
-		// The number the next packet will take, in both roles. libutp's
-		// accepting side does the same (utp_internal.cpp:2988-2989); its
-		// initiator does not -- fast_resend_seq_nr stays at 1 when
-		// utp_connect randomises seq_nr (:2615, :2768), and for half of all
-		// starting numbers never catches up. Not copied; see
-		// TestFastRetransmitFromAnyInitialSequenceNumber.
+		// The number the next packet will take, whichever side opened the
+		// connection, so fast retransmit works from any initial sequence
+		// number.
 		fastResendSeqNum: initSeqNum + 1,
 		congestionCtrl:   congestionCtrl,
 		rack:             rackState{reoWndMult: 1},
@@ -144,8 +130,8 @@ type transmissionForgetter interface {
 }
 
 // trimAcked drops the acknowledged packets at the front of the window, and
-// the controller's records of them: nothing asks about a packet behind the
-// window (Ack, OnLost and MarkAllForResend all stop at it).
+// the controller's records of them. Nothing asks about a packet behind the
+// window.
 func (s *sentPackets) trimAcked() {
 	n := 0
 	for n < len(s.packets) && s.packets[n].acked {
@@ -176,8 +162,9 @@ func (s *sentPackets) AckNum() uint16 {
 	return num
 }
 
-// SeqNumRange is the sequence numbers an acknowledgement may name: the one
-// before the window, which acknowledges nothing new, through the last sent.
+// SeqNumRange returns the sequence numbers an acknowledgement may name: from
+// the one before the window, which acknowledges nothing new, to the last
+// sent.
 func (s *sentPackets) SeqNumRange() *circularRangeInclusive {
 	end := s.NextSeqNum() - uint16(1)
 	return newCircularRangeInclusive(s.base-1, end)
@@ -192,8 +179,8 @@ func (s *sentPackets) controllerStats() controllerStats {
 	return s.congestionCtrl.Stats()
 }
 
-// QueueingDelay is controllerStats().FilteredQueueingDelay, from the
-// controller directly when it offers it.
+// QueueingDelay returns controllerStats().FilteredQueueingDelay, directly
+// from the controller when it provides it.
 func (s *sentPackets) QueueingDelay() time.Duration {
 	if q, ok := s.congestionCtrl.(interface{ QueueingDelay() time.Duration }); ok {
 		return q.QueueingDelay()
@@ -231,8 +218,7 @@ func (s *sentPackets) OnTick(now time.Time) {
 	s.congestionCtrl.OnTick(now)
 }
 
-// UnackedCount is how many packets have been sent and not yet acknowledged --
-// libutp's `cur_window_packets`.
+// UnackedCount returns how many packets have been sent and not acknowledged.
 func (s *sentPackets) UnackedCount() uint16 {
 	if len(s.packets) == 0 {
 		return 0
@@ -244,18 +230,10 @@ func (s *sentPackets) UnackedCount() uint16 {
 	return s.NextSeqNum() - 1 - lastAck
 }
 
-// LastAckedSeqNum is the sequence number just before the oldest packet still
-// outstanding -- the number a peer repeats when it is reporting a hole.
-//
-// libutp computes it inline as `seq_nr - cur_window_packets - 1`
-// (utp_internal.cpp:1922). The arithmetic here is the same: UnackedCount is
-// `NextSeqNum() - 1 - lastAck` whenever anything has been acknowledged, so
-// this recovers lastAck, and before the first acknowledgement it gives the
-// number before the first packet sent, which is what libutp's expression
-// gives there too.
-//
-// Wrapping is deliberate and correct: sequence numbers are uint16 and libutp
-// masks with ACK_NR_MASK for the same reason.
+// LastAckedSeqNum returns the sequence number just before the oldest packet
+// still outstanding: the number a peer repeats when reporting a hole. Before
+// the first acknowledgement it is the number before the first packet sent.
+// Sequence numbers are uint16, so the arithmetic wraps.
 func (s *sentPackets) LastAckedSeqNum() uint16 {
 	return s.NextSeqNum() - 1 - s.UnackedCount()
 }
@@ -269,21 +247,15 @@ func (s *sentPackets) HasLostPackets() bool {
 	return s.lostPackets.Len() != 0 || s.rack.pending > 0
 }
 
-// maxFastResendsPerAck caps how many packets one ack may fast retransmit.
-//
-// libutp: "Re-send max 4 packets" (utp_internal.cpp:1605-1606). Without a cap
-// a single ack that reveals a burst of losses answers with a burst of
-// retransmissions, on a path that has just demonstrated it cannot carry one.
+// maxFastResendsPerAck caps how many packets one ack may fast retransmit, so
+// an ack revealing a burst of losses does not trigger a burst of
+// retransmissions on a path that has just shown it cannot carry one.
 const maxFastResendsPerAck = 4
 
 // TakeLostPackets returns the packets to fast retransmit now, at most
-// maxFastResendsPerAck of them, and advances fastResendSeqNum past each so it
-// is not fast retransmitted again. Only the retransmission timer will send
-// them a third time.
-//
-// It mutates, unlike an ordinary getter, because taking a packet and marking
-// it taken cannot be separated without reintroducing the duplicate-resend bug
-// this exists to prevent.
+// maxFastResendsPerAck, and advances fastResendSeqNum past each so it is not
+// fast retransmitted again. Taking and marking are one operation so a packet
+// cannot be resent twice.
 func (s *sentPackets) TakeLostPackets() []*lostPacket {
 	if s.rack.active {
 		return s.rackTakeLost()
@@ -322,15 +294,12 @@ func (s *sentPackets) TakeLostPackets() []*lostPacket {
 	return result
 }
 
-// OnTransmit records a packet going out, new or sent again.
+// OnTransmit records a packet going out, new or resent.
 //
-// The send path sends nothing the window does not allow and numbers packets in
-// order, so none of its errors should happen; each says this connection's
-// bookkeeping has gone wrong. They panicked, and took the whole process -- every
-// other connection, and the application -- with them. The connection now ends
-// with the error instead (connection.transmit). libutp asserts the same
-// conditions, and its release builds compile the asserts out and carry on.
-// The packet is recorded only once nothing has refused it.
+// The send path sends only what the window allows and numbers packets in
+// order, so an error here means the connection's bookkeeping is wrong; the
+// connection then ends with the error (connection.transmit) rather than
+// panicking. The packet is recorded only once nothing has refused it.
 func (s *sentPackets) OnTransmit(
 	seqNum uint16,
 	packetType packetType,
@@ -344,17 +313,17 @@ func (s *sentPackets) OnTransmit(
 	index := s.SeqNumIndex(seqNum)
 	isRetransmission := index < len(s.packets)
 
-	// Check for out of order transmit
+	// Check for out-of-order transmit.
 	if index > len(s.packets) {
 		if index >= 1<<15 {
-			// Behind the window: a packet already acknowledged and dropped.
-			// Nothing to account.
+			// Behind the window: already acknowledged and dropped. Nothing to
+			// account.
 			return nil
 		}
 		return errOutOfOrderTransmit
 	}
 
-	// Check window size for new transmissions
+	// Check the window for new transmissions.
 	if !isRetransmission && dataLen > s.Window() {
 		return errTransmitExceedsWindow
 	}
@@ -370,15 +339,14 @@ func (s *sentPackets) OnTransmit(
 	}
 
 	if index < len(s.packets) {
-		// Update existing packet
+		// Update an existing packet.
 		s.packets[index].retransmission = now
 		s.transmissions++
 		s.packets[index].sentOrder = s.transmissions
-		// Sent again, so no longer waiting to be: libutp clears need_resend
-		// in send_packet (utp_internal.cpp:881).
+		// Sent again, so no longer waiting to be.
 		s.packets[index].needResend = false
 	} else {
-		// Create new packet
+		// Record a new packet.
 		var sent *sentPacket
 		if k := len(s.spare); k > 0 {
 			sent, s.spare = s.spare[k-1], s.spare[:k-1]
@@ -400,7 +368,8 @@ func (s *sentPackets) OnTransmit(
 }
 
 // onAckOfNothingNew is onAck for an acknowledgement of the number just before
-// the window with no selective ack: the delay sample, and nothing to retire.
+// the window with no selective ack: it records the delay sample and retires
+// nothing.
 func (s *sentPackets) onAckOfNothingNew(delay time.Duration, now time.Time) {
 	s.congestionCtrl.OnAckDelay(delay, now)
 	s.congestionCtrl.ApplyAck()
@@ -412,19 +381,18 @@ func (s *sentPackets) onAck(
 	delay time.Duration,
 	now time.Time,
 ) (*circularRangeInclusive, []uint16, error) {
-	// Once per acknowledgement, whatever it acknowledges: libutp records the
-	// sample even from one whose ack number it discards (utp_internal.cpp:
-	// 1907, :2023-2024).
+	// Record the delay sample once per acknowledgement, even one whose ack
+	// number is discarded.
 	s.congestionCtrl.OnAckDelay(delay, now)
 	if s.rack.active {
 		s.rackOnAck(ackNum, selectiveAck)
 	}
-	// Whatever path the acknowledgement takes below, its window update
-	// happens once. detectAndRecordLosses applies it earlier, before a loss
-	// can decay the window, as libutp's order has it.
+	// The window update happens once, whatever path the acknowledgement
+	// takes below. detectAndRecordLosses applies it before a loss can decay
+	// the window.
 	defer s.congestionCtrl.ApplyAck()
 
-	// Check if ack number is in valid range
+	// Check that the ack number is in range.
 	seqRange := s.SeqNumRange()
 	if !seqRange.Contains(ackNum) {
 		if len(s.packets) != 0 && seqRange.end == seqRange.start {
@@ -442,17 +410,10 @@ func (s *sentPackets) onAck(
 			return nil, nil, err
 		}
 	} else if selectiveAck != nil {
-		// ackNum names the sequence number before the first packet we sent,
-		// so there is nothing to acknowledge cumulatively. The selective ack
-		// still does: it names packets that arrived past the gap, and those
-		// are what declare the first packet lost.
-		//
-		// This branch previously did nothing at all, which meant that when
-		// the very first packet of a connection was lost, every selective ack
-		// the peer sent about it was discarded -- no packet was ever declared
-		// lost, no fast retransmit happened, and recovery waited for the
-		// retransmission timeout. libutp processes the extension whatever
-		// ack_nr says (utp_internal.cpp:2289).
+		// ackNum is the number before the first packet sent, so nothing is
+		// acknowledged cumulatively. The selective ack still names packets
+		// that arrived past the gap, which can declare the first packet
+		// lost.
 		if err := s.applySelectiveAckBits(ackNum, selectiveAck, delay, now); err != nil {
 			return nil, nil, err
 		}
@@ -461,9 +422,8 @@ func (s *sentPackets) onAck(
 		}
 	}
 
-	// Mark all packets up to ackNum as acknowledged
-	// Valid until the next acknowledgement, which is as long as anyone uses
-	// it: a new one for each was an allocation per acknowledgement.
+	// Mark all packets up to ackNum as acknowledged. The slice is reused
+	// and valid until the next acknowledgement.
 	s.fullAcked = circularRangeInclusive{start: seqRange.Start(), end: ackNum}
 	fullAcked := &s.fullAcked
 
@@ -472,7 +432,7 @@ func (s *sentPackets) onAck(
 		acked := selectiveAck.Acked()
 		for i, isAcked := range acked {
 			if isAcked {
-				// Double wrapping addition for uint16
+				// wrapping add
 				indexNum := ackNum + uint16(2) + uint16(i)
 				selectedAcks = append(selectedAcks, indexNum)
 			}
@@ -498,17 +458,9 @@ func (s *sentPackets) OnAckNum(
 		return err
 	}
 
-	// An ACK for ackNum implicitly ACKs all sequence numbers that precede ackNum
-	// Account for any preceding innerMap packets
-	//
-	// Nothing left unacknowledged is the ordinary outcome of an ack that
-	// retires everything in flight, not an error. It used to be returned as
-	// one, and processAck then stopped short of everything after the ack
-	// itself: the timers of the retired packets stayed armed, the
-	// retransmission deadline was not restarted, the consecutive-timeout
-	// count was not reset, and an MTU probe's acknowledgement was never seen.
-	// On any connection not sending flat out, that was every ack. libutp's
-	// ack_packet has no such failure (utp_internal.cpp:1329-1400).
+	// An ACK for ackNum implicitly acknowledges every preceding sequence
+	// number. Nothing left unacknowledged is the ordinary outcome of an ack
+	// that retires everything in flight, not an error.
 	firstUnacked, err := s.FirstUnackedSeqNum()
 	switch {
 	case err == nil:
@@ -519,8 +471,7 @@ func (s *sentPackets) OnAckNum(
 		return err
 	}
 
-	// Advance the fast-retransmit floor with the cumulative ack, as libutp
-	// does at utp_internal.cpp:2186-2188.
+	// Advance the fast-retransmit floor with the cumulative ack.
 	if wrappingLessThan(s.fastResendSeqNum, ackNum+1) {
 		s.fastResendSeqNum = ackNum + 1
 	}
@@ -535,8 +486,7 @@ func (s *sentPackets) OnAckNum(
 // controller about each one. A packet is declared lost once: see
 // fastResendSeqNum.
 func (s *sentPackets) detectAndRecordLosses(now time.Time) error {
-	// libutp's apply_ccontrol (utp_internal.cpp:2139) precedes the decay a
-	// selective ack can cause (:2289).
+	// Apply the window update before any decay a selective ack causes.
 	s.congestionCtrl.ApplyAck()
 	if s.rack.active {
 		s.rackDetectAndMark(now)
@@ -576,13 +526,13 @@ func (s *sentPackets) applySelectiveAckBits(
 ) error {
 	seqRange := s.SeqNumRange()
 
-	// The first bit of the selective ACK corresponds to ackNum + 2,
-	// where ackNum + 1 is assumed to have been dropped
+	// The first bit of the selective ack is ackNum+2; ackNum+1 is
+	// presumed dropped.
 	sackNum := ackNum + 2
 
 	for _, ack := range selectiveAck.Acked() {
-		// Break once we exhaust all sent sequence numbers
-		// The selective ACK length is a multiple of 32, so it may be padded
+		// Stop once past the last sequence number sent; the bitfield is a
+		// multiple of 32 bits, so it may be padded.
 		if !seqRange.Contains(sackNum) {
 			break
 		}
@@ -593,7 +543,7 @@ func (s *sentPackets) applySelectiveAckBits(
 			}
 		}
 
-		sackNum += uint16(1) // wrapping addition for uint16
+		sackNum += uint16(1) // wrapping add
 	}
 	return nil
 }
@@ -605,16 +555,14 @@ func (s *sentPackets) DetectLostPackets(firstUnacked uint16) []uint16 {
 	startIndex := s.SeqNumIndex(firstUnacked)
 	packets := s.packets[startIndex:]
 
-	// Iterate in reverse order
+	// Iterate in reverse order.
 	for i := len(packets) - 1; i >= 0; i-- {
 		packetInst := packets[i]
 
 		if !packetInst.acked && acked >= lossThreshold &&
 			!wrappingLessThan(packetInst.seqNum, s.fastResendSeqNum) {
-			// The fastResendSeqNum test is libutp's, at
-			// utp_internal.cpp:1537: a packet already fast retransmitted once
-			// is not declared lost again, so the window is not halved again
-			// for the same loss.
+			// A packet already fast retransmitted once is not declared lost
+			// again, so the window is not halved twice for one loss.
 			lost = append(lost, packetInst.seqNum)
 		}
 		if packetInst.acked {
@@ -633,9 +581,8 @@ func (s *sentPackets) Ack(seqNum uint16, delay time.Duration, now time.Time) err
 	}
 	if index >= len(s.packets) {
 		// Past what was sent. The connection drops such acknowledgements
-		// before they get here (FUZZING.md, "Packets acking data we never
-		// sent were processed"); this indexed past the window and panicked
-		// if one ever did.
+		// before they get here; this guards against indexing past the
+		// window.
 		return errAckOfUnsent
 	}
 	packetInst := s.packets[index]
@@ -716,13 +663,9 @@ func (s *sentPackets) SeqNumIndex(seqNum uint16) int {
 }
 
 // Outstanding reports whether seqNum names a packet that was sent and has not
-// been acknowledged.
-//
-// It exists for the retransmission timer. Timers are armed per packet and
-// cancelled when the ack arrives, but a timer that has already fired is out of
-// the wheel and on its way to the event loop, where cancelling it can no
-// longer stop it. Acting on such a timeout resends a packet the peer already
-// has.
+// been acknowledged. The retransmission timer uses it: a timer that has
+// already fired can no longer be canceled, and acting on it would resend a
+// packet the peer already has.
 func (s *sentPackets) Outstanding(seqNum uint16) bool {
 	if len(s.packets) == 0 {
 		return false
@@ -737,12 +680,10 @@ func (s *sentPackets) Outstanding(seqNum uint16) bool {
 	return !s.packets[i].acked
 }
 
-// MarkAllForResend gives up every packet still outstanding as lost, as libutp
-// does on a retransmission timeout: "every packet should be considered lost"
-// (utp_internal.cpp:1230-1237). Each is flagged to be sent again and stops
-// counting in flight. Nothing is sent here: the caller resends the oldest,
-// and the rest go out oldest first as the window allows -- see
-// NextNeedingResend.
+// MarkAllForResend declares every outstanding packet lost, as on a
+// retransmission timeout. Each is flagged to be resent and stops counting as
+// in flight. Nothing is sent here: the caller resends the oldest, and the
+// rest go out oldest first as the window allows (NextNeedingResend).
 func (s *sentPackets) MarkAllForResend() {
 	first, err := s.FirstUnackedSeqNum()
 	if err != nil {
@@ -758,9 +699,8 @@ func (s *sentPackets) MarkAllForResend() {
 	}
 }
 
-// NextNeedingResend is the oldest outstanding packet waiting to be sent again
-// after a retransmission timeout, if any. libutp's flush_packets walks the
-// same packets in the same order (utp_internal.cpp:970-985).
+// NextNeedingResend returns the oldest outstanding packet waiting to be
+// resent after a retransmission timeout, if any.
 func (s *sentPackets) NextNeedingResend() (*sentPacket, bool) {
 	first, err := s.FirstUnackedSeqNum()
 	if err != nil {
@@ -775,8 +715,7 @@ func (s *sentPackets) NextNeedingResend() (*sentPacket, bool) {
 	return nil, false
 }
 
-// OldestOutstanding is the packet a retransmission timeout resends: libutp's
-// `outbuf.get(seq_nr - cur_window_packets)` (utp_internal.cpp:1249).
+// OldestOutstanding returns the packet a retransmission timeout resends.
 func (s *sentPackets) OldestOutstanding() (*sentPacket, bool) {
 	first, err := s.FirstUnackedSeqNum()
 	if err != nil {
@@ -806,7 +745,7 @@ func (s *sentPackets) FirstUnackedSeqNum() (uint16, error) {
 		if s.packets[len(s.packets)-1].seqNum == lastAckNum {
 			return 0, errNoneAckNum
 		}
-		seqNum = lastAckNum + 1 // wrapping addition for uint16
+		seqNum = lastAckNum + 1 // wrapping add
 	}
 
 	return seqNum, nil
