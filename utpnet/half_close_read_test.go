@@ -10,24 +10,16 @@ import (
 	utp "github.com/arxodeus/utp"
 )
 
-// The other half-close: this end has finished reading, the peer has not
-// finished sending.
-//
-// libutp's utp_shutdown(s, SHUT_RD) sets read_shutdown, and what that flag
-// does is narrower than it looks: `conn->ack_nr++` runs whether or not the
-// bytes are delivered (utp_internal.cpp:2344-2355, and again for the reorder
-// buffer at :2392-2395). Incoming data is acknowledged and dropped, not
-// refused.
-//
-// The distinction is the whole test. The obvious implementation -- stop
-// delivering and let the receive buffer fill -- closes the advertised window,
-// and a peer that cannot finish sending cannot finish closing either. So this
-// sends far more than the receive buffer holds and requires it to go through.
+// The other half-close: this end has finished reading and the peer has not
+// finished sending. Incoming data is acknowledged and dropped, not refused;
+// letting the receive buffer fill would close the advertised window, and a
+// peer that cannot finish sending cannot finish closing. So this sends far
+// more than the receive buffer holds and requires it all to go through.
 func TestCloseReadKeepsThePeerSending(t *testing.T) {
 	server, client := listenPair(t)
 
-	// Four times the default receive buffer. A connection that merely stopped
-	// delivering would stall a quarter of the way in.
+	// Four times the default receive buffer: a connection that merely
+	// stopped delivering would stall a quarter of the way in.
 	const total = 4 * 1024 * 1024
 
 	served := make(chan error, 1)
@@ -138,7 +130,7 @@ func TestCloseReadIsNotAClose(t *testing.T) {
 	if err := conn.(interface{ CloseRead() error }).CloseRead(); err != nil {
 		t.Fatalf("CloseRead: %v", err)
 	}
-	// Twice is not an error: net.TCPConn tolerates it and so must this.
+	// Calling it twice is not an error, as with net.TCPConn.
 	if err := conn.(interface{ CloseRead() error }).CloseRead(); err != nil {
 		t.Fatalf("second CloseRead: %v", err)
 	}

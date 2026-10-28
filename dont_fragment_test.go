@@ -56,7 +56,7 @@ func newDFSocket(t *testing.T, conn Conn) (*UtpSocket, context.CancelFunc) {
 	return WithSocket(ctx, conn, conformanceLogger()), cancel
 }
 
-// The bit reaches a Conn that can honour it, and only for a probe.
+// The bit reaches a Conn that can honor it, and only for a probe.
 func TestDontFragmentReachesTheConn(t *testing.T) {
 	conn := &dfConn{}
 	s, cancel := newDFSocket(t, conn)
@@ -83,9 +83,8 @@ func TestDontFragmentReachesTheConn(t *testing.T) {
 	}
 }
 
-// A Conn that implements the interface but cannot honour it right now must
-// still get the datagram. Losing the probe instead would turn a missing socket
-// option into a hole in the sequence space.
+// A Conn that implements the interface but cannot honor it now still gets
+// the datagram.
 func TestDontFragmentUnsupportedStillSends(t *testing.T) {
 	conn := &dfConn{unsupported: true}
 	s, cancel := newDFSocket(t, conn)
@@ -111,11 +110,9 @@ func TestDontFragmentUnsupportedStillSends(t *testing.T) {
 // A Conn that never heard of the interface is unaffected.
 func TestDontFragmentConnWithoutTheInterface(t *testing.T) {
 	inner := &dfConn{}
-	// path_mtu_test.go's plainConn embeds the Conn *interface*, so only
-	// ReadFrom, WriteTo and Close are promoted: the DontFragmentWriter method
-	// on the value inside is invisible to a type assertion. That is precisely
-	// the Conn this case is about -- the libutp driver, an emulated network,
-	// anything written before this interface existed.
+	// path_mtu_test.go's plainConn embeds the Conn interface, so only
+	// ReadFrom, WriteTo and Close are promoted and a type assertion cannot
+	// see DontFragmentWriter: a Conn that predates the interface.
 	s, cancel := newDFSocket(t, &plainConn{Conn: inner})
 	defer cancel()
 	defer s.Close()
@@ -129,12 +126,9 @@ func TestDontFragmentConnWithoutTheInterface(t *testing.T) {
 	}
 }
 
-// The hop between the connection and the socket: a packet emitted as a probe
-// must carry the bit on its socket event, and an ordinary one must not.
-//
-// The tests above exercise the last hop, from the socket to the Conn.
-// This is the one before it, and between them they cover the whole path from
-// mtuSearch.eligibleProbe to WriteToDontFragment.
+// A packet emitted as a probe carries the bit on its socket event, and an
+// ordinary one does not. With the tests above, this covers the whole path
+// from mtuSearch.eligibleProbe to WriteToDontFragment.
 func TestDontFragmentTravelsOnTheSocketEvent(t *testing.T) {
 	events := make(chan *socketEvent, 2)
 	c := &connection{socketEvents: events}

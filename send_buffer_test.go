@@ -69,9 +69,7 @@ func TestRead(t *testing.T) {
 	}
 
 	// The rest of the first write, and the second continues it: a read
-	// fills its buffer across writes, as libutp fills the last unsent packet
-	// (TestSendBufferReadSpansWrites). This test used to expect the read to
-	// stop at the end of the first write, which was the defect.
+	// fills its buffer across writes (TestSendBufferReadSpansWrites).
 	readBuf = make([]byte, READ_LEN)
 	read = buf.Read(readBuf)
 	want := append(append([]byte(nil), writeOne[READ_LEN:]...), writeTwo[:2*READ_LEN-WRITE_LEN]...)
@@ -109,14 +107,9 @@ func TestWrite(t *testing.T) {
 	}
 }
 
-// The buffer must own the bytes it holds. UtpStream.Write returns as soon as
-// the data is accepted here, so the caller is free to reuse its array the
-// moment it returns -- and io.Writer's contract ("Implementations must not
-// retain p") means every stdlib-shaped caller does exactly that.
-//
-// This buffer used to store the caller's slice by reference. Any full-duplex
-// exchange -- read into a buffer, write it back, repeat -- had its queued
-// bytes overwritten by the next read.
+// The buffer owns the bytes it holds. UtpStream.Write returns as soon as
+// the data is accepted here, and io.Writer implementations must not retain
+// p, so callers reuse their buffers at once.
 func TestSendBufferDoesNotRetainCallerSlice(t *testing.T) {
 	sb := newSendBuffer(1024)
 
@@ -160,8 +153,8 @@ func TestSendBufferDoesNotRetainOnPartialWrite(t *testing.T) {
 	}
 }
 
-// A read fills its buffer across writes, as libutp fills the last unsent
-// packet before starting another (utp_internal.cpp:1013-1023).
+// A read fills its buffer across writes, completing the last unsent packet
+// before starting another.
 func TestSendBufferReadSpansWrites(t *testing.T) {
 	sb := newSendBuffer(1024)
 	for _, w := range []string{"abc", "defg", "hi"} {

@@ -9,27 +9,15 @@ import (
 	"time"
 )
 
-// Cancelling the dial context must not close the connection the dial produced.
-//
-// This is what net.Dialer promises -- "Canceling ctx does not affect the
-// connection after it is established" (net.Dialer.DialContext) -- and every Go
-// caller is written against that promise. The standard shape is
+// Canceling the dial context does not close the connection the dial
+// returned, as net.Dialer documents: "Canceling ctx does not affect the
+// connection after it is established". Callers commonly write
 //
 //	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
 //	defer cancel()
 //	conn, err := dialer.DialContext(ctx, ...)
 //
-// where the cancel fires as soon as the dialling function returns, with the
-// connection still in the caller's hands.
-//
-// This library gave the connection that context as its lifetime, so the
-// connection died the moment the dial returned. It was invisible to every test
-// here because they all dial with a context they keep alive for the duration.
-// anacrolix/torrent does not: its outgoing connections cancel their dial
-// context on the way out of establishOutgoingConn. What that produced was a
-// connection that completed the whole BitTorrent handshake and then stopped
-// mid-stream -- the peer read 796 bytes of a 1007-byte exchange and saw EOF,
-// and the torrent never moved a piece.
+// and the cancel runs as soon as the dialing function returns.
 func TestDialContextCancelDoesNotCloseTheConnection(t *testing.T) {
 	server, client := listenPair(t)
 
@@ -68,8 +56,8 @@ func TestDialContextCancelDoesNotCloseTheConnection(t *testing.T) {
 		cancelDial()
 		t.Fatalf("dialling: %v", err)
 	}
-	// Exactly what a `defer cancel()` does, at exactly the moment it does it:
-	// the dial is over, the connection is not.
+	// What defer cancel() does, when it does it: the dial is over, the
+	// connection is not.
 	cancelDial()
 	defer conn.Close()
 

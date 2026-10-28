@@ -9,28 +9,10 @@ import (
 	"time"
 )
 
-// The firewall callback: refuse a peer before any state exists for it.
-//
-// libutp asks its embedder about every SYN for a connection it does not
-// already have, after the duplicate check and before it creates the socket:
-//
-//	// true means yes, block connection.  false means no, don't block.
-//	if (utp_call_on_firewall(ctx, to, tolen)) {
-//	    ...
-//	    return 1;
-//	}
-//	                                        (utp_internal.cpp:2975-2982)
-//
-// This library accepted a callback at the anacrolix adapter and ignored it,
-// which is the worst of the three options available: a caller that passed a
-// blocklist got no blocking, and no sign that it was not happening.
-//
-// Two properties matter beyond "the connection does not happen". A refusal
-// must create no connection state, or a blocklist becomes a way to make a node
-// allocate; and it must be silent, because answering -- with a RESET or
-// anything else -- confirms to a refused peer that something is listening
-// here, which is the opposite of what a blocklist is for. libutp's refusal is
-// a bare `return 1`.
+// The firewall callback refuses a peer before any state exists for it. A
+// refusal must create no connection state, or a blocklist becomes a way to
+// make a node allocate, and must be silent, since any answer confirms to a
+// refused peer that something is listening.
 func TestFirewallRefusesBeforeAnyStateExists(t *testing.T) {
 	var (
 		mu    sync.Mutex
@@ -45,7 +27,7 @@ func TestFirewallRefusesBeforeAnyStateExists(t *testing.T) {
 			asked = append(asked, addr.String())
 			mu.Unlock()
 			// Refuse everyone, so the test does not depend on which port the
-			// kernel handed the dialler.
+			// dialer was given.
 			select {
 			case blocked <- addr.String():
 			default:

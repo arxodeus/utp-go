@@ -9,14 +9,11 @@ import (
 	"time"
 )
 
-// A socket must not answer every packet addressed to a connection it does not
-// have. Doing so is both an incompatibility with libutp and an amplification
-// vector: a peer that keeps sending to a torn-down connection would draw one
-// RESET per packet.
-//
-// libutp remembers what it has already answered, keyed on
-// (connection id, address, seq nr), for RST_INFO_TIMEOUT, and stops answering
-// entirely past RST_INFO_LIMIT stored entries (utp_internal.cpp:2907-2945).
+// A socket must not answer every packet addressed to a connection it does
+// not have, or a peer that keeps sending to a torn-down connection would draw
+// one RESET per packet. Each (connection id, address, sequence number) is
+// answered once while remembered, and nothing is answered past the stored
+// limit.
 
 type testPeer struct{ name string }
 
@@ -116,8 +113,8 @@ func TestResetIsSentOnceForARepeatedUnknownPacket(t *testing.T) {
 	sock := WithSocket(ctx, conn, testSocketLogger())
 	defer sock.Close()
 
-	// The same unanswerable packet, over and over. libutp answers the first
-	// and stays quiet for the rest.
+	// The same unanswerable packet, repeatedly: the first is answered and
+	// the rest are not.
 	const repeats = 50
 	for i := 0; i < repeats; i++ {
 		conn.inject(dataPacketFor(4242, 7))
@@ -140,8 +137,8 @@ func TestResetIsSentForEachDistinctUnknownPacket(t *testing.T) {
 	sock := WithSocket(ctx, conn, testSocketLogger())
 	defer sock.Close()
 
-	// Distinct sequence numbers are distinct events, and each is answered --
-	// suppression must not silence a genuinely new peer.
+	// Distinct sequence numbers are distinct events, and each is answered,
+	// so suppression does not silence a new peer.
 	const distinct = 20
 	for i := 0; i < distinct; i++ {
 		conn.inject(dataPacketFor(4242, uint16(i)))
@@ -162,9 +159,8 @@ func TestResetIsNeverSentInReplyToAReset(t *testing.T) {
 	sock := WithSocket(ctx, conn, testSocketLogger())
 	defer sock.Close()
 
-	// Answering a reset with a reset lets two hosts trade them forever.
-	// libutp handles ST_RESET in its own branch and returns without
-	// responding (utp_internal.cpp:2850-2881).
+	// Answering a reset with a reset would let two hosts exchange them
+	// indefinitely.
 	for i := 0; i < 20; i++ {
 		conn.inject(newPacketBuilder(st_reset, 4242, uint32(time.Now().UnixMicro()), 100_000, uint16(i)).Build())
 	}

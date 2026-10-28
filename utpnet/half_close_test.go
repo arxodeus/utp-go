@@ -10,18 +10,9 @@ import (
 	"time"
 )
 
-// A half-close: one end finishes sending, both keep going.
-//
-// libutp has had this all along -- `utp_shutdown(s, SHUT_WR)`, with the socket
-// held in CS_GOT_FIN while its application keeps reading. This library did
-// not: on reaching the peer's FIN the connection tore itself down, so a peer
-// that closed its sending side took the whole connection with it, along with
-// whatever it had not finished sending back. That was the one place the
-// reference could do something an application here could not.
-//
-// The shape below is the one that matters in practice, and the one that used
-// to fail: a client sends a request, says it has nothing more to send, and
-// then reads a reply that is larger than everything before it.
+// A half-close: one end finishes sending, and both keep going. A client
+// sends a request, closes its sending side, and then reads a reply larger
+// than everything before it.
 func TestCloseWriteKeepsTheReadSideOpen(t *testing.T) {
 	server, client := listenPair(t)
 
@@ -102,11 +93,8 @@ func TestCloseWriteKeepsTheReadSideOpen(t *testing.T) {
 	}
 }
 
-// The far end must see end of stream, not an error, when its peer half-closes.
-//
-// A reader that cannot tell "the peer has finished sending" from "the
-// connection broke" cannot use a half-close for anything: the whole point is
-// that the reply is still worth sending.
+// The far end sees end of stream, not an error, when its peer half-closes:
+// the reply is still worth sending.
 func TestCloseWriteLooksLikeEndOfStreamNotFailure(t *testing.T) {
 	server, client := listenPair(t)
 

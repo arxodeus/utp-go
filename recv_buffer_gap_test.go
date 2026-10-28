@@ -2,15 +2,10 @@ package utp
 
 import "testing"
 
-// The packet that fills a gap is always admitted.
-//
-// Without room held back for it, a gap is a deadlock: data behind the gap is
-// accepted until the buffer is full, and then the retransmission that would
-// release all of it is refused for want of space -- every time the peer sends
-// it, and the peer sends it forever. Nothing else can free the buffer, because
-// nothing behind the gap can be delivered until the gap closes.
-//
-// This is that situation, built directly rather than waited for.
+// The packet that fills a gap is always admitted. Without room held for it,
+// data behind the gap fills the buffer and the retransmission that would
+// release it is refused every time, a deadlock. This builds that state
+// directly.
 func TestGapFillingPacketIsAdmittedWhenTheBufferIsFull(t *testing.T) {
 	const capacity = 32 * 1024
 	const packet = 1000

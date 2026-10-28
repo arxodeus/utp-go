@@ -13,11 +13,8 @@ import (
 
 func (p *packetHeaderV1) Generate(rand *rand.Rand, size int) reflect.Value {
 	packetType := packetType(rand.Intn(5))
-	// The extension byte must name a known extension: the decoder rejects
-	// anything above maxKnownExtension, matching libutp
-	// (utp_internal.cpp:2481). This generator previously produced arbitrary
-	// bytes and asserted they survived a round trip, which only held while
-	// the decoder validated nothing.
+	// The extension byte must name a known extension, since the decoder
+	// rejects anything above maxKnownExtension.
 	extension := byte(rand.Intn(maxKnownExtension + 1))
 	header := &packetHeaderV1{
 		PacketType:    packetType,
@@ -39,10 +36,6 @@ func (a *selectiveAck) Generate(rand *rand.Rand, size int) reflect.Value {
 	for i := 0; i < bits; i++ {
 		acked[i] = rand.Intn(2) == 1
 	}
-	//if len(acked) == 0 {
-	//	var empty [32]bool
-	//	acked = empty[:]
-	//}
 	return reflect.ValueOf(newSelectiveAck(acked))
 }
 
@@ -105,14 +98,14 @@ func TestPacket(t *testing.T) {
 		MaxCount: 1000,
 		Rand:     rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
-	// Helper function to check property
+	// Check the property.
 	checkPacket := func(header *packetHeaderV1, selectiveAck *selectiveAck, payload []byte) bool {
-		// Check empty payload
+		// Check for an empty payload.
 		if len(payload) == 0 {
 			return true
 		}
 
-		// Handle selective ack
+		// Handle the selective ack.
 		if len(selectiveAck.acked) > 0 {
 			header.Extension = 1
 		} else {
@@ -120,26 +113,26 @@ func TestPacket(t *testing.T) {
 			header.Extension = 0
 		}
 
-		// Create packet
+		// Create the packet.
 		packetInst := &packet{
 			Header: header,
 			Eack:   selectiveAck,
 			Body:   payload,
 		}
 
-		// Get encoded length
+		// Get the encoded length.
 		encodedLen := packetInst.EncodedLen()
 
-		// Encode packet
+		// Encode the packet.
 		encoded := packetInst.Encode()
 
-		// Check length
+		// Check the length.
 		if len(encoded) != encodedLen {
 			t.Errorf("encoded length mismatch: got %d, want %d", len(encoded), encodedLen)
 			return false
 		}
 
-		// Decode packet
+		// Decode the packet.
 
 		decoded, err := decodePacket(encoded, false)
 		if err != nil {

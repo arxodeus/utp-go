@@ -4,11 +4,10 @@ package utp
 
 import "testing"
 
-// Cases from reading utp_process_incoming line by line (LIBUTP-AUDIT.md).
+// Edge cases of incoming packet processing.
 
-// An out-of-order packet that has already arrived is discarded with no
-// acknowledgement: libutp returns before schedule_ack (utp_internal.cpp:
-// 2425-2431).
+// An out-of-order packet that has already arrived is discarded without an
+// acknowledgement.
 func TestConformanceDuplicateOutOfOrderData(t *testing.T) {
 	runResponderCorpus(t, []step{
 		{name: "handshake", inject: synPacketFor(corpusSynConnID, corpusSynSeq)},
@@ -33,11 +32,10 @@ func TestConformanceDuplicateOutOfOrderData(t *testing.T) {
 	})
 }
 
-// establishedSteps completes libutp's side of the connection. Its acceptor
-// stays in CS_SYN_RECV until the first ST_DATA (utp_internal.cpp:2157) and
-// drops anything else that arrives before it (:2311), which is a recorded
-// deviation ("Completing an incoming connection") and not what these cases
-// are about.
+// establishedSteps completes the reference implementation's side of the
+// connection. Its acceptor waits for the first ST_DATA before it is
+// established and drops anything else before it, which these cases are not
+// about.
 func establishedSteps() []step {
 	return []step{
 		{name: "handshake", inject: synPacketFor(corpusSynConnID, corpusSynSeq)},
@@ -50,9 +48,8 @@ func establishedSteps() []step {
 	}
 }
 
-// Data numbered past the peer's FIN, arriving out of order, is dropped and the
-// connection carries on: `if (conn->got_fin && pk_seq_nr > conn->eof_pkt)
-// return 0;` (utp_internal.cpp:2381-2386).
+// Data numbered past the peer's FIN, arriving out of order, is dropped and
+// the connection continues.
 func TestConformanceDataPastTheFinIsDropped(t *testing.T) {
 	runResponderCorpus(t, append(establishedSteps(), []step{
 		{
@@ -77,9 +74,7 @@ func TestConformanceDataPastTheFinIsDropped(t *testing.T) {
 }
 
 // A second FIN with another sequence number does not move the end of the
-// stream, and does not end the connection: libutp records eof_pkt only
-// `if (pk_flags == ST_FIN && !conn->got_fin)` (utp_internal.cpp:2316) and
-// otherwise treats the packet like data.
+// stream or end the connection; it is treated like data.
 func TestConformanceSecondFinDoesNotMoveTheEnd(t *testing.T) {
 	runResponderCorpus(t, append(establishedSteps(), []step{
 		{
@@ -106,11 +101,9 @@ func TestConformanceSecondFinDoesNotMoveTheEnd(t *testing.T) {
 	}...))
 }
 
-// A SYN for a connection that already exists draws nothing from libutp: the
-// lookup of (address, id + 1) finds the socket and utp_process_udp returns
-// (utp_internal.cpp:2955-2958). This library sends its SYN-ACK again, which is
-// a recorded deviation ("A retransmitted SYN is answered"): a libutp acceptor
-// whose SYN-ACK was lost never answers the initiator's retries.
+// A SYN for a connection that already exists draws nothing from the
+// reference implementation, while this library sends its SYN-ACK again, so
+// an acceptor whose SYN-ACK was lost still answers the initiator's retries.
 func TestConformanceDuplicateSynBeforeData(t *testing.T) {
 	runResponderCorpus(t, []step{
 		{name: "handshake", inject: synPacketFor(corpusSynConnID, corpusSynSeq)},
@@ -138,8 +131,8 @@ func withExtensionBits(p *packet, n int) []byte {
 	return append(out, raw[20:]...)
 }
 
-// An "extension bits" extension must be 8 bytes long, or libutp drops the
-// packet (utp_internal.cpp:1850-1856).
+// An extension-bits extension must be 8 bytes long, or the packet is
+// dropped.
 func TestConformanceExtensionBitsMustBeEightBytes(t *testing.T) {
 	runResponderCorpus(t, append(establishedSteps(), []step{
 		{
