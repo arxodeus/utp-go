@@ -54,8 +54,8 @@ func TestOnTransmitRetransmit(t *testing.T) {
 	seqNum := sentPackets.NextSeqNum()
 	data := []byte{0}
 	length := uint32(len(data))
-	// Distinct by construction: two readings of the clock in a row can be
-	// equal, as they were on Windows CI.
+	// Distinct by construction: two consecutive clock readings can be
+	// equal.
 	first := time.Now()
 	second := first.Add(time.Millisecond)
 
@@ -90,7 +90,7 @@ func TestOnTransmitOutOfOrder(t *testing.T) {
 	ctrl := newDefaultController(fromConnConfig(NewConnectionConfig()))
 	sentPackets := newSentPacketsWithoutLogger(initSeqNum, ctrl)
 
-	outOfOrderSeqNum := initSeqNum + 2 // wrapping addition for uint16
+	outOfOrderSeqNum := initSeqNum + 2 // wrapping add
 	data := []byte{0}
 	length := uint32(len(data))
 	now := time.Now()
@@ -103,7 +103,7 @@ func TestOnSelectiveAck(t *testing.T) {
 	const (
 		COUNT    = 10
 		SACK_LEN = COUNT - 2
-		DELAY    = time.Millisecond * 100 // Assuming this value
+		DELAY    = time.Millisecond * 100 // Assume this value.
 	)
 
 	ctrl := newDefaultController(fromConnConfig(NewConnectionConfig()))
@@ -114,14 +114,14 @@ func TestOnSelectiveAck(t *testing.T) {
 	data := []byte{0}
 	length := uint32(len(data))
 
-	// Send COUNT packets
+	// Send count packets.
 	for i := 0; i < COUNT; i++ {
 		now := time.Now()
 		seqNum := sentPackets.NextSeqNum()
 		sentPackets.OnTransmit(seqNum, st_data, data, length, now)
 	}
 
-	// Create selective ACK
+	// Create a selective ack.
 	acked := make([]bool, SACK_LEN)
 	for i := range acked {
 		if i%2 == 0 {
@@ -130,14 +130,14 @@ func TestOnSelectiveAck(t *testing.T) {
 	}
 	selectiveAck := newSelectiveAck(acked)
 
-	// Process ACK
+	// Process the ack.
 	now := time.Now()
 	_, _, err := sentPackets.onAck(initSeqNum+1, selectiveAck, DELAY, now)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify ACKs
+	// Verify the acks.
 	if !sentPackets.packets[0].acked {
 		t.Errorf("expected the first packet acknowledged")
 	}
@@ -165,7 +165,7 @@ func TestDetectLostPackets(t *testing.T) {
 	data := []byte{0}
 	length := uint32(len(data))
 
-	// Send packets and selectively acknowledge them
+	// Send packets and selectively acknowledge them.
 	for i := 0; i < COUNT; i++ {
 		now := time.Now()
 		seqNum := sentPackets.NextSeqNum()
@@ -177,12 +177,12 @@ func TestDetectLostPackets(t *testing.T) {
 		}
 	}
 
-	// Detect lost packets
+	// Detect lost packets.
 	firstUnacked, err := sentPackets.FirstUnackedSeqNum()
 	require.NoError(t, err)
 	lost := sentPackets.DetectLostPackets(firstUnacked)
 
-	// Verify lost packets
+	// Verify the lost packets.
 	for i := 0; i < START; i++ {
 		packetInst := sentPackets.packets[i]
 		var found bool
@@ -209,10 +209,10 @@ func TestAck(t *testing.T) {
 	now := time.Now()
 	sentPackets.OnTransmit(seqNum, st_data, data, length, now)
 
-	// Artificially insert packet into lost packets
+	// Insert a packet into the lost packets directly.
 	sentPackets.lostPackets.ReplaceOrInsert(seqNum)
 
-	// Acknowledge the packet
+	// Acknowledge the packet.
 	now = time.Now()
 	err := sentPackets.Ack(seqNum, DELAY, now)
 	require.NoError(t, err)
@@ -248,14 +248,14 @@ func TestAckPriorUnacked(t *testing.T) {
 	data := []byte{0}
 	length := uint32(len(data))
 
-	// Send COUNT packets
+	// Send count packets.
 	for i := 0; i < COUNT; i++ {
 		now := time.Now()
 		seqNum := sentPackets.NextSeqNum()
 		sentPackets.OnTransmit(seqNum, st_data, data, length, now)
 	}
 
-	// Verify test preconditions
+	// Verify the preconditions.
 	if int(ACK_NUM) >= COUNT {
 		t.Fatal("ACK_NUM must be less than COUNT")
 	}
@@ -263,14 +263,14 @@ func TestAckPriorUnacked(t *testing.T) {
 		t.Fatal("COUNT minus ACK_NUM must be greater than 2")
 	}
 
-	// Acknowledge prior innerMap packets
+	// Acknowledge the earlier packets.
 	now := time.Now()
 	firstUnacked, err := sentPackets.FirstUnackedSeqNum()
 	require.NoError(t, err)
 	err = sentPackets.AckPriorUnacked(ACK_NUM, firstUnacked, DELAY, now)
 	require.NoError(t, err)
 
-	// Verify acknowledgments
+	// Verify the acknowledgments.
 	for i := 0; i < int(ACK_NUM); i++ {
 		if !sentPackets.packets[i].acked {
 			t.Errorf("packet %d: expected it acknowledged", i)
@@ -286,7 +286,7 @@ func TestAckUnsent(t *testing.T) {
 	initSeqNum := uint16(math.MaxUint16)
 	sentPackets := newSentPacketsWithoutLogger(initSeqNum, ctrl)
 
-	unsentAckNum := initSeqNum + 2 // wrapping addition for uint16
+	unsentAckNum := initSeqNum + 2 // wrapping add
 	now := time.Now()
 
 	err := sentPackets.Ack(unsentAckNum, DELAY, now)
@@ -303,20 +303,14 @@ func TestSeqNumIndex(t *testing.T) {
 		t.Errorf("expected index %d, got %d", math.MaxUint16, sentPackets.SeqNumIndex(initSeqNum))
 	}
 
-	zero := initSeqNum + 1 // wrapping addition for uint16
+	zero := initSeqNum + 1 // wrapping add
 	if sentPackets.SeqNumIndex(zero) != 0 {
 		t.Errorf("expected index 0, got %d", sentPackets.SeqNumIndex(zero))
 	}
 }
 
-// A packet is fast retransmitted once. Every further ack that still shows it
-// missing leaves it alone; only the retransmission timer sends it again.
-//
-// libutp advances fast_resend_seq_nr past each packet as it resends it
-// (utp_internal.cpp:1603) and refuses to fast resend anything below it
-// (:1537). Without that, a packet declared lost was resent on every ack until
-// its own ack came back: measured on a 2%-loss link, 52 fast retransmissions
-// for 7 distinct lost packets, one packet sent 16 extra times.
+// A packet is fast retransmitted once. Further acks that still show it
+// missing leave it alone; only the retransmission timer sends it again.
 func TestFastRetransmitHappensOncePerPacket(t *testing.T) {
 	ctrl := newDefaultController(fromConnConfig(NewConnectionConfig()))
 	initSeqNum := uint16(100)
@@ -343,7 +337,7 @@ func TestFastRetransmitHappensOncePerPacket(t *testing.T) {
 		t.Fatalf("first ack should have declared 101 lost, got %v", describeLost(first))
 	}
 
-	// The same ack again, and again. 101 is still missing, and must not be
+	// The same ack again, twice. 101 is still missing and must not be
 	// resent.
 	for round := 0; round < 3; round++ {
 		if _, _, err := sent.onAck(initSeqNum, sack, 10*time.Millisecond, time.Now()); err != nil {
@@ -356,22 +350,11 @@ func TestFastRetransmitHappensOncePerPacket(t *testing.T) {
 	}
 }
 
-// Fast retransmission works whatever the first sequence number is.
-//
-// A libutp initiator gets this wrong. utp_create_socket sets seq_nr = 1 and
-// fast_resend_seq_nr = seq_nr (utp_internal.cpp:2611-2615); utp_connect then
-// replaces seq_nr with a random number (:2768) and leaves fast_resend_seq_nr
-// at 1. Acknowledgements advance it only through a wrapping less-than
-// (:2186-2188), and when the random start is more than half the sequence
-// space past 1, 1 counts as ahead and it never moves -- so the connection
-// cannot fast-retransmit (:1537, :1560) until the numbers wrap round. The
-// accepting side sets it after choosing seq_nr (:2988-2989) and is correct.
-// Measured through the real-socket relay: every one of 61 stalls in which
-// libutp had the selective-ack evidence and did not resend came from such a
-// connection, and none from the other half (KNOWN-LIMITATIONS.md).
-//
-// This library starts fast_resend at the first sequence number in both roles,
-// which is what the accepting side of libutp does.
+// Fast retransmission works whatever the first sequence number is: the
+// fast-retransmit floor starts at the first sequence number in both roles.
+// If it started at a fixed value, a random start more than half the
+// sequence space away would make the floor look ahead, and nothing could be
+// fast retransmitted until the numbers wrapped.
 func TestFastRetransmitFromAnyInitialSequenceNumber(t *testing.T) {
 	for _, initSeqNum := range []uint16{100, 32768, 40000, 65000, 65534} {
 		ctrl := newDefaultController(fromConnConfig(NewConnectionConfig()))
@@ -394,7 +377,7 @@ func TestFastRetransmitFromAnyInitialSequenceNumber(t *testing.T) {
 }
 
 // One ack fast retransmits at most four packets, however many it reveals as
-// lost. libutp: "Re-send max 4 packets" (utp_internal.cpp:1605-1606).
+// lost.
 func TestFastRetransmitIsCappedPerAck(t *testing.T) {
 	ctrl := newDefaultController(fromConnConfig(NewConnectionConfig()))
 	ctrl.maxWindowSizeBytes = 1 << 20
@@ -406,8 +389,8 @@ func TestFastRetransmitIsCappedPerAck(t *testing.T) {
 		sent.OnTransmit(sent.NextSeqNum(), st_data, data, uint32(len(data)), time.Now())
 	}
 
-	// Ten missing packets with acked packets above all of them: 102, 104,
-	// 106 ... are acked, the odd ones are not.
+	// Ten missing packets with acknowledged packets above all of them:
+	// 102, 104, 106 and so on are acknowledged, the odd ones are not.
 	acked := make([]bool, 30)
 	for i := range acked {
 		acked[i] = i%2 == 0
@@ -428,8 +411,7 @@ func TestFastRetransmitIsCappedPerAck(t *testing.T) {
 			maxFastResendsPerAck, len(batch))
 	}
 
-	// The rest are still pending, and come out on the next round rather than
-	// being forgotten.
+	// The rest are still pending and come out on the next round.
 	next := sent.TakeLostPackets()
 	if len(next) == 0 {
 		t.Error("packets held back by the cap were dropped instead of resent on the next round")

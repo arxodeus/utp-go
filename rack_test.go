@@ -69,9 +69,8 @@ func (h *rackHarness) lost() []int {
 }
 
 // Once the path has been seen to reorder, three packets acknowledged past a
-// hole are not enough: a packet is lost only once a round trip and a quarter
-// of the minimum round trip have passed since it was sent. libutp's count
-// declares it lost at once.
+// hole are not enough: a packet is lost only once a round trip plus a
+// quarter of the minimum round trip has passed since it was sent.
 func TestRackReorderingWithinWindowIsNotLoss(t *testing.T) {
 	scenario := func(h *rackHarness) {
 		h.send(0)       // 1
@@ -106,7 +105,7 @@ func TestRackReorderingWithinWindowIsNotLoss(t *testing.T) {
 }
 
 // Before the path has been seen to reorder, three packets past a hole make
-// it loss at once, as libutp's count does.
+// it lost at once, as with the default rule.
 func TestRackWithoutReorderingMatchesTheCount(t *testing.T) {
 	h := newRackHarness(t, true)
 	for ms := 0; ms < 5; ms++ {
@@ -118,8 +117,7 @@ func TestRackWithoutReorderingMatchesTheCount(t *testing.T) {
 }
 
 // A retransmission that is lost too is declared lost a round trip later,
-// once something sent after it has been delivered. libutp fast-retransmits
-// a packet once and leaves a second loss to its retransmission timeout.
+// once something sent after it has been delivered.
 func TestRackLostRetransmissionIsDetected(t *testing.T) {
 	scenario := func(h *rackHarness) []int {
 		for ms := 0; ms < 5; ms++ {
@@ -143,8 +141,8 @@ func TestRackLostRetransmissionIsDetected(t *testing.T) {
 }
 
 // One acknowledgement covering several packets retires them in no
-// particular order -- its ack number before the packets under it -- and that
-// is not reordering.
+// particular order (its ack number before the packets under it), which is
+// not reordering.
 func TestRackInOrderAcksAreNotReordering(t *testing.T) {
 	h := newRackHarness(t, true)
 	for round := 0; round < 4; round++ {
@@ -183,10 +181,8 @@ func TestRackSpuriousLossWidensTheWindow(t *testing.T) {
 }
 
 // A packet past the highest one an acknowledgement reports is not judged:
-// uTP's selective ack covers a fixed window past the ack number, so past it
-// a packet may have arrived and not been said. Without the bound, a
-// delivered resend -- sent after everything outstanding -- made all of them
-// lost.
+// uTP's selective ack covers a fixed window past the ack number, so beyond it
+// a packet may have arrived unreported.
 func TestRackDoesNotJudgePastWhatTheAckReports(t *testing.T) {
 	h := newRackHarness(t, true)
 	for ms := 0; ms < 40; ms++ {
@@ -201,9 +197,8 @@ func TestRackDoesNotJudgePastWhatTheAckReports(t *testing.T) {
 	require.Empty(t, h.lost(), "32..40 were not reported either way")
 }
 
-// What was sent before what is decided by send order, not by the times
-// recorded: those come from clocks read at different points of the event
-// loop, and a packet sent after a resend can carry an earlier time than it.
+// Which packet was sent first is decided by send order, not by recorded
+// times, which come from clock reads at different points of the event loop.
 func TestRackJudgesBySendOrderNotTimestamp(t *testing.T) {
 	h := newRackHarness(t, true)
 	for ms := 0; ms < 5; ms++ {

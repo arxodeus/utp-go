@@ -17,18 +17,18 @@ const (
 )
 
 func CreateTestConnection(endpoint endpointInfo) *connection {
-	// Create channels
+	// Create the channels.
 	socketEvents := make(chan *socketEvent, 100)
 	reads := make(chan *readOrWriteResult, 100)
 
-	// Create peer address
+	// Create the peer address.
 	peer := &tcpPeer{&net.TCPAddr{
 		IP:   net.IPv4(127, 0, 0, 1),
 		Port: 3400,
 	},
 	}
 
-	// Create connection ID
+	// Create the connection id.
 	cid := ConnectionId{
 		Send: 101,
 		Recv: 100,
@@ -56,10 +56,7 @@ func CreateTestConnection(endpoint endpointInfo) *connection {
 		pendingWrites:  make([]*queuedWrite, 0),
 		writable:       make(chan struct{}, 1),
 		latestTimeout:  nil,
-		// As newConnection has it. The fixture left it out, and nothing
-		// noticed while every acknowledgement that retired all it covered
-		// returned early from processAck, before the MTU search was
-		// consulted. See TestAckRetiringEverythingRestartsTheDeadline.
+		// As newConnection sets it.
 		mtu: newMtuSearch(uint32(NewConnectionConfig().MaxPacketSize), time.Now()),
 	}
 
@@ -75,10 +72,7 @@ func TestOnSynInitiator(t *testing.T) {
 	conn := CreateTestConnection(endpoint)
 	before := conn.state.stateType
 
-	// A SYN at a connection we dialled is not ours to answer, and libutp
-	// never lets one reach the connection ("connection already exists",
-	// utp_internal.cpp:2957-2965). It used to reset it with
-	// ErrSynFromAcceptor.
+	// A SYN at a connection we dialed is not ours to answer, and is ignored.
 	conn.onPacket(newPacketBuilder(st_syn, 7, 0, 1<<20, syn).Build(), time.Now())
 
 	require.Equal(t, before, conn.state.stateType, "a stray SYN changed the connection's state")
@@ -114,12 +108,8 @@ func TestOnSynAcceptorNonMatchingSyn(t *testing.T) {
 
 	before := conn.state.stateType
 
-	// Step 2: a SYN with a different sequence number is another
-	// connection's, one that drew the same ids. It is ignored, as libutp
-	// ignores any SYN for a connection it has (utp_internal.cpp:2957-2965).
-	// It used to reset this one with ErrInvalidSyn: the long soak saw a
-	// peer's new connection kill an established one that way, 41 times in
-	// 880,000 connections.
+	// Step 2: a SYN with a different sequence number belongs to another
+	// connection that drew the same ids. It is ignored.
 	altSyn := uint16(128)
 	conn.onPacket(newPacketBuilder(st_syn, 7, 0, 1<<20, altSyn).Build(), time.Now())
 	require.Equal(t, before, conn.state.stateType,
@@ -185,16 +175,8 @@ func TestOnPacketInvalidAckNum(t *testing.T) {
 	}
 
 	// An acknowledgement number past everything we have sent acknowledges
-	// nothing -- and leaves the connection alone. libutp:
-	//
-	//	// this happens when we receive an old ack nr
-	//	if (acks > conn->cur_window_packets) acks = 0;
-	//	                                (utp_internal.cpp:1904-1907)
-	//
-	// This used to require the opposite: state connClosed and
-	// errInvalidAckNum. That made one forged ST_STATE enough to end an
-	// established transfer, and made an ordinary late or duplicated
-	// acknowledgement fatal on a lossy path.
+	// nothing, and leaves the connection alone: one forged or late
+	// ST_STATE must not end a transfer.
 	delay := 100 * time.Millisecond
 	ackResult := conn.processAck(synAck+2, nil, delay, now)
 
@@ -232,7 +214,7 @@ func TestOnFinEstablished(t *testing.T) {
 	}
 
 	// Test FIN
-	fin := syn + 3 // wrapping add in Go handles overflow automatically
+	fin := syn + 3 // wrapping add
 	err := conn.onFin(fin, []byte{})
 	require.NoError(t, err, "expected no error")
 
@@ -327,11 +309,9 @@ func TestOnFinClosingNonMatchingFin(t *testing.T) {
 	err := conn.onFin(altFin, []byte{})
 	require.NoError(t, err, "expected no error")
 
-	// Step 5: The end of the stream is still the first FIN's, and the
-	// connection carries on. This used to assert a reset; libutp records
-	// eof_pkt only for the first FIN (utp_internal.cpp:2316) and drops a
-	// packet numbered past it without acknowledging it (:2381-2386).
-	// TestConformanceSecondFinDoesNotMoveTheEnd compares the two directly.
+	// Step 5: the end of the stream is still the first FIN's, and the
+	// connection continues. TestConformanceSecondFinDoesNotMoveTheEnd
+	// compares this with the reference implementation.
 	require.Equal(t, connConnected, conn.state.stateType, "expected the connection to stay up")
 	require.NoError(t, conn.state.Err)
 	require.Equal(t, fin, *conn.state.closing.RemoteFin, "the end of the stream moved")

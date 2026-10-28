@@ -7,29 +7,22 @@ import (
 
 // Fuzzing the wire decoder.
 //
-// M2's malformed corpus compared this implementation against libutp on
-// hand-written hostile input, and found two real divergences that way. This
-// is where that leaves off: the corpus can only test the malformed packets
-// someone thought of, and a fuzzer does not need to think of them.
+// The properties a decoder owes its caller whatever the input:
 //
-// The properties asserted are the ones a decoder owes its caller regardless
-// of input:
-//
-//   - It never panics. A panic here is remotely triggerable by anyone who can
-//     send a UDP datagram to the port.
-//   - It never reports success while having read past the buffer it was
-//     given, or claims a length the input cannot support.
-//   - Anything it accepts, it re-encodes to the same bytes. A decoder that
-//     accepts a packet it cannot reproduce has silently reinterpreted it,
-//     which is how two implementations end up disagreeing about what a peer
-//     said.
+//   - It never panics; anyone who can send a UDP datagram to the port could
+//     trigger one.
+//   - It never reports success having read past its buffer, or claims a
+//     length the input cannot support.
+//   - Anything it accepts re-encodes to the same bytes. A decoder that
+//     accepts a packet it cannot reproduce has silently reinterpreted it.
 //
 // Run longer with:
 //
 //	go test -run xxx -fuzz FuzzDecodePacket -fuzztime 5m
 
 func FuzzDecodePacketHeader(f *testing.F) {
-	// Seeds: a valid header, and the shapes the M2 corpus found interesting.
+	// Seeds: a valid header, and the shapes of the malformed-packet
+	// conformance cases.
 	f.Add(newPacketBuilder(st_data, 1234, 200000, 1048576, 42).Build().Encode())
 	f.Add(newPacketBuilder(st_syn, 1, 0, 0, 0).Build().Encode())
 	f.Add(make([]byte, 20))
@@ -112,21 +105,16 @@ func FuzzDecodePacket(f *testing.F) {
 			t.Fatalf("decoded a %d-byte body from a %d-byte packet", len(pkt.Body), len(data))
 		}
 
-		// The claimed length has to match what it produced, or a caller
-		// sizing a buffer from EncodedLen writes out of bounds.
+		// The claimed length must match what was produced, or a caller sizing
+		// a buffer from EncodedLen writes out of bounds.
 		if got, want := pkt.EncodedLen(), len(pkt.Encode()); got != want {
 			t.Errorf("EncodedLen says %d, Encode produced %d", got, want)
 		}
 
 		reencoded := pkt.Encode()
 
-		// Everything this encoder produces, this decoder must accept.
-		//
-		// This is the invariant, and it is the one that broke: Encode took
-		// the extension byte from the header rather than from what it was
-		// writing, so a decoded packet carrying an extension we do not retain
-		// re-encoded to a header claiming an extension with no extension
-		// bytes after it -- which this decoder rejects.
+		// Everything this encoder produces, this decoder must accept. The
+		// header's extension byte must agree with the extensions written.
 		again, err := decodePacket(reencoded, false)
 		if err != nil {
 			t.Fatalf("this encoder produced a packet this decoder rejects (%v):\n"+
@@ -138,19 +126,10 @@ func FuzzDecodePacket(f *testing.F) {
 			t.Errorf("encoding is not idempotent:\n first %x\nsecond %x", reencoded, again.Encode())
 		}
 
-		// Byte-exact round trip, for every packet the decoder accepts.
-		//
-		// This used to be owed only for packets carrying nothing the decoder
-		// dropped -- no extensions, or exactly one selective ack -- because
-		// it kept the selective ack and discarded everything else in the
-		// chain: extension 2, unknown types further along, a zero-length
-		// selective ack. It now keeps the whole chain in order
-		// (packet.wireExtensions), so nothing is dropped and nothing is owed
-		// less than the original bytes.
-		//
-		// The selective-ack bitfield's own round trip, which is where a
-		// bit-order bug would hide, is also covered directly by
-		// FuzzDecodeSelectiveAck.
+		// Byte-exact round trip for every packet the decoder accepts: the
+		// whole extension chain is kept in order (packet.wireExtensions).
+		// The selective-ack bitfield's own round trip, where a bit-order bug
+		// would hide, is covered by FuzzDecodeSelectiveAck.
 		if !bytes.Equal(reencoded, data) {
 			t.Errorf("an accepted packet did not round trip:\n in %x\nout %x", data, reencoded)
 		}

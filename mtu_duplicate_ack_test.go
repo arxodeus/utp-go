@@ -5,14 +5,10 @@ import (
 	"time"
 )
 
-// The duplicate-acknowledgement route to lowering the MTU ceiling
-// (libutp utp_internal.cpp:1921-1941), rule by rule.
-//
-// The netem case shows what it is worth end to end. These pin the rules it
-// has to follow, which that measurement cannot distinguish: a version that
-// counted every acknowledgement rather than only bare ones, or that fired on
-// the first duplicate rather than the third, would still bring the search
-// down on a path that drops probes.
+// The duplicate-acknowledgement route to lowering the MTU ceiling, rule by
+// rule. An end-to-end test on a path that drops probes could not tell a
+// version that counted every acknowledgement, or fired on the first
+// duplicate, from a correct one.
 
 // dupAckConn builds a connected connection with three packets outstanding and
 // an MTU probe on the first of them.
@@ -82,12 +78,9 @@ func TestDuplicateAckLowersTheMtuCeiling(t *testing.T) {
 	}
 }
 
-// Only bare ST_STATE packets count.
-//
-// libutp is emphatic (utp_internal.cpp:1911-1920): an ST_DATA carrying an
-// acknowledgement was most likely sent because the peer had data of its own.
-// Counting those would give three "duplicates" immediately after every payload
-// packet on a bidirectional connection.
+// Only bare ST_STATE packets count. An ST_DATA carrying an acknowledgement
+// was most likely sent because the peer had data, so on a bidirectional
+// connection it would look like a duplicate after every packet.
 func TestDuplicateAckIgnoresDataPackets(t *testing.T) {
 	for _, pt := range []packetType{st_data, st_fin} {
 		t.Run(pt.String(), func(t *testing.T) {
@@ -133,15 +126,15 @@ func TestDuplicateAckCountResets(t *testing.T) {
 	}
 }
 
-// A hole ahead of the probe says nothing about size. libutp forgets the probe
-// so another can be sent, and leaves the ceiling alone.
+// A hole ahead of the probe says nothing about size: the probe is forgotten
+// so another can be sent, and the ceiling is left alone.
 func TestDuplicateAckForANonProbeHoleForgetsTheProbe(t *testing.T) {
 	conn, _ := dupAckConn(t)
 	ceilingBefore := conn.mtu.ceiling
 
-	// A repeated acknowledgement pointing somewhere other than just before the
-	// probe. It still has to be the number the window says is repeated, or it
-	// would simply reset the count -- so move the probe instead.
+	// A repeated acknowledgement pointing somewhere other than just before
+	// the probe. It must still be the number the window says is repeated,
+	// or it would reset the count, so move the probe instead.
 	conn.mtu.clearProbe()
 	conn.mtu.beginProbe(conn.state.SentPackets.LastAckedSeqNum()+3, 1200)
 	dup := conn.state.SentPackets.LastAckedSeqNum()
@@ -161,9 +154,7 @@ func TestDuplicateAckForANonProbeHoleForgetsTheProbe(t *testing.T) {
 	}
 }
 
-// Nothing is counted while nothing is outstanding, and libutp does not reset
-// the count there either: the whole block sits inside
-// `if (cur_window_packets > 0)`.
+// Nothing is counted, or reset, while nothing is outstanding.
 func TestDuplicateAckIgnoredWithNothingOutstanding(t *testing.T) {
 	conn, dup := dupAckConn(t)
 
@@ -185,9 +176,8 @@ func TestDuplicateAckIgnoredWithNothingOutstanding(t *testing.T) {
 }
 
 // A selective ack sets the duplicate count to the number of packets it names
-// inside the window (libutp: `duplicate_ack = count`, utp_internal.cpp:1612),
-// and the next duplicate counts on from there. With the two packets after the
-// probe named, the second duplicate is libutp's third.
+// inside the window, and the next duplicate counts on from there. With the
+// two packets after the probe named, the second duplicate is the third.
 func TestSelectiveAckSetsTheDuplicateCount(t *testing.T) {
 	conn, dup := dupAckConn(t)
 	ceilingBefore := conn.mtu.ceiling
@@ -243,12 +233,9 @@ func TestSelectiveAckSetsTheDuplicateCountOnArrival(t *testing.T) {
 	}
 }
 
-// A selective ack that names more than three packets after the probe judges
-// it refused there and then. libutp's test is equality with three, so a count
-// that jumps from below three to above it -- an acknowledgement covering a
-// whole read batch -- concludes nothing in libutp, ever, for that run. It is
-// the same evidence as three duplicates: at least three packets after the
-// probe arrived and the probe did not.
+// A selective ack naming three or more packets after the probe judges it
+// too large at once, even when the count jumps past three without equaling
+// it: at least three packets after the probe arrived and the probe did not.
 func TestSelectiveAckPastThreeJudgesTheProbe(t *testing.T) {
 	conn, dup := dupAckConnN(t, 8)
 	// dup+2 .. dup+6: five packets after the probe.
@@ -293,10 +280,10 @@ func TestDuplicateRunJudgesOnce(t *testing.T) {
 	}
 }
 
-// A probe sent again is no longer a probe: it goes without the
-// don't-fragment bit, so its acknowledgement says nothing about whether the
-// size fits, and must not raise the floor. The loss probe resends the oldest
-// packet outstanding, which can be the probe.
+// A resent probe is no longer a probe: it goes without the don't-fragment
+// bit, so its acknowledgement says nothing about whether the size fits and
+// must not raise the floor. The loss probe resends the oldest outstanding
+// packet, which can be the probe.
 func TestAResentProbeIsNotJudged(t *testing.T) {
 	conn, _ := dupAckConn(t)
 	probeSeq := conn.mtu.probeSeq

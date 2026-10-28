@@ -5,13 +5,9 @@ import (
 	"time"
 )
 
-// The drift estimator, checked against values worked out by hand rather than
-// only through a transfer.
-//
-// The arithmetic is wrapping uint32 throughout, and a wrap read the wrong way
-// round would show up as a penalty applied to an honest peer. That is the
-// failure worth being careful about, and it is not one an end-to-end test
-// would localise.
+// The drift estimator, checked against hand-worked values. The arithmetic
+// is modulo 2^32 throughout, and a wrap read the wrong way would penalize an
+// honest peer.
 
 func driftAt(t *testing.T, start time.Time) (*driftEstimator, func(sample uint32, at time.Duration)) {
 	t.Helper()
@@ -127,8 +123,8 @@ func TestDriftIsSmoothed(t *testing.T) {
 	}
 }
 
-// The penalty is zero until the drift passes the threshold, and then grows as
-// libutp's formula says.
+// The penalty is zero until the drift passes the threshold, then grows
+// linearly.
 func TestDriftPenalty(t *testing.T) {
 	cases := []struct {
 		drift int64
@@ -178,19 +174,15 @@ func TestDriftEmptySlot(t *testing.T) {
 	}
 }
 
-// Renormalisation keeps the average bounded while leaving the slope alone.
-//
-// Without it a steadily rising delay walks the average up forever and
-// eventually overflows an int32. libutp's comment: "since we're only
-// interested in the slope of the curve formed by the average delay samples,
-// we can cancel out the actual offset to make sure we won't have problems
-// with wrapping" (utp_internal.cpp:2076-2080).
+// Renormalization keeps the average bounded while leaving the slope alone;
+// without it a steadily rising delay would walk the average up until it
+// overflowed an int32.
 func TestDriftRenormalisationBoundsTheAverage(t *testing.T) {
 	start := time.Unix(0, 0)
 	d := newDriftEstimator(start)
 
-	// Forty slots, each 8000 microseconds further out than the last. Left
-	// unnormalised the average would reach 320,000 and keep going.
+	// Forty slots, each 8000 microseconds further than the last. Without
+	// renormalization the average would reach 320,000 and keep going.
 	const step = 8000
 	sample := uint32(1000)
 	at := time.Second
@@ -212,8 +204,8 @@ func TestDriftRenormalisationBoundsTheAverage(t *testing.T) {
 	}
 }
 
-// libutp takes a base of zero as unset and seeds it from the next sample
-// (utp_internal.cpp:2028), including when a renormalisation has left it there.
+// A base of zero means unset and is seeded from the next sample, including
+// when renormalization has left it at zero.
 func TestDriftBaseOfZeroIsReseeded(t *testing.T) {
 	start := time.Unix(0, 0)
 	d, push := driftAt(t, start)

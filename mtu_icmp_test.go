@@ -134,9 +134,9 @@ func TestMtuIcmpFragmentationNeededCanFinishTheSearch(t *testing.T) {
 	}
 }
 
-// A figure below the floor does not invert the search: the floor drops with
-// the ceiling. The search may settle below 576 bytes, since that is what the
-// link actually carries.
+// A figure below the floor does not invert the search, which would send
+// packets the path just said it cannot carry. The search may settle below
+// 576 bytes, since that is what the link actually carries.
 func TestMtuIcmpFragmentationNeededBelowTheFloor(t *testing.T) {
 	const linkMTU = 600
 	now := time.Now()

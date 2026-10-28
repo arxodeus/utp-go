@@ -7,23 +7,16 @@ import (
 	"time"
 )
 
-// A retransmission timeout resends one packet, the oldest, and the rest follow
-// as acknowledgements come back.
-//
-// libutp marks every packet in flight need_resend and resends only the oldest
-// (utp_internal.cpp:1230-1252). The rest go out from flush_packets as the
-// window allows, or one per acknowledgement through the fast-timeout path
-// (:2256-2282). This library used to resend every packet whose own timer
-// fired, which on a blacked-out link was the whole window at the timeout and
-// most of it again a second later (netem.TestRTOBurstMeasure).
+// A retransmission timeout resends one packet, the oldest, and the rest
+// follow as acknowledgements come back: every packet in flight is marked for
+// resend, and they go out as the window allows or one per acknowledgement
+// through the fast-timeout retry.
 func TestRetransmissionTimeoutResendsOnlyTheOldest(t *testing.T) {
 	t.Run("ack opens the window", func(t *testing.T) { rtoResendCase(t, 1<<20, false) })
 	// An acknowledgement advertising less than a packet of room leaves
-	// processWrites unable to send anything, so only the fast-timeout retry
-	// can bring the next packet back -- and libutp's does, because it calls
-	// send_packet directly rather than through flush_packets and is_full
-	// (utp_internal.cpp:2280-2281). Without this case the fast timeout could
-	// be missing and the other case would still pass.
+	// processWrites unable to send, so only the fast-timeout retry can bring
+	// the next packet back. Without this case the fast timeout could be
+	// missing and the other case would still pass.
 	t.Run("ack leaves less than a packet of room", func(t *testing.T) { rtoResendCase(t, 100, true) })
 }
 
@@ -39,19 +32,18 @@ func rtoResendCase(t *testing.T, ackWindow uint32, belowOnePacket bool) {
 	clk, conn, stream, ctx := vc.clk, vc.conn, vc.stream, vc.ctx
 	_ = step
 
-	// Room for four packets. The opening window is two, and a packet is a
-	// full one from the start (the MTU search starts at its ceiling, as
-	// libutp's does), so on its own the window would hold two -- not enough
-	// for the resend loop below. Set while the connection is parked; the
-	// clock's barrier orders it before the loop next runs.
+	// Room for four packets. The opening window is two, and a packet is
+	// full-size from the start (the MTU search starts at its ceiling), so on
+	// its own the window would hold two, not enough for the resend loop
+	// below. Set while the connection is parked; the clock's barrier orders
+	// it before the loop next runs.
 	clk.AwaitQuiet()
 	stream.conn.testWidenCongestionWindow(4 * 4000)
 	clk.AwaitQuiet()
 
-	// Write more than the window holds, so there are packets in flight and
-	// more waiting behind them.
-	// The writer is not a participant in the virtual clock, so wait for its
-	// packets in real time rather than by advancing the clock.
+	// Write more than the window holds, so packets are in flight with more
+	// waiting behind them. The writer is not a virtual-clock participant, so
+	// wait for its packets in real time.
 	go func() { _, _ = stream.Write(ctx, bytes.Repeat([]byte("x"), 20000)) }()
 	waitFor(t, 5*time.Second, func() bool { return conn.emittedCount() > 0 })
 	clk.AwaitQuiet()
@@ -91,7 +83,7 @@ func rtoResendCase(t *testing.T, ackWindow uint32, belowOnePacket bool) {
 	}
 
 	// The acknowledgement for the oldest brings the next oldest back first,
-	// ahead of anything new: fast-timeout retry, then flush_packets in order.
+	// ahead of anything new: the fast-timeout retry, then the rest in order.
 	clk.AwaitReactionTo(func() {
 		conn.inject(newPacketBuilder(st_state, peerID+1, 250000, ackWindow, peerSeq+2).
 			WithAckNum(oldest).Build().Encode())
@@ -115,10 +107,9 @@ func rtoResendCase(t *testing.T, ackWindow uint32, belowOnePacket bool) {
 		}
 	}
 	if !belowOnePacket {
-		// What the window lets out is what was given up at the timeout,
-		// oldest first, before any new data: libutp's flush_packets walks its
-		// buffer from the oldest. The timeout cut the window to two packets,
-		// so not all of it need fit.
+		// What the window lets out is what was declared lost at the timeout,
+		// oldest first, before any new data. The timeout cut the window to
+		// two packets, so not all of it need fit.
 		if len(after) < 2 {
 			t.Fatalf("after the acknowledgement, sent %s; a window of two packets "+
 				"has room for more than the fast-timeout retry", describePackets(after))
@@ -167,7 +158,7 @@ type virtualAccepted struct {
 
 // newVirtualAccepted accepts a connection with our sequence number pinned to
 // 0x4321, the peer's id 6000 and its first sequence number 900. maxPacket, if
-// non-zero, sets MaxPacketSize.
+// nonzero, sets MaxPacketSize.
 func newVirtualAccepted(t *testing.T, maxPacket uint16) *virtualAccepted {
 	t.Helper()
 	const (
@@ -236,17 +227,7 @@ func (v *virtualAccepted) writeOne(t *testing.T, b []byte) [][]byte {
 
 // An acknowledgement that retires everything in flight restarts the
 // retransmission deadline, so the next packet's timeout runs from its own
-// send.
-//
-// It did not. The sent-packet bookkeeping reported "nothing left
-// unacknowledged" as an error, and processAck returned before it disarmed the
-// retired packets' timers or restarted the deadline. On any connection not
-// sending flat out -- request and response, a trickle of protocol messages --
-// that was every acknowledgement. The next packet then found timers still
-// armed, so it did not start a deadline of its own, and was resent against
-// whatever deadline the earlier packet had left: here 3 seconds from the first
-// send, where libutp resends one timeout after the second (its ack_packet
-// restarts rto_timeout, utp_internal.cpp:1388-1389).
+// send rather than from an earlier packet's.
 func TestAckRetiringEverythingRestartsTheDeadline(t *testing.T) {
 	const (
 		ourSeq  = 0x4321
@@ -272,7 +253,7 @@ func TestAckRetiringEverythingRestartsTheDeadline(t *testing.T) {
 		t.Fatalf("second write sent %d packets", len(second))
 	}
 
-	// One RTT sample of 100ms puts the timeout at libutp's 1000ms floor.
+	// One RTT sample of 100ms puts the timeout at its 1000ms floor.
 	var waited time.Duration
 	for waited < 5*time.Second {
 		vc.clk.Advance(5 * time.Millisecond)
