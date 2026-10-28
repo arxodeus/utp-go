@@ -9,14 +9,9 @@ import (
 
 // A round trip's acknowledgements grow the window by the same amount however
 // many acknowledgements it is split into: a full window of them adds the
-// gain once, scaled by how far off target the delay is.
-//
-// libutp's window factor divides each acknowledgement's bytes by the window
-// as it stands, which the previous acknowledgement of the same round trip has
-// just grown, so the more acknowledgements, the less growth: about G^2/2W
-// short of G for an update per packet (utp_internal.cpp:1668). Here each is
-// reckoned against the window its packets were sent in. DEVIATIONS.md, "The
-// window grows by a round trip's worth per round trip".
+// gain once, scaled by how far off target the delay is. Each is reckoned
+// against the window its packets were sent in; reckoned against the current
+// window, the growth falls short by about G^2/2W per update.
 func TestWindowGrowthDoesNotDependOnHowAcksAreSplit(t *testing.T) {
 	const (
 		packets    = 20
@@ -58,8 +53,8 @@ func TestWindowGrowthDoesNotDependOnHowAcksAreSplit(t *testing.T) {
 			split := grow(t, slowStart, perAck)
 			updates := packets / perAck
 			t.Logf("slow start %v: one acknowledgement grew the window %d bytes, %d of them %d", slowStart, whole, updates, split)
-			// Each update truncates the window to whole bytes, as libutp's
-			// does, so up to a byte apiece.
+			// Each update truncates the window to whole bytes, so allow up to a
+			// byte per update.
 			if d := whole - split; d < 0 || d > updates {
 				t.Errorf("slow start %v: %d acknowledgements of %d packets grew the window %d bytes, one of all %d grew it %d",
 					slowStart, updates, perAck, split, packets, whole)
@@ -67,7 +62,7 @@ func TestWindowGrowthDoesNotDependOnHowAcksAreSplit(t *testing.T) {
 		}
 	}
 
-	// libutp's factor, for the record: the split costs growth.
+	// Against the current window only, the split costs growth.
 	t.Run("libutp's factor", func(t *testing.T) {
 		was := sendWindowCredit.Swap(false)
 		defer sendWindowCredit.Store(was)

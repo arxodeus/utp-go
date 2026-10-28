@@ -7,10 +7,9 @@ import (
 	"time"
 )
 
-// A connection whose own send bookkeeping refuses a packet ends, with the
-// reason, and the packet is not sent. It used to panic, and a panic in one
-// connection's loop ends the process: every other connection and the
-// application with it.
+// A connection whose own send bookkeeping refuses a packet ends with the
+// reason, and the packet is not sent; it does not panic and take the
+// process down.
 func TestABrokenSendBookkeepingEndsTheConnectionNotTheProcess(t *testing.T) {
 	conn, _ := dupAckConnN(t, 3)
 	next := conn.state.SentPackets.NextSeqNum()
@@ -54,8 +53,8 @@ func TestOnTransmitPastTheWindowIsRefusedAndNotRecorded(t *testing.T) {
 	}
 }
 
-// A dial to a peer whose every id is taken fails, rather than looking for a
-// free one for ever.
+// A dial to a peer whose every id is taken fails rather than searching
+// forever.
 func TestDialWithNoFreeIdFails(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

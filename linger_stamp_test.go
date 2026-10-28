@@ -6,12 +6,9 @@ import (
 	"time"
 )
 
-// An acknowledgement the socket sends again for a connection that has gone is
-// stamped as it is sent, as libutp stamps every packet (send_data,
-// utp_internal.cpp:733-738): the time now, and the delay of the packet it
-// answers. It went out with the stamps it was built with, and a peer
-// retransmitting its FIN fed its delay estimate the same old sample from
-// every copy. Review of 224c363.
+// An acknowledgement the socket resends for a connection that has gone is
+// stamped as it is sent: the current time, and the delay of the packet it
+// answers.
 func TestALingeringAcknowledgementIsStampedAsItIsSent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

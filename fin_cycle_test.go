@@ -5,14 +5,10 @@ import (
 )
 
 // A FIN that overtakes the last data must not strand it, however long the
-// connection has run. Whether a packet comes before the FIN was decided from
-// the connection's first sequence number, which after 65,536 packets bounds
-// nothing: with the first number 1000 and the acknowledgement at 998, DATA 999
-// fell outside [1000, 1001] and was dropped each time it was resent, and DATA
-// 1000 waited behind it for ever.
-//
-// From the release review of 9c44c4f (R4). The fixture sets consumed directly
-// rather than sending 65,534 packets.
+// connection has run. With the first sequence number 1000 and the
+// acknowledgement at 998 after a full cycle, DATA 999 and 1000 must still be
+// accepted. The fixture sets consumed directly rather than sending 65,534
+// packets.
 func TestFinOvertakingDataAfterAFullSequenceCycle(t *testing.T) {
 	rb := newReceiveBuffer(4096, 1000)
 	rb.consumed = 65534
@@ -37,7 +33,7 @@ func TestFinOvertakingDataAfterAFullSequenceCycle(t *testing.T) {
 	}
 }
 
-// And what is past the FIN is still refused, at any point in the cycle.
+// Data past the FIN is still refused, at any point in the cycle.
 func TestDataPastTheFinIsStillDropped(t *testing.T) {
 	for _, init := range []uint16{0, 1000, 65530} {
 		rb := newReceiveBuffer(4096, init)

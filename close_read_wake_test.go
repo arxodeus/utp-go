@@ -8,9 +8,7 @@ import (
 )
 
 // CloseRead wakes a Read already waiting on an open, silent stream, as
-// net.TCPConn's does. The flag was checked only before the wait, so such a
-// Read waited through it for as long as the peer stayed quiet. From the
-// release review of 9c44c4f (R6).
+// net.TCPConn's does.
 func TestCloseReadWakesABlockedRead(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -42,9 +40,9 @@ func TestCloseReadWakesABlockedRead(t *testing.T) {
 	}
 }
 
-// A CloseRead whose event was dropped -- the event queue full -- still shuts
-// the read side in the connection: data arriving afterwards is acknowledged
-// and discarded, not buffered for a reader that will refuse it.
+// A CloseRead whose event was dropped because the event queue was full still
+// shuts the read side: data arriving afterwards is acknowledged and
+// discarded, not buffered.
 func TestCloseReadAppliesWithoutItsEvent(t *testing.T) {
 	stream, conn, clk, done := liveAccepted(t)
 	defer done()

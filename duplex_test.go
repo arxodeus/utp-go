@@ -15,14 +15,9 @@ func duplexQuietLog() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 4}))
 }
 
-// Reading and writing on the same stream at the same time, which is what
-// BitTorrent does on every peer connection and what nothing in this
-// repository tested until the anacrolix integration needed it.
-//
-// It failed: the send buffer retained the caller's slice, so an echo loop --
-// read into a buffer, write it back, reuse the buffer -- transmitted whatever
-// the buffer held by the time the connection got round to sending. Every
-// unidirectional test passed throughout, because each writes one buffer once.
+// Reading and writing on one stream at the same time, as a BitTorrent peer
+// connection does. An echo loop reuses its buffer between reads, so this
+// also checks that Write does not retain the caller's slice.
 func TestFullDuplexEcho(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

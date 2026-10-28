@@ -19,9 +19,8 @@ func nagleTestConn(t *testing.T) (*connection, uint32) {
 	return conn, p
 }
 
-// libutp's Nagle rule (flush_packets, utp_internal.cpp:974-982), with both
-// windows open: a short packet waits while another is unacknowledged, and
-// what is written next joins it until it is a full packet.
+// The Nagle rule, with both windows open: a short packet waits while another
+// is unacknowledged, and later writes join it until it is full.
 func TestNagleHoldsAShortPacketBehindAnother(t *testing.T) {
 	conn, p := nagleTestConn(t)
 
@@ -48,9 +47,8 @@ func TestNoDelaySendsAShortPacketAtOnce(t *testing.T) {
 	}
 }
 
-// Closing the write side releases a held packet: nothing more will join it.
-// libutp queues its FIN behind the held packet, which is then no longer the
-// last and goes out (utp_close, utp_internal.cpp:3358-3380; flush_packets).
+// Closing the write side releases a held packet, since nothing more will
+// join it.
 func TestNagleReleasedWhenTheWriteSideCloses(t *testing.T) {
 	conn, _ := nagleTestConn(t)
 

@@ -8,9 +8,7 @@ import (
 )
 
 // An Accept already queued ends when its socket does, whatever the caller's
-// context. It watched only the caller's, so one on context.Background()
-// outlived the socket: the dispatcher that would have answered it had gone.
-// From the release review of 9c44c4f (R7).
+// context.
 func TestAcceptObservesSocketCancellation(t *testing.T) {
 	socketCtx, socketCancel := context.WithCancel(context.Background())
 	defer socketCancel()
@@ -62,9 +60,7 @@ func TestAcceptReturnsWhenTheSocketCloses(t *testing.T) {
 	}
 }
 
-// Accepts that time out on a socket nobody connects to are not kept. They
-// were dropped only when a SYN came to claim one, so an accept loop with a
-// timeout grew the queue by one per timeout for as long as it ran.
+// Accepts that time out on a socket nobody connects to are not retained.
 func TestTimedOutAcceptsAreNotRetained(t *testing.T) {
 	ctx := context.Background()
 	conn := newScriptedConn()
@@ -87,8 +83,7 @@ func TestTimedOutAcceptsAreNotRetained(t *testing.T) {
 	}
 }
 
-// A dial given a nil config gets the defaults, as an accept does. It panicked
-// making the connection.
+// A dial given a nil config gets the defaults, as an accept does.
 func TestConnectWithANilConfig(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

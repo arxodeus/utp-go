@@ -15,10 +15,9 @@ func streamWindow(s *UtpStream) (window, inFlight uint32) {
 	return c.state.SentPackets.CongestionWindow(), c.state.SentPackets.BytesInFlight()
 }
 
-// SetWindowSize is libutp's utp_setsockopt(UTP_SNDBUF) on a live connection:
-// from the call on, the window is no larger than the ceiling and nothing is
-// sent past it, while the transfer goes on. go-libutp exposes it as
-// Conn.SetWriteBufferLen.
+// SetWindowSize on a live connection: from the call on, the window is no
+// larger than the ceiling and nothing is sent past it, while the transfer
+// continues.
 func TestSetWindowSizeCapsALiveConnection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -68,11 +67,8 @@ func TestSetWindowSizeCapsALiveConnection(t *testing.T) {
 	}
 
 	// Bytes already in flight when the ceiling dropped drain first; after
-	// that nothing goes past it. Drained is waited for: it was eight writes,
-	// but a write returns once the send buffer has it, not once anything is
-	// acknowledged, and a slow moment in CI left the flight sent under the
-	// old window still outstanding when the measuring began. A connection
-	// that went on sending past the ceiling never gets here.
+	// that nothing goes past it. Wait for the drain, since a write returns
+	// once the send buffer has it, not once it is acknowledged.
 	drained := time.Now().Add(20 * time.Second)
 	for {
 		write()

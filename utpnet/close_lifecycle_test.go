@@ -10,12 +10,9 @@ import (
 	"time"
 )
 
-// Closing a connection and then its socket straight after a Write delivers
-// everything the Write accepted. The socket stopped reading at the start of
-// Close, while the connection still had most of a send buffer to deliver, so
-// the acknowledgements that would have let it out were never read: the peer
-// got what was in flight and the rest was abandoned. From the release review
-// of 9c44c4f (R2).
+// Closing a connection and then its socket right after a Write delivers
+// everything the Write accepted: the socket keeps reading acknowledgements
+// while the connection delivers.
 func TestSocketCloseAfterWriteDeliversEverything(t *testing.T) {
 	server, client := listenPair(t)
 
@@ -59,8 +56,8 @@ func TestSocketCloseAfterWriteDeliversEverything(t *testing.T) {
 	}
 }
 
-// failingPacketConn is a real UDP socket whose reads fail, with err, once
-// told to.
+// failingPacketConn is a real UDP socket whose reads fail with err once told
+// to.
 type failingPacketConn struct {
 	*net.UDPConn
 	fail chan struct{}
@@ -87,10 +84,8 @@ func (c *failingPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	return n, addr, err
 }
 
-// A read error that will not clear closes the socket: Accept and ReadFrom,
-// already waiting, return at once with it. The reader used to stop and
-// nothing else, leaving both waiting for ever. Release review of 9c44c4f
-// (R9).
+// A persistent read error closes the socket: Accept and ReadFrom, already
+// waiting, return at once with it.
 func TestTerminalReadErrorClosesTheSocket(t *testing.T) {
 	udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {

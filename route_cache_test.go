@@ -6,11 +6,9 @@ import (
 	"time"
 )
 
-// The reader remembers the last datagram's route. Every change to the routing
-// tables must invalidate it: a connection registered, removed, or attached for
-// inline handling. A stale route would hand a removed connection's packets to
-// it, or keep sending a connection's packets through its channel after it was
-// attached.
+// The reader remembers the last datagram's route. Every change to the
+// routing tables must invalidate it: a connection registered, removed, or
+// attached for inline handling.
 func TestRouteCacheFollowsTheTables(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -55,8 +53,8 @@ func TestRouteCacheFollowsTheTables(t *testing.T) {
 		t.Fatal("a connection registered under a key just freed was not found")
 	}
 
-	// Registered over a route still remembered: a key reused before the
-	// old entry's removal reached the tables.
+	// Registered over a remembered route: a key reused before the old
+	// entry's removal reached the tables.
 	third := make(chan *streamEvent, 1)
 	sock.putConnStream(cid, third)
 	if ch, _ := route(); ch != third {
@@ -72,10 +70,10 @@ func TestRouteCacheFollowsTheTables(t *testing.T) {
 	}
 }
 
-// An initiator's SYN keeps its retransmission timer until an acknowledgement
-// after the handshake retires it. On a connection that only receives, every
-// such acknowledgement names the SYN and nothing new -- the case the
-// acknowledgement fast path takes -- so the fast path must still retire it.
+// An initiator's SYN keeps its retransmission timer until an
+// acknowledgement after the handshake retires it. On a connection that only
+// receives, every such acknowledgement names the SYN and nothing new, which
+// takes the acknowledgement fast path, so the fast path must retire it too.
 func TestReceiverRetiresTheSynTimer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

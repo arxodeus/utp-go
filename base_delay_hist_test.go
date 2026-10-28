@@ -5,9 +5,9 @@ import (
 	"time"
 )
 
-// The base delay is libutp's DelayHist (utp_internal.cpp:260-381): thirteen
-// one-minute buckets by default, so a low sample is remembered for twelve to
-// thirteen minutes of samples, and then forgotten.
+// The base delay history has thirteen one-minute buckets by default, so a
+// low sample is remembered for twelve to thirteen minutes of samples and
+// then forgotten.
 func TestBaseDelayRemembersThirteenMinutes(t *testing.T) {
 	clk := &stepClock{t: time.Unix(0, 0)}
 	h := newBaseDelayHist(defaultDelayWindow, clk)
@@ -32,9 +32,8 @@ func TestBaseDelayRemembersThirteenMinutes(t *testing.T) {
 	}
 }
 
-// Only a sample rotates the history, as in libutp: a connection that falls
-// silent for twenty minutes still has its base when it speaks again, the
-// first sample after the silence moving it on by one bucket only.
+// Only a sample rotates the history: a connection silent for twenty minutes
+// keeps its base, and the first sample afterwards moves it on by one bucket.
 func TestBaseDelayDoesNotAgeWhileIdle(t *testing.T) {
 	clk := &stepClock{t: time.Unix(0, 0)}
 	h := newBaseDelayHist(defaultDelayWindow, clk)
@@ -47,8 +46,8 @@ func TestBaseDelayDoesNotAgeWhileIdle(t *testing.T) {
 }
 
 // A drift correction raises the base at once and lasts only as long as the
-// buckets carrying it: libutp's shift adds to every bucket, and each is
-// replaced by a fresh sample as the history rotates onto it.
+// buckets carrying it, each replaced by a fresh sample as the history
+// rotates onto it.
 func TestBaseDelayShiftAgesOut(t *testing.T) {
 	clk := &stepClock{t: time.Unix(0, 0)}
 	h := newBaseDelayHist(defaultDelayWindow, clk)

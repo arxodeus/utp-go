@@ -30,9 +30,9 @@ func dialWithin(ctx context.Context, from, to *UtpSocket, within time.Duration) 
 	return from.Connect(dctx, NewUdpPeer(to.LocalAddr().(*net.UDPAddr)), NewConnectionConfig())
 }
 
-// With a configuration of its own, a socket answers a SYN as it arrives, as
-// libutp does: the dial completes with nothing waiting in Accept, and the
-// next Accept returns the connection, which carries data.
+// With its own configuration, a socket answers a SYN as it arrives: the dial
+// completes with nothing waiting in Accept, and the next Accept returns the
+// connection, which carries data.
 func TestSynIsAnsweredWithNoAcceptWaiting(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -68,9 +68,8 @@ func TestSynIsAnsweredWithNoAcceptWaiting(t *testing.T) {
 	}
 }
 
-// Without one, the configuration is each Accept's, and a SYN waits for the
-// Accept that says how to make its connection: the dial does not complete
-// until one comes, and then does.
+// Without one, the configuration comes from each Accept, so a SYN waits for
+// an Accept: the dial does not complete until one comes, and then does.
 func TestSynWaitsForAcceptWithoutASocketConfig(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -117,8 +116,8 @@ func TestAcceptWithCidTakesAnAnsweredConnection(t *testing.T) {
 	}
 	defer second.Close()
 
-	// The acceptor's id for the second connection: it sends on the
-	// dialler's receive id and receives on the dialler's send id.
+	// The acceptor's ids for the second connection: it sends on the
+	// dialer's receive id and receives on the dialer's send id.
 	dcid := second.Cid()
 	want := NewConnectionId(NewUdpPeer(dialer.LocalAddr().(*net.UDPAddr)), dcid.Send, dcid.Recv)
 	got, err := acceptor.AcceptWithCid(ctx, want, NewConnectionConfig())

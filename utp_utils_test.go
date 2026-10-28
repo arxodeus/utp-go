@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// test for data race
+// randomUint16 is safe for concurrent use.
 func TestRandomUint16DataRace(t *testing.T) {
 	var wg sync.WaitGroup
 	const numGoroutines = 100
@@ -98,9 +98,8 @@ func TestDurationBetween(t *testing.T) {
 	}
 }
 
-// Connection ids and sequence numbers are drawn from all 65536 values, as
-// libutp draws them. 65535 used to be unreachable. Two million draws miss a
-// given value with probability e^-30.
+// Connection ids and sequence numbers are drawn from all 65536 values. Two
+// million draws miss a given value with probability e^-30.
 func TestRandomUint16CoversTheWholeRange(t *testing.T) {
 	for i := 0; i < 2_000_000; i++ {
 		if randomUint16() == 65535 {

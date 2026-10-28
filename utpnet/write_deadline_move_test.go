@@ -12,17 +12,12 @@ import (
 )
 
 // Moving the write deadline while a Write waits for room neither loses nor
-// repeats bytes. Write started over from the beginning whenever the stream
-// came back with nothing reported, and the stream reported nothing even
-// for bytes it had taken, so the peer got the start of the payload twice.
-// From the release review of 9c44c4f (R1).
+// repeats bytes.
 func TestMovingTheWriteDeadlineDoesNotRepeatBytes(t *testing.T) {
 	moveDeadlineDuringWrite(t, func(c net.Conn, p []byte) (int, error) { return c.Write(p) })
 }
 
-// The same for WriteBuffers, which took the vector write straight through and
-// returned "context canceled" once part of it had been taken and the deadline
-// moved. Review of 294cc2e, finding 3.
+// The same for WriteBuffers.
 func TestMovingTheWriteDeadlineDuringWriteBuffers(t *testing.T) {
 	moveDeadlineDuringWrite(t, func(c net.Conn, p []byte) (int, error) {
 		n, err := c.(*Conn).WriteBuffers(net.Buffers{p[:100], p[100 : len(p)/2], p[len(p)/2:]})

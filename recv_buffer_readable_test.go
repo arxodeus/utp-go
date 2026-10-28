@@ -2,10 +2,8 @@ package utp
 
 import "testing"
 
-// Readable is what lets a reader size its buffer to the data rather than to
-// the largest packet the connection might carry, and it has to distinguish two
-// states that IsEmpty cannot: a buffer with nothing in it, and a buffer holding
-// only bytes that arrived out of order.
+// Readable lets a reader size its buffer to the data, and must distinguish
+// an empty buffer from one holding only out-of-order bytes.
 func TestReceiveBufferReadable(t *testing.T) {
 	const initSeq = 100
 	rb := newReceiveBuffer(64*1024, initSeq)
@@ -14,9 +12,8 @@ func TestReceiveBufferReadable(t *testing.T) {
 		t.Errorf("a fresh buffer reports %d readable bytes, want 0", rb.Readable())
 	}
 
-	// A packet past the gap. It is held, not readable: the bytes before it
-	// have not arrived, and handing these over would deliver the stream out of
-	// order.
+	// A packet past the gap is held, not readable: the bytes before it have
+	// not arrived.
 	if err := rb.Write([]byte("second"), initSeq+2); err != nil {
 		t.Fatalf("write out of order: %v", err)
 	}
@@ -35,7 +32,7 @@ func TestReceiveBufferReadable(t *testing.T) {
 		t.Errorf("%d bytes readable after the gap closed, want %d", got, want)
 	}
 
-	// And it tracks what is left after a partial read.
+	// It tracks what is left after a partial read.
 	buf := make([]byte, 6)
 	if n := rb.Read(buf); n != 6 || string(buf) != "first!" {
 		t.Fatalf("read returned %d bytes %q", n, buf)

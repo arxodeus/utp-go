@@ -31,11 +31,9 @@ func writeResult(t *testing.T, ch chan *readOrWriteResult) *readOrWriteResult {
 	}
 }
 
-// A write that reaches the connection after this end's FIN has gone -- one
-// queued just before Close or CloseWrite -- is refused with an error. It was
-// answered with 0 bytes and no error, which an io.Writer may not return: the
-// caller was told it succeeded and its bytes were never sent. libutp refuses
-// it the same way (utp_internal.cpp:3188).
+// A write that reaches the connection after this end's FIN has gone, such as
+// one queued just before Close or CloseWrite, is refused with an error
+// rather than reporting zero bytes and no error.
 func TestWriteAfterOurFinIsRefused(t *testing.T) {
 	conn := connectedFixture(t)
 	fin := uint16(500)

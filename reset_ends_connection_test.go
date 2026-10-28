@@ -7,18 +7,14 @@ import (
 	"time"
 )
 
-// A RESET ends the connection whatever acknowledgement number it carries, and
-// a reader blocked on it is told.
+// A RESET ends the connection whatever acknowledgement number it carries,
+// and a blocked reader is told.
 //
 // A peer's socket answers a packet for a connection it no longer has with a
-// RESET acknowledging that packet's sequence number. When the packet was one
-// of our acknowledgements or keep-alives, that is our next, unsent number,
-// which the acknowledgement check took for acknowledging a packet never sent:
-// the RESET was dropped, and the connection, its peer gone, ran on with its
-// reader waiting. libutp acts on a RESET before checking anything else
-// (utp_internal.cpp:2850-2873). The long soak left server connections
-// running this way for clients that had given up. Here the RESET answers our
-// SYN-ACK, a STATE; the reader must return at once.
+// RESET acknowledging that packet's sequence number. If the packet was one
+// of our acknowledgements, that is our next, unsent number, which must not
+// cause the RESET to be dropped as acknowledging a packet never sent. Here
+// the RESET answers our SYN-ACK; the reader must return at once.
 func TestResetAnsweringOurAckEndsTheConnection(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

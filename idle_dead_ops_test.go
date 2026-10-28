@@ -86,11 +86,10 @@ func TestWriteAfterIdleTimeoutFails(t *testing.T) {
 	}
 }
 
-// A read on a connection the idle timeout has closed reports the timeout, not
-// a clean end of stream -- also once the socket's context has been cancelled
-// as well. Read then had two ready cases, the closed read queue carrying the
-// error and the cancelled stream context mapped to io.EOF, and Go picks
-// between them at random, so this repeats.
+// A read on a connection the idle timeout has closed reports the timeout,
+// not a clean end of stream, also after the socket's context has been
+// canceled. Two select cases can be ready at once, and Go chooses at random,
+// so this repeats.
 func TestReadAfterIdleTimeoutReportsIt(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		stream, cancelSocket, done := deadByIdleTimeout(t)
