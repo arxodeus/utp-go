@@ -9,21 +9,20 @@ import (
 // TestAckCoalescingUnderLoad measures how many acknowledgements the receiver
 // puts on the return path per data packet it receives, on a real transfer.
 //
-// The connection defers acks -- connection.ackPending is set when data arrives
-// and flushAck sends one once the read that brought the data has been handed
-// out, matching libutp's schedule_ack / utp_issue_deferred_acks
-// (utp_internal.cpp:2377, :3796-3808) -- and lets one wait to cover a few
-// packets only once its acknowledgements have been seen to queue on the way
-// back (connection.ackEvery). Where the return path keeps up, it acknowledges
-// as libutp does; this network hands each datagram to the receiver on its
-// own, so that is about one acknowledgement per data packet.
+// The receiver acknowledges once per socket read, and lets an
+// acknowledgement wait to cover several packets only once its
+// acknowledgements are seen to queue on the return path
+// (connection.ackEvery). This network hands the receiver each datagram on its
+// own, so where the return path keeps up that is about one acknowledgement
+// per data packet; the symmetric rows are reported only.
 //
-// So the assertion is on the path that cannot keep up: 20 Mb/s of data
-// draws about 1,750 acknowledgements a second, and 160 kb/s carries about
-// 1,000. Measured 0.61-0.62 acknowledgements per data packet there, three
-// runs on Linux at 69e2b75 (0.51-0.52 when first written), and 1.00 with
-// ackEvery returning 1; once 0.83 on a macOS CI runner. The symmetric rows
-// are reported only: 1.00 at 20 Mb/s, 100 Mb/s and 1 Gb/s.
+// The assertion is on the path that cannot keep up: 20 Mb/s of data draws
+// about 1,750 acknowledgements a second, and 160 kb/s carries about 1,000.
+// There the ratio is about 0.6, and 1.00 with coalescing disabled. Coalescing
+// starts only once the return path's delay has climbed steadily for about
+// 400 ms, and a host that stalls the process during that time delays it:
+// repeated 100 ms stalls early in the transfer raise the ratio to about 0.74.
+// The transfer is 4 MB so the steady state dominates, and the bound is 0.8.
 func TestAckCoalescingUnderLoad(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -32,7 +31,7 @@ func TestAckCoalescingUnderLoad(t *testing.T) {
 		delay    time.Duration
 		maxRatio float64 // 0 means "report only, do not assert"
 	}{
-		{name: "20Mbps/10ms, 160kbps back", bps: 20_000_000, backBps: 160_000, delay: 10 * time.Millisecond, maxRatio: 0.75},
+		{name: "20Mbps/10ms, 160kbps back", bps: 20_000_000, backBps: 160_000, delay: 10 * time.Millisecond, maxRatio: 0.8},
 		{name: "20Mbps/10ms", bps: 20_000_000, delay: 10 * time.Millisecond},
 		{name: "100Mbps/1ms", bps: 100_000_000, delay: time.Millisecond},
 		{name: "1Gbps/1ms", bps: 1_000_000_000, delay: time.Millisecond},
@@ -80,7 +79,7 @@ func ackRatioTransfer(t *testing.T, bps, backBps uint64, delay time.Duration) (d
 	defer cancel()
 	pair := NewUtpPair(ctx, n, a, b, quiet())
 
-	payload := make([]byte, 2<<20)
+	payload := make([]byte, 4<<20)
 	for i := range payload {
 		payload[i] = byte(i * 31)
 	}

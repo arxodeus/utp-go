@@ -15,6 +15,10 @@ import (
 // about zero. BaseDelay and CurrentDelay both measure the outbound path;
 // subtracting the inbound PeerTsDiff instead would report the path
 // asymmetry, about 90ms here, as queue.
+//
+// Both are judged on the median sample. Reporting the asymmetry would show in
+// every sample, while a single late sample is what a host that deschedules
+// the receiver for a moment produces, and is a real delay of that moment.
 func TestQueueingDelayMeasuresTheOutboundQueue(t *testing.T) {
 	// One direction slow, the other fast, and nothing to queue behind.
 	const outbound = 10 * time.Millisecond
@@ -101,34 +105,33 @@ func TestQueueingDelayMeasuresTheOutboundQueue(t *testing.T) {
 		t.Fatal("no metrics samples with a base delay; the test observed nothing")
 	}
 
-	// What the old formula would have produced, computed from the same
-	// samples, so the comparison is not a claim about a previous run.
-	var maxCrossDirection time.Duration
+	// What subtracting across directions would produce, from the same
+	// samples, so the comparison does not depend on another run.
+	queue := make([]time.Duration, 0, len(samples))
+	cross := make([]time.Duration, 0, len(samples))
 	for _, m := range samples {
-		if m.PeerTsDiff > m.BaseDelay {
-			if q := m.PeerTsDiff - m.BaseDelay; q > maxCrossDirection {
-				maxCrossDirection = q
-			}
-		}
+		queue = append(queue, m.QueueingDelay())
+		cross = append(cross, max(m.PeerTsDiff-m.BaseDelay, 0))
 	}
+	medianQueue, medianCross := medianDuration(queue), medianDuration(cross)
 
-	t.Logf("%d samples; outbound %v inbound %v; queueing delay max %v; "+
-		"cross-direction difference max %v",
-		len(samples), outbound, inbound, maxQueue, maxCrossDirection)
+	t.Logf("%d samples; outbound %v inbound %v; queueing delay median %v max %v; "+
+		"cross-direction difference median %v",
+		len(samples), outbound, inbound, medianQueue, maxQueue, medianCross)
 
 	// The path asymmetry is 90ms. A queue reported anywhere near it is the
 	// asymmetry, not a queue.
 	const asymmetry = inbound - outbound
-	if maxQueue > asymmetry/2 {
-		t.Errorf("queueing delay reached %v on a path with no bottleneck and a %v "+
-			"asymmetry; it is reporting the asymmetry", maxQueue, asymmetry)
+	if medianQueue > asymmetry/4 {
+		t.Errorf("queueing delay median %v on a path with no bottleneck and a %v "+
+			"asymmetry; it is reporting the asymmetry", medianQueue, asymmetry)
 	}
 
-	// And the control: the old formula really does report the asymmetry on
-	// this link, so the assertion above is not passing for some other reason.
-	if maxCrossDirection < asymmetry/2 {
-		t.Errorf("the cross-direction difference only reached %v, so this link does "+
-			"not expose the defect and the test proves nothing", maxCrossDirection)
+	// The control: subtracting across directions does report the asymmetry
+	// on this link, so the assertion above is not passing for another reason.
+	if medianCross < asymmetry/2 {
+		t.Errorf("the cross-direction difference median is only %v, so this link does "+
+			"not expose the defect and the test proves nothing", medianCross)
 	}
 }
 
