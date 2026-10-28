@@ -189,6 +189,6 @@ func TestCloseWriteDeliversWhatThePeerSendsAfterIt(t *testing.T) {
 	}
 
 	t.Logf("half-close against real libutp: it read our %d bytes, saw end of stream, and sent "+
-		"%d bytes back which we read in full -- the case that used to be discarded",
+		"%d bytes back which we read in full",
 		read, len(got))
 }

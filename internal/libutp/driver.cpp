@@ -211,19 +211,14 @@ static uint64 drv_get_read_buffer_size(utp_callback_arguments *a) {
 // libutp asks its embedder for the path MTU and uses the answer as the ceiling
 // of its own MTU search (mtu_reset, utp_internal.cpp:1314-1322).
 //
-// This comment used to say that with no callback registered the answer is 0
-// and libutp settles on 288-byte packets. It is not so: every context is
-// created with libutp's own defaults installed (utp_api.cpp:77-78), and with
-// this driver's callback left out libutp sends 1402-byte datagrams --
-// measured. libutp's default reports 1402 for an IPv4 peer and 1232 for an
-// IPv6 one, which it assumes is a Teredo tunnel (utp_utils.cpp:228-236).
+// Every context is created with libutp's defaults installed
+// (utp_api.cpp:77-78), whose callback reports 1402 for an IPv4 peer and 1232
+// for an IPv6 one (utp_utils.cpp:228-236).
 //
-// The driver reports 1472 instead: a standard 1500-byte Ethernet MTU less 20
-// bytes of IPv4 header and 8 of UDP, which is what an embedder that knows its
-// path is ordinary Ethernet reports. Measurements made against it are of
-// libutp so configured, not of libutp's defaults -- and for an IPv6 peer
-// libutp's default would never send more than 1232 (KNOWN-LIMITATIONS.md).
-// SetUDPMTU sets any other figure.
+// The driver reports 1472 instead: a 1500-byte Ethernet MTU less 20 bytes of
+// IPv4 header and 8 of UDP, as an embedder that knows its path is ordinary
+// Ethernet would. Measurements against it are of libutp so configured, not
+// of its defaults. SetUDPMTU sets any other figure.
 static uint64 drv_get_udp_mtu(utp_callback_arguments *a) {
 	libutp_driver *d = drv_of(a);
 	return d->udp_mtu ? d->udp_mtu : 1472;
