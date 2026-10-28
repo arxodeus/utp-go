@@ -2,65 +2,43 @@ package utp
 
 import "time"
 
-// Path MTU discovery, as libutp performs it.
+// Path MTU discovery.
 //
-// A uTP sender has to choose a datagram size without being told what the path
-// carries. Too small wastes header overhead on every packet; too large is
-// worse than wasteful, because a datagram above the path's MTU is either
-// fragmented -- costing more than it saves -- or, on IPv6 and on any IPv4 path
-// with the don't-fragment bit set, silently dropped. A connection that picks
-// too large a size and cannot detect it does not run slowly; it stops.
+// A sender must choose a datagram size without being told what the path
+// carries. Too small wastes header overhead; too large is worse, since a
+// datagram above the path MTU is either fragmented or, on IPv6 and on IPv4
+// with don't-fragment set, silently dropped, and a connection that cannot
+// detect that stops.
 //
-// The algorithm is a binary search between a floor known to work and a ceiling
-// known or assumed not to. Each probe is an ordinary data packet, sized at the
-// midpoint and sent with fragmentation disabled where the platform allows it:
+// The search is a binary search between a floor known to work and a ceiling
+// known or assumed not to. Each probe is an ordinary data packet sized at the
+// midpoint and sent with fragmentation disabled where the platform allows:
 //
-//   - acknowledged, and the floor rises to the probe's size;
-//   - lost, and the ceiling drops to just below it.
+//   - acknowledged, the floor rises to the probe's size;
+//   - lost, the ceiling drops to just below it.
 //
-// The search ends when the two are within mtuSearchDoneThreshold of each
-// other, and restarts every mtuSearchInterval because paths change.
-//
-// libutp: mtu_search_update (utp_internal.cpp:1289-1312), mtu_reset
-// (:1314-1322), the probe decision in send_packet (:890-925), the
-// probe-acknowledged path (:1969-1974), and the two failure paths --
-// retransmission timeout (:1152-1167) and duplicate acknowledgements
-// (:1927-1940). Both failure paths are implemented: the timeout one in
-// connection's retransmission handling, and the duplicate-acknowledgement
-// one in connection.noteDuplicateAck, which is the only one a saturated send
-// window leaves working. History: HISTORY.md, "mtu.go".
+// The search ends when the two are within mtuSearchDoneThreshold, and
+// restarts every mtuSearchInterval because paths change. A probe is detected
+// lost by a retransmission timeout or by duplicate acknowledgements
+// (connection.noteDuplicateAck); only the latter works while the send window
+// is full.
 
 const (
-	// mtuAbsoluteFloor is the smallest datagram the search will settle on.
-	//
-	// libutp: `mtu_floor = 576;` with the comment "Less would not pass TCP..."
-	// (utp_internal.cpp:1318). 576 is IPv4's guaranteed reassembly size, so a
-	// path that cannot carry it cannot carry much of anything.
+	// mtuAbsoluteFloor is the smallest datagram the search settles on: 576,
+	// IPv4's guaranteed reassembly size.
 	mtuAbsoluteFloor uint32 = 576
 
 	// mtuSearchDoneThreshold is how close the floor and ceiling must be for
-	// the search to stop. libutp: `if (mtu_ceiling - mtu_floor <= 16)`
-	// (utp_internal.cpp:1303).
-	//
-	// Stopping short is deliberate: the last 16 bytes are not worth the
-	// round trips, and the search settles on the *floor*, the only size known
-	// to have made it through.
+	// the search to stop. The search settles on the floor, the only size
+	// known to get through.
 	mtuSearchDoneThreshold uint32 = 16
 
-	// mtuSearchInterval is how long a completed search stands before the
-	// whole thing is redone. libutp: 30 minutes (utp_internal.cpp:1310,
-	// :1320). Paths change; a route that shortened is worth finding, and one
-	// that lengthened must be found.
+	// mtuSearchInterval is how long a completed search stands before it is
+	// redone, since a path's MTU can change in either direction.
 	mtuSearchInterval = 30 * time.Minute
 
-	// mtuHeaderOverhead is what a uTP packet spends before payload: the
-	// 20-byte header, as libutp's get_packet_size subtracts
-	// (`sizeof(PacketFormatV1)`, utp_internal.cpp:1759).
-	//
-	// It used to reserve room for a selective-ack extension as well, because
-	// this library attached one to data packets. libutp never does, and now
-	// neither does this library (conn_ack.go, statePacket), so
-	// a packet carrying payload is never longer than the header plus it.
+	// mtuHeaderOverhead is the uTP header a data packet carries before its
+	// payload. Data packets carry no selective ack (see statePacket).
 	mtuHeaderOverhead uint32 = minimalHeaderSize
 )
 
@@ -75,10 +53,8 @@ type mtuSearch struct {
 	// floor once the search has converged.
 	current uint32
 
-	// probeSeq and probeSize identify the packet currently under test. A
-	// probe is outstanding only while probing is true; libutp uses
-	// `mtu_probe_seq == 0` as the same flag, which costs it sequence number
-	// zero (see its `seq_nr != 1` guard at utp_internal.cpp:910).
+	// probeSeq and probeSize identify the packet under test. A probe is
+	// outstanding only while probing is true.
 	probeSeq  uint16
 	probeSize uint32
 	probing   bool
@@ -88,13 +64,10 @@ type mtuSearch struct {
 }
 
 // newMtuSearch starts a search bounded above by ceiling, sending at the
-// ceiling, as libutp does: `mtu_last = mtu_ceiling` when a socket is created
-// (utp_internal.cpp:2561-2562). The first packet larger than the floor is
-// the probe; if it is lost the ceiling comes down and the search proceeds
-// from the midpoint. The ceiling itself is libutp's conservative 1402 (or the
-// local interface's, or 1232 for IPv6), which leaves room for a tunnel.
-// DEVIATIONS.md, "The MTU search starts at the ceiling"; history:
-// HISTORY.md, "newMtuSearch".
+// ceiling. The first packet larger than the floor is the probe; if it is
+// lost the ceiling comes down and the search continues from the midpoint.
+// The default ceiling of 1402 bytes (1232 for IPv6, or less if the local
+// interface says so) leaves room for a tunnel.
 func newMtuSearch(ceiling uint32, now time.Time) *mtuSearch {
 	m := &mtuSearch{}
 	m.reset(ceiling, now)
@@ -102,11 +75,10 @@ func newMtuSearch(ceiling uint32, now time.Time) *mtuSearch {
 	return m
 }
 
-// reset restarts the search. libutp's mtu_reset (utp_internal.cpp:1314-1322).
+// reset restarts the search.
 func (m *mtuSearch) reset(ceiling uint32, now time.Time) {
 	if ceiling < mtuAbsoluteFloor {
-		// A caller asking for less than the floor gets the floor: below it
-		// the search has nothing to search.
+		// A request below the floor gets the floor.
 		ceiling = mtuAbsoluteFloor
 	}
 	m.floor = mtuAbsoluteFloor
@@ -118,13 +90,9 @@ func (m *mtuSearch) reset(ceiling uint32, now time.Time) {
 }
 
 // research restarts a converged search after mtuSearchInterval without
-// giving up the size it settled on.
-//
-// libutp's re-search is mtu_reset alone (utp_internal.cpp:892-896, :1314-
-// 1322): it restores the floor and ceiling but does not recompute mtu_last,
-// so packets stay at the size known to get through, and the first of them is
-// the next probe. reset alone would put the size at the midpoint, dropping a
-// connection settled at 1400 bytes to about 988 every half hour.
+// giving up the size it settled on: the floor and ceiling are restored, but
+// packets stay at the size known to get through, and the next one is the
+// probe. reset would drop the size to the midpoint.
 func (m *mtuSearch) research(ceiling uint32, now time.Time) {
 	known := m.current
 	m.reset(ceiling, now)
@@ -134,7 +102,7 @@ func (m *mtuSearch) research(ceiling uint32, now time.Time) {
 }
 
 // searchUpdate takes one binary-search step. Called whenever the floor or
-// ceiling moves. libutp's mtu_search_update (utp_internal.cpp:1289-1312).
+// ceiling moves.
 func (m *mtuSearch) searchUpdate(now time.Time) {
 	if m.floor > m.ceiling {
 		m.floor = m.ceiling
@@ -147,46 +115,23 @@ func (m *mtuSearch) searchUpdate(now time.Time) {
 	m.probeSize = 0
 
 	if m.ceiling-m.floor <= mtuSearchDoneThreshold {
-		// Settle on the floor: the only size known to have gone through.
+		// Settle on the floor, the only size known to get through.
 		m.current = m.floor
 		m.ceiling = m.floor
 		m.nextSearch = now.Add(mtuSearchInterval)
 	}
 }
 
-// icmpFragmentationNeeded applies an ICMP "fragmentation needed" report to the
-// search.
+// icmpFragmentationNeeded applies an ICMP "fragmentation needed" report to
+// the search.
 //
-// linkMTU is the next-hop MTU the router quoted, in ICMP's terms: the largest
-// IP datagram the next hop will carry. Zero, or anything outside what libutp
-// treats as sane, means the router did not tell us a usable size.
+// linkMTU is the next-hop MTU the router quoted: the largest IP datagram the
+// next hop carries. Zero, or a value outside [576, 0x2000), means the router
+// gave no usable size, and the gap is halved for a probe to resolve.
 //
-// libutp:
-//
-//	if (next_hop_mtu >= 576 && next_hop_mtu < 0x2000) {
-//	    conn->mtu_ceiling = min<uint32>(next_hop_mtu, conn->mtu_ceiling);
-//	    conn->mtu_search_update();
-//	    // ... we don't set mtu_last to the value in between the floor and
-//	    // the ceiling ... we want to test this MTU size first.
-//	    conn->mtu_last = conn->mtu_ceiling;
-//	} else {
-//	    conn->mtu_ceiling = (conn->mtu_floor + conn->mtu_ceiling) / 2;
-//	    conn->mtu_search_update();
-//	}
-//	                                        (utp_internal.cpp:1327-1348)
-//
-// **One deliberate difference, and it is a unit conversion.** libutp compares
-// `next_hop_mtu` directly against `mtu_ceiling`, but those are not the same
-// quantity: the ceiling comes from `get_udp_mtu` and is what fits in a UDP
-// payload, while ICMP quotes the link MTU, which also has to carry the IP and
-// UDP headers. So libutp's ceiling ends up 28 bytes too large on IPv4 whenever
-// the router's figure is the binding one. It is self-correcting -- the next
-// probe at that size is dropped and the ceiling comes down again -- but it
-// costs a round trip to discover something the router already said, and the
-// point of honouring ICMP at all is to skip that round trip.
-//
-// The sizes here are uTP datagram sizes, so the headers are subtracted before
-// the comparison. Recorded in DEVIATIONS.md.
+// A usable figure is converted from a link MTU to a uTP datagram size by
+// subtracting the IP and UDP headers, then lowers the ceiling, and the next
+// packet is sent at that size.
 func (m *mtuSearch) icmpFragmentationNeeded(linkMTU uint32, now time.Time) {
 	if usable, ok := udpPayloadForLinkMTU(linkMTU); ok {
 		if usable < m.ceiling {
@@ -194,36 +139,29 @@ func (m *mtuSearch) icmpFragmentationNeeded(linkMTU uint32, now time.Time) {
 		}
 		m.searchUpdate(now)
 		// Test the router's figure itself rather than the midpoint below it:
-		// there may be a smaller hop further on, but this one is known.
+		// a smaller hop may lie further on, but this one is known.
 		if m.ceiling >= m.floor {
 			m.current = m.ceiling
 		}
 		return
 	}
-	// No usable figure, so fall back to the binary search: halve the gap and
-	// let a probe find the truth.
+	// No usable figure: halve the gap and let a probe decide.
 	m.ceiling = (m.floor + m.ceiling) / 2
 	m.searchUpdate(now)
 }
 
-// ipv4HeaderAndUDPOverhead is what a uTP datagram gives up to the layers below
-// it: 20 bytes of IPv4 header and 8 of UDP. IPv6's header is 40, so treating
-// every path as IPv4 makes the figure derived here at most 20 bytes too
-// generous on a v6 path -- and a probe that size then fails and lowers the
-// ceiling, which is the same correction libutp relies on generally.
+// ipv4HeaderAndUDPOverhead is the 20-byte IPv4 header plus 8 bytes of UDP.
+// On an IPv6 path the result is up to 20 bytes too generous; a probe at that
+// size then fails and lowers the ceiling.
 const ipv4HeaderAndUDPOverhead = 28
 
-// ipv6HeaderAndUDPOverhead is the same for IPv6: a 40-byte header and 8 of
-// UDP. Used where the address family is actually known, which the ICMP path
-// above does not know and the interface lookup in path_mtu.go does.
+// ipv6HeaderAndUDPOverhead is the 40-byte IPv6 header plus 8 bytes of UDP,
+// used where the address family is known, as in path_mtu.go.
 const ipv6HeaderAndUDPOverhead = 48
 
 // udpPayloadForLinkMTU converts a router's next-hop MTU into the uTP datagram
-// size that fits inside it, and reports whether the figure was usable at all.
-//
-// The bounds are libutp's: at least 576, IPv4's guaranteed reassembly size,
-// and below 0x2000, beyond which the router is not telling the truth about a
-// path this library will meet.
+// size that fits in it, and reports whether the figure is usable: at least
+// 576, IPv4's guaranteed reassembly size, and below 0x2000.
 func udpPayloadForLinkMTU(linkMTU uint32) (uint32, bool) {
 	if linkMTU < 576 || linkMTU >= 0x2000 {
 		return 0, false
@@ -240,7 +178,7 @@ func (m *mtuSearch) dueForSearch(now time.Time) bool {
 	return m.done() && !m.nextSearch.IsZero() && !now.Before(m.nextSearch)
 }
 
-// payloadSize is how many bytes of application data a packet may carry.
+// payloadSize returns how many bytes of application data a packet may carry.
 func (m *mtuSearch) payloadSize() uint32 {
 	if m.current <= mtuHeaderOverhead {
 		return 1
@@ -248,14 +186,10 @@ func (m *mtuSearch) payloadSize() uint32 {
 	return m.current - mtuHeaderOverhead
 }
 
-// eligibleProbe reports whether a packet of this datagram size, carrying this
-// sequence number, should be used as the next probe.
-//
-// libutp's conditions (utp_internal.cpp:906-911): the search is still open,
-// the packet is larger than the floor and no larger than the ceiling, no
-// probe is outstanding, and this is a first transmission. A retransmission is
-// never a probe -- libutp notes that an oversized packet being resent needs to
-// fragment just to get through, which is the opposite of what a probe is for.
+// eligibleProbe reports whether a packet of this datagram size and sequence
+// number should be the next probe: the search is open, the packet is larger
+// than the floor and no larger than the ceiling, no probe is outstanding,
+// and this is a first transmission. A retransmission is never a probe.
 func (m *mtuSearch) eligibleProbe(size uint32, firstTransmission bool) bool {
 	return !m.done() &&
 		!m.probing &&
@@ -271,8 +205,8 @@ func (m *mtuSearch) beginProbe(seq uint16, size uint32) {
 	m.probeSize = size
 }
 
-// onAck reports a packet acknowledged. If it was the probe, the floor rises to
-// its size. libutp: utp_internal.cpp:1969-1974.
+// onAck records a packet acknowledged. If it was the probe, the floor rises
+// to its size.
 func (m *mtuSearch) onAck(seq uint16, now time.Time) bool {
 	if !m.probing || seq != m.probeSeq {
 		return false
@@ -282,19 +216,11 @@ func (m *mtuSearch) onAck(seq uint16, now time.Time) bool {
 	return true
 }
 
-// onProbeLost reports the probe presumed lost, so the ceiling drops to just
-// below its size.
-//
-// libutp reaches this two ways: a retransmission timeout where the probe was
-// the only packet outstanding (utp_internal.cpp:1152-1167), and a third
-// duplicate acknowledgement pointing at the packet before the probe
-// (:1927-1934). Both mean the same thing -- a packet of that size did not
-// arrive -- and neither is a congestion signal, which is why libutp sets
-// `ignore_loss` on the timeout path and does not shrink the window.
-//
-// Both call this: the timeout path in connection's retransmission handling,
-// and connection.noteDuplicateAck on the third repeated acknowledgement. The
-// second is the only one that can fire while the send window is full.
+// onProbeLost records the probe as lost, so the ceiling drops to just below
+// its size. It is called on a retransmission timeout with the probe the only
+// packet outstanding, and on a third duplicate acknowledgement of the packet
+// before the probe (connection.noteDuplicateAck). Neither is a congestion
+// signal, so the window is not reduced.
 func (m *mtuSearch) onProbeLost(now time.Time) bool {
 	if !m.probing {
 		return false
@@ -306,19 +232,11 @@ func (m *mtuSearch) onProbeLost(now time.Time) bool {
 	return true
 }
 
-// clearProbe forgets the outstanding probe without drawing any conclusion from
-// it, so another can be sent.
-//
-// libutp does this on every retransmission timeout, outside the branch that
-// lowers the ceiling: `// we dropped the probe, clear these fields to allow us
-// to send a new one` followed by `mtu_probe_seq = mtu_probe_size = 0`
-// (utp_internal.cpp:1166-1167).
-//
-// The ceiling may only come down when the probe was the *only* packet
-// outstanding, because only then does its loss say something about size
-// rather than congestion. A probe lost alongside other packets says nothing
-// -- but it is still gone, and a search that went on waiting for it would
-// wait forever. History: HISTORY.md, "mtuSearch.clearProbe".
+// clearProbe forgets the outstanding probe without drawing a conclusion, so
+// another can be sent. The ceiling comes down only when the probe was the
+// only packet outstanding, since only then does its loss indicate size rather
+// than congestion; but a probe lost alongside others is still gone, and
+// waiting for it would stall the search.
 func (m *mtuSearch) clearProbe() {
 	m.probing = false
 	m.probeSeq = 0
