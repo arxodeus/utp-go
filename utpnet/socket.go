@@ -1,31 +1,23 @@
-// Package utpnet presents a uTP socket as the standard library's net types.
+// Package utpnet presents a uTP socket through the standard library's net
+// interfaces.
 //
-// The core package speaks in its own vocabulary -- ConnectionPeer, UtpStream,
-// contexts on every call -- which is right for a library that has to work
-// over an emulated network as easily as a real one. Everything that wants to
-// *use* uTP wants net.Conn and net.PacketConn instead.
-//
-// This package is the translation. Its Socket satisfies:
+// A Socket satisfies
 //
 //	net.PacketConn
 //	Accept() (net.Conn, error)
 //	Addr() net.Addr
 //	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
 //
-// which is exactly the interface github.com/anacrolix/torrent requires of a
-// uTP implementation (its unexported `utpSocket`, in utp.go). Go interfaces
-// are structural, so satisfying it needs no import of that module and this
-// package does not have one; integration/anacrolix holds a separate module
-// that compiles this against the real interface, so the claim is checked
-// rather than asserted.
+// and its connections are net.Conn values with CloseRead and CloseWrite, so
+// it can be used wherever a BitTorrent client or other application expects a
+// uTP socket in net terms.
 //
 // # Sharing a UDP port
 //
-// A BitTorrent client runs uTP and the DHT on one UDP port. So this Socket
-// does not consume every datagram: it inspects each one, hands uTP packets to
-// the uTP machinery, and leaves everything else to be returned by ReadFrom.
-// That is what makes it a net.PacketConn rather than merely a listener, and
-// it is why the type exists at all instead of a few helper functions.
+// A BitTorrent client typically runs uTP and the DHT on one UDP port. A
+// Socket therefore inspects each datagram: uTP packets go to the uTP
+// connections, and everything else is returned by ReadFrom. WriteTo sends
+// raw datagrams on the same port.
 package utpnet
 
 import (
@@ -44,23 +36,20 @@ import (
 // ErrSocketClosed is returned by operations on a closed Socket.
 var ErrSocketClosed = errors.New("utpnet: socket is closed")
 
-// maxDatagram is the largest datagram the read loop will accept. A uTP packet
-// never approaches this; the ceiling is for the non-uTP traffic sharing the
-// port, which this package does not get to choose the size of.
+// maxDatagram is the largest datagram the read loop accepts. uTP packets
+// are far smaller; the limit is for other traffic sharing the port.
 const maxDatagram = 65536
 
 // passthroughDepth is how many non-uTP datagrams may be buffered for ReadFrom
-// before the read loop starts dropping them.
-//
-// Dropping is correct rather than regrettable: this is a datagram socket, the
-// caller is expected to lose packets, and blocking here would stall uTP
-// traffic behind a slow DHT reader on the same port.
+// before the read loop drops them. Dropping is what a datagram socket does,
+// and blocking would stall uTP traffic behind a slow reader on the same
+// port.
 const passthroughDepth = 256
 
 // udpPacketConn is what a Socket uses of its UDP socket. *net.UDPConn is the
-// only implementation outside tests; the interface exists so that tests can
-// run a Socket over an in-memory network whose addresses are IPv6, on a host
-// whose kernel has no IPv6 at all (utpnet's IPv6 tests, ipv6_test.go).
+// only implementation outside tests; the interface lets tests run a Socket
+// over an in-memory network, for example with IPv6 addresses on a host
+// without IPv6.
 type udpPacketConn interface {
 	ReadFromUDP(b []byte) (int, *net.UDPAddr, error)
 	WriteToUDP(b []byte, addr *net.UDPAddr) (int, error)
@@ -77,10 +66,10 @@ var _ udpPacketConn = (*net.UDPConn)(nil)
 type Socket struct {
 	udp udpPacketConn
 	// raw is the UDP socket under udp, when it is one, for WriteTo's
-	// attempt that never waits (sendNow).
+	// non-blocking first attempt (sendNow).
 	raw *rawSender
-	// passUDP is what the passthrough writer sends on: udp, kept apart so
-	// that nothing else reads it.
+	// passUDP is what the passthrough writer sends on: udp, kept separate so
+	// nothing else reads it.
 	passUDP udpPacketConn
 	sock    *utp.UtpSocket
 	inner   *demuxConn
@@ -89,11 +78,11 @@ type Socket struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// config is used for every stream accepted or dialled from now on; see
+	// config is used for every stream accepted or dialed from now on; see
 	// SetConnectionConfig.
 	config atomic.Pointer[utp.ConnectionConfig]
 
-	// generic is the adapter when the Socket was made on a net.PacketConn
+	// generic is the adapter when the Socket was created on a net.PacketConn
 	// that is not a UDP socket (NewSocketFromPacketConn), and nil otherwise.
 	generic *packetConn
 
@@ -103,16 +92,17 @@ type Socket struct {
 	writeDeadline *deadline
 
 	closeOnce sync.Once
-	// closed ends what the application is waiting in -- Accept, ReadFrom,
-	// the dials -- at the start of Close. appCtx ends with it, for Accept.
+	// closed ends Accept, ReadFrom and the dials at the start of Close.
+	// appCtx ends with it, for Accept.
 	closed    chan struct{}
 	appCtx    context.Context
 	appCancel context.CancelFunc
-	// stopRead ends the reader, once the uTP socket has finished with it.
+	// stopRead stops the reader once the uTP socket has finished with it.
 	stopRead chan struct{}
 	// readErr is the read error that closed the socket, if one did.
 	readErr atomic.Pointer[error]
-	// passOut is what WriteTo hands its writer, started on the first.
+	// passOut is the channel WriteTo hands datagrams to its writer on,
+	// started by the first WriteTo.
 	passOut        chan *passWrite
 	passWriterOnce sync.Once
 	readLoop       sync.WaitGroup
@@ -120,12 +110,12 @@ type Socket struct {
 
 type datagram struct {
 	payload []byte
-	// pooled is payload's buffer if it came from datagramPool, to go back
-	// once ReadFrom has copied it out.
+	// pooled is payload's buffer if it came from datagramPool, returned once
+	// ReadFrom has copied it out.
 	pooled *[]byte
 	from   *net.UDPAddr
-	// native is the address the datagram came from as a PacketConn of the
-	// Socket's own gave it (packetConn), or nil.
+	// native is the original source address when the Socket's own
+	// PacketConn gave one that is not a *net.UDPAddr (packetConn), or nil.
 	native net.Addr
 }
 
@@ -135,42 +125,35 @@ type Options struct {
 	Logger *slog.Logger
 	// ConnectionConfig is applied to every stream this socket accepts or
 	// dials. A nil value uses utp.NewConnectionConfig().
-	//
-	// This is where a BitTorrent client selects LEDBAT++ -- see
-	// BENCHMARKS.md for why it should.
 	ConnectionConfig *utp.ConnectionConfig
-	// Firewall, when set, is asked about every incoming connection before any
-	// state is created for it. Returning true refuses it: the packet is
-	// dropped without an answer, so a refused peer learns nothing.
+	// Firewall, when set, is consulted for every incoming connection before
+	// any state is created for it. Returning true refuses it: the packet is
+	// dropped without an answer, so a refused peer learns nothing. A typical
+	// use is an IP blocklist.
 	//
-	// This is libutp's UTP_ON_FIREWALL. A BitTorrent client uses it for an IP
-	// blocklist, which is why torrent's own uTP constructor takes one.
-	//
-	// It runs on the socket's receive path: it must not block, and must not
-	// call back into the socket.
+	// It runs on the socket's receive path: it must not block or call back
+	// into the socket.
 	Firewall func(net.Addr) bool
-	// OnWriteError, when set, hears of every datagram the uTP machinery
-	// failed to send, with the address it was for. The machinery carries on
-	// regardless -- a lost datagram is retransmitted like any other -- so
-	// this is for a caller that wants to give up sooner on an error it
-	// knows will not clear, or to count them. go-libutp's sendto callback
-	// draws the same line.
+	// OnWriteError, when set, is called for every datagram the uTP
+	// connections failed to send, with its destination. The connections
+	// carry on regardless, since a lost datagram is retransmitted; this lets
+	// a caller give up sooner on an error it knows is permanent, or count
+	// them.
 	//
-	// It is called on the sending goroutine: it must not block, and must not
-	// call back into the socket.
+	// It is called on the sending goroutine: it must not block or call back
+	// into the socket.
 	OnWriteError func(to net.Addr, err error)
-	// MaxConnections caps the connections this socket holds before it
-	// refuses a new incoming one, silently, as libutp does past 3000
-	// (utp_internal.cpp:2967-2974). Zero means utp.DefaultMaxConnections,
-	// libutp's 3000; a negative value means no cap. See
-	// utp.WithMaxConnections for exactly what is counted.
+	// MaxConnections limits the connections this socket holds before it
+	// silently refuses new incoming ones. Zero means
+	// utp.DefaultMaxConnections; a negative value means no limit. See
+	// utp.WithMaxConnections.
 	MaxConnections int
 }
 
 // Listen binds a UDP port and returns a uTP socket on it.
 //
-// network is "udp", "udp4" or "udp6"; addr is a host:port as net.ResolveUDPAddr
-// accepts, and an empty port asks the kernel to choose one.
+// network is "udp", "udp4" or "udp6"; addr is a host:port as accepted by
+// net.ResolveUDPAddr, and an empty port lets the kernel choose one.
 func Listen(ctx context.Context, network, addr string, opts *Options) (*Socket, error) {
 	if opts == nil {
 		opts = &Options{}
@@ -186,11 +169,9 @@ func Listen(ctx context.Context, network, addr string, opts *Options) (*Socket, 
 	return NewSocket(ctx, conn, opts)
 }
 
-// NewSocket wraps an already-bound UDP connection.
-//
-// The Socket takes ownership: closing it closes conn. This is the entry point
-// for a caller that needs to set socket options, bind with a particular
-// control function, or hand over a socket it obtained some other way.
+// NewSocket returns a Socket on an already bound UDP connection. The Socket
+// takes ownership, and closing it closes conn. Use it to set socket options
+// or bind with a particular control function.
 func NewSocket(ctx context.Context, conn *net.UDPConn, opts *Options) (*Socket, error) {
 	if conn == nil {
 		return nil, errors.New("utpnet: nil UDP connection")
@@ -211,8 +192,7 @@ func newSocket(ctx context.Context, conn udpPacketConn, opts *Options) (*Socket,
 		config = utp.NewConnectionConfig()
 	}
 
-	// Best effort, as in utp.Bind: a smaller buffer costs throughput but is
-	// not fatal.
+	// Best effort: a smaller buffer costs throughput but is not fatal.
 	_ = conn.SetReadBuffer(utp.DefaultSocketBufferSize)
 	_ = conn.SetWriteBuffer(utp.DefaultSocketBufferSize)
 
@@ -244,11 +224,9 @@ func newSocket(ctx context.Context, conn udpPacketConn, opts *Options) (*Socket,
 	if opts.Firewall != nil {
 		refuse := opts.Firewall
 		sockOpts = append(sockOpts, utp.WithFirewall(func(peer utp.ConnectionPeer) bool {
-			// The caller was given a net.Addr signature, because that is what
-			// it already has a blocklist keyed by. Peers this package creates
-			// carry the address; anything else is refused rather than let
-			// through unchecked, since a firewall that fails open is worse
-			// than no firewall.
+			// The callback takes a net.Addr. Peers this package creates carry the
+			// address; anything else is refused rather than let through
+			// unchecked, since a firewall that fails open is worse than none.
 			addr, err := peerUDPAddr(peer)
 			if err != nil {
 				logger.Warn("refusing an incoming connection: its peer has no usable address",
@@ -267,9 +245,8 @@ func newSocket(ctx context.Context, conn udpPacketConn, opts *Options) (*Socket,
 	return s, nil
 }
 
-// run is the single reader of the UDP socket. Every datagram goes to exactly
-// one of two places: the uTP machinery, or the passthrough queue that
-// ReadFrom drains.
+// run is the single reader of the UDP socket. Every datagram goes either to
+// the uTP connections or to the passthrough queue that ReadFrom drains.
 func (s *Socket) run() {
 	defer s.readLoop.Done()
 	buf := make([]byte, maxDatagram)
@@ -280,10 +257,9 @@ func (s *Socket) run() {
 		default:
 		}
 
-		// On a PacketConn of the Socket's own, the address the datagram
-		// came from is kept as it was given, to go with the datagram: it
-		// waits in a queue before anything answers it, and the map of such
-		// addresses could forget it meanwhile (review of 99ce302).
+		// On the Socket's own PacketConn, the original source address travels
+		// with the datagram: the datagram waits in a queue before it is
+		// answered, and the address map could drop the address meanwhile.
 		var n int
 		var from *net.UDPAddr
 		var native net.Addr
@@ -303,11 +279,9 @@ func (s *Socket) run() {
 				continue
 			}
 			// A read error on a socket nobody closed is terminal, and the
-			// socket closes with it. It used to stop reading and nothing
-			// else: Accept and ReadFrom waited for ever, and every
-			// connection went on retransmitting into a socket that could no
-			// longer hear the answer. From another goroutine, because Close
-			// waits for this one. Release review of 9c44c4f (R9).
+			// socket closes with it, so Accept, ReadFrom and the connections
+			// fail promptly. From another goroutine, because Close waits for
+			// this one.
 			s.logger.Debug("utpnet: UDP read failed; closing the socket", "err", err)
 			go s.shutdown(err)
 			return
@@ -323,25 +297,21 @@ func (s *Socket) run() {
 		select {
 		case s.passthrough <- datagram{payload: payload, pooled: pooled, from: from, native: native}:
 		default:
-			// The caller is not draining ReadFrom. Drop, as a UDP socket
-			// does, rather than stalling uTP behind it.
+			// The caller is not draining ReadFrom. Drop, as a UDP socket does,
+			// rather than stall uTP behind it.
 			releaseDatagram(pooled)
 		}
 	}
 }
 
 // pooledDatagram is the size of datagramPool's buffers: room for any uTP
-// packet, which libutp keeps under 1402 bytes and this library under its
-// own ceiling, and for most of what shares a port with it. A larger datagram
-// gets a buffer of its own.
+// packet and most other traffic sharing the port. A larger datagram gets a
+// buffer of its own.
 const pooledDatagram = 2048
 
 // datagramPool holds the buffers each datagram is copied into between the
-// socket's reader and whoever takes it. Both consumers copy it out at once
-// -- the uTP socket into its own read buffer, ReadFrom into its caller's --
-// so a buffer is free again as soon as it has been taken, and copying every
-// datagram into a new one was most of what a go-libutp transfer allocated:
-// 39% of the bytes in compat/golibutp's 100 MB benchmark.
+// socket's reader and its consumer. Both consumers copy it out at once, so a
+// buffer is free again as soon as it has been taken.
 var datagramPool = sync.Pool{New: func() any {
 	b := make([]byte, pooledDatagram)
 	return &b
@@ -367,18 +337,15 @@ func releaseDatagram(pooled *[]byte) {
 	}
 }
 
-// isUtpPacket reports whether a datagram is a uTP packet for this
-// implementation, by the packet decoder's own header validation (utp.IsPacket):
-// the sniff cannot drift away from what the socket will actually accept.
+// isUtpPacket reports whether a datagram is a uTP packet, using the packet
+// decoder's own header validation (utp.IsPacket), so the classification
+// matches what the uTP socket accepts.
 func isUtpPacket(b []byte) bool {
 	return utp.IsPacket(b)
 }
 
-// ReadFrom returns the next datagram that was not a uTP packet.
-//
-// This is what makes a Socket usable on a port shared with another protocol:
-// a BitTorrent client's DHT traffic arrives here while its uTP traffic is
-// handled by Accept and DialContext.
+// ReadFrom returns the next datagram that was not a uTP packet, such as a
+// BitTorrent client's DHT traffic on a shared port.
 func (s *Socket) ReadFrom(p []byte) (int, net.Addr, error) {
 	for {
 		timeout, expired, stop := s.readDeadline.wait()
@@ -399,45 +366,36 @@ func (s *Socket) ReadFrom(p []byte) (int, net.Addr, error) {
 			}
 			return n, s.nativeAddr(d.from), nil
 		case <-timeout:
-			// The deadline may have been moved rather than reached; the loop
-			// re-checks it. stop() here too: the next pass starts its own
-			// waiter, and this one's goroutine has already served its purpose.
+			// The deadline may have moved rather than passed; the loop re-checks
+			// it. Stop this waiter: the next pass starts its own.
 			stop()
 		}
 	}
 }
 
-// WriteTo sends a datagram, unchanged, to addr.
+// WriteTo sends a raw datagram to addr on the port the uTP connections use,
+// for example a DHT reply.
 //
-// It is the outbound half of sharing the port: a caller's DHT replies go out
-// through the same socket the uTP connections use.
-//
-// The write deadline applies for as long as the write waits, and moving it
-// moves the wait, as net.PacketConn's contract says. The datagram is handed
-// to one writer goroutine (see passthroughWriter), so the wait can end
-// without the write: the port is shared with the uTP connections, and a
-// deadline set on the port itself would end their writes too. A datagram
+// The write deadline applies while the write waits, and moving it moves the
+// wait. The datagram is handed to a single writer goroutine (see
+// passthroughWriter), so the wait can end without the write; a deadline set
+// on the port itself would end the uTP connections' writes too. A datagram
 // whose deadline passes before the writer reaches it is not sent; one the
-// writer is already sending may still be, as one already given to the kernel
-// may. p is copied, so the caller has it back on return either way.
+// writer is already sending may still be. p is copied, so the caller may
+// reuse it on return.
 //
-// On a UDP socket a datagram is first offered to the kernel once, without
-// waiting (sendNow, on Unix): the common case, at the cost of a direct
-// write. Only one the kernel cannot take at once goes to the writer, so a
-// blocked write is always one the deadline can end, including a deadline
-// set after it began. It used to write directly whenever no deadline was
-// set, and a deadline set during such a write waited for the kernel. Review
-// of 294cc2e, finding 2. Elsewhere every datagram is handed over: the
-// request is pooled, and there is no timer or goroutine while no deadline
-// is set (BenchmarkWriteTo).
+// On Unix a datagram is first offered to the kernel once without waiting
+// (sendNow); only one the kernel cannot take at once goes to the writer, so
+// a blocked write can always be ended by the deadline. While no deadline is
+// set, handing over uses no timer or goroutine.
 func (s *Socket) WriteTo(p []byte, addr net.Addr) (int, error) {
 	select {
 	case <-s.closed:
 		return 0, s.closedErr()
 	default:
 	}
-	// expired rather than wait for the common case: it needs only the
-	// answer, and wait starts a goroutine.
+	// expired rather than wait: only the answer is needed, and wait starts
+	// a goroutine.
 	if s.writeDeadline.expired() {
 		return 0, timeoutError{}
 	}
@@ -447,7 +405,7 @@ func (s *Socket) WriteTo(p []byte, addr net.Addr) (int, error) {
 		if udpAddr, err = toUDPAddr(addr); err != nil {
 			return 0, err
 		}
-		// What the kernel takes at once needs no hand-over and no wait.
+		// What the kernel takes at once needs no hand-off and no wait.
 		if n, sent, err := s.raw.sendNow(p, udpAddr); sent {
 			return n, err
 		}
@@ -458,16 +416,16 @@ func (s *Socket) WriteTo(p []byte, addr net.Addr) (int, error) {
 
 	queued := false
 	for {
-		// No timer and no goroutine while there is no deadline: the changed
-		// channel alone says when one is set.
+		// No timer or goroutine while there is no deadline: the changed
+		// channel signals when one is set.
 		at, changed := s.writeDeadline.snapshot()
 		var timer *time.Timer
 		var timeout <-chan time.Time
 		if !at.IsZero() {
 			d := time.Until(at)
 			if d <= 0 {
-				// Withdrawn if the writer has not reached it. If it has, it
-				// may yet be sent, as a datagram given to the kernel may be.
+				// Withdraw it if the writer has not reached it. If it has, it may
+				// still be sent.
 				w.cancel()
 				return 0, timeoutError{}
 			}
@@ -490,7 +448,7 @@ func (s *Socket) WriteTo(p []byte, addr net.Addr) (int, error) {
 			select {
 			case r := <-w.done:
 				stopTimer(timer)
-				// The writer is done with it, so it can be used again.
+				// The writer is done with it, so it can be reused.
 				passWritePool.Put(w.reset())
 				return r.n, r.err
 			case <-s.closed:
@@ -513,9 +471,8 @@ func stopTimer(t *time.Timer) {
 }
 
 // passWritePool holds WriteTo's requests, each with its result channel and a
-// buffer grown to the datagrams it has carried. One goes back only once its
-// result has been taken: a request given up on may still be in the writer's
-// hands.
+// buffer. A request returns to the pool only once its result has been taken,
+// since one given up on may still be with the writer.
 var passWritePool = sync.Pool{New: func() any { return &passWrite{done: make(chan passResult, 1)} }}
 
 func (w *passWrite) reset() *passWrite {
@@ -550,8 +507,7 @@ func (w *passWrite) cancel() {
 }
 
 // passthroughWriter sends what WriteTo queues, one datagram at a time, until
-// the socket closes. One goroutine, so a blocked write holds up the writes
-// behind it and nothing more.
+// the socket closes. A blocked write holds up only the writes behind it.
 func (s *Socket) passthroughWriter() {
 	for {
 		select {
@@ -565,8 +521,8 @@ func (s *Socket) passthroughWriter() {
 			w.mu.Unlock()
 			var r passResult
 			if s.generic != nil {
-				// The caller's address goes to the PacketConn as it is: it
-				// is of the PacketConn's own kind, or one it can write to.
+				// The caller's address goes to the PacketConn unchanged: it is of the
+				// PacketConn's own type, or one it can write to.
 				r.n, r.err = s.generic.pc.WriteTo(w.buf, w.addr)
 			} else {
 				r.n, r.err = s.passUDP.WriteToUDP(w.buf, w.udp)
@@ -581,7 +537,7 @@ func (s *Socket) passthroughWriter() {
 // Accept waits for the next incoming uTP connection.
 func (s *Socket) Accept() (net.Conn, error) {
 	// A nil config: the connection takes s.config as it stands when its
-	// SYN arrives (utp.WithAcceptConfig), not as it stood now.
+	// SYN arrives (utp.WithAcceptConfig).
 	stream, err := s.sock.Accept(s.appCtx, nil)
 	if err != nil {
 		select {
@@ -594,10 +550,8 @@ func (s *Socket) Accept() (net.Conn, error) {
 	return newConn(s, stream), nil
 }
 
-// DialContext opens a uTP connection to addr.
-//
-// network is accepted for interface compatibility and must name a UDP
-// network; addr is a host:port.
+// DialContext opens a uTP connection to addr, a host:port. network is a UDP
+// network name; "utp", "utp4" and "utp6" are accepted as aliases.
 func (s *Socket) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	select {
 	case <-s.closed:
@@ -615,9 +569,9 @@ func (s *Socket) DialContext(ctx context.Context, network, addr string) (net.Con
 }
 
 // DialAddr opens a uTP connection to an address already resolved. It takes
-// any address with a host and port; on a Socket made on a PacketConn of its
-// own (NewSocketFromPacketConn), that is how to dial an address of the
-// PacketConn's own type, which DialContext's resolver does not know.
+// any address with a host and port. On a Socket created with
+// NewSocketFromPacketConn, use it to dial an address of the PacketConn's own
+// type, which DialContext cannot resolve.
 func (s *Socket) DialAddr(ctx context.Context, addr net.Addr) (net.Conn, error) {
 	select {
 	case <-s.closed:
@@ -627,9 +581,9 @@ func (s *Socket) DialAddr(ctx context.Context, addr net.Addr) (net.Conn, error) 
 	var udpAddr *net.UDPAddr
 	if s.generic != nil {
 		var ok bool
-		// Kept from here, not from the uTP socket's first SYN: the address
-		// is remembered now, and churn before the socket holds it
-		// (demuxConn.HoldPeer) could forget it again.
+		// Hold it from now, not from the uTP socket's first SYN: the address
+		// is recorded now, and other traffic could evict it before the
+		// socket holds it (demuxConn.HoldPeer).
 		if udpAddr, ok = s.generic.retain(addr); !ok {
 			return nil, fmt.Errorf("utpnet: %v has no host and port", addr)
 		}
@@ -654,9 +608,9 @@ func (s *Socket) AcceptBacklog() int {
 }
 
 // SetConnectionConfig replaces the configuration given to streams accepted
-// or dialled from now on; streams already open keep theirs. A nil config is
-// utp.NewConnectionConfig(). The config is not copied, and must not be
-// changed once handed over.
+// or dialed from now on; open streams keep theirs. A nil config means
+// utp.NewConnectionConfig(). The config is not copied and must not be
+// modified afterwards.
 func (s *Socket) SetConnectionConfig(config *utp.ConnectionConfig) {
 	if config == nil {
 		config = utp.NewConnectionConfig()
@@ -664,13 +618,14 @@ func (s *Socket) SetConnectionConfig(config *utp.ConnectionConfig) {
 	s.config.Store(config)
 }
 
-// ConnectionConfig is the configuration streams accepted or dialled now get.
+// ConnectionConfig returns the configuration given to streams accepted or
+// dialed now.
 func (s *Socket) ConnectionConfig() *utp.ConnectionConfig {
 	return s.config.Load()
 }
 
-// nativeAddr is a UDP address as the caller knows it: on a Socket made on a
-// PacketConn of its own, the address of that PacketConn's type it came from.
+// nativeAddr returns a UDP address as the caller knows it: on a Socket
+// created on its own PacketConn, the original address it came from.
 func (s *Socket) nativeAddr(udp *net.UDPAddr) net.Addr {
 	if s.generic != nil && udp != nil {
 		return s.generic.nativeOf(udp)
@@ -678,24 +633,22 @@ func (s *Socket) nativeAddr(udp *net.UDPAddr) net.Addr {
 	return udp
 }
 
-// Dial is DialContext with a background context.
+// Dial calls DialContext with a background context.
 func (s *Socket) Dial(network, addr string) (net.Conn, error) {
 	return s.DialContext(context.Background(), network, addr)
 }
 
-// Addr returns the local address, satisfying net.Listener.
 // ProcessICMPFragmentation reports an ICMP "fragmentation needed" message
 // (IPv4 type 3 code 4, or ICMPv6 "packet too big") for a datagram this socket
-// sent, so the path-MTU search can take the router's word for it.
+// sent, so the path-MTU search can use the router's figure.
 //
-// quoted is the uTP datagram the ICMP message quoted -- the original UDP
-// payload, not the ICMP packet -- and addr is where that datagram was sent.
-// nextHopMTU is the router's figure, which may be zero when it did not supply
-// one. It reports whether the quoted bytes matched a live connection.
+// quoted is the uTP datagram the ICMP message quoted, the original UDP
+// payload without the ICMP packet around it, and addr is where it was sent.
+// nextHopMTU is the router's figure, which may be zero. It reports whether
+// quoted matched a live connection.
 //
-// Nothing in this package collects ICMP: on Linux the usual source is
-// IP_RECVERR on the UDP socket this Socket was built from, and reading it is
-// the embedder's job. libutp draws the same line.
+// This package does not collect ICMP itself. On Linux the usual source is
+// IP_RECVERR on the UDP socket the Socket was built from.
 func (s *Socket) ProcessICMPFragmentation(quoted []byte, addr *net.UDPAddr, nextHopMTU uint16) bool {
 	if addr == nil {
 		return false
@@ -703,13 +656,11 @@ func (s *Socket) ProcessICMPFragmentation(quoted []byte, addr *net.UDPAddr, next
 	return s.sock.ProcessICMPFragmentation(quoted, utp.NewUdpPeer(addr), nextHopMTU)
 }
 
-// ProcessICMPError reports an ICMP message that should tear a connection
-// down: destination unreachable other than fragmentation-needed, time
-// exceeded, parameter problem. Which messages are fatal is the caller's
-// judgement, as it is in libutp.
+// ProcessICMPError reports an ICMP message that should end a connection:
+// destination unreachable other than fragmentation needed, time exceeded, or
+// parameter problem. Which messages are fatal is for the caller to decide.
 //
-// quoted and addr mean what they mean for ProcessICMPFragmentation, and the
-// return value likewise.
+// quoted, addr and the result are as for ProcessICMPFragmentation.
 func (s *Socket) ProcessICMPError(quoted []byte, addr *net.UDPAddr) bool {
 	if addr == nil {
 		return false
@@ -717,6 +668,7 @@ func (s *Socket) ProcessICMPError(quoted []byte, addr *net.UDPAddr) bool {
 	return s.sock.ProcessICMPError(quoted, utp.NewUdpPeer(addr))
 }
 
+// Addr returns the local address, implementing net.Listener.
 func (s *Socket) Addr() net.Addr { return s.udp.LocalAddr() }
 
 // LocalAddr returns the local address, satisfying net.PacketConn.
@@ -731,7 +683,7 @@ func (s *Socket) SetDeadline(t time.Time) error {
 	return nil
 }
 
-// SetReadDeadline bounds how long ReadFrom will wait.
+// SetReadDeadline sets how long ReadFrom will wait.
 func (s *Socket) SetReadDeadline(t time.Time) error {
 	s.readDeadline.set(t)
 	return nil
@@ -746,25 +698,23 @@ func (s *Socket) SetWriteDeadline(t time.Time) error {
 }
 
 // Close shuts down the socket, every connection on it, and the underlying UDP
-// port. It is idempotent.
+// port. It is safe to call more than once.
 //
-// Connections already closed are given the time to deliver what they hold,
-// as utp.UtpSocket.Close gives them, and the port goes on being read while
-// they do: their acknowledgements arrive on it. The reader used to stop
-// first, so a Write followed by Close and Socket.Close lost whatever was
-// still behind the congestion window. Release review of 9c44c4f (R2).
+// Connections already closed are given time to deliver what they hold, as
+// utp.UtpSocket.Close gives them, and the port keeps being read meanwhile,
+// since their acknowledgements arrive on it.
 func (s *Socket) Close() error {
 	s.shutdown(nil)
 	return nil
 }
 
-// shutdown is Close, and the close a terminal read error causes.
+// shutdown implements Close, and the close a terminal read error causes.
 func (s *Socket) shutdown(readErr error) {
 	s.closeOnce.Do(func() {
 		if readErr != nil {
 			s.readErr.Store(&readErr)
 		}
-		// What the application waits in ends now.
+		// Calls the application is waiting in end now.
 		close(s.closed)
 		s.appCancel()
 		if readErr != nil {
@@ -778,8 +728,8 @@ func (s *Socket) shutdown(readErr error) {
 		s.inner.close()
 		_ = s.udp.SetReadDeadline(time.Now())
 		if s.generic != nil {
-			// See NewSocketFromPacketConn: closing it is what stops the
-			// reader, and waiting first could wait for ever.
+			// See NewSocketFromPacketConn: closing pc is what stops the reader,
+			// and waiting first could wait forever.
 			_ = s.udp.Close()
 			return
 		}
@@ -788,8 +738,8 @@ func (s *Socket) shutdown(readErr error) {
 	})
 }
 
-// closedErr is what an operation on a closed socket returns: ErrSocketClosed,
-// wrapping the read error that closed it if one did.
+// closedErr returns the error for an operation on a closed socket:
+// ErrSocketClosed, wrapping the read error that closed it, if any.
 func (s *Socket) closedErr() error {
 	if err := s.readErr.Load(); err != nil {
 		return fmt.Errorf("%w: %w", ErrSocketClosed, *err)
@@ -802,7 +752,7 @@ func udpNetwork(network string) string {
 	case "udp", "udp4", "udp6":
 		return network
 	default:
-		// anacrolix/torrent names its networks "utp", "utp4" and "utp6".
+		// Accept "utp", "utp4" and "utp6" as aliases of the UDP networks.
 		switch {
 		case len(network) > 0 && network[len(network)-1] == '4':
 			return "udp4"
@@ -828,7 +778,7 @@ func toUDPAddr(addr net.Addr) (*net.UDPAddr, error) {
 	}
 }
 
-// timeoutError is what net expects a deadline to produce.
+// timeoutError is the net.Error a deadline produces.
 type timeoutError struct{}
 
 func (timeoutError) Error() string   { return "utpnet: i/o timeout" }
