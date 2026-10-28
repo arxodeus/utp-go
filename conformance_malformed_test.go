@@ -8,14 +8,11 @@ import (
 	"time"
 )
 
-// Malformed and hostile input, compared against libutp.
-//
-// The rule from the brief: every validation that causes libutp to drop or
-// reset matters, because if this implementation accepts a packet libutp
-// rejects, that is both an incompatibility and an attack surface.
-//
-// Each case injects raw bytes into an established connection on both sides
-// and requires them to agree on whether anything comes back.
+// Malformed and hostile input, compared with the reference implementation.
+// Accepting a packet the reference rejects would be both an incompatibility
+// and an attack surface. Each case injects raw bytes into an established
+// connection on both sides and requires them to agree on whether anything
+// comes back.
 
 // wireHeader builds a well-formed 20-byte header, which each case then
 // corrupts in one specific way.
@@ -61,7 +58,7 @@ func nameForLen(n int) string {
 	return string(rune('0'+n/10)) + string(rune('0'+n%10)) + "bytes"
 }
 
-// uTP version 1 is the only version either implementation speaks.
+// Version 1 is the only version.
 func TestMalformedWrongVersion(t *testing.T) {
 	for _, v := range []byte{0, 2, 15} {
 		t.Run(string(rune('0'+v%10))+"-version", func(t *testing.T) {
@@ -97,24 +94,14 @@ func TestMalformedExtensionLengthOverrunsPacket(t *testing.T) {
 	malformedCase(t, "an extension length past the end of the packet", raw)
 }
 
-// A selective ack whose length is not a whole number of 4-byte words.
-//
-// This is a deliberate divergence, and the only one in this file. libutp
-// performs no length validation on a selective-ack extension at all -- its
-// parser records the pointer and moves on (utp_internal.cpp:1844, `case 1`),
-// with only the generic "does the length fit in the packet" check applied. It
-// therefore accepts a 1, 3, 5 or 7-byte bitfield and interprets it.
-//
-// We reject it. A bitfield that is not a whole number of words is truncated,
-// and interpreting it means guessing which acks the peer meant. libutp never
-// emits such an extension -- it always writes exactly 4 bytes
-// (utp_internal.cpp:815-818) -- so nothing in the wild depends on the
-// leniency, and being stricter here cannot make us unroutable.
-//
-// The direction matters: being stricter than the reference is an
-// interoperability risk, being more permissive is an attack surface. This
-// test pins the direction, so a future change that makes us accept these
-// would fail.
+// A selective ack whose length is not a whole number of 4-byte words. This
+// is a deliberate difference: the reference implementation does not check
+// the length and interprets the truncated bitfield, while this library
+// rejects it, since interpreting it means guessing which acks the peer
+// meant. Selective acks are always written as exactly 4 bytes, so nothing
+// depends on the leniency. Being stricter than the reference risks
+// interoperability; being more permissive is an attack surface. The test
+// fixes the direction.
 func TestMalformedSelectiveAckLength(t *testing.T) {
 	for _, extLen := range []byte{1, 3, 5, 7} {
 		t.Run(string(rune('0'+extLen))+"-len", func(t *testing.T) {
@@ -165,28 +152,14 @@ func unknownExtensionPacket() []byte {
 	return append(raw, []byte("payload")...)
 }
 
-// An unknown first extension type. BEP 29 says unknown extensions are skipped
-// using their length, so a well-formed one carrying a payload ought to be
-// accepted and acked. Neither implementation does that: both drop the packet.
+// An unknown first extension type. BEP 29 says unknown extensions are
+// skipped by their length, but both implementations drop the packet: a first
+// extension type of 3 or more makes the reference implementation read the
+// packet's version as 0, so it is not treated as uTP.
 //
-// libutp does not drop it in its extension loop, which has no default case and
-// would skip the type quite happily (utp_internal.cpp:1844-1866). It drops it
-// two steps earlier, in UTP_Version (utp_internal.cpp:2480):
-//
-//	return (pf->type() < ST_NUM_STATES && pf->ext < 3 ? pf->version() : 0);
-//
-// A first extension byte of 3 or more makes the packet report version 0, and a
-// version that is not 1 is not uTP. The packet never reaches a socket.
-//
-// So the two implementations agree, and agree in departing from the
-// specification. Recorded in DEVIATIONS.md.
-//
-// The second step is the assertion and the third is what makes it mean
-// anything: the identical packet without the extension is acked, so the
-// silence above is the extension being rejected and not some unrelated reason
-// the connection had stopped answering. This case asserted nothing at all
-// until that control was added -- it expected an emission, got none from
-// either side, and passed on the match.
+// The control, the same packet without the extension, is acknowledged, so
+// the silence is the extension being rejected and not the connection having
+// stopped answering for some other reason.
 func TestMalformedUnknownExtensionType(t *testing.T) {
 	plain := dataHeader()
 	plain = append(plain, []byte("payload")...)
@@ -204,17 +177,11 @@ func TestMalformedUnknownExtensionType(t *testing.T) {
 	})
 }
 
-// The same unknown type, but second in the chain rather than first.
-//
-// UTP_Version inspects only `pf->ext`, the first extension byte. An unknown
-// type reached through a chain never passes through that gate, and libutp's
-// extension loop skips it by its length as BEP 29 says it should. So the
-// packet libutp rejects and the packet it accepts differ only in the order of
-// two extensions.
-//
-// This is the case that separates "rejects unknown extensions" from "rejects
-// an unknown extension byte in the header", and the two implementations have
-// to agree on which of those they do.
+// The same unknown type, second in the chain rather than first. Only the
+// first extension byte is checked in the header; an unknown type reached
+// through the chain is skipped by its length, as BEP 29 says. This separates
+// "rejects unknown extensions" from "rejects an unknown extension byte in
+// the header".
 func TestMalformedUnknownExtensionTypeInChain(t *testing.T) {
 	raw := dataHeader()
 	raw[1] = 1 // first extension: selective ack, which is known
@@ -290,10 +257,8 @@ func runDivergence(t *testing.T, raws [][]byte, answered bool) (ours, libutpOut 
 		conn.inject(raw)
 		conn.settle()
 	}
-	// settle calls a connection done after 60 ms with nothing new, which on a
-	// loaded machine can come before its answer to the last packet: under the
-	// full suite TestReorderedDataDoesNotBlockOurWindow read "ours emitted
-	// nothing" from a connection that answers every packet when run alone. A
+	// settle declares a connection done after 60 ms with nothing new, which
+	// on a loaded machine can come before its answer to the last packet. A
 	// caller that expects an answer waits for one.
 	for deadline := time.Now().Add(5 * time.Second); answered && conn.emittedCount() == 0 && time.Now().Before(deadline); {
 		time.Sleep(5 * time.Millisecond)
