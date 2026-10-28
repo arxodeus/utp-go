@@ -25,13 +25,11 @@ func (s *UtpSocket) readLoop() {
 	}
 
 	// Each read is a batch. A connection holds the acknowledgement owed for
-	// a packet until the batch has been dispatched, so a run of datagrams that
-	// were already waiting in the kernel draws one acknowledgement, not one
-	// each -- libutp's embedder loop of recvfrom until EWOULDBLOCK, then
-	// utp_issue_deferred_acks (utp.h:512-517). A Conn that cannot read in
-	// batches but is a QueuedReader has its batch end when nothing more is
-	// waiting; any other Conn makes every datagram its own batch, which holds
-	// nothing back.
+	// a packet until the batch has been dispatched, so datagrams already
+	// queued in the kernel draw one acknowledgement rather than one each. A
+	// Conn that cannot read in batches but is a QueuedReader ends its batch
+	// when nothing more is waiting; any other Conn makes each datagram its
+	// own batch.
 	br, _ := s.socket.(batchReader)
 	qr, _ := s.socket.(QueuedReader)
 	touched := &readBatch{}
@@ -43,9 +41,9 @@ func (s *UtpSocket) readLoop() {
 		case <-s.ctx.Done():
 			return
 		default:
-			// Part way through a run the read cannot block, so this loop is
-			// not idle -- and must not be seen to be, with acknowledgements
-			// still owed for the run. See idleBarrier.
+			// Partway through a run the read cannot block, so this loop is not
+			// idle, and must not appear so while acknowledgements are owed.
+			// See idleBarrier.
 			if barrier != nil && run == 0 {
 				barrier.MarkIdle()
 			}
@@ -83,10 +81,9 @@ func (s *UtpSocket) readLoop() {
 				continue
 			}
 			failures = 0
-			// Decoded from buf, which the next read reuses: a packet
-			// processed before then needs no copy, and one kept takes its
-			// body (packet.own). The whole datagram was copied, an
-			// allocation for every packet received.
+			// Decoded from buf, which the next read reuses: a packet processed
+			// before then needs no copy, and one that is kept copies its body
+			// (packet.own).
 			s.dispatch(&incomingPacketRaw{peer: from, payload: buf[:n], borrowed: true}, touched)
 			if run++; qr == nil || run >= maxQueuedRun || qr.Queued() == 0 {
 				s.endBatch(touched)
@@ -97,16 +94,11 @@ func (s *UtpSocket) readLoop() {
 	}
 }
 
-// dispatch routes one datagram, on the reader's goroutine. A packet for an
-// established connection is handled there and then, under that
-// connection's lock (connection.receiveInline), and the connection is
-// recorded in touched, to be acknowledged at the end of the batch.
-//
-// This handed every datagram to a socket event loop, which handed it on to
-// the connection's own event loop: two goroutine hand-offs before the packet
-// was looked at, and a third, to a write loop, before its acknowledgement
-// left. libutp's embedder calls utp_process_udp from its read loop and the
-// acknowledgement is sent from the same call stack.
+// dispatch routes one datagram on the reader's goroutine. A packet for an
+// established connection is handled immediately under that connection's lock
+// (connection.receiveInline), and the connection is recorded in touched, to
+// be acknowledged at the end of the batch. Handling packets on the reader
+// avoids goroutine hand-offs between receiving a packet and acknowledging it.
 func (s *UtpSocket) dispatch(raw *incomingPacketRaw, touched *readBatch) {
 	s.dispatchMu.Lock()
 	c := s.handleIncomingBuf(raw)
@@ -117,18 +109,15 @@ func (s *UtpSocket) dispatch(raw *incomingPacketRaw, touched *readBatch) {
 	}
 }
 
-// readBatch is the connections one read batch delivered to, each once, in the
-// order the batch first reached them. A list rather than a set: a batch
-// usually reaches one connection, and a map's iteration and deletion were a
-// tenth of a packet's cost on a reader woken with its caches cold.
+// readBatch lists the connections one read batch delivered to, each once, in
+// the order first reached. A list rather than a set, since a batch usually
+// reaches one connection.
 type readBatch struct {
 	conns []*connection
 }
 
-// endBatch acknowledges, for each connection a read batch delivered to, what
-// the batch brought it, and empties touched. libutp's
-// utp_issue_deferred_acks, which its embedder calls once the socket would
-// block (utp.h:512-517).
+// endBatch sends, for each connection a read batch delivered to, the
+// acknowledgement for what the batch brought it, and empties touched.
 func (s *UtpSocket) endBatch(touched *readBatch) {
 	for i, c := range touched.conns {
 		c.inReadBatch = false
@@ -138,21 +127,15 @@ func (s *UtpSocket) endBatch(touched *readBatch) {
 	touched.conns = touched.conns[:0]
 }
 
-// maxConsecutiveReadErrors is how many read errors in a row the socket
-// tolerates before it gives up and closes. go-libutp, go-utp's pure Go port
-// and rust-utp all use 100, for the same reason: some platforms report errors
-// on a UDP socket that do not mean it is finished.
+// maxConsecutiveReadErrors is how many consecutive read errors the socket
+// tolerates before it closes. Some platforms report errors on a UDP socket
+// that do not mean it is finished.
 const maxConsecutiveReadErrors = 100
 
-// readFailed handles a read error, and reports whether the read loop should
-// stop. failures counts the errors since the last successful read.
-//
-// The loop used to stop at the first error that did not say it was temporary,
-// and leave the socket open. Nothing read from it again: every connection on
-// it retransmitted into silence until it timed out, new dials and accepts
-// waited out their contexts, and nothing told the application why. Now a run
-// of errors is tolerated, and a socket that cannot read closes, so everything
-// waiting on it fails at once with ErrClosed-shaped errors instead.
+// readFailed handles a read error and reports whether the read loop should
+// stop. failures counts the errors since the last successful read. A run of
+// errors is tolerated; a socket that cannot read closes, so everything
+// waiting on it fails promptly.
 func (s *UtpSocket) readFailed(err error, failures *int) bool {
 	if err == nil {
 		*failures = 0
@@ -172,8 +155,7 @@ func (s *UtpSocket) readFailed(err error, failures *int) bool {
 	}
 	s.logger.Error("too many consecutive read errors, closing the socket",
 		"err", err, "consecutive", *failures)
-	// In the background: Close waits for this loop's peers to settle, and
-	// this loop is one of the things it tears down.
+	// In the background: Close waits for this loop, among other things.
 	go s.Close()
 	return true
 }
@@ -181,13 +163,11 @@ func (s *UtpSocket) readFailed(err error, failures *int) bool {
 // handleIncomingBuf routes one datagram, and returns the connection that
 // took it inline, or nil. Called with dispatchMu held.
 func (s *UtpSocket) handleIncomingBuf(incomingRaw *incomingPacketRaw) *connection {
-	// Handle incoming packets
+	// Handle the packet.
 	packetPtr, err := decodePacket(incomingRaw.payload, incomingRaw.borrowed)
 	if err != nil {
-		// Not uTP, or not well formed. Ordinary on a port shared with
-		// another protocol -- go-libutp, go-utp and rust-utp all hand such
-		// datagrams on rather than complain -- and anyone can send them, so
-		// a warning per datagram is a way to flood the log.
+		// Not uTP, or malformed. Ordinary on a port shared with another
+		// protocol, and anyone can send them, so do not log each one.
 		s.logger.Debug("Unable to decode uTP packet", "peer", incomingRaw.peer, "err", err)
 		return nil
 	}
@@ -202,30 +182,20 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *incomingPacketRaw) *connectio
 			"packet.Data.len", len(packetPtr.Body))
 	}
 
-	// Each derivation is looked up by its key alone, built into a reused
-	// buffer: no ConnectionId and no string per attempt. This ran three
-	// cidFromPacket calls for every datagram -- for an accepted connection the
-	// match is the third -- each formatting the peer's address and the key
-	// anew: 9 of the 23 allocations a data packet cost, and most of the time
-	// routing took. A ConnectionId is built below only for a SYN.
+	// Each candidate is looked up by its key alone, built into a reused
+	// buffer. A ConnectionId is built below only for a SYN.
 	peerKey := incomingRaw.peer.Hash()
 	send, recv, connStream, c := s.route(packetPtr, peerKey)
 	if connStream != nil {
 		if c != nil && c.receiveInline(packetPtr) {
 			return c
 		}
-		// The last hop of the inbound path: a virtual clock must not
-		// consider the system quiet while this packet is queued for a
-		// connection that has not woken to take it.
-		//
-		// Noted and taken on streamIncoming only, and that is what keeps
-		// the accounting honest rather than approximately right. A
-		// connection's event channel has several writers -- this loop,
-		// the ICMP entry points, and the application's own CloseWrite,
-		// CloseRead and Close -- and only this one is a clock
-		// participant. Keying both halves on the event type makes the
-		// pairing structural: nothing else notes, and the connection
-		// takes for nothing else. See idleBarrier.
+		// The last hop of the inbound path: a virtual clock must not consider
+		// the system quiet while this packet is queued for a connection that
+		// has not woken to take it. Only streamIncoming is noted and taken,
+		// since the connection's other event writers (ICMP and the
+		// application's close calls) are not clock participants. See
+		// idleBarrier.
 		barrier, _ := s.clock().(idleBarrier)
 		if barrier != nil {
 			barrier.NoteHandoff()
@@ -241,8 +211,8 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *incomingPacketRaw) *connectio
 			if barrier != nil {
 				barrier.TakeHandoff()
 			}
-			// See droppedFullConnQueue. This is a real packet loss that the
-			// peer has to recover from, and it is ours, not the network's.
+			// See droppedFullConnQueue. This is real packet loss the peer must
+			// recover from.
 			s.droppedFullConnQueue.Add(1)
 			s.logger.Warn("connection stream channel is full, dropping packet",
 				"connStream.len", len(connStream), "cid.send", send, "cid.recv", recv, "cid.peer", peerKey)
@@ -265,15 +235,12 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *incomingPacketRaw) *connectio
 			"accCID", cidFromPacket(packetPtr, incomingRaw.peer, cidTypes[2]))
 	}
 	if packetPtr.Header.PacketType != st_syn {
-		// An unmatched RESET is dropped, never answered: replying to a reset
-		// with a reset lets two hosts trade them forever. libutp handles
-		// ST_RESET in its own branch and returns without responding
-		// (utp_internal.cpp:2850-2881).
+		// An unmatched RESET is dropped, never answered: answering a reset
+		// with a reset would let two hosts exchange them indefinitely.
 		if packetPtr.Header.PacketType != st_reset {
 			// A FIN or data packet retransmitted after we closed is
-			// re-acknowledged rather than reset. Checked here, once every
-			// lookup above has missed, so a connection that still exists
-			// always wins.
+			// re-acknowledged rather than reset. Checked only after every
+			// lookup above has missed, so a live connection always wins.
 			if s.reAckLingering(packetPtr, incomingRaw.peer) {
 				return nil
 			}
@@ -288,11 +255,9 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *incomingPacketRaw) *connectio
 	cid := cidFromPacket(packetPtr, incomingRaw.peer, cidTypes[2])
 	cidHash := cid.Hash()
 
-	// A connection we dialled may already receive on the id this one would:
-	// accepting it would leave two connections a packet could be for. libutp
-	// refuses the SYN without an answer -- "rejected incoming connection,
-	// connection already exists" (utp_internal.cpp:2957-2965) -- and the
-	// dialler, hearing nothing, gives up or retries on its own terms.
+	// A connection we dialed may already receive on the id this one would
+	// use; accepting would leave a packet ambiguous between the two. The SYN
+	// is dropped without an answer, and the dialer retries or gives up.
 	s.connsMutex.RLock()
 	taken := s.recvIdTakenLocked(cid.Recv, peerKey)
 	s.connsMutex.RUnlock()
@@ -305,11 +270,9 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *incomingPacketRaw) *connectio
 		return nil
 	}
 
-	// The connection cap is checked here, where libutp checks it: after the
-	// duplicate lookup above and before the firewall
-	// (utp_internal.cpp:2967-2974). A SYN for a connection already parked
-	// waiting for Accept is the peer retransmitting, not a new connection,
-	// and does not count against the cap.
+	// Check the connection limit after the duplicate lookup and before the
+	// firewall. A SYN for a connection already waiting for Accept is a
+	// retransmission and does not count.
 	if s.maxConns > 0 {
 		if _, parked := s.incomingConns.get(cidHash); !parked && s.connectionCount() > s.maxConns {
 			s.refusedAtCapacity.Add(1)
@@ -321,13 +284,10 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *incomingPacketRaw) *connectio
 		}
 	}
 
-	// The firewall is asked here: every lookup above has missed, so this is a
-	// connection the socket does not have, and nothing has been created for it
-	// yet. libutp asks in the same place, after its duplicate-connection check
-	// and before utp_create_socket (utp_internal.cpp:2975-2982), and a refusal
-	// there is `return 1` -- the SYN is dropped without an answer. Not a
-	// RESET: a RESET would confirm to a refused peer that something is
-	// listening, which is the opposite of what a blocklist is for.
+	// Consult the firewall: every lookup above has missed, so this is a new
+	// connection and nothing has been created for it yet. A refused SYN is
+	// dropped without an answer; a RESET would confirm to a blocked peer
+	// that something is listening.
 	if s.firewall != nil && s.firewall(incomingRaw.peer) {
 		s.refusedByFirewall.Add(1)
 		if s.logger.Enabled(baseContext, slog.LevelDebug) {
@@ -361,24 +321,19 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *incomingPacketRaw) *connectio
 				"cid.Send", cid.Send, "cid.Recv", cid.Recv)
 		}
 		// The socket's context, not the Accept call's: an accepted connection
-		// outlives the Accept that produced it, exactly as a dialled one
-		// outlives its dial. The sibling branch above already used s.ctx.
+		// outlives the Accept that returned it, as a dialed one outlives its
+		// dial.
 		s.selectAcceptHelper(cid, packetPtr, accept)
 	} else if s.acceptConfig != nil {
-		// Nobody is waiting, and the socket has a configuration of its own:
-		// answer now, as libutp does, and hold the connection for an Accept.
-		//
-		// Held from here, under the lock an Accept takes it under, not once
-		// its handshake reports from another goroutine: by then the dialler
-		// can have the answer, and an AcceptBacklog asked of this socket
-		// found nothing -- TestDialCompletesWithNoAcceptWaiting, 9 runs in
-		// 200. libutp hands its embedder the connection from inside the call
-		// that received the SYN (utp_call_on_accept, utp_internal.cpp:3001).
+		// Nobody is waiting and the socket has its own configuration: answer
+		// now and hold the connection for an Accept. It is held from here,
+		// under the lock Accept takes, so the backlog reflects it before the
+		// dialer can see the answer.
 		if st := s.selectAcceptHelper(cid, packetPtr, &acceptRequest{
 			ctx:    s.ctx,
 			stream: make(chan *streamResult, 1),
-			// Already held. A connection that fails ends, and is dropped
-			// from answered once it has.
+			// Already held. A connection that fails is dropped from answered once
+			// it ends.
 			onHand: func(*streamResult) {},
 		}); st != nil {
 			s.holdAnswered(st)
@@ -390,21 +345,11 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *incomingPacketRaw) *connectio
 	return nil
 }
 
-// maybeSendReset answers a packet addressed to a connection this socket does
-// not have, subject to the same rate limiting libutp applies.
-//
-// Answering every such packet is both an incompatibility and an amplification
-// vector: a peer that keeps sending to a torn-down connection draws one RESET
-// per packet. A 300-connection test run emitted over 3000 of them. libutp
-// remembers what it has already answered and stays quiet
-// (utp_internal.cpp:2907-2945).
 // rememberLingerAck keeps one acknowledgement for a connection that has just
 // closed, so a FIN the peer retransmits is answered rather than reset.
-//
-// lingerAckTimeout is generous against libutp's FIN retransmissions, which
-// back off from its 1000ms RTO floor: it covers the first few, which is where
-// a lost acknowledgement actually costs something. Past that the peer gives up
-// on its own and a RESET is the right answer anyway.
+// lingerAckTimeout covers the first few retransmissions, where a lost
+// acknowledgement matters; after that the peer gives up and a RESET is the
+// right answer.
 func (s *UtpSocket) rememberLingerAck(key string, ack *packet) {
 	if ack == nil {
 		return
@@ -413,25 +358,17 @@ func (s *UtpSocket) rememberLingerAck(key string, ack *packet) {
 	s.lingerExpirations.put(key, key, lingerAckTimeout)
 }
 
-// reAckLingering answers a FIN or a data packet retransmitted for a connection
+// reAckLingering answers a FIN or data packet retransmitted for a connection
 // that has just closed, and reports whether it did.
 //
-// Both arrive for the same reason: the peer finished sending, we acknowledged
-// everything including its FIN and tore down, and one of those acknowledgements
-// was lost. The peer is retransmitting something we have already received and
-// already acknowledged. Sending it that acknowledgement again ends the
-// connection cleanly on both sides; sending a RESET tells it a completed
-// transfer failed.
+// Both arrive because one of our final acknowledgements was lost and the
+// peer is retransmitting what we already received. Acknowledging it again
+// ends the connection cleanly on both sides; a RESET would tell the peer a
+// completed transfer failed.
 //
-// This is what libutp does in return, for the same reason it can: it keeps the
-// socket in CS_GOT_FIN until its own application closes, and a socket in that
-// state acknowledges duplicates of data it has already taken.
-//
-// Data arriving *past* the stored acknowledgement -- beyond anything we took --
-// is the other half of the same case: the peer writing after our FIN. libutp,
-// still in CS_GOT_FIN, hands that to its application; we have none left to hand
-// it to, so we drop it, but silently, which is what libutp's wire looks like.
-// Either way the answer is never a RESET, and this returns true for both.
+// Data beyond the stored acknowledgement is the peer writing after our FIN.
+// With no application left to deliver it to, it is dropped silently. Either
+// way the answer is never a RESET.
 func (s *UtpSocket) reAckLingering(pkt *packet, peer ConnectionPeer) bool {
 	if pkt.Header.PacketType != st_fin && pkt.Header.PacketType != st_data {
 		return false
@@ -442,28 +379,15 @@ func (s *UtpSocket) reAckLingering(pkt *packet, peer ConnectionPeer) bool {
 		if !ok {
 			continue
 		}
-		// Data past the stored acknowledgement number is not a retransmission
-		// of anything we took: it is the peer writing after our FIN, which is
-		// what its half-close is for. We have nobody to give it to -- the
-		// application closed -- but there is a difference between discarding
-		// it and telling the peer its connection is broken.
+		// Data past the stored acknowledgement number is the peer writing after
+		// our FIN, which a half-close permits. Nobody is left to receive it,
+		// so it is discarded silently rather than answered with a RESET.
 		//
-		// libutp discards. Its socket sits in CS_GOT_FIN and simply ignores
-		// what arrives past the FIN; DEVIATIONS.md recorded us answering with
-		// a RESET as a deliberate divergence, and measuring it showed what
-		// that costs: a libutp peer writing after our FIN gets
-		// UTP_ECONNRESET, three runs out of three. Silence matches the
-		// reference and costs the peer nothing but a few retransmissions it
-		// was going to make anyway.
-		// The peer's FIN, numbered just past everything we took, is the end
-		// of a stream we have whole: it is acknowledged, and the stored
-		// acknowledgement moves to cover it. Silence here -- the rule for data
-		// below -- left a peer that closed second retransmitting its FIN for
-		// ever, each retransmission refreshing this entry; ending a closed
-		// connection only once its FIN is acknowledged, as libutp does, made
-		// that every such connection (review of 294cc2e).
-		// Stamped as it is sent (freshlyStamped), on the wire clock: the
-		// connection, and any clock its config gave it, has gone.
+		// The peer's FIN, numbered just past everything we took, ends a
+		// stream we have in full: acknowledge it and move the stored
+		// acknowledgement to cover it, or a peer that closed second would
+		// retransmit its FIN indefinitely. It is stamped as sent
+		// (freshlyStamped) on the wire clock, since the connection is gone.
 		if pkt.Header.PacketType == st_fin && pkt.Header.SeqNum == ack.Header.AckNum+1 {
 			finAck := freshlyStamped(ack, nowMicro(), pkt)
 			finAck.Header.AckNum = pkt.Header.SeqNum
@@ -477,11 +401,8 @@ func (s *UtpSocket) reAckLingering(pkt *packet, peer ConnectionPeer) bool {
 				s.logger.Debug("ignoring data past a closed connection's FIN",
 					"cid.send", cid.Send, "cid.recv", cid.Recv, "seq", pkt.Header.SeqNum)
 			}
-			// Refresh, as below: a peer still writing is still there, and
-			// letting the entry expire under it would hand it the RESET this
-			// exists to avoid. The cost is one entry, held only by a peer
-			// that completed a handshake with us, which is the more expensive
-			// half of the exchange.
+			// Refresh, as below: a peer still writing is still there, and letting
+			// the entry expire would hand it the RESET this avoids.
 			s.lingerExpirations.put(cid.Hash(), cid.Hash(), lingerAckTimeout)
 			return true
 		}
@@ -497,6 +418,10 @@ func (s *UtpSocket) reAckLingering(pkt *packet, peer ConnectionPeer) bool {
 	return false
 }
 
+// maybeSendReset answers a packet for a connection this socket does not have
+// with a RESET. Each packet (peer, connection id and sequence number) is
+// answered once while its entry lasts, and nothing is answered while too many
+// entries are outstanding, so a RESET cannot be used for amplification.
 func (s *UtpSocket) maybeSendReset(pkt *packet, peer ConnectionPeer) {
 	key := rstInfoKey{
 		peer:   peer.Hash(),
@@ -505,14 +430,12 @@ func (s *UtpSocket) maybeSendReset(pkt *packet, peer ConnectionPeer) {
 	}
 
 	if _, seen := s.rstInfo.get(key); seen {
-		// Already answered this one. Refresh its expiry and stay quiet, as
-		// libutp does at utp_internal.cpp:2918.
+		// Already answered: refresh its expiry and stay quiet.
 		s.rstInfoExpirations.put(key, key, rstInfoTimeout)
 		return
 	}
 	if s.rstInfo.len() > rstInfoLimit {
-		// Past this point libutp stops answering entirely rather than let the
-		// table grow without bound (utp_internal.cpp:2928).
+		// Stop answering rather than let the table grow without bound.
 		if s.logger.Enabled(baseContext, slog.LevelDebug) {
 			s.logger.Debug("not sending RESET, too many already outstanding", "stored", s.rstInfo.len())
 		}
@@ -523,16 +446,13 @@ func (s *UtpSocket) maybeSendReset(pkt *packet, peer ConnectionPeer) {
 	s.rstInfo.put(key, struct{}{})
 	s.rstInfoExpirations.put(key, key, rstInfoTimeout)
 
-	// Fields match libutp's send_rst (utp_internal.cpp:846-863) exactly:
+	// The reset's fields:
 	//
 	//   - ack_nr is the sequence number of the packet being rejected, so the
-	//     peer can tell which of its packets drew the reset. We previously
-	//     left it at zero, which named no packet at all.
-	//   - seq_nr is random, so an off-path attacker cannot predict it.
-	//   - windowsize is zero: there is no connection, so there is no receive
-	//     window to advertise. We previously advertised 100000.
-	//   - the timestamp fields are left at zero. libutp zeroes the whole
-	//     header and never fills them in for a reset.
+	//     peer can tell which packet drew the reset;
+	//   - seq_nr is random, so an off-path attacker cannot predict it;
+	//   - windowsize is zero, since there is no connection;
+	//   - the timestamp fields are zero.
 	randSeqNum := randomUint16()
 	resetPacket := newPacketBuilder(st_reset, pkt.Header.ConnectionId, 0, 0, randSeqNum).
 		WithAckNum(pkt.Header.SeqNum).
@@ -542,22 +462,18 @@ func (s *UtpSocket) maybeSendReset(pkt *packet, peer ConnectionPeer) {
 
 // ProcessICMPFragmentation reports an ICMP "fragmentation needed" message
 // (IPv4 type 3 code 4, or ICMPv6 "packet too big") for a datagram this socket
-// sent, so the path-MTU search can take the router's word for it instead of
-// discovering the same limit by losing a probe.
+// sent, so the path-MTU search can use the router's figure instead of losing
+// a probe to discover it.
 //
-// quoted is the *uTP datagram the ICMP message quoted* -- the original UDP
-// payload -- not the ICMP packet and not the IP or UDP headers around it.
-// peer is the address that datagram was sent to. nextHopMTU is the router's
-// figure, which may be zero: older routers do not supply one, and the search
-// falls back to halving the gap when it is missing or implausible.
+// quoted is the uTP datagram the ICMP message quoted, the original UDP
+// payload, without the ICMP, IP or UDP headers. peer is the address it was
+// sent to. nextHopMTU is the router's figure, which may be zero; the search
+// halves the gap when it is missing or implausible.
 //
-// It reports whether the quoted bytes were recognised as a uTP packet
-// belonging to a live connection, matching what libutp's return value means
-// (utp_internal.cpp:3071-3072).
+// It reports whether quoted was recognized as a packet of a live connection.
 //
-// This library does not open a raw socket to collect ICMP itself, and neither
-// does libutp: on Linux the usual source is IP_RECVERR on the UDP socket, and
-// feeding it in is the embedder's job.
+// The socket does not collect ICMP itself. On Linux the usual source is
+// IP_RECVERR on the UDP socket.
 func (s *UtpSocket) ProcessICMPFragmentation(quoted []byte, peer ConnectionPeer, nextHopMTU uint16) bool {
 	return s.deliverICMP(quoted, peer, &icmpNotice{
 		Kind:       icmpFragmentationNeeded,
@@ -565,41 +481,32 @@ func (s *UtpSocket) ProcessICMPFragmentation(quoted []byte, peer ConnectionPeer,
 	})
 }
 
-// ProcessICMPError reports an ICMP message that should tear a connection
-// down: destination unreachable other than fragmentation-needed, time
-// exceeded, parameter problem. The connection ends with ErrConnRefused if it
-// had only sent its SYN and ErrReset otherwise, which is libutp's
-// UTP_ECONNREFUSED / UTP_ECONNRESET distinction (utp_internal.cpp:3122).
+// ProcessICMPError reports an ICMP message that should end a connection:
+// destination unreachable other than fragmentation needed, time exceeded, or
+// parameter problem. The connection ends with ErrConnRefused if it had only
+// sent its SYN and ErrReset otherwise.
 //
-// quoted and peer mean what they mean for ProcessICMPFragmentation, and the
-// return value likewise. Deciding which ICMP messages are fatal is the
-// caller's: libutp draws that line in its callers too.
+// quoted, peer and the result are as for ProcessICMPFragmentation. Which ICMP
+// messages are fatal is for the caller to decide.
 func (s *UtpSocket) ProcessICMPError(quoted []byte, peer ConnectionPeer) bool {
 	return s.deliverICMP(quoted, peer, &icmpNotice{Kind: icmpUnreachable})
 }
 
-// deliverICMP is libutp's parse_icmp_payload (utp_internal.cpp:3019-3067)
-// followed by the delivery its two callers share.
+// deliverICMP parses the quoted header and delivers the report to its
+// connection.
 func (s *UtpSocket) deliverICMP(quoted []byte, peer ConnectionPeer, notice *icmpNotice) bool {
 	if peer == nil || notice == nil {
 		return false
 	}
 
-	// "ICMP packets are only required to quote the first 8 bytes of the
-	// layer4 payload. The UDP payload is 8 bytes, and the UTP header is
-	// another 20 bytes. So, in order to find the entire UTP header, we need
-	// the ICMP packet to quote 28 bytes." -- and then libutp checks for 20,
-	// because by this point the UDP header is already off (:3032-3041).
+	// ICMP need only quote 8 bytes of the layer-4 payload, but the UDP
+	// header is already stripped, so the 20-byte uTP header is required.
 	if len(quoted) < minimalHeaderSize {
 		s.logger.Debug("ignoring ICMP: runt quoted payload", "len", len(quoted), "peer", peer)
 		return false
 	}
-	// libutp reads the version and connection id straight out of the quoted
-	// bytes and rejects anything that is not version 1 (:3043-3052). Its
-	// UTP_Version also requires a known packet type and a first extension
-	// below 3, which is exactly what this decoder checks. Only the fixed
-	// header is parsed: a router that quoted 20 bytes has cut the extensions
-	// off, and requiring them would throw away the report.
+	// Parse only the fixed header: a router that quoted 20 bytes has cut
+	// off the extensions, and requiring them would discard the report.
 	header, err := decodePacketHeader(quoted[:minimalHeaderSize])
 	if err != nil {
 		s.logger.Debug("ignoring ICMP: quoted payload is not a uTP v1 packet",
@@ -624,9 +531,9 @@ func (s *UtpSocket) deliverICMP(quoted []byte, peer ConnectionPeer, notice *icmp
 		}
 	default:
 		// The connection's queue is full. Dropping the report costs a probe,
-		// not correctness: the fragmentation case is rediscovered by the lost
-		// probe and the error case by the retransmission timeout. Reported as
-		// unrecognised would be wrong -- the connection was found.
+		// not correctness: fragmentation is rediscovered by the lost probe
+		// and the error by the retransmission timeout. The connection was
+		// found, so this still reports recognized.
 		s.logger.Warn("connection stream channel is full, dropping ICMP report",
 			"id", header.ConnectionId, "peer", peer)
 	}
