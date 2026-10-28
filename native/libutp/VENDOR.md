@@ -17,7 +17,7 @@ libutp peer will complete a transfer with us. These tests are.
 | Date | 2018-05-15 |
 | Licence | MIT, in [`LICENSE.libutp`](LICENSE.libutp) |
 
-This is the same commit [`REFERENCE.md`](../../REFERENCE.md) pins as the
+This is the same commit [`REFERENCE.md`](../../docs/dev/REFERENCE.md) pins as the
 normative text, and `scripts/check-libutp-reference.sh` checks it against the
 copy vendored in `anacrolix/go-libutp`.
 

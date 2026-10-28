@@ -56,7 +56,7 @@ whitespace-only and blank-line-only changes (`diff -w -B`).
 | `utp_templates.h` | 0 | 0 |
 
 The complete set of differences is recorded verbatim in
-[`scripts/libutp-expected.diff`](scripts/libutp-expected.diff). There are
+[`scripts/libutp-expected.diff`](../../scripts/libutp-expected.diff). There are
 three, and none of them touches the wire:
 
 1. **`utp_internal.cpp` — `send_to_addr` gained a `utp_socket*` parameter**

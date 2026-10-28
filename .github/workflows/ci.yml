@@ -1,4 +1,4 @@
-# The release gates in RELEASING.md: the quick ones on every push and pull
+# The release gates in docs/dev/RELEASING.md: the quick ones on every push and pull
 # request, the long ones nightly.
 name: ci
 

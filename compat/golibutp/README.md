@@ -78,7 +78,7 @@ transfers each, on one machine:
 This is loopback, where nothing is queued and nothing is lost, so it measures
 how fast each implementation turns packets around, not how it behaves on a
 network. The repository's emulated-network comparisons
-([BENCHMARKS.md](../../BENCHMARKS.md)) are the ones that say that.
+([BENCHMARKS.md](../../docs/dev/BENCHMARKS.md)) are the ones that say that.
 
 The allocation figures are not like for like. go-libutp's counts only the
 Go heap; libutp allocates each packet it builds or holds out of order with
@@ -125,8 +125,8 @@ Each difference is something go-libutp or libutp could not do:
 
 Underneath, the protocol is this library's. That is libutp's behaviour, and
 where it differs the difference is recorded and measured: see the repository's
-[COMPATIBILITY.md](../../COMPATIBILITY.md) and
-[DEVIATIONS.md](../../DEVIATIONS.md).
+[COMPATIBILITY.md](../../docs/dev/COMPATIBILITY.md) and
+[DEVIATIONS.md](../../docs/dev/DEVIATIONS.md).
 
 ## Publishing
 
@@ -136,7 +136,7 @@ dependency is ignored, so a downloaded copy builds against the v0.1.0 it
 requires: that tag has to exist before this module's own,
 `compat/golibutp/v0.1.0` (it lives in a subdirectory, so its tags carry the
 directory as a prefix). The order, and the check that a clean consumer can
-build both, are in [RELEASING.md](../../RELEASING.md).
+build both, are in [RELEASING.md](../../docs/dev/RELEASING.md).
 
 ## Licence
 

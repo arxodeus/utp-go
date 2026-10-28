@@ -7,7 +7,7 @@
 #
 #   scripts/check-release.sh v0.1.0
 #
-# Run it after pushing the tags (RELEASING.md). It fails if either tag is
+# Run it after pushing the tags (docs/dev/RELEASING.md). It fails if either tag is
 # missing, if compat/golibutp requires a root version that does not exist,
 # or if anything advertised does not compile.
 set -euo pipefail
