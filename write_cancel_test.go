@@ -9,11 +9,7 @@ import (
 )
 
 // A write whose context ends while it waits for room reports what the
-// connection took, and the connection sends that and no more. It reported 0
-// and went on taking the rest, so the peer received bytes the writer had been
-// told were not written -- and utpnet, which retries a write that reported
-// nothing when its deadline moves, sent them twice. From the release review
-// of 9c44c4f (R1).
+// connection took, and the connection sends exactly that.
 func TestCancelledWriteReportsWhatWillBeSent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

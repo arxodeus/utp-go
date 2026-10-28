@@ -8,10 +8,8 @@ import (
 	"time"
 )
 
-// A write waiting behind another one ends when its own context does. The
-// writes were serialised by a mutex, so one queued behind a writer the peer's
-// window held up waited however long that took. From the review of 294cc2e
-// (finding 1); the already-cancelled case is that review's proposed test.
+// A write waiting behind another ends when its own context does, including a
+// context already canceled.
 func TestAWriteWaitingForAnotherHonoursItsContext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

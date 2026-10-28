@@ -7,8 +7,7 @@ import (
 )
 
 // A Socket.Close that lands between a connection's publication and the end
-// of newConn must not leave newConn reading the stream Close took away: it
-// read c.us outside the lock, after Close had set it to nil, and panicked.
+// of newConn must not leave newConn reading the stream Close removed.
 func TestCloseWhileAConnIsBeingPublished(t *testing.T) {
 	a, b := udpPair(t)
 	testHookConnPublished = func(s *Socket) {

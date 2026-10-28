@@ -8,14 +8,12 @@ import (
 	"time"
 )
 
-// TestTheSecondFinIsAcknowledgedPromptly closes connections the way a
-// transfer does -- the sender writes and closes, the receiver reads to the end
-// and closes after -- and requires the receiver's connection, which closed
-// second, to end within a fraction of a retransmission timeout. Its FIN
-// reaches a sender that has closed, or is tearing down, or is gone; libutp
-// acknowledges a FIN whatever the state of its socket (utp_internal.cpp:
-// 2369-2370), and each of those left it unanswered until it was retransmitted.
-// Review of 294cc2e.
+// TestTheSecondFinIsAcknowledgedPromptly closes connections as a transfer
+// does, the sender writing and closing and the receiver reading to the end
+// and closing after, and requires the receiver's connection, which closed
+// second, to end within a fraction of a retransmission timeout. Its FIN may
+// reach a sender that has closed, is tearing down, or is gone, and must be
+// acknowledged in each case.
 func TestTheSecondFinIsAcknowledgedPromptly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

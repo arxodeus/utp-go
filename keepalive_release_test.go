@@ -8,8 +8,7 @@ import (
 )
 
 // A connection quiet for its keep-alive interval holds none of its receive
-// buffer's storage, as libutp holds none of what it has delivered; one that
-// is still busy keeps it.
+// buffer's storage; one that is still busy keeps it.
 func TestQuietConnectionReleasesReceiveStorage(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

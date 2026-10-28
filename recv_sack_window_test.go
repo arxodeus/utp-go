@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// The selective ack visits only its window of the reorder buffer, and must
-// say exactly what a scan of everything held says -- including where the
+// The selective ack visits only its window of the reorder buffer and must
+// report exactly what a scan of everything held reports, including where the
 // window wraps past 65535.
 func TestSelectiveAckMatchesAFullScan(t *testing.T) {
 	for seed := int64(1); seed <= 200; seed++ {
@@ -49,8 +49,7 @@ func flattenSack(s *selectiveAck) []bool {
 	return out
 }
 
-// Building one costs the same however much is held: it used to copy every
-// held packet's number into a map first, on every acknowledgement.
+// Building a selective ack costs the same however much is held.
 func TestSelectiveAckCostDoesNotGrowWithTheReorderBuffer(t *testing.T) {
 	rb := newReceiveBuffer(1<<20, 0)
 	for seq := uint16(3); seq < 3+2000; seq += 2 {

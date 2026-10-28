@@ -6,9 +6,8 @@ import (
 	"time"
 )
 
-// The path MTU cache is bounded, however many destinations the process
-// sends to. It removed nothing, so a node reaching ever more addresses grew
-// it for as long as it ran. From the release review of 9c44c4f (R10).
+// The path MTU cache is bounded however many destinations the process sends
+// to.
 func TestPathMTUCacheIsBounded(t *testing.T) {
 	pathMTUCache.Lock()
 	saved := pathMTUCache.entries
@@ -32,7 +31,7 @@ func TestPathMTUCacheIsBounded(t *testing.T) {
 	}
 }
 
-// Expired entries are what goes first.
+// Expired entries are removed first.
 func TestPathMTUCachePrunesExpiredFirst(t *testing.T) {
 	pathMTUCache.Lock()
 	saved := pathMTUCache.entries

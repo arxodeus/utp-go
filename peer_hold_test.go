@@ -36,8 +36,8 @@ func (c *holdingConn) holds() int {
 	return n
 }
 
-// A transport that keeps something per peer is told a dial's peer is in use
-// from its first SYN, and let go of it when the dial is abandoned. See Conn.
+// A transport that keeps per-peer state is told a dial's peer is in use from
+// its first SYN, and released when the dial is abandoned. See Conn.
 func TestADialHoldsItsPeerUntilTheSocketForgetsIt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

@@ -7,10 +7,10 @@ import (
 	"time"
 )
 
-// libutpTailBurstRecovery is tailBurstRecovery for libutp, through the
-// conformance driver on the same virtual clock: the same round trip, the same
-// burst, every packet but the burst's own acknowledged a round trip after it
-// left, and the burst lost but for its last packet.
+// libutpTailBurstRecovery is tailBurstRecovery for the reference
+// implementation, through the conformance driver on the same virtual clock:
+// the same round trip and burst, every packet but the burst acknowledged a
+// round trip after it left, and the burst lost except its last packet.
 func libutpTailBurstRecovery(t *testing.T, rtt time.Duration, burst int) (time.Duration, int) {
 	t.Helper()
 	rr := newRecoveryRun(t, 0)
@@ -96,7 +96,8 @@ func libutpTailBurstRecovery(t *testing.T, rtt time.Duration, burst int) (time.D
 	return elapsed, int(lostTo-lostFrom) + 1
 }
 
-// The same tail burst, measured against libutp: ours recovers it no slower.
+// The same tail burst against the reference implementation: recovery is no
+// slower.
 func TestTailBurstLossAgainstLibutp(t *testing.T) {
 	const rtt = 50 * time.Millisecond
 	theirs, theirLost := libutpTailBurstRecovery(t, rtt, 25)

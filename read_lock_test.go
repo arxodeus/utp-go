@@ -8,10 +8,7 @@ import (
 	"time"
 )
 
-// A read waiting behind another one ends when its own context does. Reads
-// were serialised by a mutex, so one queued behind a reader waiting on a quiet
-// stream waited as long as that one did, whatever its own context said.
-// Release review of 224c363, finding 2.
+// A read waiting behind another ends when its own context does.
 func TestAReadWaitingForAnotherHonoursItsContext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -55,8 +52,7 @@ func TestAReadWaitingForAnotherHonoursItsContext(t *testing.T) {
 	}
 }
 
-// A read waiting for another gives up when the read side is closed, rather
-// than waiting to be let in and told so.
+// A read waiting for another gives up when the read side is closed.
 func TestAReadWaitingForAnotherEndsAtCloseRead(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

@@ -9,10 +9,10 @@ import (
 	"time"
 )
 
-// BenchmarkReadBatch is the cost of udpConn.readBatch taking k datagrams the
-// kernel already holds, per datagram (ns/datagram): k = 1 is a reader woken
-// for each packet, as on a paced path, and larger k a reader that fell behind
-// a burst. Only the read is timed; the datagrams are queued before it.
+// BenchmarkReadBatch measures udpConn.readBatch taking k datagrams the kernel
+// already holds, per datagram: k = 1 is a reader woken for each packet, as on
+// a paced path, and larger k a reader catching up after a burst. Only the
+// read is timed.
 func BenchmarkReadBatch(b *testing.B) {
 	for _, k := range []int{1, 8, 64} {
 		b.Run(fmt.Sprintf("queued=%d", k), func(b *testing.B) {

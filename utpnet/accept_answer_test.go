@@ -6,9 +6,8 @@ import (
 	"time"
 )
 
-// A Socket answers a SYN as it arrives, as libutp does: a dial completes
-// with nothing waiting in Accept, and the next Accept returns it. Before,
-// the dial waited for an Accept and failed after 21 s if none came.
+// A Socket answers a SYN as it arrives: a dial completes with nothing
+// waiting in Accept, and the next Accept returns the connection.
 func TestDialCompletesWithNoAcceptWaiting(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

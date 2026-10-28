@@ -7,10 +7,9 @@ import (
 	"time"
 )
 
-// Options.MaxConnections reaches the socket, over real UDP.
-//
-// A cap of 1 admits two connections -- the check is libutp's "more than", see
-// utp.WithMaxConnections -- and refuses the third, silently: its dial times
+// Options.MaxConnections reaches the socket, over real UDP. A limit of 1
+// admits two connections (the check is "more than"; see
+// utp.WithMaxConnections) and silently refuses the third: its dial times
 // out, nothing is accepted, and no RESET is sent.
 func TestMaxConnectionsRefusesPastTheCap(t *testing.T) {
 	server, err := Listen(context.Background(), "udp", "127.0.0.1:0", &Options{

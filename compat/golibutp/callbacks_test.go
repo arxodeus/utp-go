@@ -9,9 +9,8 @@ import (
 	qt "github.com/frankban/quicktest"
 )
 
-// Test for a race that occurs if the error returned from PacketConn.WriteTo in sendtoCallback holds
-// a reference to the addr passed to the call, and the addr storage is reused between calls to
-// sendtoCallback in this instance.
+// TestSendToRaceErrorAddr checks that an error returned by PacketConn.WriteTo
+// does not keep a reference to an address buffer that later sends reuse.
 func TestSendToRaceErrorAddr(t *testing.T) {
 	c := qt.New(t)
 	s, err := NewSocket("udp", "localhost:0")

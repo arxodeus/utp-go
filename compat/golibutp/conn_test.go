@@ -13,20 +13,16 @@ func TestConnMethodsAfterClose(t *testing.T) {
 	require.NoError(t, err)
 	defer s.Close()
 	d, a := connPairSocket(s)
-	// We need to trigger libutp to destroy the Conns, the fastest way to do
-	// this is destroy the parent Socket.
+	// Closing the parent Socket is the fastest way to end the Conns.
 	assert.NoError(t, s.Close())
 	for _, c := range []net.Conn{d, a} {
-		// We're trying to test what happens when the Conn isn't known to
-		// libutp anymore.
-		// Under mu: the goroutine that waits for the stream to end clears
-		// it too.
+		// Test a Conn whose connection no longer exists. Under mu: the
+		// goroutine that waits for the stream to end clears it too.
 		mu.Lock()
 		us := c.(*Conn).us
 		mu.Unlock()
 		assert.Nil(t, us)
-		// These functions must not panic. I'm not sure we care what they
-		// return.
+		// These must not panic; their results do not matter.
 		assert.NotPanics(t, func() { c.RemoteAddr() })
 		assert.NotPanics(t, func() { c.LocalAddr() })
 	}

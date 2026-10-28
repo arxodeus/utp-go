@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// BenchmarkWriteTo is a passthrough datagram on a UDP socket with no write
-// deadline: the path a DHT on a shared port takes for every send.
+// BenchmarkWriteTo measures a passthrough datagram on a UDP socket with no
+// write deadline, the path every send takes for a DHT sharing the port.
 func BenchmarkWriteTo(b *testing.B) {
 	s, err := Listen(context.Background(), "udp", "127.0.0.1:0", &Options{Logger: quiet()})
 	if err != nil {

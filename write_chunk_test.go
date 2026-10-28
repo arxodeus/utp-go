@@ -7,10 +7,8 @@ import (
 	"time"
 )
 
-// A write larger than the send buffer is not copied whole before any of it
-// can be taken: what it holds beyond the send buffer is at most one send
-// buffer's worth. It copied everything first, so a 32 MB write to a peer not
-// reading held 32 MB. From the release review of 9c44c4f.
+// A write larger than the send buffer is not copied whole up front: it holds
+// at most one send buffer's worth beyond the send buffer.
 func TestALargeWriteHoldsOneChunk(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

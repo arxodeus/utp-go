@@ -84,9 +84,8 @@ func TestIteratorSingle(t *testing.T) {
 	}
 }
 
-// wrappingLessThan is the sequence-number comparison every fast-retransmit
-// decision goes through, so it is tested on its own rather than only through
-// a transfer. The wrap cases are the point: a naive `a < b` gets them wrong.
+// wrappingLessThan underlies every fast-retransmit decision, so it is tested
+// directly. The wrap cases matter most: a plain a < b gets them wrong.
 func TestWrappingLessThan(t *testing.T) {
 	cases := []struct {
 		name string
@@ -119,8 +118,8 @@ func TestWrappingLessThan(t *testing.T) {
 	}
 }
 
-// The relation must be antisymmetric everywhere except the two unordered
-// cases, across the whole space rather than the handful of points above.
+// The relation is antisymmetric everywhere except the two unordered cases,
+// across the whole space.
 func TestWrappingLessThanIsAntisymmetric(t *testing.T) {
 	for i := 0; i < 4096; i++ {
 		a := uint16(i * 7919)

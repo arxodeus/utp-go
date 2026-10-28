@@ -9,9 +9,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// mmsghdr is laid out as the kernel's struct mmsghdr: a msghdr, the length
-// received, and padding to the word size. Written for any word size: a
-// 32-bit build has no padding at all.
+// mmsghdr has the layout of the kernel's struct mmsghdr: a msghdr, the
+// length received, and padding to the word size (none on 32-bit builds).
 func TestMmsghdrLayout(t *testing.T) {
 	word := unsafe.Sizeof(uintptr(0))
 	want := (unsafe.Sizeof(unix.Msghdr{}) + 4 + word - 1) / word * word
@@ -23,8 +22,8 @@ func TestMmsghdrLayout(t *testing.T) {
 	}
 }
 
-// rawPeerKey reads an address as the kernel writes it -- the port in network
-// byte order -- into the key peerFor makes from the same address.
+// rawPeerKey reads an address as the kernel writes it, port in network byte
+// order, into the same key peerFor makes from that address.
 func TestRawPeerKeyMatchesPeerFor(t *testing.T) {
 	var any4 unix.RawSockaddrAny
 	a4 := (*unix.RawSockaddrInet4)(unsafe.Pointer(&any4))

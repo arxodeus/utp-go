@@ -73,7 +73,7 @@ func connPairSocket(s *Socket) (dialed net.Conn, accepted net.Conn) {
 
 const neverResponds = "localhost:1"
 
-// Ensure that libutp dial timeouts out by itself.
+// A dial with no answer times out on its own.
 func TestLibutpDialTimesOut(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -86,7 +86,7 @@ func TestLibutpDialTimesOut(t *testing.T) {
 	require.Error(t, err)
 }
 
-// Ensure that our timeout is honored during dialing.
+// The caller's dial timeout is honored.
 func TestDialTimeout(t *testing.T) {
 	t.Parallel()
 	s, err := NewSocket("udp", "localhost:0")
@@ -182,8 +182,8 @@ func TestSocketConnsAfterConnClosed(t *testing.T) {
 	assertSocketConnsLen(t, s, 0)
 }
 
-// Ensure that adding math.MaxInt64 to any current timestamp will result in the maximum "when" field
-// for a Timer.
+// Adding math.MaxInt64 to any current timestamp gives the maximum "when"
+// field for a Timer.
 func TestMaxExpiryTimerMath(t *testing.T) {
 	quick.Check(func(i int64) bool {
 		i += math.MaxInt64

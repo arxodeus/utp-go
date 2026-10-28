@@ -7,11 +7,9 @@ import (
 	"time"
 )
 
-// A write is copied once. Write copies the caller's bytes into a slice of its
-// own, so the caller may reuse its buffer at once; the send buffer then takes
-// that slice as it is (sendBuffer.Adopt). It used to copy it again, and a
-// 1 MB write allocated 2 MB. libutp copies the application's bytes once
-// (utp_internal.cpp:1061).
+// A write is copied once: Write copies the caller's bytes into its own
+// slice, so the caller may reuse its buffer at once, and the send buffer
+// adopts that slice (sendBuffer.Adopt).
 func TestWriteCopiesOnce(t *testing.T) {
 	const size = 1 << 20
 	stream, _, clk, done := liveAccepted(t)

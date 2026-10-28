@@ -9,11 +9,9 @@ import (
 	"time"
 )
 
-// The first attempt at a UDP datagram does not wait for another write on the
-// port. It went through RawConn.Write, which takes the descriptor's write lock
-// before anything else, and waited there for as long as any other write --
-// the uTP sender's, or one blocked on a full send buffer -- held it: a wait
-// the deadline could not end. Release review of 224c363, finding 1.
+// The first attempt to send a UDP datagram does not wait for another write
+// on the port, such as the uTP sender's or one blocked on a full send
+// buffer, since the deadline could not end that wait.
 func TestUDPWriteToDoesNotWaitForAnotherWrite(t *testing.T) {
 	s, err := Listen(context.Background(), "udp", "127.0.0.1:0", &Options{Logger: quiet()})
 	if err != nil {
