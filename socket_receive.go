@@ -540,6 +540,11 @@ func (s *UtpSocket) deliverICMP(quoted []byte, peer ConnectionPeer, notice *icmp
 	return true
 }
 
+// getConnStreamForQuotedId finds the connection that sent the packet an ICMP
+// message quoted. The quoted packet is ours, so its connection id is our send
+// id, except in a SYN, which carries our receive id. The candidates are tried
+// in order: a SYN from either role, then an accepted connection (receive id
+// one above), then a dialed one (receive id one below).
 func (s *UtpSocket) getConnStreamForQuotedId(id uint16, peer ConnectionPeer) chan *streamEvent {
 	candidates := []*ConnectionId{
 		// recv == id (the quoted packet is our SYN), either role

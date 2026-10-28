@@ -17,29 +17,25 @@ const (
 	awaitingConnectionTimeout    = time.Second * 20
 
 	// rstInfoTimeout is how long a sent RESET is remembered, so a peer that
-	// keeps sending packets for a connection we do not have receives one
-	// RESET rather than one per packet. Matches libutp's RST_INFO_TIMEOUT
-	// (utp_internal.cpp:71).
+	// keeps sending to a connection we do not have receives one RESET
+	// rather than one per packet.
 	rstInfoTimeout = 10 * time.Second
 
 	// lingerAckTimeout is how long a closed connection's acknowledgement is
-	// kept so a retransmitted FIN can be answered with it. libutp's FIN
-	// retransmissions back off from its 1000ms RTO floor, so this covers the
-	// first few, which is where a lost acknowledgement costs something.
+	// kept to answer a retransmitted FIN. It covers the first few
+	// retransmissions, where a lost acknowledgement matters.
 	lingerAckTimeout = 10 * time.Second
 
-	// idQuarantine is how long a closed connection's ids are kept from a new
-	// connection to the same peer. See GenerateCid.
+	// idQuarantine is how long a closed connection's ids are withheld from a
+	// new connection to the same peer. See generateCid.
 	idQuarantine = lingerAckTimeout
-	// rstInfoLimit is the number of remembered RESETs past which we stop
-	// answering unknown packets at all. Matches libutp's RST_INFO_LIMIT
-	// (utp_internal.cpp:72).
+	// rstInfoLimit is the number of remembered RESETs beyond which unknown
+	// packets are no longer answered at all.
 	rstInfoLimit = 1000
 )
 
-// rstInfoKey identifies one unanswerable packet, so a repeat of the same one
-// is not answered twice. libutp keys on the same triple
-// (utp_internal.cpp:2913-2917).
+// rstInfoKey identifies one unanswerable packet, so a repeat of it is not
+// answered twice.
 type rstInfoKey struct {
 	peer   string
 	connID uint16
@@ -47,8 +43,8 @@ type rstInfoKey struct {
 }
 
 var (
-	// ErrAcceptTimedOut is returned by Accept/AcceptWithCid when no matching
-	// SYN arrived within 20 seconds.
+	// ErrAcceptTimedOut is returned by AcceptWithCid when no matching SYN
+	// arrives within 20 seconds.
 	ErrAcceptTimedOut = errors.New("utp_socket: timed out waiting for incoming connection")
 )
 
@@ -56,31 +52,26 @@ var (
 //
 // WriteTo must behave like a UDP socket's: it may wait for the local send
 // path, but never for the peer to read. The socket writes from the goroutine
-// that reads -- an acknowledgement leaves from the call stack that received
-// the packet, as libutp's sendto callback does (utp_call_sendto,
-// utp_internal.cpp:713) -- so a WriteTo that waited for the other side to
-// read would let two sockets each wait on the other for ever. A transport
-// that cannot keep up drops, as UDP does. WriteTo is called concurrently.
+// that reads, so a WriteTo that waited for the other side to read could
+// deadlock two sockets. A transport that cannot keep up drops, as UDP does.
+// WriteTo is called concurrently.
 //
-// WriteTo must not keep b once it returns: the socket encodes each packet into
-// a buffer it reuses, as libutp's send callback is handed one it reuses
-// (utp_call_sendto, utp_internal.cpp:713). net.PacketConn already works this
-// way; a transport that queues a datagram must copy it.
+// WriteTo must not retain b after it returns: the socket reuses the buffer.
+// net.PacketConn already works this way; a transport that queues datagrams
+// must copy them.
 //
 // A Conn may also have the methods
 //
 //	HoldPeer(peer ConnectionPeer)
 //	ReleasePeer(peer ConnectionPeer)
 //
-// and then the socket calls HoldPeer when it starts a connection with peer --
-// a dial, as it sends its SYN, or a peer's SYN, as it is taken in -- and
-// ReleasePeer when the socket forgets that connection, once it has ended. A
-// transport that keeps something per peer, as utpnet keeps the address a
-// datagram came from to write back to, keeps it while it is held: it is needed
-// from the first packet of the handshake to the last of the close, which only
-// the socket sees. Each HoldPeer is matched by one ReleasePeer, for a peer
-// with as many connections as it is held. They are called with the socket's
-// connection table locked, and must not call back into the socket.
+// The socket then calls HoldPeer when it starts a connection with peer, as
+// it sends or receives a SYN, and ReleasePeer when it forgets that
+// connection. A transport that keeps per-peer state, such as the original
+// address to reply to, keeps it while held: from the first handshake packet
+// to the last packet of the close. Each HoldPeer is matched by one
+// ReleasePeer. They are called with the socket's connection table locked and
+// must not call back into the socket.
 type Conn interface {
 	ReadFrom(b []byte) (int, ConnectionPeer, error)
 	WriteTo(b []byte, dst ConnectionPeer) (int, error)
@@ -95,10 +86,10 @@ type peerHolder interface {
 }
 
 type UtpSocket struct {
-	// dispatchMu serialises the routing of incoming packets with everything
-	// else that changes the routing tables: registering a new connection and
-	// serving an Accept. The reader holds it for each datagram it routes. See
-	// dispatch.
+	// dispatchMu serializes the routing of incoming packets with everything
+	// that changes the routing tables: registering a new connection and
+	// serving an Accept. The reader holds it for each datagram it routes.
+	// See dispatch.
 	dispatchMu sync.Mutex
 	// keyScratch is where the reader builds the keys it routes by. Used only
 	// under dispatchMu.
@@ -108,8 +99,8 @@ type UtpSocket struct {
 	// the route the last datagram took, good while connsGen has not moved.
 	connsGen  atomic.Uint64
 	lastRoute cachedRoute
-	// writeMu keeps an ordinary write from landing while an MTU probe has the
-	// don't-fragment bit set on the socket. See writeDatagram.
+	// writeMu keeps an ordinary write from being sent while an MTU probe has
+	// don't-fragment set on the socket. See writeDatagram.
 	writeMu sync.RWMutex
 	// inlineConns maps a connection's event channel to the connection, so
 	// the reader can hand it a packet directly. Guarded by connsMutex.
@@ -117,13 +108,14 @@ type UtpSocket struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	logger      *ulogger
-	// clk is this socket's clock, handed to every connection it creates.
-	// Nil means the real one.
+	// clk is this socket's clock, handed to every connection it creates. Nil
+	// means RealClock.
 	clk        Clock
 	connsMutex sync.RWMutex
 	conns      map[string]chan *streamEvent
-	// holder is socket, if it is a peerHolder, and held the peer each entry
-	// in conns holds it for. Guarded by connsMutex. See registerLocked.
+	// holder is socket, if it is a peerHolder, and held counts the
+	// connections holding each peer. Guarded by connsMutex. See
+	// registerLocked.
 	holder                   peerHolder
 	held                     map[string]ConnectionPeer
 	accepts                  chan *acceptRequest
@@ -133,60 +125,47 @@ type UtpSocket struct {
 	incomingConns            *syncMap[*incomingPacket]
 	incomingConnsExpirations *timeWheel[any, *incomingPacket]
 	socket                   Conn
-	// retransmitTimers is one timer wheel for every connection on this
-	// socket. Per-connection wheels cost a ticker each; see
-	// retransmit_timer.go.
+	// retransmitTimers is one timer wheel shared by every connection on this
+	// socket. See retransmit_timer.go.
 	retransmitTimers *retransmitTimers
 	// pendingAccepts holds Accept calls that named no connection id and are
 	// waiting for any incoming SYN. Guarded by dispatchMu.
 	pendingAccepts []*acceptRequest
 	// answered holds connections whose SYN was answered with no Accept
 	// waiting, oldest first, until an Accept or AcceptWithCid takes one. Only
-	// a socket with WithAcceptConfig answers so. Guarded by dispatchMu.
+	// a socket with WithAcceptConfig does this. Guarded by dispatchMu.
 	answered []*UtpStream
 	// rstInfo remembers RESETs recently sent for connections we do not have.
 	rstInfo            *syncMap[struct{}]
 	rstInfoExpirations *timeWheel[any, rstInfoKey]
 	// ownsSocket is true when this UtpSocket created the underlying Conn
-	// (via Bind) and is therefore responsible for closing it. A Conn handed
-	// in through WithSocket belongs to the caller.
+	// (Bind) and must close it. A Conn passed to WithSocket belongs to the
+	// caller.
 	ownsSocket bool
 	// droppedFullConnQueue counts packets discarded because a connection's
-	// event queue was full. libutp never discards a datagram it has already
-	// received and parsed -- utp_process_udp runs synchronously, with no queue
-	// between the socket and the connection -- so any non-zero value here is
-	// this library losing work the peer will have to retransmit.
-	//
-	// It exists to be asserted on rather than to be read in production. It
-	// used to be reached routinely, because a connection whose reader stopped
-	// blocked its own event loop and stopped draining this queue; that is
-	// fixed, and TestSlowReaderDoesNotWedgeConnection asserts this stays zero
-	// across a transfer whose reader stalls.
+	// event queue was full. Each is loss the peer must recover from.
 	droppedFullConnQueue atomic.Uint64
 	// lingerAcks holds, for a connection that has just closed after reaching
-	// its peer's FIN, the acknowledgement to re-send if that FIN arrives
+	// its peer's FIN, the acknowledgement to resend if that FIN arrives
 	// again. See connection.lingerAck.
 	lingerAcks        *syncMap[*packet]
 	lingerExpirations *timeWheel[any, string]
-	// recentlyClosed holds the keys of connections that ended in the last
-	// idQuarantine. See GenerateCid.
+	// recentlyClosed holds the keys of connections that ended within
+	// idQuarantine. See generateCid.
 	recentlyClosed            *syncMap[struct{}]
 	recentlyClosedExpirations *timeWheel[any, string]
-	// resetsSent counts RESETs answered to packets for connections this
-	// socket does not have. A RESET tells the peer to give up, so a healthy
-	// connection that draws one has been killed by us.
+	// resetsSent counts RESETs sent in answer to packets for connections this
+	// socket does not have.
 	resetsSent atomic.Uint64
-	// refusedByFirewall counts SYNs the firewall callback rejected. It exists
-	// so a test can tell "refused" from "lost".
+	// refusedByFirewall counts SYNs the firewall callback rejected.
 	refusedByFirewall atomic.Uint64
 	closeOnce         sync.Once
 	// lingering holds the streams the application has closed whose
 	// connections are still delivering. Close waits for them. See linger.
 	lingering sync.Map // *UtpStream -> struct{}
-	// firewall, when set, is asked about every SYN for a connection this
-	// socket does not already have, before any state is created for it.
-	// Reporting true refuses the connection. Set once at construction and
-	// only read afterwards.
+	// firewall, when set, is consulted for every SYN for a connection this
+	// socket does not have, before any state is created for it. Returning
+	// true refuses the connection. Set at construction and read-only after.
 	firewall func(ConnectionPeer) bool
 	// acceptConfig is WithAcceptConfig's function, or nil.
 	acceptConfig func() *ConnectionConfig
@@ -195,43 +174,28 @@ type UtpSocket struct {
 	// less means no cap. See WithMaxConnections.
 	maxConns int
 	// refusedAtCapacity counts SYNs refused because the socket was at its
-	// connection cap. It exists so a test can tell "refused" from "lost".
+	// connection limit.
 	refusedAtCapacity atomic.Uint64
-	// refusedIdInUse counts SYNs refused because a connection we dialled
-	// already receives on the id the new one would. See handleIncomingBuf.
+	// refusedIdInUse counts SYNs refused because a connection we dialed
+	// already receives on the id the new one would use. See
+	// handleIncomingBuf.
 	refusedIdInUse atomic.Uint64
 }
 
-// DefaultMaxConnections is libutp's cap on the sockets one context may hold
-// before it refuses a new incoming connection (utp_internal.cpp:2967-2974).
+// DefaultMaxConnections is the default limit on connections a socket holds
+// before it refuses new incoming ones.
 const DefaultMaxConnections = 3000
 
-// WithMaxConnections caps the connections this socket holds before it refuses
-// a new incoming one.
+// WithMaxConnections limits the connections this socket holds before it
+// refuses new incoming ones. A SYN is refused while the socket holds more
+// than n, so up to n+1 are admitted.
 //
-// libutp refuses a SYN when its context already holds more than 3000 sockets:
+// Every connection counts, dialed or accepted, established or closing, as
+// does every SYN waiting for Accept. A refused SYN is dropped silently: a
+// RESET would tell the peer something is listening.
 //
-//	if (ctx->utp_sockets->GetCount() > 3000) {
-//	    ...
-//	    return 1;
-//	}
-//	                                        (utp_internal.cpp:2967-2974)
-//
-// This is the same check in the same place -- after the duplicate-connection
-// lookup and before the firewall -- with the figure configurable, because 3000
-// is a policy choice rather than a protocol rule. The comparison is libutp's
-// too: a SYN is refused while the socket holds *more than* n, so it admits
-// one past n, exactly as libutp admits a 3001st socket.
-//
-// What is counted is libutp's count. Every connection this socket has, dialled
-// or accepted, established or still closing, plus every SYN parked waiting for
-// Accept -- the state libutp holds as a socket in CS_SYN_RECV.
-//
-// A refusal is silent, as libutp's `return 1` is. A RESET would tell the peer
-// something is listening, and at capacity there is nothing to offer it.
-//
-// n == 0 means DefaultMaxConnections, which is also what a socket gets without
-// this option. n < 0 means no cap.
+// n == 0 means DefaultMaxConnections, the default without this option. n < 0
+// means no limit.
 func WithMaxConnections(n int) SocketOption {
 	return func(s *UtpSocket) {
 		switch {
@@ -253,14 +217,14 @@ func (s *UtpSocket) ConnectionsRefusedAtCapacity() uint64 {
 }
 
 // ConnectionsRefusedIdInUse reports how many incoming connections were
-// refused because a connection this socket dialled to the same peer already
-// receives on the id the new one would have. libutp refuses these too.
+// refused because a connection this socket dialed to the same peer already
+// receives on the id the new one would use.
 func (s *UtpSocket) ConnectionsRefusedIdInUse() uint64 {
 	return s.refusedIdInUse.Load()
 }
 
-// connectionCount is what the incoming-connection cap is measured against:
-// libutp's `utp_sockets->GetCount()`. See WithMaxConnections.
+// connectionCount returns the number the connection limit is checked
+// against. See WithMaxConnections.
 func (s *UtpSocket) connectionCount() int {
 	return s.NumConnections() + s.incomingConns.len()
 }
@@ -270,52 +234,39 @@ type SocketOption func(*UtpSocket)
 
 // WithFirewall refuses incoming connections the callback rejects.
 //
-// It is asked about a SYN for a connection this socket does not already have,
-// before any state exists for it, and reporting true drops the packet without
-// answering. That is libutp's UTP_ON_FIREWALL, in the same position and with
-// the same meaning -- "true means yes, block connection"
-// (utp_internal.cpp:2975-2982), reached after the duplicate-connection check
-// and before the socket is created, and refusing by returning rather than by
-// sending a RESET.
+// The callback is consulted for a SYN for a connection this socket does not
+// already have, before any state exists for it. Returning true drops the
+// packet without an answer, so a refused peer costs no connection state and
+// learns nothing; a typical use is an IP blocklist.
 //
-// A BitTorrent client uses it for an IP blocklist: the point of doing it here
-// rather than after Accept is that a refused peer costs no connection state
-// and gets no reply to confirm anything is listening.
-//
-// The callback runs on the socket's receive path. It must not block, and must
-// not call back into the socket.
+// The callback runs on the socket's receive path. It must not block or call
+// back into the socket.
 func WithFirewall(refuse func(peer ConnectionPeer) bool) SocketOption {
 	return func(s *UtpSocket) { s.firewall = refuse }
 }
 
-// WithAcceptConfig gives the socket a configuration of its own for incoming
-// connections, read as each one is made, and with it libutp's way of
-// accepting: a SYN is answered as it arrives, whether or not an Accept is
-// waiting, and the connection is held until an Accept or AcceptWithCid takes
-// it. libutp creates the socket and sends the SYN-ACK in utp_process_udp
-// (utp_internal.cpp:2984-2990) with the context's options as they stand
-// (:2616-2621), and hands the connection to its embedder.
+// WithAcceptConfig gives the socket its own configuration for incoming
+// connections, read as each one is created. With it, a SYN is answered as it
+// arrives, whether or not an Accept is waiting, and the connection is held
+// until an Accept or AcceptWithCid takes it.
 //
-// The function's configuration is used for every connection the socket
-// answers before an Accept asks, and for one accepted with a nil config. An
-// Accept or AcceptWithCid given a config of its own still applies it to a
-// connection whose SYN arrives while it waits; one that takes a connection
-// already answered gets that connection as it was made.
+// The function's configuration is used for every connection answered before
+// an Accept asks, and for one accepted with a nil config. An Accept given a
+// config of its own still applies it to a connection whose SYN arrives while
+// it waits; one that takes an already answered connection gets it as it was
+// created.
 //
-// Without it, the configuration is each Accept's, so a SYN that arrives
-// before its Accept is parked, unanswered, until an Accept claims it or
-// 20 seconds pass: the connection cannot be made before
-// the call that says how. DEVIATIONS.md, "A SYN is answered when an Accept
-// takes it, unless the socket has a configuration of its own".
+// Without this option the configuration comes from each Accept, so a SYN
+// that arrives before its Accept waits, unanswered, until an Accept claims
+// it or 20 seconds pass.
 //
-// The answered connections count against WithMaxConnections, as libutp's
-// do against its cap, and are held, like libutp's, for as long as the
-// application leaves them.
+// Answered connections count against WithMaxConnections and are held until
+// the application accepts them.
 func WithAcceptConfig(config func() *ConnectionConfig) SocketOption {
 	return func(s *UtpSocket) { s.acceptConfig = config }
 }
 
-// configForAccept is the configuration an accepted connection gets.
+// configForAccept returns the configuration an accepted connection gets.
 func (s *UtpSocket) configForAccept(accept *acceptRequest, peer ConnectionPeer) *ConnectionConfig {
 	config := accept.config
 	if config == nil && s.acceptConfig != nil {
@@ -327,7 +278,7 @@ func (s *UtpSocket) configForAccept(accept *acceptRequest, peer ConnectionPeer) 
 	return s.configForPeer(config, peer)
 }
 
-// clock is this socket's clock, never nil.
+// clock returns this socket's clock, never nil.
 func (s *UtpSocket) clock() Clock {
 	if s.clk != nil {
 		return s.clk
@@ -335,14 +286,10 @@ func (s *UtpSocket) clock() Clock {
 	return RealClock
 }
 
-// WithClock runs this socket's retransmission wheel on the given clock, and
-// makes it the default for every connection the socket creates.
-//
-// The wheel is shared by every connection on a socket, so the clock has to be
-// chosen here rather than per connection: two connections on one socket
-// cannot disagree about when a tick happened.
-//
-// Nothing outside a test should need this. See Clock.
+// WithClock runs this socket's retransmission wheel on clk and makes it the
+// default for every connection the socket creates. The wheel is shared by
+// every connection on the socket, so the clock is chosen per socket. It is
+// intended for tests; see Clock.
 func WithClock(clk Clock) SocketOption {
 	return func(s *UtpSocket) {
 		if clk == nil {
@@ -356,19 +303,16 @@ func WithClock(clk Clock) SocketOption {
 }
 
 // DefaultSocketBufferSize is the size requested for the underlying UDP
-// socket's send and receive buffers.
-//
-// A single readLoop goroutine drains the socket, so anything the kernel drops
-// before it gets there is invisible packet loss that uTP then has to recover
-// from with retransmits. At the OS default (~208 KiB on Linux) a few hundred
-// concurrent connections overflow the receive queue and handshakes start
-// failing outright. The kernel silently clamps this to net.core.rmem_max, so
-// requesting more than the system allows is harmless.
+// socket's send and receive buffers. A single goroutine drains the socket,
+// and datagrams the kernel drops before it does are loss uTP must recover
+// from; the operating system's default is too small for a few hundred
+// concurrent connections. The kernel clamps the request to its configured
+// maximum.
 const DefaultSocketBufferSize = 4 * 1024 * 1024
 
 // Bind opens a UDP socket on addr and runs a uTP socket on it, which owns it
-// and closes it with itself. logger receives the socket's logging; nil
-// discards it. LevelTrace is its per-packet level.
+// and closes it on Close. logger receives the socket's logging; nil discards
+// it. LevelTrace is its per-packet level.
 func Bind(ctx context.Context, network string, addr *net.UDPAddr, logger *slog.Logger, opts ...SocketOption) (*UtpSocket, error) {
 	conn, err := net.ListenUDP(network, addr)
 	if err != nil {
@@ -386,7 +330,7 @@ func Bind(ctx context.Context, network string, addr *net.UDPAddr, logger *slog.L
 	return sock, nil
 }
 
-// WithSocket runs a uTP socket on socket, which stays the caller's. logger
+// WithSocket runs a uTP socket on socket, which remains the caller's. logger
 // receives the socket's logging; nil discards it. LevelTrace is its
 // per-packet level.
 func WithSocket(ctx context.Context, socket Conn, logger *slog.Logger, opts ...SocketOption) *UtpSocket {
@@ -396,9 +340,7 @@ func WithSocket(ctx context.Context, socket Conn, logger *slog.Logger, opts ...S
 	awaitingMap := newSyncMap[*acceptRequest]()
 	handleAwaitExpirations := func(key any, accReq *acceptRequest) {
 		awaitingMap.remove(key)
-		// Tell the caller. Dropping the request silently left AcceptWithCid
-		// blocked on accReq.stream forever whenever the caller's own context
-		// had no deadline.
+		// Report it to the caller, so AcceptWithCid does not wait forever.
 		select {
 		case accReq.stream <- &streamResult{err: ErrAcceptTimedOut}:
 		default:
@@ -453,7 +395,7 @@ func WithSocket(ctx context.Context, socket Conn, logger *slog.Logger, opts ...S
 		utp.holder = h
 	}
 
-	// Applied before the loops start, so nothing can observe a half-built
+	// Applied before the loops start, so nothing observes a partly built
 	// socket.
 	for _, opt := range opts {
 		opt(utp)
@@ -465,32 +407,25 @@ func WithSocket(ctx context.Context, socket Conn, logger *slog.Logger, opts ...S
 	return utp
 }
 
-// LocalAddr returns the address the underlying socket is bound to, or nil if
-// it cannot report one.
-//
-// A caller that binds to port 0 -- which is the usual thing to do -- has no
-// other way to learn which port the kernel chose.
-// PacketsDroppedFullConnQueue reports how many received, decoded packets this
-// socket discarded because the destination connection's event queue was full.
-//
-// It should be zero. libutp has no equivalent: it processes each datagram
-// synchronously, so there is no queue between receiving and processing and
-// nothing to overflow. A non-zero value means this library threw away work the
-// peer must now retransmit, and is a bug rather than a tuning signal.
+// PacketsDroppedFullConnQueue reports how many received packets this socket
+// discarded because the destination connection's event queue was full. It
+// should be zero.
 func (s *UtpSocket) PacketsDroppedFullConnQueue() uint64 {
 	return s.droppedFullConnQueue.Load()
 }
 
-// PacketsResetSent reports how many RESETs this socket answered to packets for
-// connections it does not have.
 // ConnectionsRefusedByFirewall reports how many incoming connections the
 // firewall callback rejected.
 func (s *UtpSocket) ConnectionsRefusedByFirewall() uint64 {
 	return s.refusedByFirewall.Load()
 }
 
+// PacketsResetSent reports how many RESETs this socket sent in answer to
+// packets for connections it does not have.
 func (s *UtpSocket) PacketsResetSent() uint64 { return s.resetsSent.Load() }
 
+// LocalAddr returns the address the underlying socket is bound to, or nil if
+// it cannot report one. After binding to port 0 it reports the chosen port.
 func (s *UtpSocket) LocalAddr() net.Addr {
 	type localAddresser interface{ LocalAddr() net.Addr }
 	if la, ok := s.socket.(localAddresser); ok {
@@ -505,13 +440,11 @@ func (s *UtpSocket) NumConnections() int {
 	return len(s.conns)
 }
 
-// Close shuts the socket down. It is idempotent: `defer sock.Close()`
-// alongside an explicit Close is ordinary Go, and the second call used to
-// panic closing an already-closed channel.
+// Close shuts the socket down. It is safe to call more than once.
 //
-// It first waits for the streams already closed to finish delivering what was
-// written to them, for as long as each one's peer is still answering
-// (awaitLingering); everything else is ended at once.
+// It first waits for streams already closed to finish delivering what was
+// written to them, while each one's peer keeps answering (awaitLingering);
+// everything else ends at once.
 func (s *UtpSocket) Close() {
 	s.closeOnce.Do(func() {
 		s.awaitLingering()
@@ -523,11 +456,8 @@ func (s *UtpSocket) Close() {
 		s.rstInfoExpirations.stop()
 		s.lingerExpirations.stop()
 		s.recentlyClosedExpirations.stop()
-		// Close the underlying socket when we opened it. Without this the UDP
-		// port stayed bound for the life of the process and readLoop stayed
-		// parked in ReadFrom, which cancelling the context does not interrupt
-		// -- an fd and goroutine leak, and the reason two runs of the same
-		// test in one process failed with "address already in use".
+		// Close the underlying socket if we opened it, which releases the
+		// port and stops readLoop.
 		if s.ownsSocket {
 			if err := s.socket.Close(); err != nil {
 				s.logger.Debug("error closing underlying socket", "err", err)
@@ -536,17 +466,11 @@ func (s *UtpSocket) Close() {
 	})
 }
 
-// linger keeps a closed stream's connection going until it has delivered
-// what was queued and ended, and lets Close wait for it.
-//
-// UtpStream.Close returns at once, as libutp's utp_close does
-// (utp_internal.cpp:3358-3380): the FIN is queued and the connection goes on
-// sending in the background. libutp leaves the rest to its embedder, which
-// must keep the context alive and pumping until its sockets have finished;
-// destroying the context throws away whatever they still held. Here closing
-// the socket is that moment, and it waits instead (awaitLingering), so that
-// writing, closing the stream, closing the socket and exiting delivers every
-// byte.
+// linger keeps a closed stream's connection running until it has
+// delivered what was queued and ended, and lets Close wait for it.
+// UtpStream.Close returns at once and the connection keeps sending in the
+// background; closing the socket waits for it, so that writing, closing the
+// stream, closing the socket and exiting delivers every byte.
 func (s *UtpSocket) linger(stream *UtpStream) {
 	s.lingering.Store(stream, struct{}{})
 	go func() {
@@ -589,9 +513,9 @@ func (s *UtpSocket) wakeConns() {
 }
 
 func (s *UtpSocket) sendShutdownEventToConns() {
-	// Snapshot the channels rather than sending under the lock: a blocking
-	// send to one wedged connection would otherwise hold connsMutex and stall
-	// packet delivery for every other connection on this socket.
+	// Snapshot the channels rather than send under the lock: a blocking send
+	// to one stuck connection would hold connsMutex and stall packet
+	// delivery for every other connection.
 	s.connsMutex.RLock()
 	channels := make([]chan *streamEvent, 0, len(s.conns))
 	conns := make([]*connection, 0, len(s.conns))
@@ -605,8 +529,8 @@ func (s *UtpSocket) sendShutdownEventToConns() {
 		select {
 		case ch <- &streamEvent{Type: streamShutdown}:
 		default:
-			// The connection's queue is full; it is already being torn down
-			// by the cancelled socket context.
+			// The connection's queue is full; it is already ending with the
+			// socket's context.
 		}
 		if conns[i] != nil {
 			conns[i].wake()
@@ -614,47 +538,17 @@ func (s *UtpSocket) sendShutdownEventToConns() {
 	}
 }
 
-// getConnStreamForQuotedId finds the connection that sent the packet an ICMP
-// message quoted.
-//
-// The quoted packet is one of ours, so its connection id is our *send* id --
-// except for a SYN, which carries the sender's own receive id. libutp covers
-// both with three lookups against a map keyed on the receive id alone
-// (utp_internal.cpp:3056-3058):
-//
-//	Lookup(UTPSocketKey(addr, id))
-//	Lookup(UTPSocketKey(addr, id + 1)) && conn_id_send == id
-//	Lookup(UTPSocketKey(addr, id - 1)) && conn_id_send == id
-//
-// The first catches a quoted SYN -- the ICMP case that matters most, since an
-// unreachable host answers the SYN and nothing else. The second and third
-// catch an established connection's data, from the acceptor and the initiator
-// side respectively.
-//
-// This socket's map is keyed on the pair, so libutp's first lookup, which
-// leaves the send id free, becomes two candidates: an initiator's send id is
-// its receive id plus one and an acceptor's is minus one, so those are the
-// only two connections libutp's map could have held under that key. The order
-// is otherwise libutp's, which is what decides it when a peer holds several
-// connections whose ids happen to be adjacent.
-// configForPeer returns the connection config to use for a peer, with the
-// path-MTU ceiling lowered when this socket's Conn can say what the local
-// path carries.
-//
-// The caller's config is never modified: a ConnectionConfig belongs to
-// whoever built it and may be reused across connections, so this copies
-// before changing anything. See pathMTUCeiling.
+// configForPeer returns the connection config for a peer, with the path-MTU
+// ceiling lowered when the socket's Conn can report what the local path
+// carries. The caller's config is copied, never modified. See
+// pathMTUCeiling.
 func (s *UtpSocket) configForPeer(config *ConnectionConfig, peer ConnectionPeer) *ConnectionConfig {
-	// Nil is the defaults, for a dial as for an accept (configForAccept). It
-	// was passed on as it was, and a Connect or ConnectWithCid given nil
-	// panicked making the connection.
+	// Nil means the defaults, as for an accept (configForAccept).
 	if config == nil {
 		config = NewConnectionConfig()
 	}
-	// A socket-wide clock reaches its connections here, so a caller that
-	// configured one does not have to remember to set it on every config it
-	// hands to Connect or Accept. An explicit per-connection Clock still
-	// wins: this only fills a gap.
+	// A socket-wide clock is applied here, unless the connection's config
+	// sets its own.
 	if s.clk != nil && config.Clock == nil {
 		adjusted := *config
 		adjusted.Clock = s.clk
