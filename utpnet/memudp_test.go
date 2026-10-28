@@ -8,19 +8,15 @@ import (
 )
 
 // memNet is an in-memory UDP network: datagrams written to an address are
-// delivered to the memUDP bound to it, and nothing else. It exists so that
-// Socket can be run end to end with IPv6 addresses on a host whose kernel has
-// no IPv6 -- the machine this was developed on answers every AF_INET6 socket
-// with "address family not supported by protocol".
-//
-// What it does not stand in for is the kernel: no socket options, no
-// dual-stack mapping, no path MTU. It exercises everything above the socket.
+// delivered to the memUDP bound to it. It lets a Socket run end to end with
+// IPv6 addresses on a host without IPv6. It does not model the kernel: no
+// socket options, dual-stack mapping or path MTU.
 type memNet struct {
 	mu    sync.Mutex
 	conns map[string]*memUDP
-	// mtu, when non-zero, is the largest datagram the network carries.
-	// Anything larger vanishes without a word, as it does on an IPv6 path
-	// whose routers' ICMPv6 "packet too big" is filtered.
+	// mtu, when nonzero, is the largest datagram the network carries. Larger
+	// ones vanish silently, as on an IPv6 path whose ICMPv6 "packet too big"
+	// messages are filtered.
 	mtu int
 }
 
@@ -105,7 +101,7 @@ func (c *memUDP) ReadFromUDP(b []byte) (int, *net.UDPAddr, error) {
 	}
 }
 
-// WriteToUDP delivers to whatever is bound at addr, and like UDP says
+// WriteToUDP delivers to whatever is bound at addr and, like UDP, reports
 // nothing if nothing is, or if its queue is full.
 func (c *memUDP) WriteToUDP(b []byte, addr *net.UDPAddr) (int, error) {
 	select {

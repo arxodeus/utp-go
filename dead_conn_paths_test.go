@@ -7,12 +7,11 @@ import (
 	"time"
 )
 
-// The dead-connection rules -- a write to a connection that has ended fails at
-// once with the reason, and a read reports the reason rather than a clean end
-// -- were tested only for a connection the idle timeout had closed. These are
-// the other two ways a connection ends without its application: the peer
-// resets it, and the sender gives up after consecutive retransmission
-// timeouts (utp_internal.cpp:1191).
+// A write to a connection that has ended fails at once with the reason, and
+// a read reports the reason rather than a clean end. These tests cover the
+// two ways a connection ends without its application besides the idle
+// timeout: the peer resets it, or the sender gives up after consecutive
+// retransmission timeouts.
 
 // deadAccepted returns an accepted stream that has read one packet of data,
 // after kill has ended its connection.
@@ -21,7 +20,7 @@ func deadAccepted(t *testing.T, kill func(conn *scriptedConn, clk *virtualClock,
 	stream, conn, clk, done := liveAccepted(t)
 	kill(conn, clk, stream)
 	// The loop leaves the clock as it returns, a moment before the stream
-	// records that it has: quiet is not yet ended.
+	// records that it has ended.
 	select {
 	case <-stream.ended:
 	case <-time.After(5 * time.Second):
@@ -149,9 +148,9 @@ func TestDeadConnectionReadsReportTheReason(t *testing.T) {
 		{"gave up", deadByGivingUp, ErrTimedOut},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			// Twice per run, with the socket's context cancelled first, so
-			// that Read has the cancelled context and the closed queue to
-			// choose between.
+			// Twice per run, with the socket's context canceled first, so Read
+			// has both the canceled context and the closed queue to choose
+			// from.
 			for i := 0; i < 5; i++ {
 				stream, done := c.dead(t)
 				done()

@@ -8,23 +8,19 @@ import (
 	"time"
 )
 
-// The delay classic LEDBAT acts on is not the one the latest acknowledgement
-// reported. libutp takes the least of the last three queueing-delay samples
-// (DelayHist::get_value, utp_internal.cpp:383-391, CUR_DELAY_SIZE 3 at :44),
-// each measured against the base as it stood when it arrived (:357-362), so
+// Classic LEDBAT acts not on the latest delay sample but on the least of the
+// last three, each measured against the base as it stood when it arrived, so
 // one late packet does not move the window and three in a row do.
 //
-// libutp is driven alone through acknowledgements whose delays jump about,
-// and its congestion-control log gives both the delay each one reported
-// (actual_delay) and the delay apply_ccontrol used (our_delay). The same
-// reported delays go into our controller, and after each the delay it would
-// use has to be libutp's.
+// The reference implementation is driven through acknowledgements whose
+// delays jump about, and its congestion-control log gives both the delay each
+// reported and the delay it used. The same delays go into our controller,
+// and after each the delay it would use must match.
 //
 // Every acknowledgement covers one packet and reports a whole number of
-// milliseconds over a fixed base, the round trip is longer than any of the
-// delays (the window is full, so the queue of unacknowledged packets is
-// long), and so libutp's clamp to the round trip (:1621) never decides the
-// value and the log's millisecond resolution loses nothing.
+// milliseconds over a fixed base, and the round trip is longer than any
+// delay, so the clamp to the round trip never decides the value and the
+// log's millisecond resolution loses nothing.
 func TestConformanceDelayFilter(t *testing.T) {
 	// Spikes of one, two and three acknowledgements, a fall, and a rise.
 	pattern := []uint32{0, 0, 0, 5, 5, 60, 5, 5, 60, 60, 5, 5, 60, 60, 60, 60, 5, 20, 20, 20, 40, 10, 40, 40, 40, 0, 80, 80, 80, 3}

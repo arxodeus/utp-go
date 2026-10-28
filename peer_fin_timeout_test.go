@@ -10,21 +10,20 @@ import (
 	"github.com/arxodeus/utp/internal/libutp"
 )
 
-// When the peer's stream ends, libutp arms its retransmission timeout
-// `min(rto * 3, 60)` milliseconds out (utp_internal.cpp:2358). The RTO is
-// never below 1000 ms (:1380), so that is always 60 ms, and if anything is in
-// flight check_timeouts then treats it as a timeout: every packet marked for
-// resend, the window cut to one packet, slow start, and the oldest resent
-// (:1144-1235). A peer that half-closes while libutp is still sending -- a
-// request followed by a response -- costs libutp its window.
+// When the peer's stream ends, the reference implementation arms its
+// retransmission timeout 60 ms out, and if anything is in flight it is then
+// treated as a timeout: everything marked for resend, the window cut to one
+// packet, and the oldest resent. A peer that half-closes while the other side
+// is still sending, as with a request followed by a response, costs the
+// sender its window.
 //
-// This library does not copy it (DEVIATIONS.md, "Reaching the end of the
-// peer's stream does not time out what is in flight"). Both halves are
-// measured here: libutp's resend moves from its timeout to its next timeout
-// pass after the FIN, and ours stays where it was.
+// This library does not do that. Both halves are checked: the reference
+// implementation's resend moves forward to its next timeout pass after the
+// FIN, and ours stays where it was.
 
-// libutpFirstResendAfterResponse is how long after sending its response
-// libutp first resends it, with the peer's FIN arriving or not.
+// libutpFirstResendAfterResponse returns how long after sending its response
+// the reference implementation first resends it, with or without the peer's
+// FIN arriving.
 func libutpFirstResendAfterResponse(t *testing.T, peerFin bool) time.Duration {
 	t.Helper()
 	drv, err := libutp.NewDriver(1_000_000)
@@ -65,7 +64,7 @@ func libutpFirstResendAfterResponse(t *testing.T, peerFin bool) time.Duration {
 	return 0
 }
 
-// ourFirstResendAfterResponse is the same, for this library on a virtual
+// ourFirstResendAfterResponse is the same for this library, on a virtual
 // clock.
 func ourFirstResendAfterResponse(t *testing.T, peerFin bool) time.Duration {
 	t.Helper()
@@ -157,8 +156,8 @@ func TestPeerFinDoesNotTimeOutWhatIsInFlight(t *testing.T) {
 	t.Logf("first resend of the response: libutp %v, or %v once the peer's FIN arrives; ours %v, or %v",
 		libPlain, libFin, ourPlain, ourFin)
 
-	// libutp's half, so a change in the vendored copy shows: the FIN pulls
-	// its resend forward to its next timeout pass.
+	// The reference implementation's half, so a change in the vendored copy
+	// shows: the FIN pulls its resend forward.
 	if libFin >= libPlain || libFin > 500*time.Millisecond {
 		t.Errorf("libutp resent at %v with the peer's FIN against %v without; the reference "+
 			"no longer times out in-flight data at the end of the peer's stream, and the "+

@@ -30,10 +30,10 @@ func TestReceiveBufferAllocatesAsDataArrives(t *testing.T) {
 }
 
 // Against a model: packets arrive in order, out of order and repeated, reads
-// take random amounts, and what is read is exactly the stream, in order. The
-// allocation never passes the capacity but by the one packet taken while
+// take random amounts, and what is read is exactly the stream in order. The
+// allocation never exceeds the capacity except by the one packet taken while
 // nothing was readable (receiveBuffer.Admits), and the window and admission
-// figures are those of the fixed-size buffer this replaced.
+// figures match a fixed-size buffer's.
 func TestReceiveBufferMatchesModel(t *testing.T) {
 	for seed := int64(1); seed <= 50; seed++ {
 		rng := rand.New(rand.NewSource(seed))

@@ -6,16 +6,9 @@ import (
 	"time"
 )
 
-// The peer's receive window, as libutp's sender spends it.
-//
-// flush_packets sends the next queued packet only while !is_full(), and
-// is_full with no argument refuses when cur_window + packet_size >
-// min(max_window, opt_sndbuf, max_window_user) (utp_internal.cpp:933-936,
-// :956, :974). The conformance corpus cannot isolate this against libutp at
-// connection start -- libutp's congestion window is one packet there (:2567),
-// which holds a second packet back whatever the peer advertises, and its first
-// packet is 1452 bytes where ours is 962 (KNOWN-LIMITATIONS.md, M6) -- so the
-// rule is asserted here, on our side alone.
+// How the sender spends the peer's receive window: the next packet is sent
+// only while bytes in flight plus a full packet fit within the least of the
+// congestion window, the window ceiling and the peer's window.
 
 // sendAndCount queues data and returns the payload sizes that went out.
 func sendAndCount(t *testing.T, conn *connection, data []byte) []int {
@@ -85,8 +78,8 @@ func TestNothingIsSentIntoLessThanAPacketOfRoom(t *testing.T) {
 }
 
 // The control for both: a window with room for everything sends everything.
-// The send buffer is widened to hold three whole packets: at 2048 bytes the
-// third was a short tail, which the Nagle rule holds back (TestNagle*).
+// The send buffer holds three whole packets, so no short tail is held back
+// by the Nagle rule.
 func TestAWidePeerWindowSendsEveryPacket(t *testing.T) {
 	conn := drainTestConn(t, 0, TEST_BUFFER_SIZE)
 	conn.state.SendBuf = newSendBuffer(64 * 1024)

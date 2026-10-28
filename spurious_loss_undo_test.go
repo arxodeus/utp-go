@@ -27,7 +27,7 @@ func takeData(t *testing.T, conn *scriptedConn) []dataSent {
 	return out
 }
 
-// peerAck is a STATE from the scripted peer acknowledging ackNum, with the
+// peerAck is a STATE from the scripted peer acknowledging ackNum with the
 // given selective ack, echoing echo as the timestamp of the packet that drew
 // it: the receiver reports the difference between its clock and that
 // timestamp, and the sender subtracts it from the STATE's own.
@@ -43,12 +43,9 @@ func peerAck(ackNum uint16, sack *selectiveAck, echo uint32) []byte {
 
 // A cut for a packet taken for lost is undone when the acknowledgement shows
 // the original arrived after all, and stands when it shows the resend did.
-//
 // On a link that reorders, a packet displaced far enough that three later
 // ones are selectively acknowledged first is taken for lost, resent, and the
-// window halved, as libutp does. The original then arrives. Under LEDBAT++
-// on the reordering benchmark link, how often that happened decided which of
-// two modes a run fell in, 2.35 or 2.62 Mbps.
+// window halved; then the original arrives.
 func TestSpuriousLossCutIsUndone(t *testing.T) {
 	for _, c := range []struct {
 		name        string
@@ -66,8 +63,8 @@ func TestSpuriousLossCutIsUndone(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			go stream.Write(ctx, make([]byte, 256*1024))
-			// The writer is not a participant of the clock: wait for what it
-			// queues to go out.
+			// The writer is not a clock participant: wait for what it queues to go
+			// out.
 			var first []dataSent
 			for len(first) == 0 && ctx.Err() == nil {
 				time.Sleep(time.Millisecond)

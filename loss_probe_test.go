@@ -14,12 +14,10 @@ func withoutLossProbe(t *testing.T) {
 	t.Cleanup(func() { lossProbeEnabled.Store(old) })
 }
 
-// TestLossProbeSendsOnePacketBeforeTheTimeout pins the loss probe on a path
-// that has gone silent after the handshake: exactly one retransmission before
-// the first retransmission timeout, a probe timeout after the data went out,
-// and then libutp's timeout schedule -- the probe does not replace the
-// timeout, and does not move its deadline: re-arming the packet's timer for
-// the same deadline lands it on the same wheel tick (timeWheel.put).
+// On a path that goes silent after the handshake, the loss probe sends
+// exactly one retransmission, a probe timeout after the data went out, and
+// the retransmission timeouts then follow their usual schedule: the probe
+// does not replace the timeout or move its deadline.
 func TestLossProbeSendsOnePacketBeforeTheTimeout(t *testing.T) {
 	const base = 200 * time.Millisecond
 	cfg := NewConnectionConfig()
@@ -32,20 +30,19 @@ func TestLossProbeSendsOnePacketBeforeTheTimeout(t *testing.T) {
 	if len(resends) < 5 {
 		t.Fatalf("%d retransmissions, want the probe and four timeouts: %v", len(resends), resends)
 	}
-	// The probe: well before the first timeout, and not before the floor
-	// RFC 8985 puts on its timeout.
+	// The probe comes well before the first timeout, and not before RFC
+	// 8985's floor on its timeout.
 	if probe := resends[0]; probe >= int64(base/time.Millisecond)/2 || probe < int64(minLossProbeTimeout/time.Millisecond) {
 		t.Errorf("first retransmission at %d ms; the probe belongs between %v and half the %v timeout",
 			probe, minLossProbeTimeout, base)
 	}
-	// One probe only: the rest is the timeout schedule, [1 3 7 15] x base.
+	// One probe only; the rest is the timeout schedule, [1 3 7 15] x base.
 	assertScheduleMatches(t, "data", []int64{1, 3, 7, 15}, resends[1:], int64(base/time.Millisecond))
 }
 
-// TestLossProbeIsNotUsedByLedbatPP pins that a LEDBAT++ connection keeps
-// libutp's behaviour: on a silent path its first retransmission is the
-// timeout's, with no probe before it. The timeout the probe avoids is part of
-// how LEDBAT++ yields to loss-based traffic (DEVIATIONS.md).
+// A LEDBAT++ connection does not use the loss probe: on a silent path its
+// first retransmission is the timeout's. The timeout is part of how
+// LEDBAT++ yields to loss-based traffic.
 func TestLossProbeIsNotUsedByLedbatPP(t *testing.T) {
 	const base = 200 * time.Millisecond
 	cfg := NewConnectionConfig()

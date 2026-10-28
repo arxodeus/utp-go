@@ -32,11 +32,9 @@ func batchPair(t *testing.T, network string, ip net.IP) (*udpConn, *net.UDPConn)
 }
 
 // readQueued reads the k datagrams just sent to c, copied out of its arena.
-//
-// Linux delivers on loopback before the send returns, so all k are queued
-// and one batch must take them. Darwin may still be delivering -- CI saw 11
-// of 16 -- so there they are read until all have come, still in order and
-// each whole.
+// Linux delivers on loopback before the send returns, so one batch takes
+// all k. Darwin may still be delivering, so there they are read until all
+// have come, still in order and each whole.
 func readQueued(t *testing.T, c *udpConn, k int) []datagram {
 	t.Helper()
 	var dgs []datagram
@@ -86,13 +84,9 @@ func TestReadBatchTakesEverythingQueued(t *testing.T) {
 	}
 }
 
-// A datagram as large as loopback carries arrives whole: MaxPacketSize may be
-// set that high, and a truncated packet would be lost.
-//
-// On Darwin the sender's send buffer also bounds the datagram it may send --
-// net.inet.udp.maxdgram, 9216 by default -- so the sender's is raised first,
-// and the size is the largest of a few the platform then accepts. That
-// refusal is the sender's, before the receive path runs at all.
+// A datagram as large as loopback carries arrives whole: MaxPacketSize may
+// be set that high. On Darwin the sender's limit (net.inet.udp.maxdgram) is
+// raised first, and the size is the largest of a few the platform accepts.
 func TestReadBatchTakesLargeDatagramWhole(t *testing.T) {
 	c, src := batchPair(t, "udp4", net.IPv4(127, 0, 0, 1))
 	_ = src.SetWriteBuffer(1 << 20)

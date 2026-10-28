@@ -6,9 +6,7 @@ import (
 	"time"
 )
 
-// The incoming-connection cap: libutp refuses a SYN when its context already
-// holds more than 3000 sockets (utp_internal.cpp:2967-2974). See
-// WithMaxConnections.
+// The incoming-connection limit. See WithMaxConnections.
 
 // capTestSocket is a socket on a scripted transport with the given options,
 // and a function that sends it a SYN for a new connection id.
@@ -34,9 +32,9 @@ func settled(t *testing.T, sock *UtpSocket, sent int) {
 	})
 }
 
-// Past the cap a SYN is refused, silently, and nothing is created for it. The
-// comparison is libutp's: refused while the socket holds more than the cap,
-// so the cap itself admits one more.
+// Past the limit a SYN is refused silently and nothing is created for it. A
+// SYN is refused while the socket holds more than the limit, so the limit
+// admits one more.
 func TestConnectionCapRefusesPastTheCap(t *testing.T) {
 	sock, conn, syn := capTestSocket(t, WithMaxConnections(2))
 
@@ -115,8 +113,7 @@ func TestConnectionCapFreesAsConnectionsGo(t *testing.T) {
 	}
 }
 
-// Connections this socket dialled count, as every socket in a libutp context
-// does.
+// Connections this socket dialed count too.
 func TestConnectionCapCountsDialledConnections(t *testing.T) {
 	sock, conn, syn := capTestSocket(t, WithMaxConnections(1))
 
@@ -137,7 +134,7 @@ func TestConnectionCapCountsDialledConnections(t *testing.T) {
 	}
 }
 
-// A negative cap is no cap.
+// A negative limit means no limit.
 func TestConnectionCapCanBeRemoved(t *testing.T) {
 	sock, _, syn := capTestSocket(t, WithMaxConnections(-1))
 	for i := 0; i < 20; i++ {
@@ -149,7 +146,8 @@ func TestConnectionCapCanBeRemoved(t *testing.T) {
 	}
 }
 
-// Without the option, and with it set to zero, the cap is libutp's.
+// Without the option, and with it set to zero, the limit is
+// DefaultMaxConnections.
 func TestConnectionCapDefaultsToLibutps(t *testing.T) {
 	for name, opts := range map[string][]SocketOption{
 		"no option": nil,

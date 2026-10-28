@@ -21,9 +21,7 @@ func (c *blockingPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 }
 
 // A WriteTo that blocks ends at its deadline, and at a deadline moved while
-// it waits. It checked the deadline once and then wrote directly, so a write
-// that blocked waited however long the write took. From the release review
-// of 9c44c4f (R8).
+// it waits.
 func TestWriteToObservesItsDeadlineWhileBlocked(t *testing.T) {
 	udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -85,11 +83,10 @@ func (b *blockingUDP) WriteToUDP(p []byte, addr *net.UDPAddr) (int, error) {
 	return b.udpPacketConn.WriteToUDP(p, addr)
 }
 
-// On a UDP socket too, a WriteTo that blocks ends at a deadline set after it
-// began. With no deadline set it wrote directly, so a deadline set while it
-// was blocked could not end it. Review of 294cc2e, finding 2. The kernel's
-// send buffer cannot be made to block on demand, so the socket's write is
-// made to, and the attempt that never waits is made to find it busy.
+// On a UDP socket too, a blocked WriteTo ends at a deadline set after it
+// began. The kernel's send buffer cannot be made to block on demand, so the
+// socket's write is made to block, and the non-blocking first attempt is
+// made to find it busy.
 func TestUDPWriteToObservesADeadlineSetWhileBlocked(t *testing.T) {
 	s, err := Listen(context.Background(), "udp", "127.0.0.1:0", &Options{Logger: quiet()})
 	if err != nil {
