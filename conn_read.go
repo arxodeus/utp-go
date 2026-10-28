@@ -8,27 +8,22 @@ type readOrWriteResult struct {
 	Err  error
 	Len  int
 	Data []byte
-	// pooled marks a chunk of received data from readChunks, which the
-	// reader returns once it has copied it out. See newReadChunk.
+	// pooled marks a chunk from readChunks, which the reader returns once it
+	// has copied it out. See newReadChunk.
 	pooled bool
 }
 
-// readChunks holds the chunks received data is handed to the reader in.
-//
-// Each chunk was a new buffer and a new result: two allocations for every
-// packet's worth of data read. The reader copies a chunk out and is done with
-// it, so it comes back here.
+// readChunks pools the chunks received data is handed to the reader in.
 var readChunks sync.Pool
 
-// pooledReadChunkMin is the least a chunk must hold to come from readChunks.
-// A pooled buffer is as large as the largest packet, and a reader that falls
-// behind leaves up to a read queue's worth of chunks waiting: small ones are
-// sized to their data, so that a trickle of a few bytes at a time does not
-// hold a full packet's memory for each.
+// pooledReadChunkMin is the minimum size of a chunk taken from readChunks.
+// A pooled buffer is as large as the largest packet, so smaller chunks are
+// allocated to fit, and a reader that falls behind on a trickle of small
+// writes does not hold a full packet's memory for each.
 const pooledReadChunkMin = 512
 
-// newReadChunk is a result holding n bytes of received data, for the reader.
-// size is the most any chunk on this connection holds.
+// newReadChunk returns a result holding n bytes of received data. size is
+// the largest any chunk on this connection holds.
 func newReadChunk(n, size int) *readOrWriteResult {
 	if n >= pooledReadChunkMin {
 		if r, _ := readChunks.Get().(*readOrWriteResult); r != nil && cap(r.Data) >= n {
@@ -57,32 +52,22 @@ func (c *connection) processReads() {
 	if recvBuf != nil && c.logger.Enabled(baseContext, LevelTrace) {
 		c.logger.Trace("read data saving in the recvBuf, start...", "available", recvBuf.Available(), "isEmpty", recvBuf.IsEmpty())
 	}
-	// Drain contiguous data even once the connection is closed: bytes that
+	// Drain contiguous data even after the connection has closed: bytes that
 	// arrived before teardown are still owed to the reader.
 	//
-	// Never block the event loop waiting for the application to read. libutp
-	// does not: utp_call_on_read hands the embedder its bytes and returns, and
-	// a slow application is handled by the advertised receive window shrinking
-	// (utp_call_get_read_buffer_size), not by libutp stopping. This connection
-	// advertises RecvBuf.Window(), so leaving unread bytes in the receive
-	// buffer is exactly that backpressure.
+	// Never block the event loop on the application. A slow reader is
+	// handled by the advertised receive window shrinking, since unread
+	// bytes stay in the receive buffer.
 	//
-	// Every sender on c.reads holds mu, so a free slot observed here is
-	// still free at the send below: consumers only ever remove.
+	// Every sender on c.reads holds mu, so a free slot seen here is still
+	// free at the send below.
 	drained := true
 	for recvBuf != nil && !recvBuf.IsEmpty() {
 		if len(c.reads) == cap(c.reads) {
 			drained = false
 			break
 		}
-		// Size the buffer to the data, not to the largest packet this
-		// connection might carry.
-		//
-		// This allocated MaxPacketSize every time and handed the whole thing to
-		// the reader with a separate length, so a 40-byte chunk kept 1400 bytes
-		// alive until the reader dropped it. IsEmpty() is also true of a buffer
-		// holding only out-of-order bytes, which are not readable yet; that
-		// case used to allocate, read nothing, and break.
+		// Size the buffer to the data rather than the largest packet.
 		readable := recvBuf.Readable()
 		if readable == 0 {
 			break
@@ -105,30 +90,23 @@ func (c *connection) processReads() {
 		c.logger.Trace("read data saving in the recvBuf, end...", "available", recvBuf.Available(), "isEmpty", recvBuf.IsEmpty())
 	}
 
-	// If we have reached eof, hand the reader the end-of-stream marker -- but
-	// only once everything already received has been handed over first.
-	//
-	// eof() means every byte the peer sent has *arrived*, not that the reader
-	// has been given it. While the drain above ran to completion that
-	// distinction did not exist. Now that it can stop early with bytes still
-	// in the receive buffer, announcing the end here truncates the transfer:
-	// the reader sees end-of-stream and stops, and the rest is discarded.
-	// Measured, when this guard was missing: 409308 bytes delivered out of
-	// 524288 against real libutp.
+	// At end of stream, deliver the end-of-stream marker, but only after
+	// everything already received. eof() means every byte has arrived, not
+	// that it has been handed to the reader; the drain above can stop early.
 	if drained && c.eof() {
 		c.deliverTerminalRead()
 	}
-	// Bytes ready for a reader whose queue is full wait for it to make room,
-	// and only then can a read change anything here: it is what reopens the
-	// receive window. See UtpStream.notifyRead.
+	// Bytes waiting for a reader with a full queue wait until it makes
+	// room; only then does a read reopen the receive window. See
+	// UtpStream.notifyRead.
 	c.readsHeld.Store(recvBuf != nil && recvBuf.Readable() > 0)
 
 	c.onReadDrained()
 }
 
-// drainable is how many bytes processReads would hand the reader now: what is
-// contiguous in the receive buffer, up to a chunk of at most MaxPacketSize for
-// each free slot in the reader's queue -- processReads' own loop, counted.
+// drainable returns how many bytes processReads would hand the reader now:
+// the contiguous bytes in the receive buffer, up to MaxPacketSize for each
+// free slot in the reader's queue.
 func (c *connection) drainable() int {
 	if c.state.stateType == connConnecting || c.state.RecvBuf == nil {
 		return 0
@@ -148,28 +126,11 @@ func (c *connection) recvWindow() uint32 {
 	return uint32(c.state.RecvBuf.Window() + c.drainCredit)
 }
 
-// onReadDrained tells the peer when handing bytes up has reopened a receive
-// window smaller than the one now available.
-//
-// libutp's utp_read_drained (utp_internal.cpp:3242-3261), which its embedder
-// calls whenever it has drained the socket:
-//
-//	const size_t rcvwin = conn->get_rcv_window();
-//	if (rcvwin > conn->last_rcv_win) {
-//	    if (conn->last_rcv_win == 0) conn->send_ack();
-//	    else conn->schedule_ack();
-//	}
-//
-// Without it the peer finds out only from the next acknowledgement this end
-// happens to send -- and while it is blocked on a window too small to fit a
-// packet it sends nothing, so nothing draws one. The test is growth, not
-// growth from zero: a window too small to use is as blocking as a closed
-// one, and libutp's condition covers both because it compares against what
-// was actually last sent.
-//
-// libutp's distinction between acknowledging now and scheduling is not
-// preserved, because it does not exist here: flushAck runs at the end of this
-// same pass either way. History: HISTORY.md, "connection.onReadDrained".
+// onReadDrained tells the peer when handing bytes to the reader has opened a
+// receive window larger than the one last advertised. Without it, a peer
+// blocked on a window too small to use sends nothing, and so draws no
+// acknowledgement that would tell it the window opened. The acknowledgement
+// is sent by flushAck at the end of this pass.
 func (c *connection) onReadDrained() {
 	if c.state == nil || c.state.stateType != connConnected || c.state.RecvBuf == nil {
 		return
@@ -180,22 +141,14 @@ func (c *connection) onReadDrained() {
 	}
 }
 
-// drainReadsForTeardown hands over everything left in the receive buffer as the
-// connection ends.
+// drainReadsForTeardown hands over everything left in the receive buffer as
+// the connection ends.
 //
-// The ordinary drain in processReads gives up when the read queue is full and
-// waits to be woken, which is what keeps the event loop from blocking on the
-// application. That is not good enough here: this is the last pass, the receive
-// buffer is about to be closed, and anything not handed over now is lost. A
-// truncated transfer is worse than a slow one -- when this path merely called
-// processReads, a large loopback transfer arrived short and
-// TestUdpTransfer failed on the payload comparison.
-//
-// So this one waits for room, and the wait has two escapes: the connection's
-// context, and the consumer closing the stream. The second is what keeps the
-// deadlock from coming back. A consumer that closed without reading is not
-// owed these bytes, and waiting for it to take them would be waiting forever,
-// because UtpStream.Close is itself blocked waiting for this goroutine.
+// Unlike processReads it waits for room in the read queue, since anything
+// not delivered now is lost. The wait ends when the connection's context
+// ends or the consumer closes the stream: a consumer that closed without
+// reading is not owed the bytes, and UtpStream.Close is itself waiting for
+// this goroutine.
 func (c *connection) drainReadsForTeardown() {
 	recvBuf := c.state.RecvBuf
 	for recvBuf != nil && !recvBuf.IsEmpty() {
@@ -221,38 +174,27 @@ func (c *connection) drainReadsForTeardown() {
 	}
 }
 
-// deliverTerminalRead hands the reader the single end-of-stream marker: a
-// result with an empty Data slice, which is what UtpStream.ReadToEOF treats as
-// the end of the stream. It is delivered at most once.
-//
-// Every path that closes the connection must reach this, including idle
-// timeout, RESET and a locally-initiated close. A reader blocks on c.reads
-// forever if the marker never arrives.
+// deliverTerminalRead delivers the end-of-stream marker, a result with an
+// empty Data slice, at most once. Every path that closes the connection must
+// reach it, including idle timeout, RESET and a local close.
 func (c *connection) deliverTerminalRead() {
 	if c.readsTerminated {
 		return
 	}
 	c.readsTerminated = true
-	// A clean end-of-stream reports no error, matching io.ReadAll: ReadToEOF
-	// reads to EOF by definition, so reaching it is success. Only an abnormal
-	// close (RESET, idle timeout) carries an error. See readEndErr.
+	// A clean end of stream carries no error, as with io.ReadAll. Only an
+	// abnormal close (RESET, idle timeout) carries one. See readEndErr.
 	err := c.readEndErr()
 	c.logger.Debug("read eof...", "err", err)
 
-	// Published before delivery is attempted, so the reason the stream ended
-	// is available however the reader finds out it has.
+	// Publish the reason before delivery, so it is available however the
+	// reader learns that the stream ended.
 	c.terminalErr.Store(&terminalError{err: err})
 
-	// Never block the event loop on this either. UtpStream.Close waits for
-	// this goroutine to finish, and only the reader drains c.reads, so a
-	// consumer that stopped reading and then closed deadlocked against
-	// itself: Close waited for the loop, the loop waited for the reader, and
-	// the context that would break the tie is cancelled by Close only after
-	// its wait returns.
-	//
-	// If there is no room the marker is simply not sent. Closing c.reads when
-	// this loop exits reports the end of the stream just as well, and carries
-	// the error through terminalErr.
+	// Do not block the event loop here either: UtpStream.Close waits for
+	// this goroutine, and only the reader drains c.reads. If there is no
+	// room the marker is not sent; closing c.reads when the loop exits
+	// signals the end just as well, with the error in terminalErr.
 	select {
 	case c.reads <- &readOrWriteResult{Err: err, Data: make([]byte, 0)}:
 	default:
@@ -261,22 +203,15 @@ func (c *connection) deliverTerminalRead() {
 	}
 }
 
-// readEndErr is what the reader is told when the stream ends: the error that
-// ended the connection, or nil for a clean end -- and a clean end means the
-// reader has been given everything the peer sent, up to its FIN. A
-// connection that ended without error but short of that reports
-// ErrReadClosed: this end closed before it had read everything.
+// readEndErr returns what the reader is told when the stream ends: the error
+// that ended the connection, or nil for a clean end. A clean end means the
+// reader has received everything the peer sent before its FIN. A connection
+// that ended without error short of that reports ErrReadClosed.
 //
-// Once everything the peer sent before its FIN has arrived and been handed
-// on, the read side has ended cleanly, whatever ends the connection
-// afterwards. libutp has delivered every byte to its embedder by then and
-// signalled UTP_STATE_EOF (utp_internal.cpp:2339-2343, :2355-2357); a RESET
-// that follows is reported as an error but takes nothing back, and
-// go-libutp's reader returns the data and io.EOF before it (go-libutp's
-// conn.go, readNoWait). It happens: the side that closed first destroys
-// its connection once its FIN is acknowledged, and answers whatever the
-// other side sends next -- a window update as its reader drains -- with a
-// RESET (:2179-2182, :2907-2944). History: HISTORY.md, "readEndErr".
+// Once everything before the peer's FIN has arrived and been delivered, the
+// read side has ended cleanly whatever happens afterwards. A peer that closed
+// first may answer a later window update with a RESET; that is reported as an
+// error but does not take back the data.
 func (c *connection) readEndErr() error {
 	if !c.readsTruncated && c.receivedThroughFin() {
 		return nil
@@ -299,9 +234,8 @@ func (c *connection) receivedThroughFin() bool {
 // including the nil case that means a clean end of stream.
 type terminalError struct{ err error }
 
-// sendRead delivers a read result, giving up if the connection context is
-// cancelled. Without the context arm a reader that has already gone away
-// wedges the event loop permanently.
+// sendRead delivers a read result, giving up if the connection's context is
+// canceled, so a reader that has gone away cannot block the event loop.
 func (c *connection) sendRead(res *readOrWriteResult) bool {
 	select {
 	case c.reads <- res:
