@@ -9,13 +9,11 @@ import (
 
 type udpConn struct {
 	base *net.UDPConn
-	// udpConnReader is what batched reads keep between reads, which differs
-	// by platform (batch_read_unix.go, batch_read_other.go). Only the
-	// socket's read loop reads, so one is enough.
+	// udpConnReader is the platform-specific state of batched reads. Only
+	// the socket's read loop reads, so one is enough.
 	udpConnReader
-	// dfUnsupported records that this platform has no per-packet
-	// don't-fragment option, so the MTU search stops asking. See
-	// WriteToDontFragment.
+	// dfUnsupported records that the platform has no don't-fragment
+	// option, so it is not tried again. See WriteToDontFragment.
 	dfUnsupported atomic.Bool
 }
 
@@ -37,14 +35,9 @@ func (c *udpConn) WriteTo(b []byte, dst ConnectionPeer) (int, error) {
 	case *UdpPeer:
 		return c.base.WriteToUDP(b, baseDst.addr)
 	}
-	// A peer type this package did not create. Its Hash is by contract the
-	// address, which is what utpnet's peerUDPAddr already relies on, so parse
-	// that rather than dropping the packet.
-	//
-	// This used to `return 0, nil`: every packet to such a peer vanished, and
-	// the connection above saw a successful send and timed out with nothing to
-	// explain it. Silence is the wrong answer whether or not the address
-	// parses -- if it does not, that is an error the caller needs.
+	// A peer type this package did not create. Its Hash is the address by
+	// contract, so parse it; a peer whose address does not parse is an
+	// error rather than a silently dropped packet.
 	addr, err := net.ResolveUDPAddr("udp", dst.Hash())
 	if err != nil {
 		return 0, fmt.Errorf("utp_socket: peer %T hashes to %q, which is not a UDP address: %w",
@@ -54,36 +47,28 @@ func (c *udpConn) WriteTo(b []byte, dst ConnectionPeer) (int, error) {
 }
 
 // WriteToDontFragment sends one datagram with fragmentation disabled,
-// implementing DontFragmentWriter for a real UDP socket.
+// implementing DontFragmentWriter.
 //
-// The bit is a socket option on every platform that has one at all -- there is
-// no per-datagram control message for it -- so it is set, one datagram is
-// sent, and it is cleared again. That is safe here because the socket holds
-// writeMu exclusively for such a send and shared for every other one, so no
-// other write can land between the two. See UtpSocket.writeDatagram.
+// Don't-fragment is a socket option, so it is set, one datagram is sent, and
+// it is cleared again. The socket holds writeMu exclusively for such a send,
+// so no other write can fall in between. The option is cleared even if the
+// send fails, so that ordinary data stays fragmentable.
 //
-// It is cleared even when the send fails. Leaving it set would make every
-// subsequent datagram on this socket unfragmentable, which is the one thing
-// libutp is explicit about not wanting: ordinary data has to stay
-// fragmentable, "now we need it to fragment just to get it through"
-// (utp_internal.cpp:898-905).
-//
-// A platform with no such option answers ErrDontFragmentUnsupported, and
-// nothing is sent. The caller then sends it normally.
+// On a platform without the option it returns ErrDontFragmentUnsupported and
+// sends nothing.
 func (c *udpConn) WriteToDontFragment(b []byte, dst ConnectionPeer) (int, error) {
 	if c.dfUnsupported.Load() {
 		return 0, ErrDontFragmentUnsupported
 	}
 	if err := setDontFragment(c.base, true); err != nil {
-		// Remember it, so a socket on a platform without the option is not
-		// asked once per probe for the life of the process.
+		// Remember it, so the option is not tried on every probe.
 		c.dfUnsupported.Store(true)
 		return 0, ErrDontFragmentUnsupported
 	}
 	n, err := c.WriteTo(b, dst)
 	if clearErr := setDontFragment(c.base, false); clearErr != nil && err == nil {
-		// The datagram went out, but the socket is now in a state where every
-		// later one would too. Report it rather than carrying on quietly.
+		// The datagram was sent, but later ones would be unfragmentable too.
+		// Report it.
 		return n, fmt.Errorf("utp_socket: sent an MTU probe but could not clear "+
 			"the don't-fragment bit, so later packets would not be fragmentable: %w", clearErr)
 	}
@@ -122,16 +107,14 @@ type batchReader interface {
 	readBatch() ([]datagram, error)
 }
 
-// QueuedReader is a Conn that can say how many datagrams ReadFrom would return
-// without waiting. The socket reads those before it acknowledges anything, so
-// a run of datagrams that were already waiting draws one acknowledgement, not
-// one each: libutp's embedder reads until the socket would block and only then
-// calls utp_issue_deferred_acks (utp.h:512-517). A Conn that implements
-// neither this nor batched reads has every datagram treated as a batch of its
-// own, which holds nothing back.
+// QueuedReader is an optional interface for a Conn that can report how many
+// datagrams ReadFrom would return without blocking. The socket reads those
+// before acknowledging, so a run of datagrams already waiting draws one
+// acknowledgement rather than one each. A Conn that implements neither this
+// nor batched reads has each datagram treated as its own batch.
 //
-// Queued may count low, never high: a datagram it counts must be one ReadFrom
-// returns at once.
+// Queued may undercount but must not overcount: every datagram it counts
+// must be returned by ReadFrom without blocking.
 type QueuedReader interface {
 	Queued() int
 }

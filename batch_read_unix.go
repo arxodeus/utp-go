@@ -7,19 +7,12 @@ import (
 	"sync"
 )
 
-// maxReadBatch bounds one batch. libutp's embedders read until the socket
-// would block, with no bound (the bridge in native/libutp does exactly that);
-// this one only keeps a pathological burst from holding acknowledgements back
-// indefinitely. A 4 MiB socket buffer holds about 3000 full-size datagrams.
+// maxReadBatch bounds one batch, so a pathological burst cannot hold
+// acknowledgements back indefinitely. A 4 MiB socket buffer holds about 3000
+// full-size datagrams.
 const maxReadBatch = 4096
 
-// readBatch returns every datagram the kernel already has queued, waiting only
-// for the first one: libutp's embedder loop of recvfrom until EWOULDBLOCK,
-// after which it calls utp_issue_deferred_acks once (utp.h:512-517;
-// native/libutp/bridge.cpp). See UtpSocket.readLoop. drain does the reading:
-// recvmmsg on Linux (batch_drain_linux.go), recvfrom elsewhere
-// (batch_drain_recvfrom.go).
-// udpConnReader is what udpConn's batched reads keep between reads.
+// udpConnReader is the state udpConn's batched reads keep between reads.
 type udpConnReader struct {
 	// peers caches the peer for each source address the read loop has seen.
 	// See peerForKey.
@@ -45,6 +38,10 @@ type peerKey struct {
 // costs one address formatting per peer that sends again.
 const maxCachedPeers = 4096
 
+// readBatch returns every datagram the kernel has queued, waiting only for
+// the first. The socket then flushes deferred acknowledgements once per
+// batch; see UtpSocket.readLoop. drain does the reading: recvmmsg on Linux,
+// recvfrom elsewhere.
 func (c *udpConn) readBatch() ([]datagram, error) {
 	rc, err := c.base.SyscallConn()
 	if err != nil {
@@ -59,24 +56,19 @@ func (c *udpConn) readBatch() ([]datagram, error) {
 	return out, err
 }
 
-// lend copies a datagram into the batch's arena and returns it there.
-//
-// Each datagram was copied into a slice of its own, which the decoded packet
-// then kept as its body: an allocation for every datagram received, for an
-// acknowledgement as much as for data. A packet decoded from a borrowed
-// buffer copies its body only if it is kept (packet.own).
+// lend copies a datagram into the batch's arena and returns the copy. The
+// decoded packet borrows it, and copies its body only if it keeps the packet
+// (packet.own).
 func (c *udpConn) lend(b []byte) []byte {
 	start := len(c.arena)
 	c.arena = append(c.arena, b...)
 	return c.arena[start:len(c.arena):len(c.arena)]
 }
 
-// peerForKey returns the peer a datagram came from, by its address's key,
-// reusing the one made for the last datagram from the same address. Making one
-// per datagram converted the address and formatted it as text -- the key
-// every packet is routed by -- for every packet: the largest single cost of
-// routing one, measured on a reader just woken. Only the read loop calls
-// this, so the cache needs no lock.
+// peerForKey returns the peer a datagram came from, reusing the one made for
+// the previous datagram from the same address, which saves formatting the
+// address for every packet. Only the read loop calls it, so the cache needs
+// no lock.
 func (c *udpConn) peerForKey(k peerKey) *UdpPeer {
 	if p, ok := c.peers[k]; ok {
 		return p
@@ -89,9 +81,9 @@ func (c *udpConn) peerForKey(k peerKey) *UdpPeer {
 	return p
 }
 
-// udpAddr is the address net.UDPConn.ReadFrom would have returned for the
-// datagram this key was made from, so a peer read in a batch hashes exactly as
-// one read singly does.
+// udpAddr returns the address net.UDPConn.ReadFrom would have returned for
+// this key's datagram, so a peer read in a batch hashes the same as one read
+// singly.
 func (k peerKey) udpAddr() *net.UDPAddr {
 	if k.v6 {
 		ip := make(net.IP, net.IPv6len)

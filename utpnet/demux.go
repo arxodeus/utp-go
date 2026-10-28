@@ -7,13 +7,9 @@ import (
 	utp "github.com/arxodeus/utp"
 )
 
-// demuxConn is the utp.Conn the uTP socket reads from.
-//
-// It is not the UDP socket. The Socket owns the only reader of that, so it can
-// decide per datagram whether uTP or the caller should get it; what the uTP
-// machinery sees is this, a queue fed only with the datagrams that were uTP.
-// Writes go straight out through the real socket, because there is nothing to
-// decide on the way out.
+// demuxConn is the utp.Conn the uTP socket reads from: a queue of the
+// datagrams the Socket's single UDP reader classified as uTP. Writes go
+// directly to the underlying socket.
 type demuxConn struct {
 	udp udpPacketConn
 
@@ -39,11 +35,8 @@ type inbound struct {
 }
 
 // demuxDepth is how many uTP datagrams may be queued for the uTP socket
-// before the read loop drops them.
-//
-// Deeper than the passthrough queue: the uTP socket drains this promptly and
-// a drop here is real packet loss that a connection then has to recover from
-// with a retransmission, where a dropped DHT datagram costs one query.
+// before the read loop drops them. It is deeper than the passthrough queue
+// because a drop here is packet loss a connection must recover from.
 const demuxDepth = 4096
 
 func newDemuxConn(udp udpPacketConn) *demuxConn {
@@ -54,17 +47,10 @@ func newDemuxConn(udp udpPacketConn) *demuxConn {
 	}
 }
 
-// HoldPeer keeps the address peer's datagrams came from, which may not be a
+// HoldPeer keeps the original address of peer, which may not be a
 // *net.UDPAddr, for as long as the uTP socket has a connection with it: from
-// the first packet of the handshake, dialled or accepted, to the last of the
-// close (utp.Conn). Only a Socket on a PacketConn of its own has such
-// addresses (packetConn).
-//
-// It was kept from when the application had the connection -- the dial
-// returned, or an Accept took it -- to the end of its stream. Before that, a
-// dial's handshake and a connection waiting to be accepted could lose it to
-// other addresses arriving, and their packets then went out in the UDP form,
-// which such a PacketConn may refuse. Release review of 224c363, finding 3.
+// the first handshake packet, dialed or accepted, to the end of the close.
+// Only a Socket on its own PacketConn has such addresses (packetConn).
 func (c *demuxConn) HoldPeer(peer utp.ConnectionPeer) {
 	if pc, ok := c.udp.(*packetConn); ok {
 		if addr, err := peerUDPAddr(peer); err == nil {
@@ -96,17 +82,12 @@ func (c *demuxConn) deliver(payload []byte, pooled *[]byte, from *net.UDPAddr, n
 	}
 }
 
-// ReadFrom hands the uTP socket the next datagram, and on a PacketConn of the
-// Socket's own, puts the address it came from back in the map and holds it
-// there until the next ReadFrom.
-//
-// The datagram waited in the queue after the map last saw its address, and a
-// busy port could make the map forget it in the meantime: a SYN's, before the
-// connection it starts holds it (HoldPeer), and the SYN-ACK then went out in
-// the UDP form, which such a PacketConn may refuse. The uTP socket handles a
-// datagram, connection made and answer sent, before it reads the next, so
-// what this holds the next ReadFrom can let go of; one address at most, and
-// none for a datagram still queued or dropped. Review of 99ce302.
+// ReadFrom returns the next datagram to the uTP socket. On a Socket's own
+// PacketConn it also re-registers the datagram's original address and holds
+// it until the next ReadFrom, so a reply such as a SYN-ACK goes to that
+// address even if the map dropped it while the datagram was queued. The uTP
+// socket finishes handling one datagram before reading the next, so at most
+// one address is held this way.
 func (c *demuxConn) ReadFrom(b []byte) (int, utp.ConnectionPeer, error) {
 	pc, _ := c.udp.(*packetConn)
 	if c.handed != nil {
@@ -172,9 +153,8 @@ func peerUDPAddr(dst utp.ConnectionPeer) (*net.UDPAddr, error) {
 	case nil:
 		return nil, ErrNilPeer
 	default:
-		// Anything else came from a caller that built its own peer type.
-		// Its Hash is by contract the address, so parse that rather than
-		// failing.
+		// A caller-defined peer type. Its Hash is the address by contract,
+		// so parse it.
 		return net.ResolveUDPAddr("udp", dst.Hash())
 	}
 }

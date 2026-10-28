@@ -10,23 +10,22 @@ import (
 	"time"
 )
 
-// NewSocketFromPacketConn makes a Socket on any net.PacketConn, not only a
-// UDP socket: one wrapped for rate limiting, metrics or a gate a test holds,
-// a socket shared with code that was handed it, or an in-memory network.
+// NewSocketFromPacketConn returns a Socket on any net.PacketConn, not only a
+// UDP socket: for example one wrapped for rate limiting or metrics, one
+// shared with other code, or an in-memory network.
 //
-// The Socket takes ownership, and closing it closes pc. Unlike a Socket on a
-// UDP socket it does not wait for its reader to return when it closes:
-// nothing says a PacketConn it did not make honours a read deadline, and a
-// Close that waited on one that does not would never return. The reader
-// stops when pc's ReadFrom fails, and an error that is not a timeout, on a
-// Socket not yet closed, closes it: Accept, ReadFrom and the dials then
-// return ErrSocketClosed wrapping that error.
+// The Socket takes ownership of pc, and closing the Socket closes it. Unlike
+// a Socket on a UDP socket, Close does not wait for the reader to return,
+// since pc may not honor read deadlines. The reader stops when pc's ReadFrom
+// fails. A non-timeout error on an open Socket closes it, and Accept,
+// ReadFrom and the dial methods then return ErrSocketClosed wrapping that
+// error.
 //
-// Addresses need only name a host and port. A datagram from an address of
-// some other type than *net.UDPAddr is handled under its UDP form, and
-// replies go back to the address it came from; a connection dialled to an
-// address of pc's own type takes DialAddr. A PacketConn that wants its own
-// address type must be able to write to one it has itself returned.
+// Addresses must name a host and port. A datagram from an address that is
+// not a *net.UDPAddr is handled under its UDP form, and replies are sent to
+// the original address; DialAddr dials an address of pc's own type. A
+// PacketConn that uses its own address type must accept, in WriteTo, any
+// address it has returned from ReadFrom.
 func NewSocketFromPacketConn(ctx context.Context, pc net.PacketConn, opts *Options) (*Socket, error) {
 	if pc == nil {
 		return nil, errors.New("utpnet: nil packet connection")
@@ -41,15 +40,13 @@ func NewSocketFromPacketConn(ctx context.Context, pc net.PacketConn, opts *Optio
 type packetConn struct {
 	pc net.PacketConn
 
-	// native maps the UDP form of each address of another type to the
-	// address itself, so what is sent to a peer goes to the address its
-	// datagrams came from. Only addresses that are not *net.UDPAddr are
-	// kept.
+	// native maps the UDP form of each address of another type back to the
+	// original, so replies go to the address datagrams came from. Only
+	// addresses that are not *net.UDPAddr are stored.
 	mu     sync.Mutex
 	native map[string]nativeAddr
 	// pins counts the live connections to each address in native. A pinned
-	// address is never pruned: its connection writes to it, and its UDP form
-	// is not something pc need accept. Review of 294cc2e, finding 4.
+	// address is never pruned.
 	pins map[string]int
 }
 
@@ -60,15 +57,10 @@ type nativeAddr struct {
 	seen time.Time
 }
 
-// The native map is bounded. Every address a datagram arrives from is
-// remembered, before any protocol has looked at it, and nothing was ever
-// forgotten: a PacketConn carrying a DHT grew it for as long as it ran.
-// Release review of 9c44c4f (R10).
-//
-// An address forgotten while still in use is written to in its UDP form,
-// which pc may not accept, so what goes first is what has been silent
-// longest: nativeIdle is well past the 29 seconds within which a live uTP
-// connection, keepalives included, sends something.
+// The native map is bounded, since every source address is recorded
+// before any protocol has looked at it. When it is full, the addresses
+// silent longest go first: nativeIdle is well beyond the 29 seconds within
+// which a live uTP connection sends something.
 const (
 	nativeMax  = 8192
 	nativeIdle = 5 * time.Minute
@@ -81,9 +73,9 @@ func (p *packetConn) ReadFromUDP(b []byte) (int, *net.UDPAddr, error) {
 	return n, udp, err
 }
 
-// readNative is ReadFromUDP, and the address as pc gave it. A datagram waits
-// in a queue before anything answers it, and the map can forget its address
-// in the meantime; the address travels with it instead (Socket.run).
+// readNative is ReadFromUDP that also returns the address as pc gave it.
+// The address travels with the datagram, since the map may drop it while the
+// datagram is queued (Socket.run).
 func (p *packetConn) readNative(b []byte) (int, *net.UDPAddr, net.Addr, error) {
 	for {
 		n, addr, err := p.pc.ReadFrom(b)
@@ -93,9 +85,8 @@ func (p *packetConn) readNative(b []byte) (int, *net.UDPAddr, net.Addr, error) {
 		if udp, ok := p.udpForm(addr); ok {
 			return n, udp, addr, nil
 		}
-		// An address with no host and port cannot be answered or told
-		// apart from another; the datagram is dropped, as one from an
-		// address the kernel could not parse would be.
+		// An address without a host and port cannot be answered, so the
+		// datagram is dropped.
 	}
 }
 
@@ -126,8 +117,8 @@ func (p *packetConn) udpForm(addr net.Addr) (*net.UDPAddr, bool) {
 	return p.remember(addr, false)
 }
 
-// retain is udpForm, and keeps addr as pin does until the matching unpin: in
-// one hold of the lock, so that nothing can forget it between the two.
+// retain is udpForm that also pins addr until the matching unpin, under
+// one hold of the lock so it cannot be pruned in between.
 func (p *packetConn) retain(addr net.Addr) (*net.UDPAddr, bool) {
 	return p.remember(addr, true)
 }
@@ -172,9 +163,9 @@ func (p *packetConn) remember(addr net.Addr, pin bool) (*net.UDPAddr, bool) {
 	return udp, true
 }
 
-// pruneLocked makes room in a full native map: what has been silent for
-// nativeIdle goes, and if that is not enough, the longest silent until half
-// is left.
+// pruneLocked makes room in a full native map: it removes addresses silent
+// for nativeIdle and, if that is not enough, the longest silent until half
+// remain.
 func (p *packetConn) pruneLocked(now time.Time) {
 	for k, e := range p.native {
 		if now.Sub(e.seen) >= nativeIdle && p.pins[k] == 0 {
@@ -224,7 +215,7 @@ func (p *packetConn) unpin(udp *net.UDPAddr) {
 	p.mu.Unlock()
 }
 
-// nativeOf is the address a UDP form was learned from, or the UDP form
+// nativeOf returns the address a UDP form was learned from, or the UDP form
 // itself.
 func (p *packetConn) nativeOf(udp *net.UDPAddr) net.Addr {
 	p.mu.Lock()
@@ -249,8 +240,8 @@ func (p *packetConn) SetReadDeadline(t time.Time) error { return p.pc.SetReadDea
 func (p *packetConn) Close() error                      { return p.pc.Close() }
 
 // SetReadBuffer and SetWriteBuffer reach the kernel when pc has a socket
-// under it, and do nothing otherwise; the Socket only ever asks as a best
-// effort.
+// under it, and do nothing otherwise. The Socket calls them on a best-effort
+// basis.
 func (p *packetConn) SetReadBuffer(bytes int) error {
 	if s, ok := p.pc.(interface{ SetReadBuffer(int) error }); ok {
 		return s.SetReadBuffer(bytes)

@@ -6,39 +6,26 @@ import (
 	"sync"
 )
 
-// connEventQueueLen is the capacity of a connection's event queue. Packets go
-// through it only until the connection's event loop has finished setting up --
-// after that the socket's reader hands them over inline (receiveInline) -- and
-// a peer has nothing to send before then but a repeated SYN: its data waits
-// for the SYN-ACK, which that setup sends. Otherwise it carries the
-// application's close and half-close and ICMP reports, a few each. A packet
-// that finds it full is dropped and counted (PacketsDroppedFullConnQueue).
-//
-// It was 1000, and a channel's buffer is allocated whole: 8 KB per
-// connection, about a quarter of what an idle connection held once its
-// receive buffer stopped being allocated up front.
+// connEventQueueLen is the capacity of a connection's event queue. Packets
+// pass through it only until the connection's event loop is set up; after
+// that the reader delivers them inline (receiveInline). It otherwise carries
+// close, half-close and ICMP reports. A packet that finds it full is dropped
+// and counted in PacketsDroppedFullConnQueue. The buffer is allocated whole,
+// so it is kept small.
 const connEventQueueLen = 64
 
 // encodeBufs holds the buffers outgoing packets are encoded into. A packet is
-// written the moment it is encoded and the Conn may not keep it, so a buffer
-// is free again once WriteTo returns. Encoding into a fresh slice was one
-// allocation per packet sent, about a twelfth of all the allocations of a LAN
-// transfer.
+// written as soon as it is encoded and the Conn may not retain it, so the
+// buffer is free again once WriteTo returns.
 var encodeBufs = sync.Pool{New: func() any {
 	b := make([]byte, 0, 1500)
 	return &b
 }}
 
-// sendEvent carries out what a connection or the socket wants done on the
-// wire, on the caller's goroutine: a packet written, or a finished
-// connection's entry removed.
-//
-// This was a write loop on its own goroutine, fed by socketEvents, which put
-// a hand-off between every decision to send and the send itself -- on an
-// acknowledgement's path, the last of three. libutp's send callback writes
-// from inside the call that decided to send (utp_call_sendto,
-// utp_internal.cpp:713). Conn.WriteTo is called concurrently from here, as
-// net.PacketConn allows.
+// sendEvent performs a connection's or the socket's request on the caller's
+// goroutine: it writes a packet, or removes a finished connection's entry.
+// Writing from the goroutine that decided to send avoids a hand-off on every
+// send. Conn.WriteTo may be called concurrently, as net.PacketConn allows.
 func (s *UtpSocket) sendEvent(event *socketEvent) {
 	if s.logger.Enabled(baseContext, LevelTrace) {
 		s.logger.Trace("a socket event should be sent to target", "event.type", event.Type, "event.cid", event.ConnectionId)
@@ -90,19 +77,13 @@ func (s *UtpSocket) sendEvent(event *socketEvent) {
 }
 
 // writeDatagram sends one datagram, with fragmentation disabled if it is an
-// MTU probe and the Conn can do that.
+// MTU probe and the Conn supports it. Otherwise the probe is sent as an
+// ordinary datagram: the MTU search still runs, but on IPv4 it cannot tell a
+// dropped probe from a fragmented one.
 //
-// Falling back to an ordinary write is deliberate, and is what makes this
-// safe to add. A Conn with no don't-fragment support probes exactly as it did
-// before -- the search still runs, it just cannot tell a dropped probe from a
-// fragmented one on IPv4. Failing the send instead would turn a missing
-// socket option into a stalled connection.
-//
-// Datagrams are written from several goroutines -- the reader, each
-// connection's event loop -- so a Conn that sets the bit as a socket option
-// around one send has that send to itself: writeMu is held exclusively for it
-// and shared by every other write. A Conn that cannot set the bit takes no
-// lock at all.
+// A Conn that sets don't-fragment as a socket option around one send holds
+// writeMu exclusively for it; every other write holds it shared. A Conn
+// without don't-fragment support takes no lock.
 func (s *UtpSocket) writeDatagram(b []byte, peer ConnectionPeer, dontFragment bool) (int, error) {
 	w, dfw := s.socket.(DontFragmentWriter)
 	if !dfw {

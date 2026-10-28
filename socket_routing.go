@@ -19,10 +19,9 @@ func (s *UtpSocket) removeConnStream(key string) {
 	s.connsGen.Add(1)
 }
 
-// registerLocked enters a connection to peer in the table under key, and,
-// the first time key is entered, tells a transport that keeps something per
-// peer that this one is in use (Conn, HoldPeer). Called with connsMutex held
-// for writing.
+// registerLocked adds a connection to peer to the table under key. The first
+// time key is added, it tells a transport that tracks peers (HoldPeer) that
+// this one is in use. Called with connsMutex held for writing.
 func (s *UtpSocket) registerLocked(key string, ch chan *streamEvent, peer ConnectionPeer) {
 	if _, ok := s.conns[key]; !ok && s.holder != nil {
 		if s.held == nil {
@@ -44,22 +43,19 @@ func (s *UtpSocket) attachInline(key string, ch chan *streamEvent, c *connection
 	if s.conns[key] == ch {
 		s.inlineConns[ch] = c
 		s.connsGen.Add(1)
-		// From here the connection may rest: nothing the socket hands it
-		// goes to a loop that is not there. See dormant.go.
+		// From here the connection may rest; see dormant.go.
 		c.attached.Store(true)
 	}
 }
 
-// route finds the connection a packet is for: the first of the derivations
-// in cidTypes whose key the socket has, and its inline connection. Called by
-// the reader, with dispatchMu held. The keys are built into a reused buffer
-// and looked up under one hold of connsMutex; the conversion in the map index
-// does not allocate.
+// route finds the connection a packet is for: the first key derived by
+// routeCandidates that the socket has, and its inline connection. Called by
+// the reader with dispatchMu held. Keys are built in a reused buffer, so a
+// lookup does not allocate.
 func (s *UtpSocket) route(packetPtr *packet, peerKey string) (send, recv uint16, ch chan *streamEvent, c *connection) {
-	// The datagrams of one flow arrive one after another, and the routing
-	// tables rarely change: the last route stands while nothing has been
-	// added or removed. A SYN always takes the full path, which has its own
-	// rule for it.
+	// Consecutive datagrams usually belong to one flow and the tables
+	// rarely change, so the last route is reused while the tables are
+	// unchanged. A SYN always takes the full path.
 	gen := s.connsGen.Load()
 	r := &s.lastRoute
 	isSyn := packetPtr.Header.PacketType == st_syn
@@ -101,25 +97,19 @@ func (s *UtpSocket) routeLocked(packetPtr *packet, peerKey string) (send, recv u
 	return 0, 0, nil, nil
 }
 
-// routeCandidates is the connections, as (send, recv) id pairs, that a packet
-// can be for, in the order they are tried. libutp's lookups, exactly:
+// routeCandidates returns the (send, recv) id pairs of the connections a
+// packet can be for, in the order they are tried:
 //
-//   - A SYN carries the sender's receive id, ours to send to, and is matched
-//     only as a retransmission of one already taken: receive id one above it
-//     (utp_internal.cpp:2957). Any other derivation would alias a SYN onto
-//     whatever local connection holds that number.
+//   - A SYN carries the sender's receive id, which is our send id, and
+//     matches only a retransmission of a SYN already accepted: a connection
+//     receiving on one above it. Any other match would alias a new SYN onto
+//     an unrelated local connection.
 //   - A RESET may carry either of our ids, so it is matched on the receive
-//     id first and then on the send id (:2856-2859).
-//   - Anything else carries our receive id and is matched on it alone
-//     (:2884-2892). Receive ids are unique per peer (generateCid, and the
-//     SYN check in handleIncomingBuf), so at most one connection matches:
-//     ours if we dialled (send one above), the peer's if we accepted (send
-//     one below).
-//
-// Trying a packet's id as our send id as well would let two connections to
-// one peer with adjacent ids share a number, and a packet for one reach the
-// other (TestPacketReachesTheConnectionItIsFor). History: HISTORY.md,
-// "routeCandidates".
+//     id first and then on the send id.
+//   - Any other packet carries our receive id and is matched on it alone.
+//     Receive ids are unique per peer, so at most one connection matches:
+//     ours if we dialed (send id one above), the peer's if we accepted (send
+//     id one below).
 func routeCandidates(p *packet, pairs *[4][2]uint16) [][2]uint16 {
 	id := p.Header.ConnectionId
 	switch p.Header.PacketType {

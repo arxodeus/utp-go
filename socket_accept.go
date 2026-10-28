@@ -36,15 +36,10 @@ func newAccept(ctx context.Context, cid *ConnectionId, config *ConnectionConfig)
 	}
 }
 
-// hand gives the caller its result, or, if the caller has already given up,
-// closes the connection the result carries.
-//
-// An accepted connection runs on the socket's context, not the Accept call's
-// (see selectAcceptHelper), so one handed to a caller that has gone would run
-// for nobody -- with no idle timeout by default, for as long as the peer
-// stayed. libutp hands each incoming connection to its application from
-// inside the call that received the SYN (utp_call_on_accept,
-// utp_internal.cpp:3001), so it has no such gap to close.
+// hand gives the caller its result or, if the caller has already given up,
+// closes the connection the result carries. An accepted connection runs on
+// the socket's context, so one handed to a departed caller would otherwise
+// run unattended.
 func (a *acceptRequest) hand(res *streamResult) {
 	if a.onHand != nil {
 		a.onHand(res)
@@ -65,9 +60,9 @@ func (a *acceptRequest) hand(res *streamResult) {
 	}
 }
 
-// giveUp records that the caller has stopped waiting, and returns a result
-// already handed over, if there is one: the caller takes it rather than
-// leaving it behind.
+// giveUp records that the caller has stopped waiting and returns a result
+// already handed over, if any, so the caller takes it rather than leaving it
+// behind.
 func (a *acceptRequest) giveUp() *streamResult {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -80,13 +75,8 @@ func (a *acceptRequest) giveUp() *streamResult {
 	}
 }
 
-// wait is what Accept and AcceptWithCid do once the request is queued.
-//
-// It ends with the socket as well as with the caller. It used to watch only
-// the caller's context, so an Accept on context.Background() outlived the
-// socket it was queued on: the dispatcher that would have answered it was
-// gone, and so, for AcceptWithCid, was the expiry wheel that would have timed
-// it out. From the release review of 9c44c4f (R7).
+// wait is what Accept and AcceptWithCid do once the request is queued. It
+// returns when the caller's context ends or the socket closes.
 func (a *acceptRequest) wait(ctx, sockCtx context.Context) (*UtpStream, error) {
 	var res *streamResult
 	select {
@@ -120,9 +110,8 @@ func (s *UtpSocket) eventLoop() {
 		}()
 	}
 	for {
-		// Receive without acting, so that a virtual clock can be told the
-		// loop is running again before any case body can create a
-		// connection. See idleBarrier.
+		// Receive without acting, so a virtual clock can be told the loop is
+		// running before any case can create a connection. See idleBarrier.
 		var gotAcceptCid, gotAccept *acceptRequest
 		if barrier != nil {
 			barrier.MarkIdle()
@@ -140,8 +129,7 @@ func (s *UtpSocket) eventLoop() {
 			barrier.MarkBusy()
 		}
 		// An Accept changes the routing tables the reader consults, so it is
-		// served under the same lock. Incoming packets no longer pass through
-		// this loop: the reader routes them itself (dispatch).
+		// served under the same lock.
 		s.dispatchMu.Lock()
 		if gotAcceptCid != nil {
 			s.handleNewAcceptWithCidEvent(gotAcceptCid)
@@ -157,9 +145,9 @@ func (s *UtpSocket) eventLoop() {
 // the SYN is answered: no Accept is waiting then, or it would have had the
 // connection, and any that comes later looks here first.
 func (s *UtpSocket) holdAnswered(st *UtpStream) {
-	// Those that ended while waiting -- reset, timed out, closed by the
-	// peer -- go now: they are no longer counted as connections, and kept
-	// here they would pile up behind a socket nobody accepts on.
+	// Drop connections that ended while waiting (reset, timed out,
+	// closed by the peer), so they do not accumulate on a socket nobody
+	// accepts on.
 	live := s.answered[:0]
 	for _, st := range s.answered {
 		select {
@@ -230,13 +218,10 @@ func (s *UtpSocket) handleNewAcceptEvent(accept *acceptRequest) {
 		s.selectAcceptHelper(incomingAccept.cid, incomingAccept.pkt, accept)
 		return
 	}
-	// Otherwise wait for one, so that the ordinary server pattern -- call
-	// Accept, then have a client connect -- works: the SYN that arrives a
-	// moment later finds the request.
-	//
-	// Those already abandoned go first: pruned on each arrival, the list
+	// Otherwise wait for one, so that calling Accept before a client
+	// connects works. Abandoned requests are pruned first, so the list
 	// holds at most the live requests and those abandoned since the last
-	// one. History: HISTORY.md, "handleNewAcceptEvent: waiting".
+	// one.
 	live := s.pendingAccepts[:0]
 	for _, a := range s.pendingAccepts {
 		if !a.abandoned() {
@@ -355,14 +340,10 @@ func (s *UtpSocket) AcceptWithCid(ctx context.Context, cid *ConnectionId, config
 	return accept.wait(ctx, s.ctx)
 }
 
-// selectAcceptHelper makes the connection for an incoming SYN and hands it to
-// accept, once connected.
-//
-// The connection runs on the socket's context, whichever came first, the SYN
-// or the Accept: an accepted connection outlives the Accept that produced it,
-// as a dialled one outlives its dial. Where the SYN came first this used the
-// Accept call's context, and a timeout on Accept that fired after it had
-// returned ended the connection it had returned.
+// selectAcceptHelper creates the connection for an incoming SYN and hands it
+// to accept once connected. The connection runs on the socket's context, so
+// it outlives the Accept call that returned it, as a dialed connection
+// outlives its dial.
 func (s *UtpSocket) selectAcceptHelper(
 	cid *ConnectionId,
 	syn *packet,
