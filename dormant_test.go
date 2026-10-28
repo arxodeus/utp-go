@@ -118,13 +118,11 @@ func TestRestingConnectionIdleTimeout(t *testing.T) {
 func TestRestingConnectionEndsWithItsSocket(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	sa, _, client, server := restingPair(t, ctx, NewConnectionConfig())
+	sa, _, client, server := restingPair(t, ctx, farRestConfig())
 	defer server.Close()
 
 	exchange(t, ctx, client, server, 1024)
 	awaitRest(t, 2*time.Second, client, server)
-	// Well within the second after which the connection's own idle-decay
-	// deadline would wake it anyway.
 	sa.Close()
 	awaitEnded(t, client, "its socket's Close")
 }
@@ -136,7 +134,7 @@ func TestRestingConnectionEndsWithItsContext(t *testing.T) {
 	defer cancel()
 	sockCtx, sockCancel := context.WithCancel(ctx)
 	defer sockCancel()
-	_, _, client, server := restingPair(t, sockCtx, NewConnectionConfig())
+	_, _, client, server := restingPair(t, sockCtx, farRestConfig())
 
 	exchange(t, ctx, client, server, 1024)
 	awaitRest(t, 2*time.Second, client, server)
@@ -146,20 +144,24 @@ func TestRestingConnectionEndsWithItsContext(t *testing.T) {
 	}
 }
 
-// awaitEnded requires s to end within 300ms of what should end it at once.
-// If it does not, it waits longer to tell a slow end from a stuck one, and
-// reports how long it took and, if still running, the goroutines.
+// farRestConfig keeps a resting connection's own timer beyond awaitEnded's
+// wait: the idle-decay deadline follows the retransmission timeout, at
+// least MinTimeout, and the keep-alive is 29 seconds away. A connection that
+// ends within the wait was therefore ended by what the test did, however
+// slow the host.
+func farRestConfig() *ConnectionConfig {
+	cfg := NewConnectionConfig()
+	cfg.MinTimeout = 30 * time.Second
+	return cfg
+}
+
+// awaitEnded requires s to end within 5s of what should end it at once,
+// and reports the goroutines if it does not. Use with farRestConfig, so
+// that nothing else can end it in that time.
 func awaitEnded(t *testing.T, s *Stream, cause string) {
 	t.Helper()
-	start := time.Now()
 	select {
 	case <-s.Done():
-		return
-	case <-time.After(300 * time.Millisecond):
-	}
-	select {
-	case <-s.Done():
-		t.Fatalf("a resting connection outlived %s by %v", cause, time.Since(start).Round(time.Millisecond))
 	case <-time.After(5 * time.Second):
 		var stacks bytes.Buffer
 		_ = pprof.Lookup("goroutine").WriteTo(&stacks, 1)
