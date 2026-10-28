@@ -11,20 +11,11 @@ import (
 )
 
 // emissionInstants reads the instant each packet was built from the packet
-// itself.
-//
-// The timestamp field carries the sender's clock at the moment the header was
-// assembled, and both implementations re-stamp it on every transmission --
-// ours in retransmit and synPacket, libutp in send_data. So when both sides
-// are on a virtual clock the field *is* the emission instant, exactly, with
-// no sampling and no quantisation.
-//
-// Reading it from the packet rather than timing its arrival also sidesteps a
-// question with no clean answer: a packet leaves a connection through a
-// channel, and "every goroutine is parked" is not the same as "nothing is in
-// flight" while a buffered handoff is outstanding. The instant is decided
-// where the header is built, which is synchronous with the connection's own
-// processing, and that is also where libutp's sendto callback fires.
+// itself. The timestamp field carries the sender's clock when the header was
+// assembled, and both implementations restamp it on every transmission, so
+// on a virtual clock it is the emission instant exactly. The instant is fixed
+// where the header is built, synchronously with the connection's processing,
+// which avoids timing a packet's passage through channels.
 func emissionInstants(t *testing.T, raw [][]byte, startMicros uint64) []time.Duration {
 	t.Helper()
 	var at []time.Duration
@@ -66,20 +57,19 @@ func ourSynRetransmissions(t *testing.T, within time.Duration) []time.Duration {
 	go func() { _, _ = sock.ConnectWithCid(ctx, cid, cfg) }()
 
 	// Four participants register on this clock: the socket's retransmission
-	// wheel and its read and event loops, when the socket is built, and this
+	// wheel and its read and event loops when the socket is built, and this
 	// connection's event loop when its goroutine runs.
 	clk.AwaitParticipants(4)
 
 	// The first SYN is not a retransmission; wait for it and discard it.
-	// Counting is allowed to poll -- it is the *instants* that must not be
-	// inferred from wall time, and those come from the packets.
+	// Counting may poll; the instants come from the packets.
 	waitForEmitted(t, conn, 1)
 	conn.takeEmitted()
 
 	clk.Advance(within)
 
-	// libutp gives up after three attempts, so at most two retransmissions
-	// are expected; wait for them to reach the transport before reading.
+	// The attempt ends after three transmissions, so at most two
+	// retransmissions are expected; wait for them to reach the transport.
 	waitForEmitted(t, conn, 2)
 	return emissionInstants(t, conn.takeEmitted(), uint64(start.UnixMicro()))
 }
@@ -115,10 +105,10 @@ func libutpSynRetransmissions(t *testing.T, within time.Duration) []time.Duratio
 	start := drv.Now()
 	drv.ClearEmitted()
 
-	// libutp's driver is synchronous: it only acts when told to, so its clock
-	// is advanced in steps with a timeout check after each. The step affects
-	// when libutp *notices* a deadline, not the instant it stamps, which is
-	// read from the packet exactly as ours is.
+	// The reference driver is synchronous, so its clock is advanced in steps
+	// with a timeout check after each. The step affects when it notices a
+	// deadline, not the instant it stamps, which is read from the packet as
+	// ours is.
 	const step = 10 * time.Millisecond
 	for elapsed := time.Duration(0); elapsed < within; elapsed += step {
 		drv.Advance(uint64(step.Microseconds()))
@@ -127,22 +117,12 @@ func libutpSynRetransmissions(t *testing.T, within time.Duration) []time.Duratio
 	return emissionInstants(t, drv.Emitted(), start)
 }
 
-// *When* this implementation sends, compared against libutp as numbers.
-//
-// Every other comparison in this corpus is about what a packet contained.
-// Timing was compared once, for retransmission, by running libutp on its
-// virtual clock and this library on the real one and checking the two
-// schedules had the same *shape* -- because nothing could ask at what instant
-// our side sent anything. The answer depended on when a goroutine happened to
-// be scheduled, which is also why several tests here wait for quiet rather
-// than for an event, and why two of this session's defects turned out to be
-// timing assumptions in the harness rather than faults in the library.
-//
-// Clock and idleBarrier close that. The connection's deadlines, timers and
-// wall clock all come from a clock this test owns, and the event loop, the
-// retransmission wheel and the socket's read loop each report when they are
-// parked, so time moves between reactions rather than during one. The
-// instants are then read from the packets, exactly.
+// When this implementation sends, compared numerically with the reference
+// implementation. The connection's deadlines, timers and wall clock all come
+// from a clock the test owns, and the event loop, retransmission wheel and
+// read loop each report when they are parked (idleBarrier), so time moves
+// between reactions rather than during one. The instants are read from the
+// packets.
 func TestSynRetransmissionInstantsMatchLibutp(t *testing.T) {
 	const within = 20 * time.Second
 
@@ -165,20 +145,11 @@ func TestSynRetransmissionInstantsMatchLibutp(t *testing.T) {
 
 	n := min(len(ours), len(theirs))
 	for i := 0; i < n; i++ {
-		// Within one wheel tick, however many retransmissions in. The wheel
-		// fires a timer on the first tick at or after its deadline, never
-		// early, because firing early resends a packet the peer was still
-		// going to acknowledge; libutp compares the clock against an absolute
-		// rto_timeout (utp_internal.cpp:1147-1148).
-		//
-		// This tolerance used to grow by a tick per retransmission. The wheel
-		// counted ticks from the moment of arming and added one, and each
-		// backoff re-arms just after the tick that fired it, so the lateness
-		// carried forward: 3.025s and 9.05s against libutp's 3.0s and 9.0s.
-		// It now places a timer by its deadline (timeWheel.put), and measures
-		// 3.0s and 9.0s.
+		// Within one wheel tick, however many retransmissions in. A timer fires
+		// on the first tick at or after its deadline, never early, and the
+		// lateness does not accumulate across backoffs (timeWheel.put).
 		tolerance := defaultRetransmitTickInterval
-		// libutp's own instants carry its driver's stepping granularity.
+		// The reference instants carry its driver's step granularity.
 		tolerance += 10 * time.Millisecond
 		diff := ours[i] - theirs[i]
 		if diff < 0 {
@@ -188,7 +159,7 @@ func TestSynRetransmissionInstantsMatchLibutp(t *testing.T) {
 			t.Errorf("retransmission %d: ours at %v, libutp at %v, %v apart (tolerance %v)",
 				i, ours[i], theirs[i], diff, tolerance)
 		}
-		// And never early: that is the direction that matters.
+		// And never early, the direction that matters.
 		if ours[i] < theirs[i]-10*time.Millisecond {
 			t.Errorf("retransmission %d: ours at %v is earlier than libutp's %v; a "+
 				"retransmission before the deadline resends a packet the peer was "+
@@ -197,9 +168,8 @@ func TestSynRetransmissionInstantsMatchLibutp(t *testing.T) {
 	}
 }
 
-// The barrier itself, asserted directly: everything above depends on it, and
-// a barrier that silently did nothing would leave every instant looking exact
-// while being as racy as before.
+// The barrier itself: if it silently did nothing, every instant above would
+// look exact while being racy.
 func TestVirtualClockHoldsTheConnectionStill(t *testing.T) {
 	start := time.Unix(0, 0).Add(time.Hour)
 	clk := newVirtualClock(start)
@@ -230,10 +200,10 @@ func TestVirtualClockHoldsTheConnectionStill(t *testing.T) {
 		t.Errorf("the clock moved on its own, from %v to %v", before, got)
 	}
 
-	// And nothing is retransmitted while it stands still, however long the
-	// test waits in the real world. The SYN's timeout is three seconds; this
-	// waits a fifteenth of that and would fail outright if any part of the
-	// connection were still on the real clock.
+	// Nothing is retransmitted while it stands still, however long the test
+	// waits in real time. The SYN's timeout is three seconds; this waits a
+	// fifteenth of that and would fail if any part of the connection were
+	// still on the real clock.
 	time.Sleep(200 * time.Millisecond)
 	if n := conn.emittedCount(); n != 0 {
 		t.Errorf("%d packets were emitted with the clock stopped; some part of the "+
@@ -246,11 +216,9 @@ func TestVirtualClockHoldsTheConnectionStill(t *testing.T) {
 }
 
 // ourReplyInstant injects one packet and returns how long after it this
-// implementation answered, measured on a clock the test owns.
-//
-// The injection point is the moment the clock is at when the packet is handed
-// to the transport; the reply instant comes from the reply's own timestamp
-// field. Both are exact.
+// implementation answered, on a clock the test owns. The injection instant is
+// the clock's when the packet is handed to the transport; the reply instant
+// comes from the reply's timestamp field.
 func ourReplyInstant(t *testing.T) (time.Duration, []byte) {
 	t.Helper()
 
@@ -277,10 +245,8 @@ func ourReplyInstant(t *testing.T) (time.Duration, []byte) {
 	}()
 
 	// Three participants register when the socket is built: the
-	// retransmission wheel and the read and event loops. An accepting
-	// connection does not exist yet -- AcceptWithCid parks until a SYN
-	// arrives, and the event loop that would be the fourth is created only
-	// then.
+	// retransmission wheel and the read and event loops. The accepting
+	// connection's event loop, the fourth, exists only once a SYN arrives.
 	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	conn.takeEmitted()
@@ -302,9 +268,9 @@ func ourReplyInstant(t *testing.T) (time.Duration, []byte) {
 	clk.AwaitQuiet()
 	conn.takeEmitted()
 
-	// Now one data packet, and the question is when the acknowledgement goes
-	// out. AwaitQuiet is the inbound path settling: the read loop handles the
-	// packet and sends the acknowledgement itself, and reports when it parks.
+	// Now one data packet, timing when the acknowledgement goes out.
+	// AwaitQuiet waits for the read loop, which handles the packet and sends
+	// the acknowledgement itself, to park.
 	injectedAt := clk.Now()
 	clk.AwaitReactionTo(func() { conn.inject(fuzzPrimingPacket()) })
 
@@ -343,19 +309,10 @@ func libutpReplyInstant(t *testing.T) time.Duration {
 }
 
 // How long after a packet arrives the acknowledgement goes out, compared
-// against libutp.
-//
-// This is the inbound half of the timing question, and until the socket's
-// read and event loops became barrier participants it could not be asked at
-// all: a test could inject a packet and advance the clock with no guarantee
-// the injection had even been processed first.
-//
-// Both implementations defer acknowledgements and flush them when something
-// external says so -- libutp when its embedder calls utp_issue_deferred_acks,
-// this library at the end of the event-loop pass that received the packet.
-// So the expected answer for both is *the same instant*: neither waits, and a
-// non-zero delay on either side would mean the acknowledgement had slipped to
-// a later pass than the packet that prompted it.
+// with the reference implementation. Both defer acknowledgements and flush
+// them at the end of the read that brought the packet, so the expected answer
+// for both is the same instant: a nonzero delay would mean the
+// acknowledgement slipped to a later pass.
 func TestReplyInstantMatchesLibutp(t *testing.T) {
 	ours, raw := ourReplyInstant(t)
 	theirs := libutpReplyInstant(t)

@@ -11,7 +11,7 @@ func TestOnTransmit(t *testing.T) {
 	ctrl := newDefaultController(defaultCtrlConfig())
 	initialTimeout := ctrl.Timeout()
 
-	// Register the initial transmission of a packet with sequence number 1
+	// Register the initial transmission of sequence number 1.
 	seqNum := uint16(1)
 	packetOneSizeBytes := uint32(32)
 
@@ -28,7 +28,7 @@ func TestOnTransmit(t *testing.T) {
 	require.Equal(t, packetOneSizeBytes, ctrl.windowSizeBytes,
 		"expected window size %d, got %d", packetOneSizeBytes, ctrl.windowSizeBytes)
 
-	// Register the initial transmission of a packet with sequence number 2
+	// Register the initial transmission of sequence number 2.
 	seqNum = 2
 	packetTwoSizeBytes := uint32(128)
 
@@ -45,7 +45,7 @@ func TestOnTransmit(t *testing.T) {
 	require.Equal(t, packetOneSizeBytes+packetTwoSizeBytes, ctrl.windowSizeBytes,
 		"expected window size %d, got %d", packetOneSizeBytes+packetTwoSizeBytes, ctrl.windowSizeBytes)
 
-	// Register the retransmission of the packet with sequence number 2
+	// Register the retransmission of sequence number 2.
 	err = ctrl.OnTransmit(seqNum, transmitRetransmission, 0)
 	require.NoError(t, err, "transmission registration failed")
 
@@ -67,7 +67,7 @@ func TestOnTransmit(t *testing.T) {
 func TestOnTransmitDuplicateTransmission(t *testing.T) {
 	ctrl := newDefaultController(defaultCtrlConfig())
 
-	// Register the initial transmission of a packet with sequence number 1
+	// Register the initial transmission of sequence number 1.
 	seqNum := uint16(1)
 	bytes := uint32(32)
 
@@ -76,7 +76,7 @@ func TestOnTransmitDuplicateTransmission(t *testing.T) {
 	require.Equal(t, bytes, ctrl.windowSizeBytes,
 		"expected window size %d, got %d", bytes, ctrl.windowSizeBytes)
 
-	// Register the initial transmission of the SAME packet
+	// Register the initial transmission of the same packet.
 	err = ctrl.OnTransmit(seqNum, transmitInitial, bytes)
 	require.ErrorIs(t, err, errDuplicateTransmission, "expected errDuplicateTransmission, got %v", err)
 	require.Equal(t, bytes, ctrl.windowSizeBytes,
@@ -86,7 +86,7 @@ func TestOnTransmitDuplicateTransmission(t *testing.T) {
 func TestOnTransmitUnknownSeqNum(t *testing.T) {
 	ctrl := newDefaultController(defaultCtrlConfig())
 
-	// Register the retransmission of the packet with sequence number 1
+	// Register the retransmission of sequence number 1.
 	seqNum := uint16(1)
 	err := ctrl.OnTransmit(seqNum, transmitRetransmission, 0)
 	require.ErrorIs(t, err, errUnknownSeqNum, "expected errUnknownSeqNum, got %v", err)
@@ -96,7 +96,7 @@ func TestOnTransmitUnknownSeqNum(t *testing.T) {
 func TestOnTransmitInsufficientWindowSize(t *testing.T) {
 	ctrl := newDefaultController(defaultCtrlConfig())
 
-	// Register the transmission of a packet with sequence number 1
+	// Register the transmission of sequence number 1.
 	seqNum := uint16(1)
 	bytes := ctrl.maxWindowSizeBytes + 1
 
@@ -111,14 +111,14 @@ func TestOnTransmitInsufficientWindowSize(t *testing.T) {
 func TestOnAck(t *testing.T) {
 	ctrl := newDefaultController(defaultCtrlConfig())
 
-	// Register the initial transmission
+	// Register the initial transmission.
 	seqNum := uint16(1)
 	bytes := uint32(32)
 
 	err := ctrl.OnTransmit(seqNum, transmitInitial, bytes)
 	require.NoError(t, err, "transmission registration failed")
 
-	// Register the acknowledgement
+	// Register the acknowledgement.
 	ackDelay := 150 * time.Millisecond
 	ackRTT := 300 * time.Millisecond
 	ackReceivedAt := time.Now()
@@ -131,13 +131,13 @@ func TestOnAck(t *testing.T) {
 	err = ackOne(ctrl, seqNum, ack)
 	require.NoError(t, err, "ack registration failed")
 
-	// Check base delay
+	// Check the base delay.
 	baseDelay := ctrl.delayAcc.BaseDelay()
 	require.Equal(t, ackDelay, baseDelay, "expected base delay %v, got %v", ackDelay, baseDelay)
-	// Check window size
+	// Check the window size.
 	require.Equal(t, uint32(0), ctrl.windowSizeBytes, "expected window size 0, got %d", ctrl.windowSizeBytes)
 
-	// Check timeout
+	// Check the timeout.
 	require.True(t, ctrl.minTimeout >= ctrl.Timeout(), "expected timeout %v, got %v", ctrl.minTimeout, ctrl.Timeout())
 }
 
@@ -153,7 +153,7 @@ func ackOne(ctrl *defaultController, seq uint16, ack ackSample) error {
 func TestOnAckUnknownSeqNum(t *testing.T) {
 	ctrl := newDefaultController(defaultCtrlConfig())
 
-	// Register the acknowledgement for packet with sequence number 1
+	// Register the acknowledgement for sequence number 1.
 	seqNum := uint16(1)
 	ack := ackSample{
 		Delay:      150 * time.Millisecond,
@@ -171,7 +171,7 @@ func TestOnLostPacketRetransmitting(t *testing.T) {
 	initialMaxWindowSizeBytes := ctrl.minWindowSizeBytes * 10
 	ctrl.maxWindowSizeBytes = initialMaxWindowSizeBytes
 
-	// Register initial transmission
+	// Register the initial transmission.
 	seqNum := uint16(1)
 	bytes := uint32(32)
 
@@ -180,7 +180,7 @@ func TestOnLostPacketRetransmitting(t *testing.T) {
 	require.Equal(t, bytes, ctrl.windowSizeBytes,
 		"expected window size %d, got %d", bytes, ctrl.windowSizeBytes)
 
-	// Register packet loss with retransmission
+	// Register the loss, with retransmission.
 	err = ctrl.OnLostPacket(seqNum, true, time.Now())
 	require.NoError(t, err, "lost packet registration failed")
 
@@ -198,24 +198,24 @@ func TestOnLostPacketRetransmitting(t *testing.T) {
 func TestOnLostPacketUnknownSeqNum(t *testing.T) {
 	ctrl := newDefaultController(defaultCtrlConfig())
 
-	// Set initial max window size
+	// Set the initial max window size.
 	initialMaxWindowSizeBytes := ctrl.minWindowSizeBytes * 10
 	ctrl.maxWindowSizeBytes = initialMaxWindowSizeBytes
 
-	// Try to register loss for unknown sequence number
+	// Register a loss for an unknown sequence number.
 	seqNum := uint16(1)
 	err := ctrl.OnLostPacket(seqNum, false, time.Now())
-	// Check error
+	// Check the error.
 	require.ErrorIs(t, err, errUnknownSeqNum, "lost packet registration failed")
 
-	// Verify window sizes unchanged
+	// The window sizes are unchanged.
 	require.Equal(t, uint32(0), ctrl.windowSizeBytes, "expected window size 0, got %d", ctrl.windowSizeBytes)
 	require.Equal(t, initialMaxWindowSizeBytes, ctrl.maxWindowSizeBytes,
 		"expected max window size %d, got %d", initialMaxWindowSizeBytes, ctrl.maxWindowSizeBytes)
 }
 
 // A timeout with packets in flight resets the window to one packet and
-// re-enters slow start. libutp: utp_internal.cpp:1223-1228.
+// re-enters slow start.
 func TestOnTimeoutWithPacketsInFlight(t *testing.T) {
 	ctrl := newDefaultController(defaultCtrlConfig())
 	ctrl.slowStart = false
@@ -235,13 +235,8 @@ func TestOnTimeoutWithPacketsInFlight(t *testing.T) {
 		"expected timeout %v, got %v", expectedTimeout, ctrl.Timeout())
 }
 
-// A timeout on an idle connection -- nothing in flight, so nothing was
-// actually lost -- decays the window by a third instead of collapsing it.
-//
-// libutp: "No need to be aggressive about resetting the congestion window.
-// Just let it decay by a 3:rd" (utp_internal.cpp:1216-1222). This fork
-// collapsed the window to its floor in both cases, so an application that
-// paused long enough to hit an RTO restarted from two packets.
+// A timeout on an idle connection, with nothing in flight and so nothing
+// lost, decays the window by a third rather than collapsing it.
 func TestOnTimeoutWhileIdleDecaysGently(t *testing.T) {
 	ctrl := newDefaultController(defaultCtrlConfig())
 	ctrl.slowStart = false
@@ -266,10 +261,10 @@ func TestOnTimeoutNotExceedMax(t *testing.T) {
 
 	ctrl := newDefaultController(config)
 
-	// Register timeout
+	// Register a timeout.
 	ctrl.OnTimeout(true)
 
-	// Verify timeout is capped at max
+	// The timeout is capped at max.
 	require.Equal(t, config.MaxTimeout, ctrl.Timeout(),
 		"expected timeout %v, got %v", config.MaxTimeout, ctrl.Timeout())
 }
@@ -300,8 +295,7 @@ func TestBaseDelay(t *testing.T) {
 	// then three newer ones, in the order acknowledgements arrive.
 	delayExpired := 1 * time.Millisecond
 	// Past the window by a margin: exactly a window ago is the boundary,
-	// and a clock that has not moved since (Windows' can be that coarse)
-	// leaves it in.
+	// and a coarse clock that has not moved since leaves it in.
 	delayExpiredReceivedAt := time.Now().Add(-window - time.Millisecond)
 	acc.Push(delayExpired, delayExpiredReceivedAt)
 
@@ -314,14 +308,14 @@ func TestBaseDelay(t *testing.T) {
 	delaySmaller := 25 * time.Millisecond
 	acc.Push(delaySmaller, time.Now())
 
-	// The 50 ms sample is gone already: it can never be the least while the
-	// 25 ms one, newer and smaller, is in the window.
+	// The 50 ms sample is already gone: it can never be the least while the
+	// newer, smaller 25 ms one is in the window.
 	require.Equal(t, 3, acc.delays.len(), "expected 3 delays, got %d", acc.delays.len())
 
-	// Get base delay
+	// Get the base delay.
 	baseDelay := acc.BaseDelay()
 	require.Equal(t, delaySmallest, baseDelay, "expected base delay %v, got %v", delaySmallest, baseDelay)
-	// Check that expired delay was removed
+	// The expired delay was removed.
 	require.Equal(t, 2, acc.delays.len(), "expected 2 delays, got %d", acc.delays.len())
 }
 
@@ -333,11 +327,8 @@ func TestBaseDelayEmpty(t *testing.T) {
 }
 
 // The congestion window is halved at most once per maxWindowDecayInterval,
-// however many packets are declared lost in that span.
-//
-// libutp: MAX_WINDOW_DECAY, guarded by can_decay_win
-// (utp_internal.cpp:51, :602-605). Without the guard a burst of four losses
-// -- one queue overflow -- took the window to a sixteenth in a single event.
+// however many packets are declared lost in that span, so a burst of losses
+// from one queue overflow is one event.
 func TestWindowDecaysAtMostOncePerInterval(t *testing.T) {
 	ctrl := newDefaultController(defaultCtrlConfig())
 	initial := ctrl.minWindowSizeBytes * 64
@@ -376,29 +367,12 @@ func TestWindowDecaysAtMostOncePerInterval(t *testing.T) {
 }
 
 // A peer's reported delay cannot drive the window below what the round trip
-// says is possible.
-//
-// libutp clamps the delay it feeds the controller to the minimum round-trip
-// time of the packets the acknowledgement covers:
-//
-//	// the delay can never be greater than the rtt. The min_rtt
-//	// variable is the RTT in microseconds
-//	int32 our_delay = min<uint32>(our_hist.get_value(), uint32(min_rtt));
-//	                                        (utp_internal.cpp:1615-1621)
-//
-// The delay it is clamping is not measured locally. It arrives in the
-// timestamp-difference field of every incoming packet and is passed to the
-// controller unaltered (conn_receive.go, onPacket: `delay :=
-// time.Duration(replyMicros) * time.Microsecond`), so it is a 32-bit number
-// under the remote peer's control. Nothing else between the wire and the
-// congestion window checks it.
-//
-// Without the clamp one packet ends the connection's usefulness. The gain is
-// `MAX_CWND_INCREASE_BYTES_PER_RTT * window_factor * (target - our_delay) /
-// target`, so a reported delay of 30 seconds against a 100 ms target makes the
-// second factor -299 and takes the window to its floor on a single
-// acknowledgement -- by malice, or by a peer whose clock stepped, or by a
-// timestamp that wrapped.
+// allows: the delay fed to the controller is clamped to the minimum round
+// trip of the packets the acknowledgement covers. The delay arrives in the
+// timestamp-difference field of every incoming packet, a 32-bit number the
+// peer controls. Unclamped, a reported delay of 30 seconds against a 100 ms
+// target would take the window to its floor on one acknowledgement, whether
+// by malice, a clock step or a wrapped timestamp.
 func TestDelayClampedToRTT(t *testing.T) {
 	const (
 		rtt        = 20 * time.Millisecond
@@ -429,10 +403,8 @@ func TestDelayClampedToRTT(t *testing.T) {
 	}
 	before := ctrl.maxWindowSizeBytes
 
-	// A peer that lies does not lie once. Twenty acknowledgements is what a
-	// second of a hostile or broken peer looks like. (The first version of
-	// this test injected exactly one, and before the delay filter and the
-	// base shift were in, twenty unclamped took the window to its floor.)
+	// A peer that lies does not lie once: twenty acknowledgements is about a
+	// second of a hostile or broken peer.
 	for i := 0; i < 20; i++ {
 		seq++
 		grow(ctrl, seq, absurd, now.Add(time.Duration(41+i)*rtt))
@@ -444,16 +416,10 @@ func TestDelayClampedToRTT(t *testing.T) {
 			"room for a collapse to be visible", before, ctrl.minWindowSizeBytes)
 	}
 	// Clamped, the delay reads as 20ms against a 100ms target, which is under
-	// target, so the window holds or grows.
-	//
-	// Unclamped it no longer reaches the floor, and a threshold at half the
-	// window stopped telling the two apart once libutp's other defence was
-	// in: a delay beyond the round trip raises the base by the excess
-	// (utp_internal.cpp:2127-2133), so after the three acknowledgements it
-	// takes to fill the delay filter the lie reads as 20ms anyway. What is
-	// left for the clamp is the acknowledgement that filled it, which
-	// unclamped takes about 17% (measured: 84000 -> 69052 bytes). So the
-	// test is that the window does not shrink at all.
+	// target, so the window holds or grows. A delay beyond the round trip
+	// also raises the base by the excess, so after the delay filter fills the
+	// lie reads as 20ms either way; the clamp covers the acknowledgements
+	// before that. So the test is that the window does not shrink at all.
 	if after < before {
 		t.Errorf("20 acknowledgements reporting %v of delay on a %v path took the window from "+
 			"%d bytes to %d (floor %d). libutp clamps the reported delay to the round trip "+
@@ -464,12 +430,9 @@ func TestDelayClampedToRTT(t *testing.T) {
 		"%v path", before, after, absurd, rtt)
 }
 
-// An acknowledgement that covers several packets updates the window once, for
-// all their bytes: libutp sums acked_bytes over the packets an incoming
-// packet acknowledges and calls apply_ccontrol once with the total
-// (utp_internal.cpp:1956-1987, :2139-2140). Updating once per packet instead
-// compounds -- each later packet sees the window the earlier ones grew -- and
-// lands somewhere else.
+// An acknowledgement covering several packets updates the window once, for
+// all their bytes. Updating once per packet compounds, since each later
+// packet sees the window the earlier ones grew.
 func TestOneWindowUpdatePerAcknowledgement(t *testing.T) {
 	const (
 		packets    = 4
@@ -519,9 +482,9 @@ func TestOneWindowUpdatePerAcknowledgement(t *testing.T) {
 	}
 }
 
-// A one-way delay longer than the round trip cannot be queueing; it is the
-// clocks. libutp raises its base by the excess (utp_internal.cpp:2127-2133),
-// so the samples that follow read the path as it is.
+// A one-way delay longer than the round trip cannot be queuing; it is the
+// clocks. The base is raised by the excess, so later samples read the path as
+// it is.
 func TestDelayOverTheRoundTripRaisesTheBase(t *testing.T) {
 	const (
 		rtt  = 20 * time.Millisecond
