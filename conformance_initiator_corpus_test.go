@@ -11,34 +11,23 @@ import (
 	"github.com/arxodeus/utp/internal/libutp"
 )
 
-// The initiator corpus.
+// The initiator corpus: both implementations open the connection, sending
+// the SYN, and the peer answers. This is the role a BitTorrent client takes
+// on every dial, and the one in which this library chooses the sequence
+// numbers and connection ids.
 //
-// Every curated case in this repository drove both implementations as the
-// side *accepting* a connection. The initiator role -- we send the SYN, the
-// peer answers -- was covered only by the differential fuzzer, which
-// generates its inputs rather than naming them, and which discards the
-// handshake before it starts comparing.
-//
-// That is the direction a BitTorrent client is exposed to on every dial: it
-// opens connections to addresses from a tracker or the DHT constantly, and
-// whatever answers is under no obligation to be friendly. It is also the role
-// in which this library, not its peer, chooses the sequence numbers and the
-// connection ids -- so a divergence here is one nothing else can produce.
-//
-// These cases run on a virtual clock. Both implementations are driven step by
-// step with time moved by the same amount on both sides, so an `advance` is
-// exact rather than a sleep, and every comparison is deterministic rather
-// than dependent on when a goroutine happened to run.
+// The cases run on a virtual clock. Both implementations are driven step by
+// step with time moved by the same amount on both sides, so every comparison
+// is deterministic.
 
 // initiatorRun holds both implementations mid-conversation.
 type initiatorRun struct {
 	t   *testing.T
 	drv *libutp.Driver
 	clk *virtualClock
-	// streamCh carries the connected stream once the handshake completes.
-	// A channel rather than a field: it is written by the goroutine running
-	// ConnectWithCid and read by the test, and a plain field would be a data
-	// race the race detector finds on the first run.
+	// streamCh carries the connected stream once the handshake completes. It
+	// is written by the goroutine running ConnectWithCid and read by the
+	// test, so a plain field would be a data race.
 	streamCh <-chan *UtpStream
 	// dialErr carries ConnectWithCid's error, if it failed.
 	dialErr <-chan error
@@ -51,11 +40,10 @@ type initiatorRun struct {
 }
 
 func (r *initiatorRun) close() {
-	// The stream is deliberately not closed. Closing waits out the flush
-	// stall timeout -- two real seconds -- because the scripted peer never
-	// acknowledges the FIN, and every case here would pay it. Cancelling the
-	// context tears the connection down without that wait, and what these
-	// cases assert is what was emitted, which has already been taken.
+	// The stream is not closed: closing waits out the two-second flush
+	// stall timeout, since the scripted peer never acknowledges the FIN.
+	// Canceling the context tears the connection down without that wait, and
+	// what the cases assert has already been emitted.
 	r.sock.Close()
 	r.cancel()
 	r.unpin()
@@ -63,18 +51,14 @@ func (r *initiatorRun) close() {
 }
 
 // newInitiatorRun opens a connection from both implementations and returns
-// the SYN each of them sent.
-//
-// The SYNs are returned rather than discarded because comparing them is a
-// case in itself, and one nothing else makes: the differential fuzzer clears
-// the handshake before it begins, and the responder corpus never sends one.
+// the SYN each sent, since comparing them is a case in itself.
 func newInitiatorRun(t *testing.T) (*initiatorRun, [][]byte, [][]byte) {
 	t.Helper()
 	return newInitiatorRunMTU(t, 0)
 }
 
-// newInitiatorRunMTU is newInitiatorRun with the MTU libutp's driver reports
-// set to udpMTU; zero leaves the driver's default, 1472.
+// newInitiatorRunMTU is newInitiatorRun with the MTU the reference driver
+// reports set to udpMTU; zero leaves the driver's default, 1472.
 func newInitiatorRunMTU(t *testing.T, udpMTU uint16) (*initiatorRun, [][]byte, [][]byte) {
 	t.Helper()
 
@@ -116,9 +100,9 @@ func newInitiatorRunMTU(t *testing.T, udpMTU uint16) (*initiatorRun, [][]byte, [
 		cancel: cancel, unpin: unpin, start: start,
 	}
 
-	// Three participants register when the socket is built -- the
-	// retransmission wheel and the read and event loops -- and the
-	// connection's event loop is the fourth as soon as ConnectWithCid runs.
+	// Three participants register when the socket is built (the
+	// retransmission wheel and the read and event loops), and the
+	// connection's event loop is the fourth once ConnectWithCid runs.
 	clk.AwaitParticipants(4)
 	clk.AwaitQuiet()
 	ourSyn := conn.takeEmitted()
@@ -139,7 +123,7 @@ func newInitiatorRunMTU(t *testing.T, udpMTU uint16) (*initiatorRun, [][]byte, [
 func (r *initiatorRun) step(i int, st step) {
 	r.t.Helper()
 
-	// --- libutp ---
+	// --- reference ---
 	if raw := st.rawBytes(); raw != nil {
 		r.drv.Inject(raw)
 	}
@@ -178,8 +162,7 @@ func (r *initiatorRun) step(i int, st step) {
 		}
 	}
 	if st.advance > 0 {
-		// The same amount of time, on a clock that moves only when told --
-		// not a sleep that hopes the two sides end up in the same place.
+		// The same amount of time, on a clock that moves only when told.
 		r.clk.Advance(st.advance)
 	}
 	r.clk.AwaitQuiet()
@@ -216,14 +199,10 @@ func runInitiatorCorpus(t *testing.T, steps []step) {
 	}
 }
 
-// initiatorFirstInOrder is the sequence number the dialling side expects
-// first from its peer.
-//
-// The SYN-ACK carries sequence number 900 and, being a bare ST_STATE,
-// consumes none: the recipient sets ack_nr to 899 and expects 900 next. Off
-// by one here and every "in order" case is quietly exercising the
-// out-of-order path instead -- which is what the first version of this file
-// did, passing all the while.
+// initiatorFirstInOrder is the sequence number the dialing side expects first
+// from its peer. The SYN-ACK carries sequence number 900 and, being a bare
+// ST_STATE, consumes none, so ack_nr is 899 and 900 is next. An off-by-one
+// here would make every "in order" case exercise the out-of-order path.
 const initiatorFirstInOrder = 900
 
 // initiatorData builds a data packet from the peer, offset packets past the
@@ -234,7 +213,7 @@ func initiatorData(offset uint16, tsMicros uint32, body []byte) *packet {
 		WithAckNum(initiatorConnSeed).WithPayload(body).Build()
 }
 
-// The handshake, from the dialling side. The SYN we send and the
+// The handshake from the dialing side: the SYN we send and the
 // acknowledgement we send once the peer answers.
 func TestInitiatorHandshake(t *testing.T) {
 	runInitiatorCorpus(t, []step{
@@ -260,7 +239,7 @@ func TestInitiatorDataAndAck(t *testing.T) {
 }
 
 // Out-of-order data on a connection we opened: the selective-ack path from
-// the dialling side.
+// the dialing side.
 func TestInitiatorReordering(t *testing.T) {
 	runInitiatorCorpus(t, []step{
 		{name: "peer answers the SYN", injectRaw: initiatorSynAck(), wantNoEmission: true},
@@ -294,12 +273,8 @@ func TestInitiatorDuplicateData(t *testing.T) {
 	})
 }
 
-// A peer that answers our SYN with a reset rather than an acknowledgement --
-// what a closed port or a refusing client does.
-//
-// The dial fails as refused. libutp intends that and cannot reach it: it sets
-// CS_RESET before testing for CS_SYN_SENT (utp_internal.cpp:2865-2870), so
-// every reset reads as ECONNRESET.
+// A peer that answers our SYN with a reset, as a closed port or a refusing
+// client does. The dial fails as refused.
 func TestInitiatorResetInsteadOfSynAck(t *testing.T) {
 	r, ourSyn, libutpSyn := newInitiatorRun(t)
 	defer r.close()
@@ -331,11 +306,9 @@ func TestInitiatorIncomingFin(t *testing.T) {
 			inject: newPacketBuilder(st_fin, initiatorConnSeed, 210000, corpusWindow,
 				initiatorFirstInOrder+1).
 				WithAckNum(initiatorConnSeed).Build(),
-			// On reaching a FIN libutp acknowledges twice: once immediately
-			// (utp_internal.cpp:2370, "if the other end wants to close, ack")
-			// and once from the deferred-ack list it also schedules at :2404.
-			// The second carries nothing the first did not. Same deliberate
-			// divergence as the responder corpus records.
+			// On reaching a FIN the reference implementation acknowledges twice:
+			// once immediately and once from its deferred-ack list. The second
+			// carries nothing new, and this library sends one.
 			libutpExtraDuplicates: 1,
 			divergenceReason: "on reaching a FIN libutp acks twice, once immediately " +
 				"and once from the deferred list; the second is a duplicate",
@@ -345,25 +318,16 @@ func TestInitiatorIncomingFin(t *testing.T) {
 	})
 }
 
-// A peer that advertises no receive window on a connection we opened.
 // initiatorState builds a bare ST_STATE from the peer advertising wnd.
 func initiatorState(tsMicros uint32, wnd uint32) []byte {
 	return newPacketBuilder(st_state, initiatorConnSeed, tsMicros, wnd, initiatorFirstInOrder).
 		WithAckNum(initiatorConnSeed).Build().Encode()
 }
 
-// A zero receive window stalls the dialling side until the peer reopens it
-// (utp_internal.cpp:936, where max_window_user is one of the three limits
-// is_full weighs).
-//
-// The first version of this case advertised the zero window and stopped
-// there, which asserted only that a bare ST_STATE draws no reply -- true of
-// any window. It has to write against the stall for the window to bite, and
-// it needs the control below, because a case that ends in silence also
-// passes when the write could never have gone out for some unrelated reason.
-// That is not hypothetical: the responder-role twin of this case was in
-// exactly that state, silent because libutp was refusing every write while
-// its socket sat in CS_SYN_RECV.
+// A zero receive window stalls the dialing side until the peer reopens it.
+// The case writes against the stall, so the window matters, and the control
+// below shows the silence is due to the window rather than some other
+// reason the write could not go out.
 func TestInitiatorZeroWindow(t *testing.T) {
 	runInitiatorCorpus(t, []step{
 		{name: "peer answers the SYN", injectRaw: initiatorSynAck(), wantNoEmission: true},
@@ -405,21 +369,12 @@ func initiatorAckOf(tsMicros uint32, seq uint16) []byte {
 		WithAckNum(seq).Build().Encode()
 }
 
-// Short writes behind an unacknowledged packet, against libutp: the second
-// waits, the third joins it, and the acknowledgement of the first sends both
-// as one packet. Every step is compared packet for packet, bodies included.
-//
-// libutp holds the second because its window starts at one packet
-// (utp_internal.cpp:2567) and is_full charges a whole packet (:933-936); it
-// would hold it with an open window too, by its Nagle rule (flush_packets,
-// :974-982). Either way the third write joins the unsent packet
-// (write_outgoing_packet, :1013-1023). This library's window starts at two
-// packets, so here it is the Nagle rule that holds the second
+// Short writes behind an unacknowledged packet: the second waits, the third
+// joins it, and the acknowledgement of the first sends both as one packet.
+// Every step is compared packet for packet, bodies included. The reference
+// implementation's window starts at one packet, which holds the second; this
+// library's starts at two, so here the Nagle rule holds it
 // (TestNagleHoldsAShortPacketBehindAnother isolates it).
-//
-// Before this library had the rule, the second and third writes went out at
-// once; without the send buffer reading across writes, the packet released
-// at the end carried "second" alone.
 func TestInitiatorNagle(t *testing.T) {
 	runInitiatorCorpus(t, []step{
 		{name: "peer answers the SYN", injectRaw: initiatorSynAck(), wantNoEmission: true},
