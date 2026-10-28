@@ -68,14 +68,10 @@ func (c *benchConn) Close() error {
 // benchPayload is the size of each data packet's payload.
 const benchPayload = 1000
 
-// benchReceiver is an established connection for the receive-path
+// benchReceiver returns an established connection for the receive-path
 // benchmarks, accepted from benchConn's peer, and the data packet they feed
-// it.
-//
-// One datagram, its timestamp and sequence number rewritten for each packet:
-// each is handled before the next is written, and the receive buffer copies
-// the payload, so nothing holds on to it. Building b.N of them up front kept
-// hundreds of megabytes alive and timed the garbage collector instead.
+// it. The one datagram is rewritten for each packet; each is handled before
+// the next is written, and the receive buffer copies the payload.
 func benchReceiver(b *testing.B) (*benchConn, *UtpSocket, *UtpStream, []byte) {
 	ctx, cancel := context.WithCancel(context.Background())
 	b.Cleanup(cancel)
@@ -104,19 +100,17 @@ func benchReceiver(b *testing.B) (*benchConn, *UtpSocket, *UtpStream, []byte) {
 	return conn, sock, stream, template
 }
 
-// BenchmarkReceivePath is the cost of one in-order data packet on an
-// established connection: routing it, handling it, handing its bytes to the
-// application and acknowledging it -- what the socket's reader does for each
-// datagram, measured warm and without the wake-up that precedes it.
+// BenchmarkReceivePath measures one in-order data packet on an established
+// connection: routing, handling, delivering its bytes and acknowledging, as
+// the socket's reader does for each datagram, warm and without the wake-up
+// that precedes it.
 func BenchmarkReceivePath(b *testing.B) {
 	conn, sock, stream, template := benchReceiver(b)
 
-	// The reader's own two steps, called here so nothing but the work is
-	// timed: no channel between the datagram and the socket, no wake-up. The
-	// socket's read loop sits idle meanwhile, waiting on conn.in. What the
-	// connection hands up is taken at once, as by an application that never
-	// falls behind; one that did would let the receive buffer fill, and the
-	// packets after it -- never resent here -- would stall the connection.
+	// Call the reader's two steps directly, so only the work is timed. The
+	// socket's read loop sits idle on conn.in. Delivered data is taken at
+	// once, as by an application that never falls behind; otherwise the
+	// receive buffer would fill and the connection stall.
 	touched := &readBatch{}
 	read := 0
 	b.SetBytes(benchPayload)
@@ -138,18 +132,16 @@ func BenchmarkReceivePath(b *testing.B) {
 }
 
 // BenchmarkReceivePathCold is BenchmarkReceivePath with the caches evicted
-// before each packet, as they are on a reader that wakes once a millisecond
-// with the rest of the process running in between, and with the packets
-// spaced as at 10 Mb/s. Each packet is timed on
-// its own and the median reported (cold-ns/op), with the median time to the
-// acknowledgement's write (cold-ack-ns/op); the benchmark's own ns/op includes
-// the eviction and means nothing.
+// before each packet, as on a reader that wakes once a millisecond with the
+// rest of the process running in between, and packets spaced as at 10 Mb/s.
+// Each packet is timed and the median reported (cold-ns/op), with the median
+// time to the acknowledgement's write (cold-ack-ns/op); the benchmark's own
+// ns/op includes the eviction and is not meaningful.
 func BenchmarkReceivePathCold(b *testing.B) {
 	conn, sock, stream, template := benchReceiver(b)
 
-	// About what other threads evict between two packets a millisecond apart:
-	// with 4 MB evicted this measured 8-9us, against 10-12us timed on a live
-	// receiver at 10 Mb/s. A full eviction (64 MB) measured 41-45us.
+	// Roughly what other threads evict between two packets a millisecond
+	// apart.
 	evict := make([]byte, 4<<20)
 	touched := &readBatch{}
 	took := make([]time.Duration, 0, b.N)
@@ -159,9 +151,8 @@ func BenchmarkReceivePathCold(b *testing.B) {
 		for j := 0; j < len(evict); j += 64 {
 			evict[j]++
 		}
-		// Packets 1.2 ms apart, as at 10 Mb/s: the receiver acknowledges each
-		// one, as it did in the runs this is compared with. Closer together,
-		// it holds acknowledgements back and this would time that instead.
+		// Packets 1.2 ms apart, as at 10 Mb/s, so the receiver acknowledges
+		// each; closer together it would hold acknowledgements back.
 		for time.Since(last) < 1200*time.Microsecond {
 		}
 		last = time.Now()

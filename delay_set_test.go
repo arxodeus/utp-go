@@ -6,9 +6,8 @@ import (
 	"time"
 )
 
-// The retransmission timer's behaviour is the difference between a working
-// congestion controller and one being fed phantom loss, so the wheel's timing
-// is tested directly rather than inferred from transfer results.
+// The retransmission timer wheel's timing is tested directly: a timer that
+// fires early feeds the congestion controller phantom loss.
 
 type firing struct {
 	mu    sync.Mutex
@@ -39,9 +38,8 @@ func (f *firing) count() int {
 	return len(f.times)
 }
 
-// An item must never fire before its delay. Firing early is what declared
-// packets lost before their ack could arrive. "Before" is to the millisecond,
-// libutp's resolution (wheelResolution).
+// An item never fires before its delay, to the millisecond
+// (wheelResolution).
 func TestTimeWheelNeverFiresEarly(t *testing.T) {
 	const interval = 20 * time.Millisecond
 	f := newFiring()
@@ -109,7 +107,7 @@ func TestTimeWheelHandlesDelaysBeyondOneRevolution(t *testing.T) {
 	defer tw.stop()
 
 	revolution := interval * slots
-	long := 3*revolution + interval // 260ms: well past the old ceiling
+	long := 3*revolution + interval // 260ms: several revolutions
 
 	tw.put("long", 1, long)
 	// Before it is due, it must not have fired.
@@ -235,16 +233,10 @@ func TestRetransmitKeysAreScoped(t *testing.T) {
 	}
 }
 
-// The same promise, but armed part-way through a tick.
-//
-// TestTimeWheelNeverFiresEarly arms everything immediately after the wheel is
-// created, when the next tick is a full interval away. That is the one case
-// where placing an item n-1 slots ahead happens to be right, so the wheel
-// passed that test while firing up to a full interval early for every timer
-// armed at any other moment -- which, in a live connection, is all of them.
-//
-// This arms at a range of offsets through the tick cycle. It reproduced the
-// defect at every offset but zero.
+// The same guarantee for items armed partway through a tick, at a range of
+// offsets through the tick cycle. Arming just after the wheel is created is
+// the one case where the next tick is a full interval away, so it alone does
+// not catch an item placed one slot too early.
 func TestTimeWheelNeverFiresEarlyWhenArmedMidCycle(t *testing.T) {
 	const interval = 20 * time.Millisecond
 

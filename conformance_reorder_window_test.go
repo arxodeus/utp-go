@@ -4,29 +4,12 @@ package utp
 
 import "testing"
 
-// Out-of-order data costs us no more receive window than it costs libutp.
-//
-// It used to cost all of it. `receiveBuffer.Available()` subtracted every byte
-// held behind a gap from the window this library advertised, where libutp's
-// `get_rcv_window` (`utp_internal.cpp:590-596`) counts only what its embedder
-// has not yet read -- and a packet held out of order sits in `conn->inbuf`,
-// never reaching `utp_call_on_read` until the gap before it is filled, so it
-// never enters that figure.
-//
-// Measured before the split into Window and Available:
-//
-//	40,000 bytes held       we advertised 1,008,576   libutp 1,048,576
-//	1,120,000 bytes held    we advertised     1,376   libutp 1,048,576
-//
-// The second row is the one that mattered. 1,376 bytes is under the 1,400 a
-// packet needs, so the peer could send nothing -- including the retransmission
-// that would have filled the gap and let the whole buffer be delivered. And it
-// is above zero, so the peer's zero-window probe, which tests for exactly
-// zero, never armed. Both ends went silent. That was the cause of a stall a
-// network case reached in 4 runs out of 20.
-//
-// These cases now pin the agreement rather than the divergence. If they start
-// failing because our window falls again, the stall is back.
+// Out-of-order data costs no more advertised receive window than it does in
+// the reference implementation, which counts only data delivered and not yet
+// read. If the window fell with out-of-order data, a large enough reorder
+// backlog would leave less than a packet of window, too little for the
+// retransmission that fills the gap and more than zero, so no zero-window
+// probe either: both ends would go silent.
 func TestReorderedDataCostsUsNoMoreWindowThanLibutp(t *testing.T) {
 	const held = 40
 	const bodyLen = 1000
@@ -51,8 +34,8 @@ func TestReorderedDataCostsUsNoMoreWindowThanLibutp(t *testing.T) {
 	t.Logf("after %d packets (%d bytes) held behind a gap: we advertise %d, libutp %d",
 		held, heldBytes, ourWindow, libutpWindow)
 
-	// The control: libutp has to be holding the data and still advertising
-	// room, or there is no agreement worth checking.
+	// The control: the reference implementation must be holding the data and
+	// still advertising room, or there is no agreement to check.
 	if libutpWindow < heldBytes {
 		t.Fatalf("libutp advertised %d after holding %d bytes out of order, less than "+
 			"the data it holds; this case's reading of get_rcv_window is wrong and "+
@@ -67,12 +50,9 @@ func TestReorderedDataCostsUsNoMoreWindowThanLibutp(t *testing.T) {
 	}
 }
 
-// The same, driven to where it used to block the peer entirely.
-//
-// 800 packets behind a gap is more than a megabyte -- enough to have taken the
-// old accounting under the size of a single packet. The reorder window bounds
-// it there: outsideReorderWindow drops anything more than 1024 packets past
-// the gap, as libutp does.
+// The same, driven to a backlog of 800 packets, more than a megabyte. The
+// reorder window bounds it: outsideReorderWindow drops anything more than
+// 1024 packets past the gap.
 func TestReorderedDataDoesNotBlockOurWindow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("drives 800 reordered packets through both implementations")

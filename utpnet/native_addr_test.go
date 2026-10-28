@@ -15,10 +15,8 @@ type otherAddr string
 func (a otherAddr) Network() string { return "other" }
 func (a otherAddr) String() string  { return string(a) }
 
-// The map from UDP form back to a PacketConn's own address type is bounded,
+// The map from UDP form back to a PacketConn's own address type is bounded
 // however many addresses datagrams arrive from, and keeps the most recent.
-// It forgot nothing, so a PacketConn carrying a DHT grew it for as long as
-// it ran. From the release review of 9c44c4f (R10).
 func TestNativeAddressesAreBounded(t *testing.T) {
 	p := &packetConn{}
 	var last otherAddr
@@ -37,11 +35,8 @@ func TestNativeAddressesAreBounded(t *testing.T) {
 	}
 }
 
-// An address a live connection uses is kept however many others arrive. The
-// longest silent went first whatever they were, so a quiet connection's peer
-// could be pushed out by a burst of new addresses, and the connection's
-// writes then went to the UDP form, which a PacketConn of another address
-// type need not accept. Review of 294cc2e, finding 4.
+// An address a live connection uses is kept however many others arrive, so
+// a quiet connection's peer is not pushed out by a burst of new addresses.
 func TestNativeAddressOfALiveConnectionIsKept(t *testing.T) {
 	p := &packetConn{}
 	live := otherAddr("192.0.2.1:6881")
@@ -187,10 +182,9 @@ func otherSocket(t *testing.T, wrap func(otherPacketConn) net.PacketConn) *Socke
 	return s
 }
 
-// A dial keeps its peer's native address through the handshake. It was kept
-// from when the dial returned, so a SYN lost and resent after other addresses
-// had crowded it out went out in the UDP form, which this PacketConn refuses,
-// and the dial never completed. Release review of 224c363, finding 3.
+// A dial keeps its peer's native address through the handshake, so a SYN
+// resent after other addresses have crowded the map still goes to the
+// native address.
 func TestADialKeepsItsPeersNativeAddressThroughTheHandshake(t *testing.T) {
 	server := otherSocket(t, nil)
 	lost := make(chan struct{})
@@ -220,9 +214,7 @@ func TestADialKeepsItsPeersNativeAddressThroughTheHandshake(t *testing.T) {
 	}
 }
 
-// A connection waiting to be accepted keeps its peer's native address. It was
-// kept from when Accept took it, by when it could already have been crowded
-// out, and the accepted connection's packets then went out in the UDP form.
+// A connection waiting to be accepted keeps its peer's native address.
 func TestAConnectionWaitingToBeAcceptedKeepsItsPeersNativeAddress(t *testing.T) {
 	server, client := otherSocket(t, nil), otherSocket(t, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -256,11 +248,9 @@ func TestAConnectionWaitingToBeAcceptedKeepsItsPeersNativeAddress(t *testing.T) 
 	}
 }
 
-// A uTP datagram keeps the address it came from while it waits to be handled.
-// The map of such addresses could forget it while it was queued, before the
-// connection it starts holds the address, and the answer then went out in
-// the UDP form. Handed to the uTP socket, its address is remembered again and
-// held until the socket reads the next one. Review of 99ce302.
+// A uTP datagram keeps the address it came from while it waits to be
+// handled. Handed to the uTP socket, its address is registered again and
+// held until the socket reads the next datagram.
 func TestAQueuedDatagramKeepsItsNativeAddress(t *testing.T) {
 	p := &packetConn{}
 	d := newDemuxConn(p)

@@ -1,9 +1,9 @@
 package utp
 
 // The scripted transport and helpers the conformance harness drives our side
-// with. None of it needs libutp, so it builds without cgo, and so do the
-// tests that use it on their own (zerowindow_test.go, dont_fragment_test.go).
-// What compares against libutp is in conformance_harness_test.go, which does.
+// with. None of it needs cgo, so tests that use it alone (zerowindow_test.go,
+// dont_fragment_test.go) build without it. The comparison against the
+// reference implementation is in conformance_harness_test.go.
 
 import (
 	"context"
@@ -29,7 +29,7 @@ type scriptedPeer struct{ name string }
 func (p *scriptedPeer) Hash() string { return p.name }
 
 // scriptedConn is a Conn whose input is injected by the test and whose output
-// is captured, so our socket can be driven exactly as the libutp driver is.
+// is captured, so our socket can be driven as the reference driver is.
 type scriptedConn struct {
 	peer   *scriptedPeer
 	closed chan struct{}
@@ -126,12 +126,9 @@ func (c *scriptedConn) takeEmitted() [][]byte {
 	return out
 }
 
-// pendingCount is how many injected packets our socket has not yet read.
-//
-// The settle loops below wait for a quiet period, and a quiet period that
-// starts before our event loop has even been handed the packet measures
-// nothing: under load the whole window can pass with the packet still sitting
-// in this queue. Draining is the precondition for the wait to mean anything.
+// pendingCount returns how many injected packets our socket has not yet read.
+// The settle loops wait for a quiet period, which means nothing if it starts
+// before the packet has even been read.
 func (c *scriptedConn) pendingCount() int {
 	c.inMu.Lock()
 	defer c.inMu.Unlock()
@@ -158,12 +155,10 @@ func (c *scriptedConn) emittedCount() int {
 	return len(c.emitted)
 }
 
-// settle waits until our implementation has stopped emitting.
-//
-// libutp is synchronous, so its side needs nothing like this. Ours is
-// goroutine-driven with real timers, so the only honest way to know it has
-// finished reacting is to watch until it goes quiet. That asymmetry is why
-// the timing comparison in this corpus is coarse -- see CONFORMANCE.md.
+// settle waits until our implementation has stopped emitting. The reference
+// driver is synchronous; ours runs goroutines and real timers, so the only
+// way to know it has finished reacting is to watch until it goes quiet. This
+// is why timing comparisons here are coarse.
 func (c *scriptedConn) settle() {
 	const quiet = 60 * time.Millisecond
 	const limit = 3 * time.Second
@@ -187,9 +182,9 @@ func (c *scriptedConn) settle() {
 
 // --- pinning our random source ----------------------------------------------
 
-// pinRandom fixes the sequence numbers our implementation chooses, so they can
-// be compared against libutp's scripted ones. It restores the real source on
-// cleanup.
+// pinRandom fixes the sequence numbers our implementation chooses, so they
+// can be compared with the reference driver's scripted ones. It restores the
+// real source on cleanup.
 func pinRandom(v uint16) func() {
 	prev := randomUint16Source.Load()
 	pinned := func() uint16 { return v }
@@ -218,11 +213,9 @@ func describePackets(pkts [][]byte) string {
 	return b.String()
 }
 
-// Pinning the random source while something draws from it is safe. A socket's
-// reader can still be answering a datagram with a reset after Close has
-// returned, and the next test pinning the source raced it -- the race
-// detector caught it in 2 of 15 runs of this package. For the race
-// detector; without it this passes either way.
+// Pinning the random source while something draws from it is safe: a
+// socket's reader can still be answering a datagram with a reset after Close
+// has returned. Meaningful under the race detector.
 func TestRandomSourcePinnedWhileInUse(t *testing.T) {
 	done := make(chan struct{})
 	stopped := make(chan struct{})

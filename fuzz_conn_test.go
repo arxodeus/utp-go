@@ -11,32 +11,24 @@ import (
 
 // Fuzzing a live connection, not just the decoder.
 //
-// The decoder fuzzers cover one packet at a time. The defects that survive
-// those are the ones that need a *sequence*: a state machine that accepts a
-// packet it should not have in the state it is in, a counter that wraps, a
-// buffer indexed from a sequence number a peer chose. M2's corpus probed that
-// by hand and found real divergences; this probes it without having to think
-// of the cases.
+// The decoder fuzzers cover one packet at a time. This covers sequences: a
+// state machine accepting a packet it should not in its current state, a
+// counter that wraps, a buffer indexed by a peer-chosen sequence number.
 //
-// The property is deliberately weak, because a strong one would be wrong: an
-// arbitrary byte sequence is not a valid uTP conversation, so almost any
-// behaviour is permitted. What is not permitted is:
+// An arbitrary byte sequence is not a valid conversation, so almost any
+// behavior is permitted. What is not permitted is:
 //
-//   - panicking, which is remotely triggerable by anyone who can send a
-//     datagram to the port;
-//   - hanging, which is the same thing more slowly;
+//   - panicking, which anyone who can send a datagram could trigger;
+//   - hanging, the same thing more slowly;
 //   - dying, so that a well-formed packet arriving afterwards gets no answer.
-//
-// The last one is the interesting one. It says a peer cannot use malformed
-// traffic to wedge a socket against everyone else.
 //
 // Run longer with:
 //
 //	go test -run xxx -fuzz FuzzResponderPacketSequence -fuzztime 5m
 
 // fuzzConn is a transport that can be fed packets and read back what the
-// socket emitted. It deliberately does not depend on the conformance harness,
-// which is behind a cgo build tag: this has to run in a CGO_ENABLED=0 build.
+// socket emitted. It does not depend on the cgo conformance harness, so it
+// runs with CGO_ENABLED=0.
 type fuzzConn struct {
 	inbox  chan []byte
 	peer   *fuzzPeer
@@ -127,8 +119,8 @@ const (
 )
 
 func FuzzResponderPacketSequence(f *testing.F) {
-	// Seeds: the shapes the M2 corpus found worth testing, plus a plain
-	// exchange, expressed as length-prefixed records.
+	// Seeds: the conformance cases, plus a plain exchange, as
+	// length-prefixed records.
 	f.Add([]byte{0})
 	f.Add(append([]byte{20}, make([]byte, 20)...))
 	f.Add([]byte{4, 0xFF, 0xFF, 0xFF, 0xFF})
@@ -168,10 +160,8 @@ func FuzzResponderPacketSequence(f *testing.F) {
 		}
 		time.Sleep(fuzzSettle)
 
-		// The socket must still be alive. A peer that can wedge a socket with
-		// malformed traffic can deny service to every other connection on the
-		// same port, so this is the property worth asserting: after whatever
-		// the fuzzer sent, a fresh connection still gets answered.
+		// The socket must still be alive: after whatever the fuzzer sent, a
+		// fresh connection still gets an answer.
 		before := conn.emittedCount()
 		fresh := NewConnectionId(conn.peer, fuzzConnID+3, fuzzConnID+2)
 		freshDone := make(chan struct{})
