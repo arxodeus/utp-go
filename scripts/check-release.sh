@@ -57,7 +57,7 @@ func main() {
 }
 GO
 
-go get "github.com/arxodeus/utp@$version" "github.com/anacrolix/go-libutp@v1.3.2"
+go get "github.com/arxodeus/utp@$version" "github.com/anacrolix/go-libutp@v1.5.1"
 go mod tidy
 CGO_ENABLED=0 go build -o /dev/null .
 CGO_ENABLED=0 go run .

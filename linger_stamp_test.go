@@ -13,7 +13,7 @@ func TestALingeringAcknowledgementIsStampedAsItIsSent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	conn := newScriptedConn()
-	sock := WithSocket(ctx, conn, conformanceLogger())
+	sock := NewSocket(ctx, conn, conformanceLogger())
 	defer sock.Close()
 
 	const stale, staleDiff = 1, 7
@@ -26,8 +26,8 @@ func TestALingeringAcknowledgementIsStampedAsItIsSent(t *testing.T) {
 			ackNum = finSeq - 1
 		}
 		peerStamp := nowMicro() - 40_000 // the peer's clock, 40ms behind ours
-		fin := newPacketBuilder(st_fin, 4801, peerStamp, 1<<20, finSeq).WithAckNum(900).Build()
-		stored := newPacketBuilder(st_state, 4800, stale, 1<<20, 901).WithTsDiffMicros(staleDiff).WithAckNum(ackNum).Build()
+		fin := newPacketBuilder(stFin, 4801, peerStamp, 1<<20, finSeq).WithAckNum(900).Build()
+		stored := newPacketBuilder(stState, 4800, stale, 1<<20, 901).WithTimestampDiffMicros(staleDiff).WithAckNum(ackNum).Build()
 		key := cidFromPacket(fin, conn.peer, cidTypes[0]).Hash()
 		sock.lingerAcks.put(key, stored)
 
@@ -38,7 +38,7 @@ func TestALingeringAcknowledgementIsStampedAsItIsSent(t *testing.T) {
 		deadline := time.Now().Add(2 * time.Second)
 		for sent == nil && time.Now().Before(deadline) {
 			for _, raw := range conn.takeEmitted() {
-				if p, err := decodePacket(raw, false); err == nil && p.Header.PacketType == st_state {
+				if p, err := decodePacket(raw, false); err == nil && p.Header.PacketType == stState {
 					sent = p
 				}
 			}

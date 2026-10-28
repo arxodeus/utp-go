@@ -18,10 +18,10 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 	// closed Go socket is.
 ```
 
-## Line 26 — type UtpStream
+## Line 26 — type Stream
 
 ```
-// UtpStream is one uTP connection, as UtpSocket's Connect and Accept return
+// Stream is one uTP connection, as Socket's Connect and Accept return
 // it.
 //
 // Its lifetime is the socket's, not the call's that made it: cancelling a
@@ -29,32 +29,32 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // Read and Write each take a context that governs that one call. CloseWrite
 // sends a FIN once what is written has gone, CloseRead stops delivery, and
 // Close does both and returns at once, the connection delivering what it
-// holds in the background; UtpSocket.Close waits for that, while the peer
+// holds in the background; Socket.Close waits for that, while the peer
 // still answers. Done is closed when the connection has ended.
 ```
 
-## Line 37 — type UtpStream
+## Line 37 — type Stream
 
 ```
 // socketCtx is the context of the socket the stream runs on; streamCtx
 	// is the stream's own, which ends with it. See endWait.
 ```
 
-## Line 48 — type UtpStream
+## Line 48 — type Stream
 
 ```
 // writeClosed is set by CloseWrite: this end has finished sending, but is
 	// still reading. Distinct from shutdown, which means finished entirely.
 ```
 
-## Line 51 — type UtpStream
+## Line 51 — type Stream
 
 ```
 // readClosed is set by CloseRead: this end has finished reading, but is
 	// still sending. The mirror of writeClosed, and libutp's read_shutdown.
 ```
 
-## Line 54 — type UtpStream
+## Line 54 — type Stream
 
 ```
 // readShutCh is closed by CloseRead, to wake a Read already waiting.
@@ -62,7 +62,7 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 	// never read from carries none. Guarded by readShutMu.
 ```
 
-## Line 59 — type UtpStream
+## Line 59 — type Stream
 
 ```
 // readBusy is set while a read is in progress, and readWake, made only
@@ -70,42 +70,42 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 	// readShutMu. See lockRead.
 ```
 
-## Line 64 — type UtpStream
+## Line 64 — type Stream
 
 ```
 // writeSem holds one write's chunks together: a write holds it while it
 	// is queued, and waits for it under its own context. See lockWrite.
 ```
 
-## Line 69 — type UtpStream
+## Line 69 — type Stream
 
 ```
 // linger, set by the socket that made this stream, takes it over at
-	// Close. See UtpSocket.linger.
+	// Close. See Socket.linger.
 ```
 
-## Line 73 — type UtpStream
+## Line 73 — type Stream
 
 ```
 // abandoned is closed by Close, telling the connection that whatever is
 	// still buffered for this reader is owed to nobody.
 ```
 
-## Line 76 — type UtpStream
+## Line 76 — type Stream
 
 ```
 // readRemainder holds bytes from a chunk that a Read call could not fit
 	// in the caller's buffer. Guarded by the read lock (lockRead).
 ```
 
-## Line 79 — type UtpStream
+## Line 79 — type Stream
 
 ```
 // readErr is the terminal read error, kept so every Read after the first
 	// one returns it rather than blocking. Guarded by the read lock.
 ```
 
-## Line 82 — type UtpStream
+## Line 82 — type Stream
 
 ```
 // ended is closed once the connection's event loop has returned, after
@@ -145,13 +145,13 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 	// History: HISTORY.md, "newUtpStream: the connection's lock".
 ```
 
-## Line 151 — func (*UtpStream).abandonDial
+## Line 151 — func (*Stream).abandonDial
 
 ```
 // abandonDial tears down a connection attempt whose caller has given up.
 //
 // It exists because the stream's lifetime is the socket's rather than the
-// dial's (see UtpSocket.Connect): cancelling the dial context no longer takes
+// dial's (see Socket.Connect): cancelling the dial context no longer takes
 // the connection with it, so a dial that times out or is cancelled has to say
 // so explicitly, or a half-open attempt would go on retrying its SYN with
 // nobody waiting for the answer.
@@ -163,14 +163,14 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // the connection either way.
 ```
 
-## Line 167 — func (*UtpStream).abandonDial
+## Line 167 — func (*Stream).abandonDial
 
 ```
 // Nothing watches the context of a resting connection. A dial is never
 	// resting -- its SYN is in flight -- but it costs nothing to be sure.
 ```
 
-## Line 176 — func (*UtpStream).notifyRead
+## Line 176 — func (*Stream).notifyRead
 
 ```
 // A resting connection is woken only if the read has something to
@@ -181,14 +181,14 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 	// its loop started for every read, to do nothing.
 ```
 
-## Line 192 — func (*UtpStream).wakeLoop
+## Line 192 — func (*Stream).wakeLoop
 
 ```
 // wakeLoop starts the connection's event loop if it is resting, for an event
 // just queued for it. See dormant.go.
 ```
 
-## Line 200 — func (*UtpStream).terminalErr
+## Line 200 — func (*Stream).terminalErr
 
 ```
 // terminalErr reports the error the connection recorded when the stream ended,
@@ -196,7 +196,7 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // than from the end-of-stream marker. A clean end reports nil.
 ```
 
-## Line 213 — func (*UtpStream).endedErr
+## Line 213 — func (*Stream).endedErr
 
 ```
 // endedErr reports, once the connection has ended, the error it ended with,
@@ -205,14 +205,14 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // end (readEndErr); that is the reader's view, and not an error here.
 ```
 
-## Line 232 — func (*UtpStream).writeErr
+## Line 232 — func (*Stream).writeErr
 
 ```
 // writeErr is what a write is told once the connection has ended: the error
 // it ended with, or ErrNotConnected if it ended without one.
 ```
 
-## Line 241 — func (*UtpStream).endWait
+## Line 241 — func (*Stream).endWait
 
 ```
 // endWait waits, once the stream's context has ended, for its event loop to
@@ -227,14 +227,14 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // what had already arrived first.
 ```
 
-## Line 260 — func (*UtpStream).shutErr
+## Line 260 — func (*Stream).shutErr
 
 ```
 // shutErr is what a write is told on a stream already shut down: the reason
 // its connection ended, if it is ending, or ErrNotConnected after Close.
 ```
 
-## Line 283 — func (*UtpStream).loopEnded
+## Line 283 — func (*Stream).loopEnded
 
 ```
 // loopEnded is the end of the connection's event loop, on whichever goroutine
@@ -242,7 +242,7 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // on (dormant.go).
 ```
 
-## Line 295 — func (*UtpStream).ReadToEOF
+## Line 295 — func (*Stream).ReadToEOF
 
 ```
 // ReadToEOF reads until the peer ends the stream, leaving everything read in
@@ -253,14 +253,14 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // the caller's: 4 MB read this way allocated about 20 MB.
 ```
 
-## Line 321 — func (*UtpStream).ReadToEOF
+## Line 321 — func (*Stream).ReadToEOF
 
 ```
 // The connection is ending. Its loop closes the read queue as it
 			// returns, behind what had arrived: read on to that.
 ```
 
-## Line 346 — func (*UtpStream).Read
+## Line 346 — func (*Stream).Read
 
 ```
 // Read reads the next available bytes from the stream into buf, returning as
@@ -276,13 +276,13 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // underlying channel and each would consume chunks the other expected.
 ```
 
-## Line 369 — func (*UtpStream).Read
+## Line 369 — func (*Stream).Read
 
 ```
 // Anything left over from the last chunk comes first.
 ```
 
-## Line 387 — func (*UtpStream).Read
+## Line 387 — func (*Stream).Read
 
 ```
 // The connection is ending. Its loop closes the read queue as it
@@ -290,7 +290,7 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 		// terminalErr: what had arrived comes first, then that.
 ```
 
-## Line 421 — func (*UtpStream).Write
+## Line 421 — func (*Stream).Write
 
 ```
 // Write queues all of buf to be sent and returns once the connection has
@@ -307,7 +307,7 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // connection has ended, the reason it ended.
 ```
 
-## Line 445 — func (*UtpStream).Write
+## Line 445 — func (*Stream).Write
 
 ```
 // The connection goroutine keeps hold of what is queued here until it has
@@ -320,10 +320,10 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 	// so an embedder may reuse its buffer straight away. One copy per Write is
 	// what that costs, and on the fastest link the harness models it does not
 	// show up at all -- see "What the write copy cost" in BENCHMARKS.md.
-	// History: HISTORY.md, "UtpStream.Write: the copy".
+	// History: HISTORY.md, "Stream.Write: the copy".
 ```
 
-## Line 468 — func (*UtpStream).lockWrite
+## Line 468 — func (*Stream).lockWrite
 
 ```
 // lockWrite waits for the write before this one to finish, for as long as
@@ -334,13 +334,13 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // not. Review of 294cc2e, finding 1.
 ```
 
-## Line 486 — func (*UtpStream).lockWrite
+## Line 486 — func (*Stream).lockWrite
 
 ```
 // The write side may have closed while this waited.
 ```
 
-## Line 500 — func (*UtpStream).lockRead
+## Line 500 — func (*Stream).lockRead
 
 ```
 // lockRead waits for the reads ahead of this one, under its own context, as
@@ -356,20 +356,20 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // per idle connection"; netem.TestIdleConnectionMemory).
 ```
 
-## Line 539 — func (*UtpStream).unlockRead
+## Line 539 — func (*Stream).unlockRead
 
 ```
 // unlockRead ends a read, and lets the reads waiting for it try again.
 ```
 
-## Line 550 — func (*UtpStream).writeChunk
+## Line 550 — func (*Stream).writeChunk
 
 ```
 // writeChunk is the most a write copies at once: the send buffer's size,
 // which is the most the connection can take from it at once anyway.
 ```
 
-## Line 559 — func (*UtpStream).writeChunked
+## Line 559 — func (*Stream).writeChunked
 
 ```
 // writeChunked writes total bytes, which fill copies out of the caller's
@@ -381,14 +381,14 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // written whole, one after another.
 ```
 
-## Line 573 — func (*UtpStream).writeChunked
+## Line 573 — func (*Stream).writeChunked
 
 ```
 // One for every chunk: each is answered before the next is queued, and
 	// one that is not ends the write.
 ```
 
-## Line 588 — func (*UtpStream).WriteV
+## Line 588 — func (*Stream).WriteV
 
 ```
 // WriteV writes several buffers as one stream write, without the caller
@@ -413,7 +413,7 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // and returns nil, as a zero-length Write does.
 ```
 
-## Line 627 — func (*UtpStream).WriteV
+## Line 627 — func (*Stream).WriteV
 
 ```
 // One copy per byte -- the whole point of the call -- into one
@@ -424,7 +424,7 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 	// through every buffer before it again.
 ```
 
-## Line 645 — func (*UtpStream).writeQueued
+## Line 645 — func (*Stream).writeQueued
 
 ```
 // writeQueued hands an already-copied buffer to the connection and waits for
@@ -438,7 +438,7 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // told why by the error callback.
 ```
 
-## Line 680 — func (*UtpStream).writeQueued
+## Line 680 — func (*Stream).writeQueued
 
 ```
 // What the connection has already taken will be sent, so it is
@@ -446,19 +446,19 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 		// without sending anything twice.
 ```
 
-## Line 689 — func (*UtpStream).writeQueued
+## Line 689 — func (*Stream).writeQueued
 
 ```
 // An answer sent before the end still counts.
 ```
 
-## Line 702 — func (*UtpStream).writeQueued
+## Line 702 — func (*Stream).writeQueued
 
 ```
 // An answer sent before the end still counts.
 ```
 
-## Line 715 — func (*UtpStream).CloseWrite
+## Line 715 — func (*Stream).CloseWrite
 
 ```
 // CloseWrite finishes this end's sending side and leaves the reading side
@@ -481,7 +481,7 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // always did, and is what actually ends the connection.
 ```
 
-## Line 740 — func (*UtpStream).CloseWrite
+## Line 740 — func (*Stream).CloseWrite
 
 ```
 // Its own event, not the one Close uses: that one means "finished
@@ -489,7 +489,7 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 	// every half-close into a full one. This only has to wake the loop.
 ```
 
-## Line 751 — func (*UtpStream).CloseRead
+## Line 751 — func (*Stream).CloseRead
 
 ```
 // CloseRead closes the receiving half of the stream: this end stops taking
@@ -517,14 +517,14 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // net.TCPConn.CloseRead, as CloseWrite follows its counterpart.
 ```
 
-## Line 786 — func (*UtpStream).CloseRead
+## Line 786 — func (*Stream).CloseRead
 
 ```
 // The event only wakes the loop; the flag is what it acts on (see
 	// afterPass), so an event dropped from a full queue loses nothing.
 ```
 
-## Line 796 — func (*UtpStream).readClosedSignal
+## Line 796 — func (*Stream).readClosedSignal
 
 ```
 // readClosedSignal is closed once CloseRead has been called.
@@ -534,7 +534,7 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // not leave a blocked Read waiting. From the release review of 9c44c4f (R6).
 ```
 
-## Line 813 — func (*UtpStream).Done
+## Line 813 — func (*Stream).Done
 
 ```
 // Done is closed once the connection has ended and holds nothing more: its
@@ -543,7 +543,7 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // before then can still be read.
 ```
 
-## Line 821 — func (*UtpStream).SetWindowSize
+## Line 821 — func (*Stream).SetWindowSize
 
 ```
 // SetWindowSize sets the ceiling on this connection's congestion window, in
@@ -554,23 +554,23 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // to it. Zero restores the default.
 ```
 
-## Line 831 — func (*UtpStream).WindowSize
+## Line 831 — func (*Stream).WindowSize
 
 ```
 // WindowSize reports the ceiling SetWindowSize or the connection's config
 // set: libutp's utp_getsockopt(UTP_SNDBUF).
 ```
 
-## Line 837 — func (*UtpStream).Close
+## Line 837 — func (*Stream).Close
 
 ```
 // Close ends the stream and returns at once. What has been written goes on
 // being delivered in the background, the FIN after it, until the peer has
 // acknowledged everything or stopped answering; closing the socket waits for
-// that (UtpSocket.Close). libutp's utp_close (utp_internal.cpp:3358-3380).
+// that (Socket.Close). libutp's utp_close (utp_internal.cpp:3358-3380).
 ```
 
-## Line 847 — func (*UtpStream).Close
+## Line 847 — func (*Stream).Close
 
 ```
 // Tell the connection's final drain not to wait for a reader that is
@@ -578,7 +578,7 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 		// that this consumer has just said it does not want.
 ```
 
-## Line 851 — func (*UtpStream).Close
+## Line 851 — func (*Stream).Close
 
 ```
 // Wake the event loop.
@@ -592,23 +592,23 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 		// connection to wind up.
 ```
 
-## Line 863 — func (*UtpStream).Close
+## Line 863 — func (*Stream).Close
 
 ```
 // The queue is full, so the loop has plenty to wake it and will
 			// see the flag on its next pass.
 ```
 
-## Line 867 — func (*UtpStream).Close
+## Line 867 — func (*Stream).Close
 
 ```
 // Return, and let the connection finish in the background: libutp's
 		// utp_close queues the FIN, sets close_requested and returns
 		// (utp_internal.cpp:3358-3380), and the socket goes on sending until
 		// utp_check_timeouts retires it. Closing the socket waits for it
-		// (UtpSocket.awaitLingering), which is where an exiting program would
+		// (Socket.awaitLingering), which is where an exiting program would
 		// otherwise lose whatever was still in flight. History: HISTORY.md,
-		// "UtpStream.Close: returning at once".
+		// "Stream.Close: returning at once".
 ```
 
 ## Line 885 — const closeStallTimeout
@@ -634,7 +634,7 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // and the wait is over before the first tick.
 ```
 
-## Line 902 — func (*UtpStream).waitForFlush
+## Line 902 — func (*Stream).waitForFlush
 
 ```
 // waitForFlush waits for the connection's event loop to finish, giving up once
@@ -647,7 +647,7 @@ Every comment in `stream.go` at e56c9aa, verbatim.
 // why the caller must not cancel the stream context on this path.
 ```
 
-## Line 942 — func (*UtpStream).peerActivity
+## Line 942 — func (*Stream).peerActivity
 
 ```
 // peerActivity reports how many packets the connection has received, or zero

@@ -107,7 +107,7 @@ Every comment in `congestion.go` at e56c9aa, verbatim.
 
 ```
 // Clock is where the controller reads time: the delay window's expiry
-	// and the age of the application-limited mark. Defaults to RealClock.
+	// and the age of the application-limited mark. Defaults to defaultClock.
 ```
 
 ## Line 129 — func defaultCtrlConfig

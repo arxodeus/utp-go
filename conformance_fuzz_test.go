@@ -72,7 +72,7 @@ func (c *scriptedConn) settleQuick() {
 // removes that known difference, pinned by TestConformanceFinBeforeAnyData,
 // so generated sequences can find new ones.
 func fuzzPrimingPacket() []byte {
-	return newPacketBuilder(st_data, corpusSynConnID+1, 190000, corpusWindow, corpusSynSeq+1).
+	return newPacketBuilder(stData, corpusSynConnID+1, 190000, corpusWindow, corpusSynSeq+1).
 		WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("prime")).Build().Encode()
 }
 
@@ -123,11 +123,11 @@ func seedDifferentialCorpus(f *testing.F, connID uint16) {
 		return b.Build().Encode()
 	}
 
-	data1 := mk(st_data, 0, 200000, []byte("first"))
-	data2 := mk(st_data, 1, 210000, []byte("second"))
-	fin := mk(st_fin, 2, 220000, nil)
-	reset := mk(st_reset, 2, 230000, nil)
-	state := mk(st_state, 0, 240000, nil)
+	data1 := mk(stData, 0, 200000, []byte("first"))
+	data2 := mk(stData, 1, 210000, []byte("second"))
+	fin := mk(stFin, 2, 220000, nil)
+	reset := mk(stReset, 2, 230000, nil)
+	state := mk(stState, 0, 240000, nil)
 
 	seed(data1)
 	seed(data1, data2)
@@ -226,7 +226,7 @@ type differentialRun struct {
 
 	drv    *libutp.Driver
 	conn   *scriptedConn
-	sock   *UtpSocket
+	sock   *Socket
 	cancel context.CancelFunc
 	unpin  func()
 
@@ -255,13 +255,13 @@ func newDifferentialRun(t *testing.T, role differentialRole) *differentialRun {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	r.cancel = cancel
 	r.conn = newScriptedConn()
-	r.sock = WithSocket(ctx, r.conn, conformanceLogger())
+	r.sock = NewSocket(ctx, r.conn, conformanceLogger())
 
 	switch role {
 	case differentialResponder:
 		drv.Listen()
-		cid := NewConnectionId(r.conn.peer, corpusSynConnID+1, corpusSynConnID)
-		go func() { _, _ = r.sock.AcceptWithCid(ctx, cid, pinnedClockConfig(drv)) }()
+		cid := NewConnectionID(r.conn.peer, corpusSynConnID+1, corpusSynConnID)
+		go func() { _, _ = r.sock.AcceptWithCID(ctx, cid, pinnedClockConfig(drv)) }()
 		// The acceptor emits nothing until a SYN arrives, so wait for the
 		// request to be registered: a cid-specific Accept waits in the
 		// awaiting map until its SYN arrives.
@@ -273,8 +273,8 @@ func newDifferentialRun(t *testing.T, role differentialRole) *differentialRun {
 		if err := drv.Connect(); err != nil {
 			t.Skipf("libutp connect failed: %v", err)
 		}
-		cid := NewConnectionId(r.conn.peer, initiatorConnSeed, initiatorConnSeed+1)
-		go func() { _, _ = r.sock.ConnectWithCid(ctx, cid, pinnedClockConfig(drv)) }()
+		cid := NewConnectionID(r.conn.peer, initiatorConnSeed, initiatorConnSeed+1)
+		go func() { _, _ = r.sock.ConnectWithCID(ctx, cid, pinnedClockConfig(drv)) }()
 		// Wait for the SYN itself rather than a fixed interval, so it cannot
 		// land in the first step's transcript.
 		r.waitFor(t, "our SYN", func() bool {
@@ -385,7 +385,7 @@ func (r *differentialRun) compare(step int, injected [][]byte) {
 // initiatorSynAck is the peer's answer to our SYN: a STATE addressed to our
 // receive id, acknowledging the SYN's sequence number.
 func initiatorSynAck() []byte {
-	return newPacketBuilder(st_state, initiatorConnSeed, 150000, corpusWindow, 900).
+	return newPacketBuilder(stState, initiatorConnSeed, 150000, corpusWindow, 900).
 		WithAckNum(initiatorConnSeed).Build().Encode()
 }
 
@@ -402,7 +402,7 @@ func groupByConnection(t *testing.T, raws [][]byte) map[uint16][]*packet {
 			// is what a real peer sends.
 			t.Fatalf("emitted packet does not decode (%v): %x", err, raw)
 		}
-		out[pkt.Header.ConnectionId] = append(out[pkt.Header.ConnectionId], pkt)
+		out[pkt.Header.ConnectionID] = append(out[pkt.Header.ConnectionID], pkt)
 	}
 	return out
 }
@@ -421,13 +421,13 @@ func TestDifferentialHarnessIsLive(t *testing.T) {
 		{
 			name: "responder",
 			role: differentialResponder,
-			probe: newPacketBuilder(st_data, corpusSynConnID+1, 250000, corpusWindow, corpusSynSeq+2).
+			probe: newPacketBuilder(stData, corpusSynConnID+1, 250000, corpusWindow, corpusSynSeq+2).
 				WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("probe")).Build().Encode(),
 		},
 		{
 			name: "initiator",
 			role: differentialInitiator,
-			probe: newPacketBuilder(st_data, initiatorConnSeed, 250000, corpusWindow, 900).
+			probe: newPacketBuilder(stData, initiatorConnSeed, 250000, corpusWindow, 900).
 				WithAckNum(initiatorConnSeed).WithPayload([]byte("probe")).Build().Encode(),
 		},
 	} {

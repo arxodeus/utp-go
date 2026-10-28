@@ -13,12 +13,12 @@ func incomingWindowConn(t *testing.T) (*connection, time.Time) {
 	conn := CreateTestConnection(endpointInfo{Type: acceptor, SynNum: syn, SynAck: synAck})
 	sentPackets := newSentPacketsWithoutLogger(synAck, newDefaultController(fromConnConfig(conn.config)))
 	now := time.Now()
-	sentPackets.OnTransmit(synAck+1, st_data, []byte{0xef}, 64, now)
+	sentPackets.OnTransmit(synAck+1, stData, []byte{0xef}, 64, now)
 	conn.state = &connState{
 		stateType:   connConnected,
 		SentPackets: sentPackets,
-		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
-		RecvBuf:     newReceiveBuffer(TEST_BUFFER_SIZE, syn),
+		SendBuf:     newSendBuffer(testBufferSize),
+		RecvBuf:     newReceiveBuffer(testBufferSize, syn),
 	}
 	conn.peerRecvWindow = 1 << 20
 	return conn, now
@@ -31,7 +31,7 @@ func TestDiscardedPacketDoesNotSetThePeerWindow(t *testing.T) {
 	conn, now := incomingWindowConn(t)
 	const syn = uint16(100)
 	// Acknowledges a packet never sent, so it is dropped.
-	forged := newPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()), 0, syn+1).
+	forged := newPacketBuilder(stState, conn.cid.Send, uint32(now.UnixMicro()), 0, syn+1).
 		WithAckNum(101 + 50).Build()
 	if !conn.invalidAckNum(forged) {
 		t.Fatal("the pre-filter accepts this packet, so the test does not reach the case")
@@ -45,7 +45,7 @@ func TestDiscardedPacketDoesNotSetThePeerWindow(t *testing.T) {
 	}
 
 	// The same window on a packet that passes is taken.
-	good := newPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()), 0, syn+1).
+	good := newPacketBuilder(stState, conn.cid.Send, uint32(now.UnixMicro()), 0, syn+1).
 		WithAckNum(101).Build()
 	conn.onPacket(good, now)
 	if conn.peerRecvWindow != 0 {
@@ -59,7 +59,7 @@ func TestZeroWindowProbeDeadlineRestartsOnEachZeroWindow(t *testing.T) {
 	conn, now := incomingWindowConn(t)
 	const syn = uint16(100)
 	zero := func(at time.Time) {
-		conn.onPacket(newPacketBuilder(st_state, conn.cid.Send, uint32(at.UnixMicro()), 0, syn+1).
+		conn.onPacket(newPacketBuilder(stState, conn.cid.Send, uint32(at.UnixMicro()), 0, syn+1).
 			WithAckNum(101).Build(), at)
 	}
 	zero(now)
@@ -82,13 +82,13 @@ func TestFinWaitsForRoomInTheWindow(t *testing.T) {
 	sentPackets := newSentPacketsWithoutLogger(synAck, ctrl)
 	now := time.Now()
 	for i := uint16(1); i <= 3; i++ {
-		sentPackets.OnTransmit(synAck+i, st_data, make([]byte, 1000), 1000, now)
+		sentPackets.OnTransmit(synAck+i, stData, make([]byte, 1000), 1000, now)
 	}
 	conn.state = &connState{
 		stateType:   connConnected,
 		SentPackets: sentPackets,
-		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
-		RecvBuf:     newReceiveBuffer(TEST_BUFFER_SIZE, syn),
+		SendBuf:     newSendBuffer(testBufferSize),
+		RecvBuf:     newReceiveBuffer(testBufferSize, syn),
 	}
 	conn.peerRecvWindow = 1 << 20
 	// A loss halves the window below what is in flight.
@@ -114,14 +114,14 @@ func TestFinWaitsForRoomInTheWindow(t *testing.T) {
 // connection carrying data both ways, acknowledgements ride on the peer's
 // data packets.
 func TestAcknowledgementOnADataPacketWakesTheWriter(t *testing.T) {
-	for _, pt := range []packetType{st_state, st_data} {
+	for _, pt := range []packetType{stState, stData} {
 		t.Run(pt.String(), func(t *testing.T) {
 			conn, now := incomingWindowConn(t)
 			const syn = uint16(100)
 			// Clear any wake left over from setting up.
 			conn.wantWrite = false
 			b := newPacketBuilder(pt, conn.cid.Send, uint32(now.UnixMicro()), 1<<20, syn+1).WithAckNum(102)
-			if pt == st_data {
+			if pt == stData {
 				b = b.WithPayload([]byte("the peer's own data"))
 			}
 			conn.onPacket(b.Build(), now)
@@ -138,7 +138,7 @@ func TestAcknowledgementOnADataPacketWakesTheWriter(t *testing.T) {
 // No more than 1023 packets in flight, however small.
 func TestOutstandingPacketsAreCappedAt1023(t *testing.T) {
 	for _, already := range []int{1021, 1022} {
-		conn := drainTestConn(t, 0, TEST_BUFFER_SIZE)
+		conn := drainTestConn(t, 0, testBufferSize)
 		// Room for three whole packets, so that none is a short tail the
 		// Nagle rule would hold back.
 		conn.state.SendBuf = newSendBuffer(64 * 1024)
@@ -148,7 +148,7 @@ func TestOutstandingPacketsAreCappedAt1023(t *testing.T) {
 		conn.peerRecvWindow = 1 << 30
 		now := time.Now()
 		for i := 1; i <= already; i++ {
-			conn.state.SentPackets.OnTransmit(101+uint16(i), st_data, []byte{1}, 1, now)
+			conn.state.SentPackets.OnTransmit(101+uint16(i), stData, []byte{1}, 1, now)
 		}
 		sent := sendAndCount(t, conn, make([]byte, 3*p))
 		if want := 1023 - already; len(sent) != want {

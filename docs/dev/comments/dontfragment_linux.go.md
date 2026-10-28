@@ -11,7 +11,7 @@ Every comment in `dontfragment_linux.go` at e56c9aa, verbatim.
 // Linux has no per-datagram control message for this -- it is a socket option
 // on every platform that offers it at all -- so the caller sets it, sends one
 // datagram, and clears it. That is only safe because the socket lets no other
-// write through meanwhile (UtpSocket.writeDatagram).
+// write through meanwhile (Socket.writeDatagram).
 //
 // IP_PMTUDISC_PROBE rather than IP_PMTUDISC_DO. Both set the bit; the
 // difference is whose path-MTU estimate wins. DO defers to the kernel's

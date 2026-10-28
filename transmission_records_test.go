@@ -22,7 +22,7 @@ func TestControllerKeepsRecordsOnlyForTheWindow(t *testing.T) {
 	most := 0
 	for i := 0; i < packets; i += inFlight {
 		for j := 0; j < inFlight; j++ {
-			sent.OnTransmit(seq, st_data, make([]byte, size), size, now)
+			sent.OnTransmit(seq, stData, make([]byte, size), size, now)
 			seq++
 		}
 		now = now.Add(time.Millisecond)

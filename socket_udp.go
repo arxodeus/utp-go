@@ -23,16 +23,16 @@ func (c *udpConn) ReadFrom(b []byte) (int, ConnectionPeer, error) {
 		return 0, nil, err
 	}
 	udpAddr := addr.(*net.UDPAddr)
-	return n, &UdpPeer{addr: udpAddr}, nil
+	return n, &UDPPeer{addr: udpAddr}, nil
 }
 func (c *udpConn) WriteTo(b []byte, dst ConnectionPeer) (int, error) {
 	if dst == nil {
 		return 0, fmt.Errorf("utp_socket: can't write to nil connection")
 	}
 	switch baseDst := dst.(type) {
-	case *ConnectionId:
+	case *ConnectionID:
 		return c.WriteTo(b, baseDst.Peer)
-	case *UdpPeer:
+	case *UDPPeer:
 		return c.base.WriteToUDP(b, baseDst.addr)
 	}
 	// A peer type this package did not create. Its Hash is the address by
@@ -127,5 +127,5 @@ var errBatchReadUnsupported = errors.New("utp: batched reads are not supported o
 
 type incomingPacket struct {
 	pkt *packet
-	cid *ConnectionId
+	cid *ConnectionID
 }

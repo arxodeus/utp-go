@@ -47,7 +47,7 @@ Every comment in `netem/close_timing_test.go` at e56c9aa, verbatim.
 
 ```
 // The stream's Close returns at once, as libutp's utp_close does; the
-	// socket's Close is where the wait is (UtpSocket.awaitLingering).
+	// socket's Close is where the wait is (Socket.awaitLingering).
 ```
 
 ## Line 129 — func TestCloseFlushesASlowTail

@@ -23,8 +23,8 @@ import (
 func FuzzDecodePacketHeader(f *testing.F) {
 	// Seeds: a valid header, and the shapes of the malformed-packet
 	// conformance cases.
-	f.Add(newPacketBuilder(st_data, 1234, 200000, 1048576, 42).Build().Encode())
-	f.Add(newPacketBuilder(st_syn, 1, 0, 0, 0).Build().Encode())
+	f.Add(newPacketBuilder(stData, 1234, 200000, 1048576, 42).Build().Encode())
+	f.Add(newPacketBuilder(stSyn, 1, 0, 0, 0).Build().Encode())
 	f.Add(make([]byte, 20))
 	f.Add([]byte{})
 	f.Add(bytes.Repeat([]byte{0xFF}, 20))
@@ -66,17 +66,17 @@ func FuzzDecodePacketHeader(f *testing.F) {
 }
 
 func FuzzDecodePacket(f *testing.F) {
-	f.Add(newPacketBuilder(st_data, 1234, 200000, 1048576, 42).WithPayload([]byte("hello")).Build().Encode())
-	f.Add(newPacketBuilder(st_state, 7, 1, 2, 3).
+	f.Add(newPacketBuilder(stData, 1234, 200000, 1048576, 42).WithPayload([]byte("hello")).Build().Encode())
+	f.Add(newPacketBuilder(stState, 7, 1, 2, 3).
 		WithSelectiveAck(newSelectiveAck([]bool{true, false, true, false})).Build().Encode())
-	f.Add(newPacketBuilder(st_fin, 9, 0, 0, 1).Build().Encode())
+	f.Add(newPacketBuilder(stFin, 9, 0, 0, 1).Build().Encode())
 	f.Add(make([]byte, 22))
 	f.Add([]byte{1, 1, 0, 0})
 	// Extensions the decoder does not interpret, which it must still keep:
 	// extension 2 (eight bytes) leading a chain to an unknown type 99, and a
 	// selective ack followed by an unknown type.
 	withChain := func(first byte, chain ...byte) []byte {
-		p := newPacketBuilder(st_data, 5, 1, 2, 3).WithPayload([]byte("body")).Build().Encode()
+		p := newPacketBuilder(stData, 5, 1, 2, 3).WithPayload([]byte("body")).Build().Encode()
 		p[1] = first
 		out := append([]byte{}, p[:minimalHeaderSize]...)
 		out = append(out, chain...)

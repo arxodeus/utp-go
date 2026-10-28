@@ -57,13 +57,13 @@ func (c *virtualClock) Now() time.Time {
 	return c.now
 }
 
-func (c *virtualClock) NewTimer(d time.Duration) Timer {
+func (c *virtualClock) NewTimer(d time.Duration) clockTimer {
 	return c.add(d, 0)
 }
 
 // AfterFunc implements funcTimerClock. Advance runs f on its own goroutine at
 // the deadline and then waits for the reaction, as it does for a send.
-func (c *virtualClock) AfterFunc(d time.Duration, f func()) Timer {
+func (c *virtualClock) AfterFunc(d time.Duration, f func()) clockTimer {
 	w := c.add(d, 0)
 	c.mu.Lock()
 	w.ch, w.fn = nil, f
@@ -71,7 +71,7 @@ func (c *virtualClock) AfterFunc(d time.Duration, f func()) Timer {
 	return w
 }
 
-func (c *virtualClock) NewTicker(d time.Duration) Ticker {
+func (c *virtualClock) NewTicker(d time.Duration) clockTicker {
 	return &virtualTicker{w: c.add(d, d)}
 }
 

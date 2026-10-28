@@ -16,7 +16,7 @@ cd integration/anacrolix && go test ./...
 
 ## What is checked
 
-`TestSatisfiesTorrentsUtpSocketInterface` reaches torrent's unexported
+`TestSatisfiesTorrentsUTPSocketInterface` reaches torrent's unexported
 `utpSocket` interface through `reflect.TypeOf(torrent.NewUtpSocket).Out(0)`
 and asserts that `*utpnet.Socket` implements it. Ten methods, all present.
 If torrent changes the interface, this fails — which a hand-written interface
@@ -32,13 +32,13 @@ caller's slice, so any full-duplex exchange corrupted its own data. Every
 unidirectional test in the repository passed throughout. See
 [KNOWN-LIMITATIONS.md](../../../docs/dev/KNOWN-LIMITATIONS.md).
 
-`TestTorrentTransferOverUtp` runs a real torrent: two `torrent.Client`s, a
+`TestTorrentTransferOverUTP` runs a real torrent: two `torrent.Client`s, a
 generated 4 MiB torrent in 128 pieces, and BitTorrent's own piece hashes
 deciding whether what arrived is what was sent. Both clients have TCP,
 torrent's built-in uTP and the DHT disabled, so the only transport between
 them is this library.
 
-It too found a defect on its first run, and a worse one: `UtpSocket.Connect`
+It too found a defect on its first run, and a worse one: `utp.Socket.Connect`
 made the caller's dial context the *connection's* lifetime, so the standard
 `defer cancel()` after a dial killed the connection it had just returned.
 torrent does exactly that, and the result was a BitTorrent connection that
@@ -94,7 +94,7 @@ so options 1 and 2 are a one-line substitution.
   It used to be accepted and ignored, which is the worst of the three options
   available: a caller that passed a blocklist got no blocking and no sign that
   it was not happening.
-- **A torrent through torrent's own socket layer.** `TestTorrentTransferOverUtp`
+- **A torrent through torrent's own socket layer.** `TestTorrentTransferOverUTP`
   takes option 3 above -- `Client.AddListener` and `Client.AddDialer`, both
   exported, both taking what `utpnet.Socket` already provides -- so it needs
   neither a fork nor a `replace`. What it does not exercise is options 1 and 2:

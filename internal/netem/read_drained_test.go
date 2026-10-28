@@ -32,14 +32,14 @@ func TestReadDrainedRestartsASenderBlockedBySubPacketWindow(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*budget)
 	defer cancel()
-	sendSock := utp.WithSocket(ctx, a, quiet())
+	sendSock := utp.NewSocket(ctx, a, quiet())
 	defer sendSock.Close()
-	recvSock := utp.WithSocket(ctx, b, quiet())
+	recvSock := utp.NewSocket(ctx, b, quiet())
 	defer recvSock.Close()
 
 	const cid = 900
-	acceptCid := utp.NewConnectionId(a.Addr(), cid+1, cid)
-	connectCid := utp.NewConnectionId(b.Addr(), cid, cid+1)
+	acceptCid := utp.NewConnectionID(a.Addr(), cid+1, cid)
+	connectCid := utp.NewConnectionID(b.Addr(), cid, cid+1)
 	payload := make([]byte, payloadSize)
 
 	var mu sync.Mutex
@@ -78,7 +78,7 @@ func TestReadDrainedRestartsASenderBlockedBySubPacketWindow(t *testing.T) {
 		defer wg.Done()
 		rctx, rcancel := context.WithTimeout(ctx, budget)
 		defer rcancel()
-		stream, err := recvSock.AcceptWithCid(rctx, acceptCid, recvCfg)
+		stream, err := recvSock.AcceptWithCID(rctx, acceptCid, recvCfg)
 		if err != nil {
 			return
 		}
@@ -91,7 +91,7 @@ func TestReadDrainedRestartsASenderBlockedBySubPacketWindow(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		stream, err := sendSock.ConnectWithCid(ctx, connectCid, sendCfg)
+		stream, err := sendSock.ConnectWithCID(ctx, connectCid, sendCfg)
 		if err != nil {
 			return
 		}

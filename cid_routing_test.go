@@ -13,7 +13,7 @@ func awaitSyn(t *testing.T, conn *scriptedConn) *packet {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, raw := range conn.takeEmitted() {
-			if p, err := decodePacket(raw, false); err == nil && p.Header.PacketType == st_syn {
+			if p, err := decodePacket(raw, false); err == nil && p.Header.PacketType == stSyn {
 				return p
 			}
 		}
@@ -37,31 +37,31 @@ func TestPacketReachesTheConnectionItIsFor(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	conn := newScriptedConn()
-	sock := WithSocket(ctx, conn, conformanceLogger())
+	sock := NewSocket(ctx, conn, conformanceLogger())
 	defer sock.Close()
 
-	connect := func(cid *ConnectionId) chan error {
+	connect := func(cid *ConnectionID) chan error {
 		done := make(chan error, 1)
 		go func() {
-			_, err := sock.ConnectWithCid(ctx, cid, NewConnectionConfig())
+			_, err := sock.ConnectWithCID(ctx, cid, NewConnectionConfig())
 			done <- err
 		}()
 		return done
 	}
 	answer := func(syn *packet) {
 		// The SYN carries our receive id; the answer comes back on it.
-		conn.inject(newPacketBuilder(st_state, syn.Header.ConnectionId,
+		conn.inject(newPacketBuilder(stState, syn.Header.ConnectionID,
 			uint32(time.Now().UnixMicro()), 1<<20, peerConn).
 			WithAckNum(syn.Header.SeqNum).Build().Encode())
 	}
 
-	first := connect(NewConnectionId(conn.peer, recv, recv+1))
+	first := connect(NewConnectionID(conn.peer, recv, recv+1))
 	answer(awaitSyn(t, conn))
 	if err := <-first; err != nil {
 		t.Fatalf("first connection: %v", err)
 	}
 
-	second := connect(NewConnectionId(conn.peer, recv+1, recv+2))
+	second := connect(NewConnectionID(conn.peer, recv+1, recv+2))
 	answer(awaitSyn(t, conn))
 	select {
 	case err := <-second:
@@ -78,32 +78,32 @@ func TestPacketReachesTheConnectionItIsFor(t *testing.T) {
 
 // A SYN whose connection would receive on an id that a connection we dialed
 // already receives on is refused without an answer.
-func TestSynForATakenReceiveIdIsRefused(t *testing.T) {
+func TestSynForATakenReceiveIDIsRefused(t *testing.T) {
 	const recv = 7000
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	conn := newScriptedConn()
-	sock := WithSocket(ctx, conn, conformanceLogger())
+	sock := NewSocket(ctx, conn, conformanceLogger())
 	defer sock.Close()
 
-	go sock.ConnectWithCid(ctx, NewConnectionId(conn.peer, recv, recv+1), NewConnectionConfig())
+	go sock.ConnectWithCID(ctx, NewConnectionID(conn.peer, recv, recv+1), NewConnectionConfig())
 	awaitSyn(t, conn)
 	before := sock.NumConnections()
 
 	// The peer dials us with id recv-1: the connection would receive on recv.
-	conn.inject(newPacketBuilder(st_syn, recv-1, uint32(time.Now().UnixMicro()), 1<<20, 500).Build().Encode())
+	conn.inject(newPacketBuilder(stSyn, recv-1, uint32(time.Now().UnixMicro()), 1<<20, 500).Build().Encode())
 	deadline := time.Now().Add(2 * time.Second)
-	for sock.ConnectionsRefusedIdInUse() == 0 && time.Now().Before(deadline) {
+	for sock.ConnectionsRefusedIDInUse() == 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if got := sock.ConnectionsRefusedIdInUse(); got != 1 {
+	if got := sock.ConnectionsRefusedIDInUse(); got != 1 {
 		t.Fatalf("%d SYNs refused for a receive id in use, expected 1", got)
 	}
 	if n := sock.NumConnections(); n != before {
 		t.Fatalf("%d connections after the refused SYN, %d before", n, before)
 	}
 	for _, raw := range conn.takeEmitted() {
-		if p, err := decodePacket(raw, false); err == nil && p.Header.ConnectionId == recv-1 {
+		if p, err := decodePacket(raw, false); err == nil && p.Header.ConnectionID == recv-1 {
 			t.Fatalf("the refused SYN was answered: %s", describePackets([][]byte{raw}))
 		}
 	}
@@ -111,12 +111,12 @@ func TestSynForATakenReceiveIdIsRefused(t *testing.T) {
 
 // A connection we dial does not take a receive id an accepted one already
 // receives on.
-func TestDialledConnectionAvoidsAReceiveIdInUse(t *testing.T) {
+func TestDialledConnectionAvoidsAReceiveIDInUse(t *testing.T) {
 	const taken = 7000
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	conn := newScriptedConn()
-	sock := WithSocket(ctx, conn, conformanceLogger())
+	sock := NewSocket(ctx, conn, conformanceLogger())
 	defer sock.Close()
 
 	// An accepted connection receiving on taken: its SYN carried taken-1.
@@ -125,7 +125,7 @@ func TestDialledConnectionAvoidsAReceiveIdInUse(t *testing.T) {
 		_, err := sock.Accept(ctx, NewConnectionConfig())
 		accepted <- err
 	}()
-	conn.inject(newPacketBuilder(st_syn, taken-1, uint32(time.Now().UnixMicro()), 1<<20, 500).Build().Encode())
+	conn.inject(newPacketBuilder(stSyn, taken-1, uint32(time.Now().UnixMicro()), 1<<20, 500).Build().Encode())
 	if err := <-accepted; err != nil {
 		t.Fatalf("accept: %v", err)
 	}
@@ -162,22 +162,22 @@ func TestClosedConnectionIdsAreNotReusedAtOnce(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	conn := newScriptedConn()
-	sock := WithSocket(ctx, conn, conformanceLogger())
+	sock := NewSocket(ctx, conn, conformanceLogger())
 	defer sock.Close()
 
-	done := make(chan *UtpStream, 1)
+	done := make(chan *Stream, 1)
 	go func() {
-		s, _ := sock.ConnectWithCid(ctx, NewConnectionId(conn.peer, recv, recv+1), NewConnectionConfig())
+		s, _ := sock.ConnectWithCID(ctx, NewConnectionID(conn.peer, recv, recv+1), NewConnectionConfig())
 		done <- s
 	}()
 	syn := awaitSyn(t, conn)
-	conn.inject(newPacketBuilder(st_state, syn.Header.ConnectionId, uint32(time.Now().UnixMicro()), 1<<20, 300).
+	conn.inject(newPacketBuilder(stState, syn.Header.ConnectionID, uint32(time.Now().UnixMicro()), 1<<20, 300).
 		WithAckNum(syn.Header.SeqNum).Build().Encode())
 	if <-done == nil {
 		t.Fatal("did not connect")
 	}
 	// The peer resets it, and it is gone.
-	conn.inject(newPacketBuilder(st_reset, recv, 0, 0, 301).WithAckNum(syn.Header.SeqNum).Build().Encode())
+	conn.inject(newPacketBuilder(stReset, recv, 0, 0, 301).WithAckNum(syn.Header.SeqNum).Build().Encode())
 	deadline := time.Now().Add(5 * time.Second)
 	for sock.NumConnections() > 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
@@ -212,16 +212,16 @@ func TestClosedConnectionIdsAreNotReusedAtOnce(t *testing.T) {
 // A dialed connection does not send on an id another connection to the peer
 // receives on: a RESET is matched on the receive id first, so the other
 // connection would take its RESETs.
-func TestDialledConnectionDoesNotSendOnAnIdInUse(t *testing.T) {
+func TestDialledConnectionDoesNotSendOnAnIDInUse(t *testing.T) {
 	const recv = 7000
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	conn := newScriptedConn()
-	sock := WithSocket(ctx, conn, conformanceLogger())
+	sock := NewSocket(ctx, conn, conformanceLogger())
 	defer sock.Close()
 
 	// A connection receiving on recv, sending on recv+1.
-	go sock.ConnectWithCid(ctx, NewConnectionId(conn.peer, recv, recv+1), NewConnectionConfig())
+	go sock.ConnectWithCID(ctx, NewConnectionID(conn.peer, recv, recv+1), NewConnectionConfig())
 	awaitSyn(t, conn)
 
 	// The first draw would receive on recv-1 and send on recv.

@@ -23,7 +23,7 @@ func TestReorderedDataCostsUsNoMoreWindowThanLibutp(t *testing.T) {
 	for i := 0; i < held; i++ {
 		// +2 onwards: +1 is the gap, and it never arrives.
 		seq := corpusSynSeq + 2 + uint16(i)
-		raws = append(raws, newPacketBuilder(st_data, corpusSynConnID+1,
+		raws = append(raws, newPacketBuilder(stData, corpusSynConnID+1,
 			200000+uint32(i), corpusWindow, seq).
 			WithAckNum(corpusPinnedSeq-1).WithPayload(body).Build().Encode())
 	}
@@ -65,7 +65,7 @@ func TestReorderedDataDoesNotBlockOurWindow(t *testing.T) {
 	var raws [][]byte
 	for i := 0; i < held; i++ {
 		seq := corpusSynSeq + 2 + uint16(i)
-		raws = append(raws, newPacketBuilder(st_data, corpusSynConnID+1,
+		raws = append(raws, newPacketBuilder(stData, corpusSynConnID+1,
 			200000+uint32(i), corpusWindow, seq).
 			WithAckNum(corpusPinnedSeq-1).WithPayload(body).Build().Encode())
 	}

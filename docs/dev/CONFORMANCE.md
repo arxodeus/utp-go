@@ -234,7 +234,7 @@ where libutp starts at the ceiling (`utp_internal.cpp:2562`); it now starts at
 the ceiling too.
 
 The other half of libutp's MTU handling is the ICMP path, and it is now here
-too: `UtpSocket.ProcessICMPFragmentation` and `UtpSocket.ProcessICMPError`.
+too: `Socket.ProcessICMPFragmentation` and `Socket.ProcessICMPError`.
 Neither is reachable from this corpus — an ICMP message does not arrive on the
 uTP wire, so a packet-injection harness cannot deliver one — so they are tested
 against an emulated router that reports what it refused

@@ -7,7 +7,7 @@ Every comment in `utpnet/socket.go` at e56c9aa, verbatim.
 ```
 // Package utpnet presents a uTP socket as the standard library's net types.
 //
-// The core package speaks in its own vocabulary -- ConnectionPeer, UtpStream,
+// The core package speaks in its own vocabulary -- ConnectionPeer, Stream,
 // contexts on every call -- which is right for a library that has to work
 // over an emulated network as easily as a real one. Everything that wants to
 // *use* uTP wants net.Conn and net.PacketConn instead.
@@ -582,7 +582,7 @@ Every comment in `utpnet/socket.go` at e56c9aa, verbatim.
 // port. It is idempotent.
 //
 // Connections already closed are given the time to deliver what they hold,
-// as utp.UtpSocket.Close gives them, and the port goes on being read while
+// as utp.Socket.Close gives them, and the port goes on being read while
 // they do: their acknowledgements arrive on it. The reader used to stop
 // first, so a Write followed by Close and Socket.Close lost whatever was
 // still behind the congestion window. Release review of 9c44c4f (R2).

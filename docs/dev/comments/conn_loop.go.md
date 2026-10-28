@@ -355,7 +355,7 @@ Every comment in `conn_loop.go` at e56c9aa, verbatim.
 // Nothing to do but wake: the drain happens in afterPass, for
 		// every pass, so that it precedes the acknowledgement.
 		//
-		// The wake itself is the point. UtpStream.notifyRead signals this
+		// The wake itself is the point. Stream.notifyRead signals this
 		// when the application takes a chunk, which is the only thing
 		// that frees room once the read queue has filled -- without it
 		// processReads gives up and waits for a packet that a blocked

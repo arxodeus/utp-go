@@ -9,7 +9,7 @@ import (
 )
 
 // loopbackSockets binds two sockets on the loopback address.
-func loopbackSockets(t *testing.T, ctx context.Context) (a, b *UtpSocket) {
+func loopbackSockets(t *testing.T, ctx context.Context) (a, b *Socket) {
 	t.Helper()
 	lg := icmpQuietLog()
 	a, err := Bind(ctx, "udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}, lg)
@@ -31,7 +31,7 @@ func TestAcceptedConnectionOutlivesItsAccept(t *testing.T) {
 	for _, withCid := range []bool{true, false} {
 		name := "Accept"
 		if withCid {
-			name = "AcceptWithCid"
+			name = "AcceptWithCID"
 		}
 		t.Run(name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -41,12 +41,12 @@ func TestAcceptedConnectionOutlivesItsAccept(t *testing.T) {
 			defer sb.Close()
 			aAddr := sa.LocalAddr().(*net.UDPAddr)
 			bAddr := sb.LocalAddr().(*net.UDPAddr)
-			cidA := NewConnectionId(NewUdpPeer(bAddr), 3000, 3001)
-			cidB := NewConnectionId(NewUdpPeer(aAddr), 3001, 3000)
+			cidA := NewConnectionID(NewUDPPeer(bAddr), 3000, 3001)
+			cidB := NewConnectionID(NewUDPPeer(aAddr), 3001, 3000)
 
-			dialled := make(chan *UtpStream, 1)
+			dialled := make(chan *Stream, 1)
 			go func() {
-				c, err := sa.ConnectWithCid(ctx, cidA, NewConnectionConfig())
+				c, err := sa.ConnectWithCID(ctx, cidA, NewConnectionConfig())
 				if err != nil {
 					t.Errorf("connect: %v", err)
 				}
@@ -61,10 +61,10 @@ func TestAcceptedConnectionOutlivesItsAccept(t *testing.T) {
 			}
 
 			acceptCtx, endAccept := context.WithCancel(ctx)
-			var server *UtpStream
+			var server *Stream
 			var err error
 			if withCid {
-				server, err = sb.AcceptWithCid(acceptCtx, cidB, NewConnectionConfig())
+				server, err = sb.AcceptWithCID(acceptCtx, cidB, NewConnectionConfig())
 			} else {
 				server, err = sb.Accept(acceptCtx, NewConnectionConfig())
 			}
@@ -99,17 +99,17 @@ func TestSocketCloseIsReportedToTheConnection(t *testing.T) {
 		sa, sb := loopbackSockets(t, ctx)
 		aAddr := sa.LocalAddr().(*net.UDPAddr)
 		bAddr := sb.LocalAddr().(*net.UDPAddr)
-		cidA := NewConnectionId(NewUdpPeer(bAddr), 4000, 4001)
-		cidB := NewConnectionId(NewUdpPeer(aAddr), 4001, 4000)
-		accepted := make(chan *UtpStream, 1)
+		cidA := NewConnectionID(NewUDPPeer(bAddr), 4000, 4001)
+		cidB := NewConnectionID(NewUDPPeer(aAddr), 4001, 4000)
+		accepted := make(chan *Stream, 1)
 		go func() {
-			s, err := sb.AcceptWithCid(ctx, cidB, NewConnectionConfig())
+			s, err := sb.AcceptWithCID(ctx, cidB, NewConnectionConfig())
 			if err != nil {
 				t.Errorf("accept: %v", err)
 			}
 			accepted <- s
 		}()
-		client, err := sa.ConnectWithCid(ctx, cidA, NewConnectionConfig())
+		client, err := sa.ConnectWithCID(ctx, cidA, NewConnectionConfig())
 		if err != nil {
 			t.Fatalf("connect: %v", err)
 		}
@@ -156,14 +156,14 @@ func TestConnectionForAnAbandonedAcceptIsClosed(t *testing.T) {
 	defer sb.Close()
 	aAddr := sa.LocalAddr().(*net.UDPAddr)
 	bAddr := sb.LocalAddr().(*net.UDPAddr)
-	cidA := NewConnectionId(NewUdpPeer(bAddr), 5000, 5001)
-	cidB := NewConnectionId(NewUdpPeer(aAddr), 5001, 5000)
-	accepted := make(chan *UtpStream, 1)
+	cidA := NewConnectionID(NewUDPPeer(bAddr), 5000, 5001)
+	cidB := NewConnectionID(NewUDPPeer(aAddr), 5001, 5000)
+	accepted := make(chan *Stream, 1)
 	go func() {
-		s, _ := sb.AcceptWithCid(ctx, cidB, NewConnectionConfig())
+		s, _ := sb.AcceptWithCID(ctx, cidB, NewConnectionConfig())
 		accepted <- s
 	}()
-	if _, err := sa.ConnectWithCid(ctx, cidA, NewConnectionConfig()); err != nil {
+	if _, err := sa.ConnectWithCID(ctx, cidA, NewConnectionConfig()); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	stream := <-accepted

@@ -43,9 +43,9 @@ func TestCloseFlushesASlowTail(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	sockA := utp.WithSocket(ctx, a, quiet())
+	sockA := utp.NewSocket(ctx, a, quiet())
 	defer sockA.Close()
-	sockB := utp.WithSocket(ctx, b, quiet())
+	sockB := utp.NewSocket(ctx, b, quiet())
 	defer sockB.Close()
 
 	const size = 512 * 1024
@@ -75,8 +75,8 @@ func TestCloseFlushesASlowTail(t *testing.T) {
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	cid := utp.NewConnectionId(b.Addr(), 8100, 8101)
-	stream, err := sockA.ConnectWithCid(ctx, cid, utp.NewConnectionConfig())
+	cid := utp.NewConnectionID(b.Addr(), 8100, 8101)
+	stream, err := sockA.ConnectWithCID(ctx, cid, utp.NewConnectionConfig())
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestCloseFlushesASlowTail(t *testing.T) {
 	}
 
 	// The stream's Close returns at once, as libutp's utp_close does; the
-	// socket's Close is where the wait is (UtpSocket.awaitLingering).
+	// socket's Close is where the wait is (utp.Socket.awaitLingering).
 	start := time.Now()
 	stream.Close()
 	if took := time.Since(start); took > streamCloseBound {
@@ -144,12 +144,12 @@ func TestCloseDoesNotWaitForASilentPeer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	sockA := utp.WithSocket(ctx, a, quiet())
+	sockA := utp.NewSocket(ctx, a, quiet())
 	defer sockA.Close()
-	sockB := utp.WithSocket(ctx, b, quiet())
+	sockB := utp.NewSocket(ctx, b, quiet())
 	defer sockB.Close()
 
-	accepted := make(chan *utp.UtpStream, 1)
+	accepted := make(chan *utp.Stream, 1)
 	go func() {
 		stream, err := sockB.Accept(ctx, utp.NewConnectionConfig())
 		if err == nil {
@@ -158,8 +158,8 @@ func TestCloseDoesNotWaitForASilentPeer(t *testing.T) {
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	cid := utp.NewConnectionId(b.Addr(), 8200, 8201)
-	stream, err := sockA.ConnectWithCid(ctx, cid, utp.NewConnectionConfig())
+	cid := utp.NewConnectionID(b.Addr(), 8200, 8201)
+	stream, err := sockA.ConnectWithCID(ctx, cid, utp.NewConnectionConfig())
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

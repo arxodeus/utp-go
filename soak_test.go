@@ -91,12 +91,12 @@ func TestSoakConnectionChurn(t *testing.T) {
 	runCycle := func(i int) error {
 		recv := uint16(2000 + i*2)
 		send := recv + 1
-		cidClient := NewConnectionId(NewUdpPeer(serverAddr), recv, send)
-		cidServer := NewConnectionId(NewUdpPeer(clientAddr), send, recv)
+		cidClient := NewConnectionID(NewUDPPeer(serverAddr), recv, send)
+		cidServer := NewConnectionID(NewUDPPeer(clientAddr), send, recv)
 
 		done := make(chan error, 1)
 		go func() {
-			stream, err := server.AcceptWithCid(ctx, cidServer, NewConnectionConfig())
+			stream, err := server.AcceptWithCID(ctx, cidServer, NewConnectionConfig())
 			if err != nil {
 				done <- err
 				return
@@ -117,7 +117,7 @@ func TestSoakConnectionChurn(t *testing.T) {
 		}()
 
 		time.Sleep(5 * time.Millisecond)
-		stream, err := client.ConnectWithCid(ctx, cidClient, NewConnectionConfig())
+		stream, err := client.ConnectWithCID(ctx, cidClient, NewConnectionConfig())
 		if err != nil {
 			return fmt.Errorf("cycle %d connect: %w", i, err)
 		}
@@ -208,8 +208,8 @@ func TestSoakAbandonedConnections(t *testing.T) {
 	for i := 0; i < cycles; i++ {
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, 200*time.Millisecond)
 		dead := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9 + i}
-		cid := NewConnectionId(NewUdpPeer(dead), uint16(5000+i*2), uint16(5001+i*2))
-		_, _ = sock.ConnectWithCid(attemptCtx, cid, NewConnectionConfig())
+		cid := NewConnectionID(NewUDPPeer(dead), uint16(5000+i*2), uint16(5001+i*2))
+		_, _ = sock.ConnectWithCID(attemptCtx, cid, NewConnectionConfig())
 		attemptCancel()
 	}
 
@@ -239,7 +239,7 @@ func TestSoakUnknownConnectionFlood(t *testing.T) {
 
 	conn := newFuzzConn()
 	defer conn.Close()
-	sock := WithSocket(ctx, conn, fuzzLogger())
+	sock := NewSocket(ctx, conn, fuzzLogger())
 	defer sock.Close()
 
 	base := settleGoroutines(2 * time.Second)
@@ -248,7 +248,7 @@ func TestSoakUnknownConnectionFlood(t *testing.T) {
 	runtime.ReadMemStats(&baseMem)
 
 	for i := 0; i < packets; i++ {
-		pkt := newPacketBuilder(st_data, uint16(i), 1000, 1024, uint16(i)).
+		pkt := newPacketBuilder(stData, uint16(i), 1000, 1024, uint16(i)).
 			WithAckNum(uint16(i)).WithPayload([]byte("x")).Build()
 		conn.inject(pkt.Encode())
 	}

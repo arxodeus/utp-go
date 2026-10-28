@@ -6,7 +6,7 @@ Every comment in `peer_address_test.go` at e56c9aa, verbatim.
 
 ```
 // Connections are keyed by the peer's address rendered as a string
-// (UdpPeer.Hash, cid.go), so two renderings of the same address must produce
+// (UDPPeer.Hash, cid.go), so two renderings of the same address must produce
 // the same key and two different addresses must not.
 //
 // The case that matters is a dual-stack socket. A caller resolving
@@ -47,7 +47,7 @@ Every comment in `peer_address_test.go` at e56c9aa, verbatim.
 ```
 // A peer type this package did not create must still receive packets.
 //
-// udpConn.WriteTo switches on *UdpPeer and *ConnectionId and used to end in
+// udpConn.WriteTo switches on *UDPPeer and *ConnectionID and used to end in
 // `return 0, nil` for anything else: the packet was dropped and the caller was
 // told it had been sent. A connection built on such a peer would then time out
 // with nothing anywhere to say why. Neither half of that is acceptable -- a

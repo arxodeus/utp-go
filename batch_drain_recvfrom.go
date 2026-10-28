@@ -50,7 +50,7 @@ func (c *udpConn) drain(rc syscall.RawConn, out *[]datagram) error {
 }
 
 // peerFor returns the peer for a source address reported by recvfrom.
-func (c *udpConn) peerFor(sa syscall.Sockaddr) *UdpPeer {
+func (c *udpConn) peerFor(sa syscall.Sockaddr) *UDPPeer {
 	var k peerKey
 	switch a := sa.(type) {
 	case *syscall.SockaddrInet4:

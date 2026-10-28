@@ -155,9 +155,9 @@ func ourWindowAcrossIdle(t *testing.T, idle time.Duration) (busy, idled uint32) 
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	sockA := utp.WithSocket(ctx, a, quiet())
+	sockA := utp.NewSocket(ctx, a, quiet())
 	defer sockA.Close()
-	sockB := utp.WithSocket(ctx, b, quiet())
+	sockB := utp.NewSocket(ctx, b, quiet())
 	defer sockB.Close()
 
 	var (
@@ -187,8 +187,8 @@ func ourWindowAcrossIdle(t *testing.T, idle time.Duration) (busy, idled uint32) 
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	cid := utp.NewConnectionId(b.Addr(), 9600, 9601)
-	stream, err := sockA.ConnectWithCid(ctx, cid, cfg)
+	cid := utp.NewConnectionID(b.Addr(), 9600, 9601)
+	stream, err := sockA.ConnectWithCID(ctx, cid, cfg)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -398,14 +398,14 @@ func libutpFirstFlightAfterIdle(t *testing.T, idle time.Duration) (flight int, w
 // receivingEndpoint is one of our sockets accepting a connection and reading
 // continuously, used as the far end for a libutp sender.
 type receivingEndpoint struct {
-	sock *utp.UtpSocket
+	sock *utp.Socket
 	got  atomic.Int64
 }
 
 func newReceivingEndpoint(t *testing.T, ctx context.Context, ep *Endpoint) *receivingEndpoint {
 	t.Helper()
 	r := &receivingEndpoint{}
-	r.sock = utp.WithSocket(ctx, ep, quiet())
+	r.sock = utp.NewSocket(ctx, ep, quiet())
 	go func() {
 		stream, err := r.sock.Accept(ctx, utp.NewConnectionConfig())
 		if err != nil {

@@ -39,7 +39,7 @@ func loopback(port uint16) *net.UDPAddr {
 
 // bindGoSocket binds one of our sockets to an arbitrary free port and reports
 // the port it got.
-func bindGoSocket(t *testing.T, ctx context.Context) (*utp.UtpSocket, uint16) {
+func bindGoSocket(t *testing.T, ctx context.Context) (*utp.Socket, uint16) {
 	t.Helper()
 	// Find a free port by binding a throwaway UDP socket.
 	probe, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
@@ -80,12 +80,12 @@ func TestInteropGoInitiatorLibutpResponder(t *testing.T) {
 	// implementation unroutable to half its peers, so it is the first thing
 	// this test exercises.
 	const initiatorCid, responderCid = 4000, 4001
-	cid := utp.NewConnectionId(utp.NewUdpPeer(loopback(peer.Port())), initiatorCid, responderCid)
+	cid := utp.NewConnectionID(utp.NewUDPPeer(loopback(peer.Port())), initiatorCid, responderCid)
 
 	payload := makePayload(interopPayloadSize)
 
 	start := time.Now()
-	stream, err := sock.ConnectWithCid(ctx, cid, utp.NewConnectionConfig())
+	stream, err := sock.ConnectWithCID(ctx, cid, utp.NewConnectionConfig())
 	if err != nil {
 		t.Fatalf("our implementation could not connect to libutp: %v", err)
 	}

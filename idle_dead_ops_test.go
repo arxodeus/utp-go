@@ -10,7 +10,7 @@ import (
 // deadByIdleTimeout returns an accepted stream whose connection the idle
 // timeout has closed: the peer sends a SYN and one data packet, then nothing
 // for longer than MaxIdleTimeout.
-func deadByIdleTimeout(t *testing.T) (*UtpStream, context.CancelFunc, func()) {
+func deadByIdleTimeout(t *testing.T) (*Stream, context.CancelFunc, func()) {
 	t.Helper()
 	const (
 		ourSeq  = 0x4321
@@ -23,17 +23,17 @@ func deadByIdleTimeout(t *testing.T) (*UtpStream, context.CancelFunc, func()) {
 	restore := pinRandom(ourSeq)
 
 	conn := newScriptedConn()
-	sock := WithSocket(ctx, conn, conformanceLogger(), WithClock(clk))
+	sock := NewSocket(ctx, conn, conformanceLogger(), withClock(clk))
 
 	cfg := NewConnectionConfig()
-	cfg.Clock = clk
-	cfg.NowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
+	cfg.clock = clk
+	cfg.nowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
 	cfg.MaxIdleTimeout = idle
 
-	cid := NewConnectionId(conn.peer, peerID+1, peerID)
-	accepted := make(chan *UtpStream, 1)
+	cid := NewConnectionID(conn.peer, peerID+1, peerID)
+	accepted := make(chan *Stream, 1)
 	go func() {
-		s, err := sock.AcceptWithCid(ctx, cid, cfg)
+		s, err := sock.AcceptWithCID(ctx, cid, cfg)
 		if err != nil {
 			t.Errorf("accept: %v", err)
 		}
@@ -42,7 +42,7 @@ func deadByIdleTimeout(t *testing.T) (*UtpStream, context.CancelFunc, func()) {
 	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(newPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+		conn.inject(newPacketBuilder(stSyn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
 	})
 	stream := <-accepted
 	if stream == nil {
@@ -51,7 +51,7 @@ func deadByIdleTimeout(t *testing.T) (*UtpStream, context.CancelFunc, func()) {
 	clk.AwaitParticipants(4)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(newPacketBuilder(st_data, peerID+1, 110000, 1<<20, peerSeq+1).
+		conn.inject(newPacketBuilder(stData, peerID+1, 110000, 1<<20, peerSeq+1).
 			WithAckNum(ourSeq - 1).WithPayload([]byte("hello")).Build().Encode())
 	})
 	buf := make([]byte, 16)

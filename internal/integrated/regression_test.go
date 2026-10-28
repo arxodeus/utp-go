@@ -60,12 +60,12 @@ func TestReaderUnblocksWhenPeerGoesAway(t *testing.T) {
 	cfg := utp.NewConnectionConfig()
 	cfg.MaxIdleTimeout = 3 * time.Second
 
-	accCid := utp.NewConnectionId(utp.NewUdpPeer(bAddr), 201, 200)
-	iniCid := utp.NewConnectionId(utp.NewUdpPeer(aAddr), 200, 201)
+	accCid := utp.NewConnectionID(utp.NewUDPPeer(bAddr), 201, 200)
+	iniCid := utp.NewConnectionID(utp.NewUDPPeer(aAddr), 200, 201)
 
 	readDone := make(chan int, 1)
 	go func() {
-		s, err := aLink.AcceptWithCid(ctx, accCid, cfg)
+		s, err := aLink.AcceptWithCID(ctx, accCid, cfg)
 		if err != nil {
 			t.Logf("accept: %v", err)
 			readDone <- -1
@@ -77,7 +77,7 @@ func TestReaderUnblocksWhenPeerGoesAway(t *testing.T) {
 		readDone <- n
 	}()
 
-	sendStream, err := bLink.ConnectWithCid(ctx, iniCid, cfg)
+	sendStream, err := bLink.ConnectWithCID(ctx, iniCid, cfg)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -132,13 +132,13 @@ func TestConcurrentTransfersScale(t *testing.T) {
 		cfg := utp.NewConnectionConfig()
 		initiatorCid := uint16(100 + i*2)
 		responderCid := initiatorCid + 1
-		recvCid := utp.NewConnectionId(utp.NewUdpPeer(sendAddr), responderCid, initiatorCid)
-		sendCid := utp.NewConnectionId(utp.NewUdpPeer(recvAddr), initiatorCid, responderCid)
+		recvCid := utp.NewConnectionID(utp.NewUDPPeer(sendAddr), responderCid, initiatorCid)
+		sendCid := utp.NewConnectionID(utp.NewUDPPeer(recvAddr), initiatorCid, responderCid)
 		wg.Add(2)
 		idx := i
 		go func() {
 			defer wg.Done()
-			s, err := recvLink.AcceptWithCid(ctx, recvCid, cfg)
+			s, err := recvLink.AcceptWithCID(ctx, recvCid, cfg)
 			if err != nil {
 				results <- fmt.Sprintf("recv %d: accept: %v", idx, err)
 				return
@@ -160,7 +160,7 @@ func TestConcurrentTransfersScale(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			s, err := sendLink.ConnectWithCid(ctx, sendCid, cfg)
+			s, err := sendLink.ConnectWithCID(ctx, sendCid, cfg)
 			if err != nil {
 				results <- fmt.Sprintf("send %d: connect: %v", idx, err)
 				return
@@ -222,15 +222,15 @@ func TestAbortedTransfersTearDown(t *testing.T) {
 		cfg.MaxIdleTimeout = time.Duration(200+i*7) * time.Millisecond
 		cfg.MaxConnAttempts = 2
 		ini := uint16(100 + i*2)
-		accCid := utp.NewConnectionId(utp.NewUdpPeer(bAddr), ini+1, ini)
-		iniCid := utp.NewConnectionId(utp.NewUdpPeer(aAddr), ini, ini+1)
+		accCid := utp.NewConnectionID(utp.NewUDPPeer(bAddr), ini+1, ini)
+		iniCid := utp.NewConnectionID(utp.NewUDPPeer(aAddr), ini, ini+1)
 		wg.Add(2)
 		idx := i
 		go func() {
 			defer wg.Done()
 			rctx, rcancel := context.WithTimeout(ctx, time.Duration(300+idx*11)*time.Millisecond)
 			defer rcancel()
-			s, err := aLink.AcceptWithCid(rctx, accCid, cfg)
+			s, err := aLink.AcceptWithCID(rctx, accCid, cfg)
 			if err != nil {
 				return
 			}
@@ -242,7 +242,7 @@ func TestAbortedTransfersTearDown(t *testing.T) {
 			defer wg.Done()
 			wctx, wcancel := context.WithTimeout(ctx, time.Duration(250+idx*13)*time.Millisecond)
 			defer wcancel()
-			s, err := bLink.ConnectWithCid(wctx, iniCid, cfg)
+			s, err := bLink.ConnectWithCID(wctx, iniCid, cfg)
 			if err != nil {
 				return
 			}
@@ -261,7 +261,7 @@ func TestAbortedTransfersTearDown(t *testing.T) {
 }
 
 // TestAcceptTimesOutWithoutSyn covers the defect where an accept that expired
-// from the awaiting map was dropped silently, blocking AcceptWithCid forever
+// from the awaiting map was dropped silently, blocking AcceptWithCID forever
 // when the caller's own context had no deadline.
 func TestAcceptTimesOutWithoutSyn(t *testing.T) {
 	if testing.Short() {
@@ -278,12 +278,12 @@ func TestAcceptTimesOutWithoutSyn(t *testing.T) {
 	}
 	defer link.Close()
 
-	cid := utp.NewConnectionId(utp.NewUdpPeer(peer), 901, 900)
+	cid := utp.NewConnectionID(utp.NewUDPPeer(peer), 901, 900)
 	done := make(chan error, 1)
 	go func() {
 		// context.Background(): the caller supplies no deadline of its own, so
 		// only the socket's own accept expiry can unblock this.
-		_, err := link.AcceptWithCid(context.Background(), cid, utp.NewConnectionConfig())
+		_, err := link.AcceptWithCID(context.Background(), cid, utp.NewConnectionConfig())
 		done <- err
 	}()
 
@@ -292,34 +292,34 @@ func TestAcceptTimesOutWithoutSyn(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected an error, got a stream")
 		}
-		t.Logf("AcceptWithCid returned: %v", err)
+		t.Logf("AcceptWithCID returned: %v", err)
 	// The socket gives up on an accept after 20 seconds (see
 	// utp.ErrAcceptTimedOut); allow as long again for slow machines.
 	case <-time.After(40 * time.Second):
-		t.Fatal("AcceptWithCid never returned for a connection that never arrived")
+		t.Fatal("AcceptWithCID never returned for a connection that never arrived")
 	}
 }
 
-// TestConnectionIdHashFromStructLiteral covers the defect where a
-// ConnectionId built as a struct literal (which the exported type invites)
+// TestConnectionIDHashFromStructLiteral covers the defect where a
+// ConnectionID built as a struct literal (which the exported type invites)
 // had an empty cached hash, so every such id collided with every other.
-func TestConnectionIdHashFromStructLiteral(t *testing.T) {
-	peer := utp.NewUdpPeer(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1234})
-	a := &utp.ConnectionId{Send: 100, Recv: 101, Peer: peer}
-	b := &utp.ConnectionId{Send: 200, Recv: 201, Peer: peer}
+func TestConnectionIDHashFromStructLiteral(t *testing.T) {
+	peer := utp.NewUDPPeer(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1234})
+	a := &utp.ConnectionID{Send: 100, Recv: 101, Peer: peer}
+	b := &utp.ConnectionID{Send: 200, Recv: 201, Peer: peer}
 
 	if a.Hash() == "" || b.Hash() == "" {
-		t.Fatal("struct-literal ConnectionId produced an empty hash")
+		t.Fatal("struct-literal ConnectionID produced an empty hash")
 	}
 	if a.Hash() == b.Hash() {
 		t.Fatal("distinct ConnectionIds collided on the same hash")
 	}
-	if got, want := a.Hash(), utp.NewConnectionId(peer, 101, 100).Hash(); got != want {
+	if got, want := a.Hash(), utp.NewConnectionID(peer, 101, 100).Hash(); got != want {
 		t.Fatalf("literal and constructor disagree: %s vs %s", got, want)
 	}
 }
 
-// TestAcceptWithoutCidWaitsForIncomingSyn covers the defect where Accept --
+// TestAcceptWithoutCIDWaitsForIncomingSyn covers the defect where Accept --
 // the path that takes no connection id, and the only one usable against a
 // peer that picks its own -- polled once for an already-arrived SYN and
 // failed outright with "no incoming conn" if none had come yet.
@@ -330,7 +330,7 @@ func TestConnectionIdHashFromStructLiteral(t *testing.T) {
 //
 // The same path also dereferenced the accept's connection id, which is nil
 // when none was given, so it panicked as soon as it got that far.
-func TestAcceptWithoutCidWaitsForIncomingSyn(t *testing.T) {
+func TestAcceptWithoutCIDWaitsForIncomingSyn(t *testing.T) {
 	logger := quietLogger()
 	srvAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5100}
 	cliAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5101}
@@ -370,8 +370,8 @@ func TestAcceptWithoutCidWaitsForIncomingSyn(t *testing.T) {
 
 	time.Sleep(150 * time.Millisecond) // let the accept register
 
-	cid := utp.NewConnectionId(utp.NewUdpPeer(srvAddr), 7100, 7101)
-	stream, err := cli.ConnectWithCid(ctx, cid, utp.NewConnectionConfig())
+	cid := utp.NewConnectionID(utp.NewUDPPeer(srvAddr), 7100, 7101)
+	stream, err := cli.ConnectWithCID(ctx, cid, utp.NewConnectionConfig())
 	if err != nil {
 		t.Fatalf("connect to a listening Accept failed: %v", err)
 	}
@@ -392,7 +392,7 @@ func TestAcceptWithoutCidWaitsForIncomingSyn(t *testing.T) {
 	}
 }
 
-// TestCloseReturnsPromptly covers the defect where UtpStream.Close set its
+// TestCloseReturnsPromptly covers the defect where utp.Stream.Close set its
 // shutdown flag and then waited, without waking the connection's event loop.
 //
 // The loop was blocked in a select on cases the flag is not one of, so it only
@@ -418,13 +418,13 @@ func TestCloseReturnsPromptly(t *testing.T) {
 	defer bLink.Close()
 
 	cfg := utp.NewConnectionConfig()
-	accCid := utp.NewConnectionId(utp.NewUdpPeer(bAddr), 601, 600)
-	iniCid := utp.NewConnectionId(utp.NewUdpPeer(aAddr), 600, 601)
+	accCid := utp.NewConnectionID(utp.NewUDPPeer(bAddr), 601, 600)
+	iniCid := utp.NewConnectionID(utp.NewUDPPeer(aAddr), 600, 601)
 
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
-		s, err := aLink.AcceptWithCid(ctx, accCid, cfg)
+		s, err := aLink.AcceptWithCID(ctx, accCid, cfg)
 		if err != nil {
 			return
 		}
@@ -433,7 +433,7 @@ func TestCloseReturnsPromptly(t *testing.T) {
 		s.Close()
 	}()
 
-	stream, err := bLink.ConnectWithCid(ctx, iniCid, cfg)
+	stream, err := bLink.ConnectWithCID(ctx, iniCid, cfg)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -464,21 +464,21 @@ func TestReadAfterLocalCloseIsNotACleanEnd(t *testing.T) {
 	aLink, aCid, bLink, bCid := buildConnectedPair()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	sender := utp.WithSocket(ctx, aLink, quietLogger())
+	sender := utp.NewSocket(ctx, aLink, quietLogger())
 	defer sender.Close()
-	receiver := utp.WithSocket(ctx, bLink, quietLogger())
+	receiver := utp.NewSocket(ctx, bLink, quietLogger())
 	defer receiver.Close()
 
 	cfg := utp.NewConnectionConfig()
-	accepted := make(chan *utp.UtpStream, 1)
+	accepted := make(chan *utp.Stream, 1)
 	go func() {
-		s, err := receiver.AcceptWithCid(ctx, bCid, cfg)
+		s, err := receiver.AcceptWithCID(ctx, bCid, cfg)
 		if err != nil {
 			t.Errorf("accept: %v", err)
 		}
 		accepted <- s
 	}()
-	send, err := sender.ConnectWithCid(ctx, aCid, cfg)
+	send, err := sender.ConnectWithCID(ctx, aCid, cfg)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

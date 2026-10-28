@@ -41,16 +41,16 @@ func spuriousProbe(t *testing.T, stall bool) {
 	defer pinRandom(ourSeq)()
 
 	conn := newScriptedConn()
-	sock := WithSocket(ctx, conn, conformanceLogger(), WithClock(clk))
+	sock := NewSocket(ctx, conn, conformanceLogger(), withClock(clk))
 	defer sock.Close()
 	cfg := NewConnectionConfig()
-	cfg.Clock = clk
-	cfg.NowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
+	cfg.clock = clk
+	cfg.nowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
 
-	cid := NewConnectionId(conn.peer, peerID+1, peerID)
-	accepted := make(chan *UtpStream, 1)
+	cid := NewConnectionID(conn.peer, peerID+1, peerID)
+	accepted := make(chan *Stream, 1)
 	go func() {
-		s, err := sock.AcceptWithCid(ctx, cid, cfg)
+		s, err := sock.AcceptWithCID(ctx, cid, cfg)
 		if err != nil {
 			t.Errorf("accept: %v", err)
 		}
@@ -59,7 +59,7 @@ func spuriousProbe(t *testing.T, stall bool) {
 	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(newPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+		conn.inject(newPacketBuilder(stSyn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
 	})
 	stream := <-accepted
 	if stream == nil {
@@ -92,8 +92,8 @@ func spuriousProbe(t *testing.T, stall bool) {
 		if noDelay {
 			diff = 0
 		}
-		return newPacketBuilder(st_state, peerID+1, peerNow, 1<<20, peerSeq+1).
-			WithAckNum(cum).WithTsDiffMicros(diff).Build().Encode()
+		return newPacketBuilder(stState, peerID+1, peerNow, 1<<20, peerSeq+1).
+			WithAckNum(cum).WithTimestampDiffMicros(diff).Build().Encode()
 	}
 	type sent struct {
 		seq   uint16
@@ -106,7 +106,7 @@ func spuriousProbe(t *testing.T, stall bool) {
 		var out []sent
 		for _, raw := range conn.takeEmitted() {
 			p, err := decodePacket(raw, false)
-			if err != nil || p.Header.PacketType != st_data {
+			if err != nil || p.Header.PacketType != stData {
 				continue
 			}
 			if everSent[p.Header.SeqNum] {

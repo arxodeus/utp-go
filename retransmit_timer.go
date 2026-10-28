@@ -44,11 +44,11 @@ type retransmitTimers struct {
 }
 
 func newRetransmitTimers(interval time.Duration, slots int) *retransmitTimers {
-	return newRetransmitTimersWithClock(interval, slots, RealClock)
+	return newRetransmitTimersWithClock(interval, slots, defaultClock)
 }
 
 // newRetransmitTimersWithClock returns a retransmission wheel driven by clk.
-func newRetransmitTimersWithClock(interval time.Duration, slots int, clk Clock) *retransmitTimers {
+func newRetransmitTimersWithClock(interval time.Duration, slots int, clk clockSource) *retransmitTimers {
 	r := &retransmitTimers{}
 	barrier, _ := clk.(idleBarrier)
 	r.wheel = newTimeWheelWithClock(interval, slots, clk, func(key retransmitKey, t retransmitTimer) {

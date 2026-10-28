@@ -10,9 +10,9 @@ import (
 // looks at every one in turn.
 const cidRandomDraws = 64
 
-// errNoFreeConnectionId is returned when every pair of ids a new connection
+// errNoFreeConnectionID is returned when every pair of ids a new connection
 // to the peer could take is in use, or was used within idQuarantine.
-var errNoFreeConnectionId = errors.New("utp: no free connection id for this peer")
+var errNoFreeConnectionID = errors.New("utp: no free connection id for this peer")
 
 // generateCid picks ids for a new connection to peer and, if eventCh is not
 // nil, registers it under them.
@@ -20,8 +20,8 @@ var errNoFreeConnectionId = errors.New("utp: no free connection id for this peer
 // It tries random ids first and then every receive id in turn from a random
 // start, so it terminates even when the peer holds every id. A connection
 // takes two ids, so about 28,000 connections to one peer exhaust them.
-func (s *UtpSocket) generateCid(peer ConnectionPeer, isInitiator bool, eventCh chan *streamEvent) (*ConnectionId, error) {
-	cid := &ConnectionId{
+func (s *Socket) generateCid(peer ConnectionPeer, isInitiator bool, eventCh chan *streamEvent) (*ConnectionID, error) {
+	cid := &ConnectionID{
 		Peer: peer,
 	}
 
@@ -69,14 +69,14 @@ func (s *UtpSocket) generateCid(peer ConnectionPeer, isInitiator bool, eventCh c
 		}
 		s.connsMutex.Unlock()
 	}
-	return nil, errNoFreeConnectionId
+	return nil, errNoFreeConnectionID
 }
 
 // Connect dials peer with newly chosen connection ids and returns the stream
 // once the handshake completes. ctx bounds the dial only; the connection
 // lives until it is closed or the socket closes. A nil config means the
 // defaults.
-func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *ConnectionConfig) (*UtpStream, error) {
+func (s *Socket) Connect(ctx context.Context, peer ConnectionPeer, config *ConnectionConfig) (*Stream, error) {
 	// Create channels for connection status and events.
 	connectedCh := make(chan error, 1)
 	streamEvents := make(chan *streamEvent, connEventQueueLen)
@@ -123,7 +123,7 @@ func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *Co
 			return nil, err
 		}
 		// The connection ended without reporting an outcome.
-		return nil, fmt.Errorf("connection closed before it was established")
+		return nil, errors.New("utp: connection closed before it was established")
 	case <-ctx.Done():
 		// The caller may still abandon the attempt, although the stream does
 		// not share its context.
@@ -135,12 +135,12 @@ func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *Co
 	}
 }
 
-// ConnectWithCid is Connect with the connection ids given by cid.
-func (s *UtpSocket) ConnectWithCid(
+// ConnectWithCID is Connect with the connection ids given by cid.
+func (s *Socket) ConnectWithCID(
 	ctx context.Context,
-	cid *ConnectionId,
+	cid *ConnectionID,
 	config *ConnectionConfig,
-) (*UtpStream, error) {
+) (*Stream, error) {
 	if s.logger.Enabled(baseContext, LevelTrace) {
 		s.logger.Trace("connecting with cid", "dst.peer.hash", cid.Peer.Hash(),
 			"dst.send", cid.Send, "dst.recv", cid.Recv, "dst.hash", cid.Hash(), "dst.peer", cid.Peer)
@@ -150,7 +150,7 @@ func (s *UtpSocket) ConnectWithCid(
 	_, exists := s.getConnStream(cid.Hash())
 	if exists {
 		s.dispatchMu.Unlock()
-		return nil, fmt.Errorf("connection ID unavailable")
+		return nil, errors.New("utp: connection ID unavailable")
 	}
 
 	connected := make(chan error, 1)
@@ -191,14 +191,14 @@ func (s *UtpSocket) ConnectWithCid(
 	}
 }
 
-func (s *UtpSocket) awaitConnected(
-	stream *UtpStream,
+func (s *Socket) awaitConnected(
+	stream *Stream,
 	accept *acceptRequest,
 	connected chan error,
 ) {
 	// Report against the stream's connection id: a cid-less Accept has
 	// none of its own.
-	cid := stream.Cid()
+	cid := stream.CID()
 
 	s.logger.Debug("waiting for answering the new connections", "dst.peer", cid.Peer.Hash(), "cid.Send", cid.Send, "cid.Recv", cid.Recv)
 	err, ok := <-connected
@@ -217,5 +217,5 @@ func (s *UtpSocket) awaitConnected(
 	}
 
 	s.logger.Warn("connected failed", "peer", cid.Peer.Hash(), "cid.Send", cid.Send, "cid.Recv", cid.Recv)
-	accept.hand(&streamResult{err: fmt.Errorf("connection aborted")})
+	accept.hand(&streamResult{err: errors.New("utp: connection aborted")})
 }

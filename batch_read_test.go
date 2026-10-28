@@ -145,7 +145,7 @@ func TestReadBatchPeerMatchesReadFrom(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(dgs) != 1 || dgs[0].peer.Hash() != NewUdpPeer(from.(*net.UDPAddr)).Hash() {
+			if len(dgs) != 1 || dgs[0].peer.Hash() != NewUDPPeer(from.(*net.UDPAddr)).Hash() {
 				t.Fatalf("batch read the peer as %v, ReadFrom as %s", dgs, from)
 			}
 		})

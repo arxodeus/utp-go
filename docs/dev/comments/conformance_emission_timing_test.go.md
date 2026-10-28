@@ -176,7 +176,7 @@ Every comment in `conformance_emission_timing_test.go` at e56c9aa, verbatim.
 ```
 // Three participants register when the socket is built: the
 	// retransmission wheel and the read and event loops. An accepting
-	// connection does not exist yet -- AcceptWithCid parks until a SYN
+	// connection does not exist yet -- AcceptWithCID parks until a SYN
 	// arrives, and the event loop that would be the fourth is created only
 	// then.
 ```

@@ -19,7 +19,7 @@ func sendAndCount(t *testing.T, conn *connection, data []byte) []int {
 	for {
 		select {
 		case ev := <-conn.socketEvents:
-			if ev.Packet != nil && ev.Packet.Header.PacketType == st_data {
+			if ev.Packet != nil && ev.Packet.Header.PacketType == stData {
 				sizes = append(sizes, len(ev.Packet.Body))
 			}
 		default:
@@ -34,7 +34,7 @@ func (c *connection) testWidenCongestionWindow(bytes uint32) {
 
 // Bytes already in flight spend the peer's window.
 func TestInFlightBytesSpendThePeersWindow(t *testing.T) {
-	conn := drainTestConn(t, 0, TEST_BUFFER_SIZE)
+	conn := drainTestConn(t, 0, testBufferSize)
 	conn.mtu = newMtuSearch(uint32(conn.config.MaxPacketSize), time.Now())
 	p := conn.mtu.payloadSize()
 	conn.testWidenCongestionWindow(100 * p)
@@ -59,7 +59,7 @@ func TestInFlightBytesSpendThePeersWindow(t *testing.T) {
 // Nothing goes out into less than a full packet of room, and nothing is cut
 // down to fit it -- even a write smaller than the room.
 func TestNothingIsSentIntoLessThanAPacketOfRoom(t *testing.T) {
-	conn := drainTestConn(t, 0, TEST_BUFFER_SIZE)
+	conn := drainTestConn(t, 0, testBufferSize)
 	conn.mtu = newMtuSearch(uint32(conn.config.MaxPacketSize), time.Now())
 	p := conn.mtu.payloadSize()
 	conn.testWidenCongestionWindow(100 * p)
@@ -81,7 +81,7 @@ func TestNothingIsSentIntoLessThanAPacketOfRoom(t *testing.T) {
 // The send buffer holds three whole packets, so no short tail is held back
 // by the Nagle rule.
 func TestAWidePeerWindowSendsEveryPacket(t *testing.T) {
-	conn := drainTestConn(t, 0, TEST_BUFFER_SIZE)
+	conn := drainTestConn(t, 0, testBufferSize)
 	conn.state.SendBuf = newSendBuffer(64 * 1024)
 	conn.mtu = newMtuSearch(uint32(conn.config.MaxPacketSize), time.Now())
 	p := conn.mtu.payloadSize()

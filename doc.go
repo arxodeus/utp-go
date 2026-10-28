@@ -2,9 +2,9 @@
 // reliable, ordered byte stream over UDP with LEDBAT delay-based congestion
 // control, in pure Go.
 //
-// A UtpSocket runs on one UDP socket (Bind) or any Conn (WithSocket) and
+// A Socket runs on one UDP socket (Bind) or any Conn (NewSocket) and
 // carries any number of connections. Connect dials a peer and Accept waits
-// for an incoming connection; both return a UtpStream, whose Read and Write
+// for an incoming connection; both return a Stream, whose Read and Write
 // take a context that governs that call:
 //
 //	sock, err := utp.Bind(ctx, "udp", laddr, nil)
@@ -13,7 +13,7 @@
 //	}
 //	defer sock.Close()
 //
-//	stream, err := sock.Connect(ctx, utp.NewUdpPeer(raddr), utp.NewConnectionConfig())
+//	stream, err := sock.Connect(ctx, utp.NewUDPPeer(raddr), utp.NewConnectionConfig())
 //	if err != nil {
 //		return err
 //	}
@@ -33,10 +33,10 @@
 // Each connection searches for the largest datagram its path carries,
 // starting from ConnectionConfig.MaxPacketSize. Probes are sent with
 // fragmentation disabled where the platform supports it, and ICMP reports can
-// be fed in with UtpSocket.ProcessICMPFragmentation and ProcessICMPError.
+// be fed in with Socket.ProcessICMPFragmentation and ProcessICMPError.
 //
 // # Logging
 //
-// Bind and WithSocket take a *slog.Logger; nil discards logging. Per-packet
+// Bind and NewSocket take a *slog.Logger; nil discards logging. Per-packet
 // events are logged at LevelTrace.
 package utp

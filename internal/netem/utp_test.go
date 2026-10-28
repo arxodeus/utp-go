@@ -18,7 +18,7 @@ func quiet() *slog.Logger {
 // something; otherwise the gates would measure an emulator nobody had run a
 // real flow over.
 
-func TestUtpTransferOverEmulatedLink(t *testing.T) {
+func TestUTPTransferOverEmulatedLink(t *testing.T) {
 	n := NewNetwork(21)
 	defer n.Close()
 	a := n.MustAddEndpoint("sender")
@@ -106,7 +106,7 @@ func TestCongestionWindowRespondsOverEmulatedLink(t *testing.T) {
 }
 
 // Loss must be survivable, and must show up as retransmissions.
-func TestUtpSurvivesLossOverEmulatedLink(t *testing.T) {
+func TestUTPSurvivesLossOverEmulatedLink(t *testing.T) {
 	n := NewNetwork(23)
 	defer n.Close()
 	a := n.MustAddEndpoint("sender")
@@ -151,7 +151,7 @@ func TestUtpSurvivesLossOverEmulatedLink(t *testing.T) {
 
 // Two flows over one bottleneck, and the capacity split reported. Here it
 // only has to work; whether the split is fair is tested elsewhere.
-func TestTwoUtpFlowsShareBottleneck(t *testing.T) {
+func TestTwoUTPFlowsShareBottleneck(t *testing.T) {
 	n := NewNetwork(24)
 	defer n.Close()
 	a := n.MustAddEndpoint("sender")
@@ -337,12 +337,12 @@ func TestConnectionGivesUpWhenPeerGoesSilent(t *testing.T) {
 	const idleTimeout = 60 * time.Second
 	cfg.MaxIdleTimeout = idleTimeout
 
-	accCid := utp.NewConnectionId(a.Addr(), 801, 800)
-	iniCid := utp.NewConnectionId(b.Addr(), 800, 801)
+	accCid := utp.NewConnectionID(a.Addr(), 801, 800)
+	iniCid := utp.NewConnectionID(b.Addr(), 800, 801)
 
 	accepted := make(chan error, 1)
 	go func() {
-		s, err := pair.SockB.AcceptWithCid(ctx, accCid, cfg)
+		s, err := pair.SockB.AcceptWithCID(ctx, accCid, cfg)
 		if err != nil {
 			accepted <- err
 			return
@@ -352,7 +352,7 @@ func TestConnectionGivesUpWhenPeerGoesSilent(t *testing.T) {
 		_, _ = s.ReadToEOF(ctx, &buf)
 	}()
 
-	stream, err := pair.SockA.ConnectWithCid(ctx, iniCid, cfg)
+	stream, err := pair.SockA.ConnectWithCID(ctx, iniCid, cfg)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

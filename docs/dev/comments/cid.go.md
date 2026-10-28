@@ -8,20 +8,20 @@ Every comment in `cid.go` at e56c9aa, verbatim.
 // ConnectionPeer is an interface representing a remote peer.
 ```
 
-## Line 14 — type UdpPeer
+## Line 14 — type UDPPeer
 
 ```
 // SocketAddr is a simple implementation of the ConnectionPeer interface using net.UDPAddr.
 ```
 
-## Line 17 — type UdpPeer
+## Line 17 — type UDPPeer
 
 ```
 // hash is addr.String(), computed when the peer is made, so a peer the
 	// socket's reader routes many datagrams for formats its address once.
 ```
 
-## Line 33 — func (*UdpPeer).Addr
+## Line 33 — func (*UDPPeer).Addr
 
 ```
 // Addr returns the UDP address this peer names. It exists so callers that
@@ -29,10 +29,10 @@ Every comment in `cid.go` at e56c9aa, verbatim.
 // get one back out without reparsing the hash.
 ```
 
-## Line 56 — type ConnectionId
+## Line 56 — type ConnectionID
 
 ```
-// ConnectionId represents a connection identifier with send and receive IDs and a peer.
+// ConnectionID represents a connection identifier with send and receive IDs and a peer.
 ```
 
 ## Line 74 — func genHash
@@ -58,17 +58,17 @@ Every comment in `cid.go` at e56c9aa, verbatim.
 // allocates nothing.
 ```
 
-## Line 100 — func (*ConnectionId).Hash
+## Line 100 — func (*ConnectionID).Hash
 
 ```
 // Hash returns the key this connection is tracked under.
 //
-// The value is cached by NewConnectionId. ConnectionId is exported with
+// The value is cached by NewConnectionID. ConnectionID is exported with
 // exported fields, so callers legitimately build one as a struct literal --
 // and such a value has an empty cached hash. Returning that empty string made
-// every literal-built ConnectionId hash to "" and therefore collide with
+// every literal-built ConnectionID hash to "" and therefore collide with
 // every other one, silently breaking connection lookup. Fall back to
 // computing it rather than handing back a key that is wrong.
 //
-// Prefer NewConnectionId: it caches, and this fallback does not.
+// Prefer NewConnectionID: it caches, and this fallback does not.
 ```

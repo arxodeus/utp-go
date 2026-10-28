@@ -41,12 +41,12 @@ func TestFullDuplexEcho(t *testing.T) {
 	payload := make([]byte, size)
 	rand.Read(payload)
 
-	cidA := NewConnectionId(NewUdpPeer(bAddr), 1000, 1001)
-	cidB := NewConnectionId(NewUdpPeer(aAddr), 1001, 1000)
+	cidA := NewConnectionID(NewUDPPeer(bAddr), 1000, 1001)
+	cidB := NewConnectionID(NewUDPPeer(aAddr), 1001, 1000)
 
 	srvDone := make(chan error, 1)
 	go func() {
-		stream, err := sb.AcceptWithCid(ctx, cidB, NewConnectionConfig())
+		stream, err := sb.AcceptWithCID(ctx, cidB, NewConnectionConfig())
 		if err != nil {
 			srvDone <- err
 			return
@@ -70,7 +70,7 @@ func TestFullDuplexEcho(t *testing.T) {
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	stream, err := sa.ConnectWithCid(ctx, cidA, NewConnectionConfig())
+	stream, err := sa.ConnectWithCID(ctx, cidA, NewConnectionConfig())
 	if err != nil {
 		t.Fatal(err)
 	}

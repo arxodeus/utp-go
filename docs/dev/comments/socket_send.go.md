@@ -28,7 +28,7 @@ Every comment in `socket_send.go` at e56c9aa, verbatim.
 // transfer.
 ```
 
-## Line 32 — func (*UtpSocket).sendEvent
+## Line 32 — func (*Socket).sendEvent
 
 ```
 // sendEvent carries out what a connection or the socket wants done on the
@@ -43,7 +43,7 @@ Every comment in `socket_send.go` at e56c9aa, verbatim.
 // net.PacketConn allows.
 ```
 
-## Line 92 — func (*UtpSocket).writeDatagram
+## Line 92 — func (*Socket).writeDatagram
 
 ```
 // writeDatagram sends one datagram, with fragmentation disabled if it is an

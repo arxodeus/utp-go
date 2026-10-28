@@ -16,7 +16,7 @@ func drainTestConn(t *testing.T, lastAdvertised uint32, bufferSize int) *connect
 	conn.state = &connState{
 		stateType:   connConnected,
 		SentPackets: newSentPacketsWithoutLogger(synAck, newDefaultController(fromConnConfig(conn.config))),
-		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
+		SendBuf:     newSendBuffer(testBufferSize),
 		RecvBuf:     newReceiveBuffer(bufferSize, syn),
 	}
 	conn.lastAdvertisedWindow = lastAdvertised
@@ -26,7 +26,7 @@ func drainTestConn(t *testing.T, lastAdvertised uint32, bufferSize int) *connect
 
 // A window larger than the one last advertised is owed an acknowledgement.
 func TestReadDrainedOwesAnAckWhenTheWindowGrew(t *testing.T) {
-	conn := drainTestConn(t, 0, TEST_BUFFER_SIZE)
+	conn := drainTestConn(t, 0, testBufferSize)
 	if conn.state.RecvBuf.Available() == 0 {
 		t.Fatal("the receive buffer starts with no room; this case would assert nothing")
 	}
@@ -45,11 +45,11 @@ func TestReadDrainedOwesAnAckWhenTheWindowGrew(t *testing.T) {
 // acknowledgement for incoming data already carries a current window, since
 // the drain happens before it in the same pass.
 func TestReadDrainedIsSilentWhenTheWindowDidNotGrow(t *testing.T) {
-	buf := newReceiveBuffer(TEST_BUFFER_SIZE, 100)
+	buf := newReceiveBuffer(testBufferSize, 100)
 	full := uint32(buf.Available())
 
 	for _, advertised := range []uint32{full, full + 1, full * 2} {
-		conn := drainTestConn(t, advertised, TEST_BUFFER_SIZE)
+		conn := drainTestConn(t, advertised, testBufferSize)
 		conn.onReadDrained()
 		if conn.ackPending {
 			t.Errorf("last advertised %d against %d now free: owed an acknowledgement "+
@@ -67,7 +67,7 @@ func TestReadDrainedIsSilentWhenTheWindowDidNotGrow(t *testing.T) {
 // reported too.
 func TestReadDrainedCoversASubPacketWindow(t *testing.T) {
 	// 861 bytes: less than a packet.
-	conn := drainTestConn(t, 861, TEST_BUFFER_SIZE)
+	conn := drainTestConn(t, 861, testBufferSize)
 	if conn.state.RecvBuf.Available() <= 861 {
 		t.Fatal("the receive buffer is too small for this case to exercise anything")
 	}
@@ -83,14 +83,14 @@ func TestReadDrainedCoversASubPacketWindow(t *testing.T) {
 // Nothing is owed on a connection that is not established, where there is no
 // peer to tell and no buffer to report.
 func TestReadDrainedIgnoresAnUnestablishedConnection(t *testing.T) {
-	conn := drainTestConn(t, 0, TEST_BUFFER_SIZE)
+	conn := drainTestConn(t, 0, testBufferSize)
 	conn.state.stateType = connConnecting
 	conn.onReadDrained()
 	if conn.ackPending {
 		t.Error("owed an acknowledgement on a connection that is not established")
 	}
 
-	conn = drainTestConn(t, 0, TEST_BUFFER_SIZE)
+	conn = drainTestConn(t, 0, testBufferSize)
 	conn.state.RecvBuf = nil
 	conn.onReadDrained()
 	if conn.ackPending {
@@ -101,10 +101,10 @@ func TestReadDrainedIgnoresAnUnestablishedConnection(t *testing.T) {
 // The comparison is against the window this connection last sent, recorded
 // from the packet itself.
 func TestLastAdvertisedWindowFollowsWhatWasSent(t *testing.T) {
-	conn := drainTestConn(t, 0, TEST_BUFFER_SIZE)
+	conn := drainTestConn(t, 0, testBufferSize)
 	conn.socketEvents = make(chan *socketEvent, 4)
 
-	pkt := newPacketBuilder(st_state, 1, 0, 4242, 1).Build()
+	pkt := newPacketBuilder(stState, 1, 0, 4242, 1).Build()
 	conn.emit(pkt)
 
 	if conn.lastAdvertisedWindow != 4242 {

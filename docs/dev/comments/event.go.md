@@ -100,5 +100,5 @@ Every comment in `event.go` at e56c9aa, verbatim.
 // lingerAck, when non-nil, is the acknowledgement to re-send if the peer keeps
 // retransmitting its FIN after this connection has gone. Without it the socket
 // answers that retransmission with a RESET, and a transfer that arrived whole
-// ends as a connection reset for the peer. See UtpSocket.rememberLingerAck.
+// ends as a connection reset for the peer. See Socket.rememberLingerAck.
 ```

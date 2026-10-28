@@ -34,7 +34,7 @@ names the section with the detail.
   port. "Classic LEDBAT does not yield, and that is the point of the
   protocol".
 - **A packet is dropped when its connection's event queue is full**, counted
-  in `UtpSocket.PacketsDroppedFullConnQueue`, and **the event loop takes
+  in `Socket.PacketsDroppedFullConnQueue`, and **the event loop takes
   incoming packets before anything else**: "Things found but deliberately not
   fixed".
 - **The accept expiry is a fixed 20 s**: "API notes".
@@ -73,7 +73,7 @@ That is the difference between conformance by citation -- code read against
 every peer in the wild runs will actually complete a transfer with this one.
 
 M7's hash-verified torrent transfer is no longer unmet:
-`integration/anacrolix/TestTorrentTransferOverUtp` moves a 4 MiB torrent in
+`integration/anacrolix/TestTorrentTransferOverUTP` moves a 4 MiB torrent in
 128 pieces between two `torrent.Client`s with this library as the only
 transport, with BitTorrent's own piece hashes deciding whether what arrived is
 what was sent. See "A real torrent" below. `CGO_ENABLED=0 go build ./...`
@@ -223,7 +223,7 @@ Measured before and after:
 | Timeouts on that path | 2 | **0** |
 | Goodput on that path | 2.43 Mbps | **3.73 Mbps** (+53%) |
 | Mean cwnd | 14.5 KB | 26.4 KB |
-| `TestUdpTransfer`, loopback | 257 Mbps (mean of 2) | **350 Mbps** (mean of 2) |
+| `TestUDPTransfer`, loopback | 257 Mbps (mean of 2) | **350 Mbps** (mean of 2) |
 | `TestManyConcurrentTransfers`, 1000 conns | 560 Mbps (mean of 4: 547/662/412/621) | **587 Mbps** (mean of 4: 613/601/654/479) |
 
 The 1000-connection figure is noisy on this machine -- the spread is wider
@@ -524,7 +524,7 @@ harness; three were the library.
 - **Connects were refused by RESETs meant for other connections.** See
   DEVIATIONS.md, "A dialled connection's ids are clear of every id in use".
 
-And one found reading for these: `UtpSocket.Close` did not stop the linger
+And one found reading for these: `Socket.Close` did not stop the linger
 acknowledgements' timer wheel, a goroutine left per socket closed.
 
 With all of it, five three-minute soaks ran clean; the two-hour result is in
@@ -559,12 +559,12 @@ did not: a dialled connection draws its id until no connection to the peer
 receives on it (`:2533-2538`), where the check was for the identical pair
 only, and a SYN whose connection would receive on an id a dialled connection
 holds is refused without an answer, as libutp refuses it (`:2957-2965`;
-counted in `UtpSocket.ConnectionsRefusedIdInUse`).
+counted in `Socket.ConnectionsRefusedIDInUse`).
 
 `TestPacketReachesTheConnectionItIsFor` dials two such connections over a
 scripted peer and fails without the routing change; the two uniqueness rules
-have a test each (`TestSynForATakenReceiveIdIsRefused`,
-`TestDialledConnectionAvoidsAReceiveIdInUse`), each failing without its
+have a test each (`TestSynForATakenReceiveIDIsRefused`,
+`TestDialledConnectionAvoidsAReceiveIDInUse`), each failing without its
 rule. The soak failed four runs in five before (two hung, two failed) and
 passed six of six after.
 
@@ -805,13 +805,13 @@ without copying anything.
 `libutp_conformance_test.go` covers the decoder accepting it, the ack number
 advancing, and data after an empty packet still being delivered.
 
-## ConnectWithCid ignored its own context
+## ConnectWithCID ignored its own context
 
 **Fixed.** It waited on a bare channel receive with no context arm, so
 cancelling the context during connection setup never returned -- the
 connection's event loop exits on that same cancellation without signalling the
 channel, leaving the caller blocked forever. `Connect` already had the arm;
-`ConnectWithCid` simply lacked it. Found by a test that cancelled mid-handshake.
+`ConnectWithCID` simply lacked it. Found by a test that cancelled mid-handshake.
 
 ## Accept could not accept
 
@@ -841,7 +841,7 @@ it, so nothing had ever run them.
 **Fixed.** Also found by the interop gate: a transfer completing in 10 ms was
 followed by a 29-second `Close`.
 
-`UtpStream.Close` set its shutdown flag and then waited on the connection's
+`Stream.Close` set its shutdown flag and then waited on the connection's
 event loop. But the loop blocks in a `select` on packet, write, read and timer
 channels, and an atomic flag is not one of them. It only noticed the shutdown
 when some unrelated packet or timer happened to arrive, so `Close` took
@@ -884,7 +884,7 @@ loss.
 The brief asked for a written explanation of each. Both named tests failed,
 but not for the reasons the brief assumed.
 
-### `TestUdpTransfer` was not testing this library
+### `TestUDPTransfer` was not testing this library
 
 It opened two `net.UDPConn`s and blasted raw datagrams between them. It never
 called the uTP library. Worse, its send loop never advanced `offset` — the
@@ -926,19 +926,19 @@ what its name suggests but not what it did. It has been rewritten to transfer
 
 ### Further defects found while fixing those
 
-- **`UtpSocket.Close()` was not idempotent** and panicked closing an
+- **`Socket.Close()` was not idempotent** and panicked closing an
   already-closed channel. `defer sock.Close()` alongside an explicit close is
   ordinary Go.
-- **`UtpSocket.Close()` never closed the underlying UDP socket**, leaking the
+- **`Socket.Close()` never closed the underlying UDP socket**, leaking the
   fd and leaving `readLoop` parked in `ReadFrom` — which cancelling the
   context does not interrupt. The port stayed bound for the life of the
   process.
-- **An expired accept was dropped silently**, so `AcceptWithCid` blocked
+- **An expired accept was dropped silently**, so `AcceptWithCID` blocked
   forever when the caller's context had no deadline of its own. Both accept
   paths also discarded the error field entirely.
-- **`ConnectionId` built as a struct literal hashed to `""`.** The type is
+- **`ConnectionID` built as a struct literal hashed to `""`.** The type is
   exported with exported fields, but its cached hash is only populated by
-  `NewConnectionId`. Every literal-built id therefore collided with every
+  `NewConnectionID`. Every literal-built id therefore collided with every
   other one, silently breaking connection lookup.
 - **Accepts starved under load.** The socket event loop drained `incomingBuf`
   in a non-blocking select before looking at the accept channels; under load
@@ -956,7 +956,7 @@ what its name suggests but not what it did. It has been rewritten to transfer
 Three further tests could not pass on a clean checkout, independent of any
 library defect:
 
-- `TestSocketReportsTwoConns` hung forever — it builds its `ConnectionId`s as
+- `TestSocketReportsTwoConns` hung forever — it builds its `ConnectionID`s as
   struct literals, hitting the empty-hash defect above.
 - `TestCloseErrorsIfAllPacketsDropped` gave `Close()` exactly the idle timeout
   it waits on, a dead heat it always lost.
@@ -996,7 +996,7 @@ and the standing queue measured at the bottleneck, not inferred.
 Gates that pass:
 
 - `go test ./...` — green.
-- `go test ./integrated/ -run 'TestUdpTransfer|TestManyConcurrentTransfers' -count=10` — green, at the full default of 1000 concurrent transfers.
+- `go test ./integrated/ -run 'TestUDPTransfer|TestManyConcurrentTransfers' -count=10` — green, at the full default of 1000 concurrent transfers.
 - `go test -race .` — green.
 - `go test -race ./...` — green, whole suite, no data races, at
   `UTP_TEST_TRANSFERS=150 REPRO_N=120` (283 s for the integrated package).
@@ -1013,7 +1013,7 @@ Gates that pass:
   our side, because libutp's first flight read as one packet under the
   detector -- the measurement's timing, since fixed, not libutp. Both
   packages green under `-race` with those changes.
-- `go test -race ./integrated/ -run 'TestUdpTransfer|TestManyConcurrentTransfers' -count=3` — green, **but at `UTP_TEST_TRANSFERS=150`, not the default 1000.** See "Memory" below: the full 1000 did not fit under the race detector on a 16 GB machine. *It does now*: `TestManyConcurrentTransfers` at the full 1000 under `-race`, four runs, green, no data races, peak RSS 5.4-5.8 GB, 77-90 s each.
+- `go test -race ./integrated/ -run 'TestUDPTransfer|TestManyConcurrentTransfers' -count=3` — green, **but at `UTP_TEST_TRANSFERS=150`, not the default 1000.** See "Memory" below: the full 1000 did not fit under the race detector on a 16 GB machine. *It does now*: `TestManyConcurrentTransfers` at the full 1000 under `-race`, four runs, green, no data races, peak RSS 5.4-5.8 GB, 77-90 s each.
 - `go test ./netem/ -count=3` — green. The M1 gate; figures in [HARNESS.md](HARNESS.md).
 - `go test -race ./netem/` — green, no data races.
 - `go test -run TestConformance .` — the M2 corpus, nine cases, green.
@@ -1029,7 +1029,7 @@ congestion-control results and say nothing about behaviour on a real path:
 
 - `TestManyConcurrentTransfers`: 1000 concurrent 1 MB transfers in ~11 s.
   Previously this test failed after its 120 s budget.
-- `TestUdpTransfer`: 16 MB single transfer in ~0.65 s.
+- `TestUDPTransfer`: 16 MB single transfer in ~0.65 s.
 
 ### Memory
 
@@ -1144,7 +1144,7 @@ for the other direction. This library moved straight to `connClosed` once the
 remote FIN was reached, so a peer that closed its sending side took the whole
 connection with it and whatever it was still sending back was lost.
 
-`UtpStream.CloseWrite` and `utpnet.Conn.CloseWrite` now do what
+`Stream.CloseWrite` and `utpnet.Conn.CloseWrite` now do what
 `utp_shutdown(SHUT_WR)` does, and reaching the peer's FIN no longer ends the
 connection. Proven against the reference:
 `netem.TestCloseWriteDeliversWhatThePeerSendsAfterIt` half-closes, libutp sees
@@ -1342,7 +1342,7 @@ start took hundreds of round trips to recover.
 
 **Fixed, and it changed a conclusion.**
 
-`ConnectionMetrics.QueueingDelay()` is `PeerTsDiff - BaseDelay`, where
+`ConnectionMetrics.QueueingDelay()` is `PeerTimestampDiff - BaseDelay`, where
 `BaseDelay` is the congestion controller's own estimate of the empty path. So
 the metric asks the controller how much queue it is causing.
 
@@ -1407,7 +1407,7 @@ reasoning is in BENCHMARKS.md rather than left implicit.
 sb.pending = append(sb.pending, data)
 ```
 
-`UtpStream.Write` returns as soon as the bytes are accepted into that buffer,
+`Stream.Write` returns as soon as the bytes are accepted into that buffer,
 which is before they are transmitted. So the caller got control back while the
 connection still held a reference to their array. Anything that reused its
 buffer between writes had the queued bytes overwritten with whatever it wrote
@@ -1427,15 +1427,15 @@ sixteen lines with no adapter involved (`TestFullDuplexEcho`).
 BitTorrent peer connections are full-duplex by nature, so this would have
 corrupted data on essentially every connection a torrent client made.
 
-## UtpSocket.Connect never succeeded
+## Socket.Connect never succeeded
 
 **Fixed.** The initiator reported a completed handshake by *closing*
-`connectedCh`; `UtpSocket.Connect` read it with `err, ok := <-connectedCh` and
+`connectedCh`; `Socket.Connect` read it with `err, ok := <-connectedCh` and
 treated `!ok` as failure, returning "connection timed out" after a handshake
 that had in fact completed.
 
-`ConnectWithCid` used the bare receive form, where a closed channel yields a
-nil error, and so worked. Every test in this repository uses `ConnectWithCid`,
+`ConnectWithCID` used the bare receive form, where a closed channel yields a
+nil error, and so worked. Every test in this repository uses `ConnectWithCID`,
 which is why the simplest and most obvious entry point in the public API had
 never worked and nothing noticed.
 
@@ -1448,13 +1448,13 @@ means.
 Both found by writing the first caller that treats a uTP stream as an ordinary
 byte stream.
 
-- **No incremental read.** `UtpStream.ReadToEOF` only returns once the whole
+- **No incremental read.** `Stream.ReadToEOF` only returns once the whole
   transfer is complete, which cannot serve a connection that stays open.
-  `UtpStream.Read` was added: it returns as soon as anything is available and
+  `Stream.Read` was added: it returns as soon as anything is available and
   reports `io.EOF` at end of stream, so a stream can be an `io.Reader`.
 - **No way to learn the local address.** `Bind` with port 0 — the usual thing
   to do — gave no way to find out which port the kernel chose.
-  `UtpSocket.LocalAddr` was added.
+  `Socket.LocalAddr` was added.
 
 ## There was no zero-window probe
 
@@ -2167,7 +2167,7 @@ memory.
 
 ### `utp_shutdown(SHUT_RD)` — the read-side half-close
 
-We had `CloseWrite` and no counterpart. `UtpStream.CloseRead` and
+We had `CloseWrite` and no counterpart. `Stream.CloseRead` and
 `utpnet.Conn.CloseRead` are it.
 
 What makes this more than a flag is one line of libutp. `read_shutdown`
@@ -2191,7 +2191,7 @@ faces that question; the reasoning is in [DEVIATIONS.md](DEVIATIONS.md).
 
 ### `utp_writev` — the vectored write
 
-`UtpStream.WriteV`, and `utpnet.Conn.WriteBuffers` in `net.Buffers` terms.
+`Stream.WriteV`, and `utpnet.Conn.WriteBuffers` in `net.Buffers` terms.
 
 It was never a capability gap — `Write` can express anything `writev` can —
 but it is a copy. A caller holding a header and a payload either joins them
@@ -2260,7 +2260,7 @@ passes `UTP_UDP_DONTFRAG` to its embedder's sendto callback
 carrying the signal, which `utp.DontFragmentWriter` now does, on the same
 optional-interface pattern as `PathMTUProvider`. And the socket holds a lock
 exclusively around a probe's send and shared around every other
-(`UtpSocket.writeDatagram`), so setting the option, sending one datagram and
+(`Socket.writeDatagram`), so setting the option, sending one datagram and
 clearing it again cannot race with another write. That is what makes a
 socket-wide option usable per packet. (This was first done by sending every
 datagram from one goroutine, a write loop; datagrams now leave from whichever
@@ -2481,7 +2481,7 @@ drop in the peer's base is evidence of drift rather than of an emptier queue —
 and libutp shifts its own base by the same amount, at once.
 
 This library has the raw value: `connection.peerTsDiff`, reported as
-`ConnectionMetrics.PeerTsDiff`, is exactly libutp's `their_delay`. What it has
+`ConnectionMetrics.PeerTimestampDiff`, is exactly libutp's `their_delay`. What it has
 no history of, so no base for, and therefore no correction from. Drift is
 corrected only by the 120-second sliding-window minimum in `delayAccumulator`
 ageing out its stale samples.
@@ -2576,7 +2576,7 @@ Every other netem test that runs more than one flow through one link was
 checked for the same weakness. None asserts inside its own noise:
 
 - `TestDeferenceToLossBasedFlow`, `TestLatecomerShare`, `TestBaseDelayTracking`
-  and `TestTwoUtpFlowsShareBottleneck` report the split and assert only that
+  and `TestTwoUTPFlowsShareBottleneck` report the split and assert only that
   each flow moved data. The deference competitor is loss-based and needs the
   queue to overflow, so there the drops are the experiment, not noise.
 - `TestTwoFlowsShareBottleneck` is about the emulator's queue, not congestion
@@ -2640,10 +2640,10 @@ reasonable time against that.
 ### A metric that subtracted two different directions
 
 **Fixed.** Found while writing up the reasons above.
-`ConnectionMetrics.QueueingDelay` computed `PeerTsDiff - BaseDelay`, and those
+`ConnectionMetrics.QueueingDelay` computed `PeerTimestampDiff - BaseDelay`, and those
 are measurements of opposite paths: `BaseDelay` is the base of the series the
 peer reports about *our* outbound packets (libutp's `our_hist`,
-`utp_internal.cpp:2016-2021`), while `PeerTsDiff` is our own measurement of the
+`utp_internal.cpp:2016-2021`), while `PeerTimestampDiff` is our own measurement of the
 *inbound* path (`their_delay`, `:2000-2001`). The difference between two
 directions is not a queue in either.
 
@@ -2803,7 +2803,7 @@ ICMP path below is what there is.
 
 ### Half of it is now addressable: the ICMP path
 
-`UtpSocket.ProcessICMPFragmentation` is libutp's
+`Socket.ProcessICMPFragmentation` is libutp's
 `utp_process_icmp_fragmentation`, and an embedder that feeds it (on Linux,
 `IP_RECVERR` on the UDP socket) gets the router's own figure instead of having
 to infer the limit from a probe that vanished. Measured over the same 1100-byte
@@ -2961,7 +2961,7 @@ passes -- 5 runs of 16 peers, and the whole package clean under `-race`.
 
 ## A packet to a peer type we did not define was dropped and reported as sent
 
-**Fixed.** `udpConn.WriteTo` switched on `*UdpPeer` and `*ConnectionId` and
+**Fixed.** `udpConn.WriteTo` switched on `*UDPPeer` and `*ConnectionID` and
 ended in `return 0, nil` for anything else. `ConnectionPeer` is an exported
 interface with one method, so a caller can implement it -- and a connection
 built on such a peer would have every packet discarded while each send
@@ -2971,7 +2971,7 @@ Silence is the wrong answer either way. The address is now parsed from the
 peer's `Hash`, which is the contract the rest of this repository already
 relies on (`utpnet`'s `peerUDPAddr` has always done this), and a `Hash` that
 is not an address is returned as an error rather than swallowed.
-`TestUdpConnWritesToForeignPeerTypes` covers both, and fails against the old
+`TestUDPConnWritesToForeignPeerTypes` covers both, and fails against the old
 code with "wrote 0 bytes, want 32".
 
 ## A connection died when its dial context was cancelled
@@ -2979,7 +2979,7 @@ code with "wrote 0 bytes, want 32".
 **Fixed, and it made the library unusable behind `net.Conn` for the most
 common dialling idiom in Go.**
 
-`UtpSocket.Connect` and `ConnectWithCid` passed the caller's context straight
+`Socket.Connect` and `ConnectWithCID` passed the caller's context straight
 to `newUtpStream`, where it became the connection's lifetime. `net.Dialer`
 documents the opposite -- "Canceling ctx does not affect the connection after
 it is established" -- and the standard shape relies on that:
@@ -3009,7 +3009,7 @@ you nothing about whose context or why.
 
 The fix: the stream's lifetime is the socket's, and the caller's context
 governs only the wait for the connection to come up. A caller that gives up
-now tears the attempt down explicitly (`UtpStream.abandonDial`), because
+now tears the attempt down explicitly (`Stream.abandonDial`), because
 cancelling no longer does it implicitly -- without that, an unanswered SYN
 would go on retrying with nobody waiting for the answer. The accept path had
 the same shape for the `Accept` call's context and changed with it; the
@@ -3018,7 +3018,7 @@ which is what the inconsistency should have suggested.
 
 **That last claim was wrong.** It changed one of three accept paths, the one
 where `Accept` was waiting when the SYN came. Where the SYN came first and
-waited for an `Accept` -- `Accept` and `AcceptWithCid` both -- the connection
+waited for an `Accept` -- `Accept` and `AcceptWithCID` both -- the connection
 was still made on the `Accept` call's context, so a timeout on `Accept` that
 fired after it had returned ended the connection it had returned. All three
 use the socket's context now; `TestAcceptedConnectionOutlivesItsAccept` covers
@@ -3041,7 +3041,7 @@ dial context was cancelled: not connected".
 
 ## A real torrent, transferred and hash-verified over this library
 
-`integration/anacrolix/TestTorrentTransferOverUtp`. Two `torrent.Client`s, a
+`integration/anacrolix/TestTorrentTransferOverUTP`. Two `torrent.Client`s, a
 generated 4 MiB torrent in 128 pieces, and BitTorrent's own piece hashes
 deciding whether what arrived is what was sent. Both clients have TCP,
 torrent's built-in uTP and the DHT disabled, so the only transport between
@@ -3073,7 +3073,7 @@ library, are worth keeping as warnings:
 
 ## Close waited out the retransmission ladder
 
-**Fixed.** `UtpStream.Close` waited for the connection's event loop to exit,
+**Fixed.** `Stream.Close` waited for the connection's event loop to exit,
 full stop. A loop with unacknowledged data does not exit until its
 retransmission ladder runs out -- 1 + 2 + 4 + 8 + 16 seconds -- and where that
 is not enough, the 60-second idle timeout behind it. So closing a connection
@@ -3120,8 +3120,8 @@ Written against real sockets first, both passed while measuring nothing:
 time in this repository a test has passed by staging the wrong situation.
 
 **Later: the stream's Close no longer waits at all.** The wait moved to
-`UtpSocket.Close`, which waits for the streams already closed, by the same
-silence rule; `UtpStream.Close` returns at once, as libutp's `utp_close` does.
+`Socket.Close`, which waits for the streams already closed, by the same
+silence rule; `Stream.Close` returns at once, as libutp's `utp_close` does.
 The two tests above now hold the socket's Close to the same ends, and the
 stream's to returning at once (DEVIATIONS.md, "Closing a stream returns at
 once; closing the socket delivers what is left").
@@ -3135,7 +3135,7 @@ recorded here only as the direction it went.
 
 ## Write kept the caller's buffer after the call returned
 
-**Fixed.** `UtpStream.Write` queued the caller's slice and returned on
+**Fixed.** `Stream.Write` queued the caller's slice and returned on
 `ctx.Done()` when the write deadline expired -- with the entry still in the
 connection's pending list, still pointing at the caller's memory. The caller is
 entitled to reuse that buffer the moment Write returns; the connection would
@@ -4994,7 +4994,7 @@ risks making things worse.
   against nothing anyone has seen.
 - **Packets can still be dropped when a connection's event queue is full**
   (`handleIncomingBuf` falls through to `default`), and this is now counted
-  rather than only logged — `UtpSocket.PacketsDroppedFullConnQueue`. The
+  rather than only logged — `Socket.PacketsDroppedFullConnQueue`. The
   condition that made it routine — a connection whose reader stopped draining
   stopped draining its own event queue too — is fixed above, but the branch
   remains reachable if a connection ever falls far enough behind.
@@ -5071,7 +5071,7 @@ risks making things worse.
   `io.ReadAll`. It previously returned `io.EOF` on one path and nil on
   another; the two in-tree callers disagreed about which to expect. Abnormal
   closes still carry their error (`ErrTimedOut`, `ErrReset`).
-- `Accept`/`AcceptWithCid` can now return `ErrAcceptTimedOut`. Callers that
+- `Accept`/`AcceptWithCID` can now return `ErrAcceptTimedOut`. Callers that
   previously blocked forever will now see an error.
 - `awaitingConnectionTimeout` is a fixed 20 s and is not configurable.
 
@@ -5556,7 +5556,7 @@ Measured:
 
 ### API changes
 
-- `ConnectionId.Hash()` returns `send:recv:peer` as text, not 40 hex
+- `ConnectionID.Hash()` returns `send:recv:peer` as text, not 40 hex
   characters of a SHA3 hash. Equality is all a key needs, and this form is
   exactly injective.
 - `QueuedReader` is new and optional.
@@ -5566,7 +5566,7 @@ Measured:
 
 ## A reset after the peer's FIN turned a complete transfer into an error
 
-**Fixed.** `integrated.TestUdpTransfer`, 16 MB over loopback, failed about
+**Fixed.** `integrated.TestUDPTransfer`, 16 MB over loopback, failed about
 one run in ten under CPU load with "read: reset" -- 10 of 100 on this
 branch and 10 of 100 on the commit before it, so not new -- after every
 byte had arrived. Traced with the send and close paths instrumented:
@@ -5597,7 +5597,7 @@ kept apart for writers (`connection.endErr`).
 receiver nobody reads from, so some of it is still in the receive buffer,
 and then resets it. With the old rule it reads all 917,504 bytes and then
 fails with "reset"; with the new one it reaches a clean end, and a write
-returns `ErrReset`. `TestUdpTransfer` under the same load: 0 failures in 100.
+returns `ErrReset`. `TestUDPTransfer` under the same load: 0 failures in 100.
 
 ## A resent MTU probe was judged as the probe
 
@@ -5822,7 +5822,7 @@ ends within 300 ms of closing. Before, the first receiver never ended; with
 every path fixed but the one after teardown, 3 of 60 waited for a
 retransmission. `TestTheSecondFinIsAcknowledgedPromptly`.
 
-Writing that test found that Connect and ConnectWithCid panicked given a nil
+Writing that test found that Connect and ConnectWithCID panicked given a nil
 config, which Accept takes as the defaults. They take it the same way now.
 `TestConnectWithANilConfig`.
 
@@ -5860,7 +5860,7 @@ neighbours, and from new connections for idQuarantine after it ends: 28,365
 connections to one peer used every id. The draw ran inside Connect, under
 the lock the socket's reader takes for every datagram, so the whole socket
 would have stopped. It now draws 64 times and then tries every receive id
-once, and a dial with none free fails. `TestDialWithNoFreeIdFails`, which
+once, and a dial with none free fails. `TestDialWithNoFreeIDFails`, which
 without the bound was still looking after 50 seconds.
 
 **A result channel per chunk.** A write larger than one chunk made a channel
@@ -5878,8 +5878,8 @@ Raised and left as they are:
   pause would only delay closing a socket that cannot read.
 - `restingEnabled` is a plain bool. Nothing writes it after initialisation,
   so there is nothing to race.
-- `UtpStream` does not satisfy net.Conn. utpnet.Conn does, over it;
-  UtpStream's context-taking methods are the layer below.
+- `Stream` does not satisfy net.Conn. utpnet.Conn does, over it;
+  Stream's context-taking methods are the layer below.
 
 ## The release review of 224c363
 

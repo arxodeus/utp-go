@@ -23,13 +23,13 @@ func mtuTransfer(t *testing.T, cfg Config, payloadLen int, cid uint16) (floor, c
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	sendSock := utp.WithSocket(ctx, a, quiet())
+	sendSock := utp.NewSocket(ctx, a, quiet())
 	defer sendSock.Close()
-	recvSock := utp.WithSocket(ctx, b, quiet())
+	recvSock := utp.NewSocket(ctx, b, quiet())
 	defer recvSock.Close()
 
-	acceptCid := utp.NewConnectionId(a.Addr(), cid+1, cid)
-	connectCid := utp.NewConnectionId(b.Addr(), cid, cid+1)
+	acceptCid := utp.NewConnectionID(a.Addr(), cid+1, cid)
+	connectCid := utp.NewConnectionID(b.Addr(), cid, cid+1)
 
 	var (
 		mu      sync.Mutex
@@ -53,7 +53,7 @@ func mtuTransfer(t *testing.T, cfg Config, payloadLen int, cid uint16) (floor, c
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		stream, err := recvSock.AcceptWithCid(ctx, acceptCid, utp.NewConnectionConfig())
+		stream, err := recvSock.AcceptWithCID(ctx, acceptCid, utp.NewConnectionConfig())
 		if err != nil {
 			t.Errorf("accept: %v", err)
 			return
@@ -66,7 +66,7 @@ func mtuTransfer(t *testing.T, cfg Config, payloadLen int, cid uint16) (floor, c
 	}()
 	go func() {
 		defer wg.Done()
-		stream, err := sendSock.ConnectWithCid(ctx, connectCid, sendCfg)
+		stream, err := sendSock.ConnectWithCID(ctx, connectCid, sendCfg)
 		if err != nil {
 			t.Errorf("connect: %v", err)
 			return
@@ -199,13 +199,13 @@ func TestPathMTUReportPreventsTheStall(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	sendSock := utp.WithSocket(ctx, a, quiet())
+	sendSock := utp.NewSocket(ctx, a, quiet())
 	defer sendSock.Close()
-	recvSock := utp.WithSocket(ctx, b, quiet())
+	recvSock := utp.NewSocket(ctx, b, quiet())
 	defer recvSock.Close()
 
-	acceptCid := utp.NewConnectionId(a.Addr(), 761, 760)
-	connectCid := utp.NewConnectionId(b.Addr(), 760, 761)
+	acceptCid := utp.NewConnectionID(a.Addr(), 761, 760)
+	connectCid := utp.NewConnectionID(b.Addr(), 760, 761)
 
 	var (
 		mu      sync.Mutex
@@ -232,7 +232,7 @@ func TestPathMTUReportPreventsTheStall(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		stream, err := recvSock.AcceptWithCid(ctx, acceptCid, utp.NewConnectionConfig())
+		stream, err := recvSock.AcceptWithCID(ctx, acceptCid, utp.NewConnectionConfig())
 		if err != nil {
 			t.Errorf("accept: %v", err)
 			return
@@ -248,7 +248,7 @@ func TestPathMTUReportPreventsTheStall(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		stream, err := sendSock.ConnectWithCid(ctx, connectCid, sendCfg)
+		stream, err := sendSock.ConnectWithCID(ctx, connectCid, sendCfg)
 		if err != nil {
 			t.Errorf("connect: %v", err)
 			return

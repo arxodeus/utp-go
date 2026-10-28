@@ -131,7 +131,7 @@ func TestConnAddresses(t *testing.T) {
 
 // Datagrams that are not uTP come out of ReadFrom rather than being
 // swallowed or answered, as for a DHT sharing the port.
-func TestNonUtpDatagramsPassThrough(t *testing.T) {
+func TestNonUTPDatagramsPassThrough(t *testing.T) {
 	sock, _ := listenPair(t)
 
 	raw, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
@@ -177,7 +177,7 @@ func TestNonUtpDatagramsPassThrough(t *testing.T) {
 }
 
 // uTP traffic does not leak out of ReadFrom.
-func TestUtpPacketsDoNotLeakToReadFrom(t *testing.T) {
+func TestUTPPacketsDoNotLeakToReadFrom(t *testing.T) {
 	server, client := listenPair(t)
 
 	go func() {
@@ -215,7 +215,7 @@ func TestUtpPacketsDoNotLeakToReadFrom(t *testing.T) {
 
 // The classification decides what the uTP connections see, so it is tested
 // directly.
-func TestIsUtpPacket(t *testing.T) {
+func TestIsUTPPacket(t *testing.T) {
 	// An ST_DATA header, version 1, no extension: connection id 1234,
 	// timestamp 200000, window 1 MiB, sequence number 42 (BEP 29).
 	valid := make([]byte, 20)

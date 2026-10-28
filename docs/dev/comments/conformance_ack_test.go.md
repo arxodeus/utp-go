@@ -23,7 +23,7 @@ Every comment in `conformance_ack_test.go` at e56c9aa, verbatim.
 // if the reference ever changes instead of pinning a stale assumption.
 //
 // We match it. The socket's reader handles each packet as it reads it and
-// sends the acknowledgement once nothing more is waiting (UtpSocket.readLoop,
+// sends the acknowledgement once nothing more is waiting (Socket.readLoop,
 // QueuedReader), which is libutp's embedder loop.
 //
 // This used to be unmatchable, and asserted only "no more acks than data

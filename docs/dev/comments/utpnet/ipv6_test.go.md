@@ -85,7 +85,7 @@ Every comment in `utpnet/ipv6_test.go` at e56c9aa, verbatim.
 ## Line 246 — type hashOnlyPeer
 
 ```
-// hashOnlyPeer is a caller-supplied peer type: not *utp.UdpPeer, so
+// hashOnlyPeer is a caller-supplied peer type: not *utp.UDPPeer, so
 // peerUDPAddr takes its parsing fallback.
 ```
 

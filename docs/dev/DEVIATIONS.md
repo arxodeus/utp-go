@@ -142,7 +142,7 @@ copied. Not measured as an improvement.
   go-libutp, go-utp and rust-utp do, so everything waiting on it fails at
   once. libutp leaves reading to its embedder.
 - *Closing the socket delivers what closed streams still hold:* libutp's
-  embedder must keep its context pumping or lose the tail; `UtpSocket.Close`
+  embedder must keep its context pumping or lose the tail; `Socket.Close`
   waits for it while the peer answers. Closing a stream returns at once in
   both. Measured on this side only: a 512 KB tail over 2 Mbps delivered in
   full, where without the wait it was lost.
@@ -193,8 +193,8 @@ consequence, or equivalent on the wire.
   overhead per byte (48 bytes against 1402, and against 1472); its gain is a
   PPPoE or GRE hop beyond the local interface carried without a probe.
 - *A SYN is answered when an Accept takes it, on a socket with no
-  configuration of its own:* a bare `UtpSocket` whose callers configure each
-  connection in their Accept or AcceptWithCid parks a SYN until that call
+  configuration of its own:* a bare `Socket` whose callers configure each
+  connection in their Accept or AcceptWithCID parks a SYN until that call
   comes, since only it says how to make the connection. With
   `WithAcceptConfig` -- which `utpnet`, and so torrent and the go-libutp
   drop-in, always set -- a SYN is answered as it arrives, as libutp answers
@@ -412,10 +412,10 @@ without one, the SYN waits for the Accept that configures its connection.**
 (`:2616-2621`), and hands it to the embedder's accept callback; what the
 embedder does with it is its own business.
 
-This library's Accept and AcceptWithCid take a `ConnectionConfig` per call,
+This library's Accept and AcceptWithCID take a `ConnectionConfig` per call,
 which libutp has no counterpart for. A socket answering a SYN before its
 Accept would have to make the connection without that call's
-configuration -- and the emulated-network harness races AcceptWithCid
+configuration -- and the emulated-network harness races AcceptWithCID
 against the dial with a per-flow configuration carrying the congestion
 algorithm and the metrics recorder, so a flow whose SYN won the race would
 have run on the wrong controller, unrecorded. So:
@@ -423,8 +423,8 @@ have run on the wrong controller, unrecorded. So:
 - **With `WithAcceptConfig`**, the socket has a configuration of its own, and
   accepts as libutp does: a SYN with no Accept waiting is answered as it
   arrives, made with the socket's configuration, and held until an Accept or
-  an AcceptWithCid naming it takes it (`holdAnswered`). An Accept already
-  waiting, or an AcceptWithCid already registered for the connection, gets
+  an AcceptWithCID naming it takes it (`holdAnswered`). An Accept already
+  waiting, or an AcceptWithCID already registered for the connection, gets
   it as before, with its own configuration. Answered connections count
   against the connection cap, and are held, as libutp's are, until the
   application takes them; one that ends while waiting is dropped.
@@ -440,7 +440,7 @@ Found by go-libutp's own `TestSocketConnsAfterConnClosed`, which dials its
 own socket and accepts afterwards: its dial timed out after 21 s. Pinned by
 `TestSynIsAnsweredWithNoAcceptWaiting` (the dial completes in about a
 millisecond with no Accept, and the connection has the socket's
-configuration), `TestAcceptWithCidTakesAnAnsweredConnection` and
+configuration), `TestAcceptWithCIDTakesAnAnsweredConnection` and
 `utpnet.TestDialCompletesWithNoAcceptWaiting`, which fail with the answering
 removed, and by `TestSynWaitsForAcceptWithoutASocketConfig` for the bare
 socket.
@@ -563,7 +563,7 @@ no receive buffer of its own -- bytes go straight to the embedder's `on_read`
 callback or nowhere -- so the question of what to do with data already held
 never arises there.
 
-It arises here. `UtpStream.CloseRead` discards it: it is owed to a reader that
+It arises here. `Stream.CloseRead` discards it: it is owed to a reader that
 has said it will not come back, and holding it would keep the advertised
 window closed by exactly that much, which is the one thing the feature exists
 to avoid.
@@ -579,7 +579,7 @@ keeps delivering to its application, and offers `utp_shutdown(s, SHUT_WR)`
 reaching the peer's FIN, so a peer closing its sending side took the whole
 connection with it — including whatever it was still trying to send back.
 
-`UtpStream.CloseWrite`, and `utpnet.Conn.CloseWrite` so that anything holding a
+`Stream.CloseWrite`, and `utpnet.Conn.CloseWrite` so that anything holding a
 `net.Conn` can find it by type assertion, now do what `utp_shutdown(SHUT_WR)`
 does: flush, send the FIN, keep reading. And reaching the peer's FIN no longer
 ends the connection — the reader gets its end-of-stream marker and the writer
@@ -600,7 +600,7 @@ its own FIN came back, which is the opposite of the point. `closeRequested`
 here is the same flag.
 
 **The other direction is implemented too**, as of the parity audit:
-`UtpStream.CloseRead` / `utpnet.Conn.CloseRead` are `utp_shutdown(SHUT_RD)`.
+`Stream.CloseRead` / `utpnet.Conn.CloseRead` are `utp_shutdown(SHUT_RD)`.
 See the note above on what happens to data already buffered, which is the only
 place the two implementations can differ, and
 [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) for why acknowledging what you
@@ -627,7 +627,7 @@ The socket here does the same. `udpConn.readBatch` reads every datagram the
 kernel already holds, waiting only for the first (`batch_read_unix.go`; on
 Linux with recvmmsg, up to sixteen a system call, `batch_drain_linux.go`), and
 each connection that received data in the batch acknowledges once the whole
-batch has been handed out (`UtpSocket.eventLoop`, `streamBatchEnd`,
+batch has been handed out (`Socket.eventLoop`, `streamBatchEnd`,
 `connection.flushAck`).
 
 What libutp's rule means on a link: packets arrive spaced, its loop has
@@ -847,14 +847,14 @@ tail is delivered is the embedder's problem: it has to keep the context alive
 and pumping, and destroying the context throws away whatever its sockets still
 held.
 
-`UtpStream.Close` now does the same: it queues the FIN and returns, and the
+`Stream.Close` now does the same: it queues the FIN and returns, and the
 connection goes on delivering in the background. It used to wait, for the
 reason libutp leaves to its embedders -- `Write` returns once the data is in
 the send buffer, so `Write(payload); Close()` followed by the program exiting
 would lose whatever had not gone out yet. That wait has moved to where the
-data is actually lost: `UtpSocket.Close`, this library's equivalent of
+data is actually lost: `Socket.Close`, this library's equivalent of
 destroying the context, first waits for every stream already closed to finish
-(`UtpSocket.awaitLingering`). It waits while the peer is still answering and
+(`Socket.awaitLingering`). It waits while the peer is still answering and
 gives up after two seconds of silence (`closeStallTimeout`, twice libutp's
 1000 ms RTO floor), the bound that used to apply to the stream's Close.
 
@@ -917,7 +917,7 @@ the bug. See [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
 
 ## `WriteV` blocks, and has no 1024-buffer limit
 
-`UtpStream.WriteV` is libutp's `utp_writev` (utp_internal.cpp:3154-3239), with
+`Stream.WriteV` is libutp's `utp_writev` (utp_internal.cpp:3154-3239), with
 two differences.
 
 **It blocks until everything is queued.** libutp's writev is non-blocking: it
@@ -1365,7 +1365,7 @@ hear.
 
 ## ICMP: collecting it is the embedder's job, and so is deciding what is fatal
 
-`UtpSocket.ProcessICMPFragmentation` and `UtpSocket.ProcessICMPError` (and the
+`Socket.ProcessICMPFragmentation` and `Socket.ProcessICMPError` (and the
 `utpnet.Socket` pass-throughs) take the quoted uTP datagram and the address it
 was sent to, exactly as `utp_process_icmp_fragmentation` and
 `utp_process_icmp_error` do. Neither this library nor libutp opens a raw
@@ -1507,7 +1507,7 @@ alone, two runs of three had one; with the whole rule, and with RESETs heeded
 whatever their numbers (KNOWN-LIMITATIONS.md, "What a two-hour soak found"),
 five runs had none -- the two changes were not measured apart there.
 `TestClosedConnectionIdsAreNotReusedAtOnce` and
-`TestDialledConnectionDoesNotSendOnAnIdInUse` each fail without their half.
+`TestDialledConnectionDoesNotSendOnAnIDInUse` each fail without their half.
 
 ## A cut for a loss that was only reordering is undone
 

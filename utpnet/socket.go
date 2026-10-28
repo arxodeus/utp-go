@@ -71,7 +71,7 @@ type Socket struct {
 	// passUDP is what the passthrough writer sends on: udp, kept separate so
 	// nothing else reads it.
 	passUDP udpPacketConn
-	sock    *utp.UtpSocket
+	sock    *utp.Socket
 	inner   *demuxConn
 	logger  *slog.Logger
 
@@ -238,7 +238,7 @@ func newSocket(ctx context.Context, conn udpPacketConn, opts *Options) (*Socket,
 	}
 	sockOpts = append(sockOpts, utp.WithMaxConnections(opts.MaxConnections))
 	sockOpts = append(sockOpts, utp.WithAcceptConfig(s.config.Load))
-	s.sock = utp.WithSocket(ctx, s.inner, logger, sockOpts...)
+	s.sock = utp.NewSocket(ctx, s.inner, logger, sockOpts...)
 
 	s.readLoop.Add(1)
 	go s.run()
@@ -594,7 +594,7 @@ func (s *Socket) DialAddr(ctx context.Context, addr net.Addr) (net.Conn, error) 
 			return nil, err
 		}
 	}
-	stream, err := s.sock.Connect(ctx, utp.NewUdpPeer(udpAddr), s.config.Load())
+	stream, err := s.sock.Connect(ctx, utp.NewUDPPeer(udpAddr), s.config.Load())
 	if err != nil {
 		return nil, err
 	}
@@ -653,7 +653,7 @@ func (s *Socket) ProcessICMPFragmentation(quoted []byte, addr *net.UDPAddr, next
 	if addr == nil {
 		return false
 	}
-	return s.sock.ProcessICMPFragmentation(quoted, utp.NewUdpPeer(addr), nextHopMTU)
+	return s.sock.ProcessICMPFragmentation(quoted, utp.NewUDPPeer(addr), nextHopMTU)
 }
 
 // ProcessICMPError reports an ICMP message that should end a connection:
@@ -665,7 +665,7 @@ func (s *Socket) ProcessICMPError(quoted []byte, addr *net.UDPAddr) bool {
 	if addr == nil {
 		return false
 	}
-	return s.sock.ProcessICMPError(quoted, utp.NewUdpPeer(addr))
+	return s.sock.ProcessICMPError(quoted, utp.NewUDPPeer(addr))
 }
 
 // Addr returns the local address, implementing net.Listener.
@@ -701,7 +701,7 @@ func (s *Socket) SetWriteDeadline(t time.Time) error {
 // port. It is safe to call more than once.
 //
 // Connections already closed are given time to deliver what they hold, as
-// utp.UtpSocket.Close gives them, and the port keeps being read meanwhile,
+// utp.Socket.Close gives them, and the port keeps being read meanwhile,
 // since their acknowledgements arrive on it.
 func (s *Socket) Close() error {
 	s.shutdown(nil)

@@ -46,15 +46,15 @@ func ourSynRetransmissions(t *testing.T, within time.Duration) []time.Duration {
 	defer pinRandom(initiatorConnSeed)()
 
 	conn := newScriptedConn()
-	sock := WithSocket(ctx, conn, conformanceLogger(), WithClock(clk))
+	sock := NewSocket(ctx, conn, conformanceLogger(), withClock(clk))
 	defer sock.Close()
 
 	cfg := NewConnectionConfig()
-	cfg.Clock = clk
-	cfg.NowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
+	cfg.clock = clk
+	cfg.nowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
 
-	cid := NewConnectionId(conn.peer, initiatorConnSeed, initiatorConnSeed+1)
-	go func() { _, _ = sock.ConnectWithCid(ctx, cid, cfg) }()
+	cid := NewConnectionID(conn.peer, initiatorConnSeed, initiatorConnSeed+1)
+	go func() { _, _ = sock.ConnectWithCID(ctx, cid, cfg) }()
 
 	// Four participants register on this clock: the socket's retransmission
 	// wheel and its read and event loops when the socket is built, and this
@@ -179,15 +179,15 @@ func TestVirtualClockHoldsTheConnectionStill(t *testing.T) {
 	defer pinRandom(initiatorConnSeed)()
 
 	conn := newScriptedConn()
-	sock := WithSocket(ctx, conn, conformanceLogger(), WithClock(clk))
+	sock := NewSocket(ctx, conn, conformanceLogger(), withClock(clk))
 	defer sock.Close()
 
 	cfg := NewConnectionConfig()
-	cfg.Clock = clk
-	cfg.NowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
+	cfg.clock = clk
+	cfg.nowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
 
-	cid := NewConnectionId(conn.peer, initiatorConnSeed, initiatorConnSeed+1)
-	go func() { _, _ = sock.ConnectWithCid(ctx, cid, cfg) }()
+	cid := NewConnectionID(conn.peer, initiatorConnSeed, initiatorConnSeed+1)
+	go func() { _, _ = sock.ConnectWithCID(ctx, cid, cfg) }()
 
 	clk.AwaitParticipants(4)
 	waitForEmitted(t, conn, 1)
@@ -230,17 +230,17 @@ func ourReplyInstant(t *testing.T) (time.Duration, []byte) {
 	defer pinRandom(corpusPinnedSeq)()
 
 	conn := newScriptedConn()
-	sock := WithSocket(ctx, conn, conformanceLogger(), WithClock(clk))
+	sock := NewSocket(ctx, conn, conformanceLogger(), withClock(clk))
 	defer sock.Close()
 
 	cfg := NewConnectionConfig()
-	cfg.Clock = clk
-	cfg.NowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
+	cfg.clock = clk
+	cfg.nowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
 
-	cid := NewConnectionId(conn.peer, corpusSynConnID+1, corpusSynConnID)
+	cid := NewConnectionID(conn.peer, corpusSynConnID+1, corpusSynConnID)
 	accepted := make(chan error, 1)
 	go func() {
-		_, err := sock.AcceptWithCid(ctx, cid, cfg)
+		_, err := sock.AcceptWithCID(ctx, cid, cfg)
 		accepted <- err
 	}()
 

@@ -51,7 +51,7 @@ func (c *connection) emitPacket(pkt *packet, dontFragment bool) {
 	if pkt.Header != nil {
 		c.lastAdvertisedWindow = pkt.Header.WndSize
 	}
-	if pkt.Header.PacketType == st_state {
+	if pkt.Header.PacketType == stState {
 		// Kept for the socket to resend after this connection is gone.
 		c.lastStateSent = pkt
 	}
@@ -59,7 +59,7 @@ func (c *connection) emitPacket(pkt *packet, dontFragment bool) {
 		// Send directly on this goroutine, so nothing is in flight between
 		// deciding to send and sending. The event is finished with when out
 		// returns, so one serves every packet.
-		c.outEvent = socketEvent{Type: outgoing, Packet: pkt, ConnectionId: c.cid, DontFragment: dontFragment}
+		c.outEvent = socketEvent{Type: outgoing, Packet: pkt, ConnectionID: c.cid, DontFragment: dontFragment}
 		c.out(&c.outEvent)
 		c.outEvent = socketEvent{}
 		return
@@ -285,12 +285,12 @@ func (c *connection) processWrites(now time.Time) {
 	for _, payload := range payloads {
 		// No selective ack: see statePacket.
 		packetInst := newPacketBuilder(
-			st_data,
+			stData,
 			c.cid.Send,
 			c.nowMicros(),
 			recvWindow,
 			seqNum,
-		).WithPayload(payload).WithTsDiffMicros(uint32(c.peerTsDiff.Microseconds())).WithAckNum(ackNum).Build()
+		).WithPayload(payload).WithTimestampDiffMicros(uint32(c.peerTimestampDiff.Microseconds())).WithAckNum(ackNum).Build()
 
 		c.transmit(packetInst, now, true)
 		seqNum = seqNum + 1 // wrapping add
@@ -353,7 +353,7 @@ const defaultKeepAliveInterval = 29 * time.Second
 func (c *connection) synPacket(seqNum uint16) *packet {
 	nowMicros := int64(c.nowMicros())
 	return newPacketBuilder(
-		st_syn,
+		stSyn,
 		c.cid.Recv,
 		uint32(nowMicros),
 		c.config.WindowSize,
@@ -379,7 +379,7 @@ func (c *connection) transmit(packet *packet, now time.Time, firstTransmission b
 
 	if c.logger.Enabled(baseContext, LevelTrace) {
 		c.logger.Trace("will transmit packet",
-			"cid", packet.Header.ConnectionId,
+			"cid", packet.Header.ConnectionID,
 			"packet.type", packet.Header.PacketType.String(),
 			"packet.seqNum", packet.Header.SeqNum,
 			"packet.ackNum", packet.Header.AckNum,

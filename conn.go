@@ -22,15 +22,15 @@ const (
 
 var (
 	// ErrReset means the peer reset the connection.
-	ErrReset = errors.New("reset")
+	ErrReset = errors.New("utp: connection reset by peer")
 	// ErrTimedOut means the connection was abandoned after repeated
 	// retransmission timeouts, the handshake was not answered, or the idle
 	// timeout expired.
-	ErrTimedOut = errors.New("timed out")
+	ErrTimedOut = errors.New("utp: connection timed out")
 	// ErrConnRefused means an ICMP error arrived for a connection that had
 	// only sent its SYN, so nothing is listening. Otherwise an ICMP error,
 	// like a received ST_RESET, produces ErrReset.
-	ErrConnRefused = errors.New("connection refused")
+	ErrConnRefused = errors.New("utp: connection refused")
 )
 
 type endpointType int
@@ -70,16 +70,16 @@ type connection struct {
 	ctx    context.Context
 	logger *ulogger
 	state  *connState
-	cid    *ConnectionId
+	cid    *ConnectionID
 	config *ConnectionConfig
 	// windowCeiling, when set, replaces config.WindowSize for this
-	// connection (UtpStream.SetWindowSize). config may be shared with other
+	// connection (Stream.SetWindowSize). config may be shared with other
 	// connections, so it is not modified. Guarded by mu.
-	windowCeiling  uint32
-	endpoint       *endpointInfo
-	peerTsDiff     time.Duration
-	peerRecvWindow uint32
-	socketEvents   chan *socketEvent
+	windowCeiling     uint32
+	endpoint          *endpointInfo
+	peerTimestampDiff time.Duration
+	peerRecvWindow    uint32
+	socketEvents      chan *socketEvent
 	// timers is the socket-wide retransmission wheel; timerScope namespaces
 	// this connection's keys within it.
 	timers     *retransmitTimers
@@ -126,7 +126,7 @@ type connection struct {
 	// need to tell the peer what we acknowledged.
 	lastStateSent *packet
 
-	// peerActivity counts packets received from the peer. UtpStream.Close
+	// peerActivity counts packets received from the peer. Stream.Close
 	// reads it without mu to tell a connection still flushing from one
 	// whose peer has stopped answering.
 	peerActivity atomic.Uint64
@@ -261,21 +261,21 @@ type connection struct {
 	// gone, and is read and cleared without mu; asleep is the same under
 	// mu. restClock is nil for a connection that never rests. attached is
 	// set once the socket delivers this connection's packets inline
-	// (UtpSocket.attachInline). wakeFn is wake, bound once.
+	// (Socket.attachInline). wakeFn is wake, bound once.
 	dormant   atomic.Bool
 	asleep    bool
 	restClock funcTimerClock
-	restTimer Timer
+	restTimer clockTimer
 	restAt    time.Time
 	attached  atomic.Bool
 	wakeFn    func()
 	// readsHeld is set while the receive buffer holds bytes the reader's
 	// full queue has no room for. Written under mu, read without it by
-	// UtpStream.notifyRead.
+	// Stream.notifyRead.
 	readsHeld atomic.Bool
 	// stream is the stream this connection belongs to, for passes run off
 	// the event loop. Set at setup.
-	stream *UtpStream
+	stream *Stream
 	// lastActivity is when the connection last heard from the peer or the
 	// application. The idle timer is not reset for each event: when it
 	// fires it re-arms for the remainder, and the connection closes only
@@ -296,10 +296,10 @@ type connection struct {
 	dropUnacked bool
 	// clk is this connection's source of deadlines and timers. Never nil
 	// after newConnection; read it through now, which tolerates a nil clk.
-	clk Clock
+	clk clockSource
 
 	// clock returns the wall clock in the uint32 microseconds uTP puts on
-	// the wire: ConnectionConfig.NowMicros when set, nil otherwise. Read it
+	// the wire: ConnectionConfig.nowMicros when set, nil otherwise. Read it
 	// through nowMicros. Every timestamp and one-way delay goes through that
 	// accessor; scheduling uses clk.
 	clock func() uint32
@@ -365,7 +365,7 @@ type connection struct {
 func newConnection(
 	ctx context.Context,
 	logger *ulogger,
-	cid *ConnectionId,
+	cid *ConnectionID,
 	config *ConnectionConfig,
 	syn *packet,
 	connected chan error,
@@ -375,16 +375,16 @@ func newConnection(
 	timers *retransmitTimers,
 ) *connection {
 	var clock func() uint32
-	clk := RealClock
+	clk := defaultClock
 	if config != nil {
-		clock = config.NowMicros
-		if config.Clock != nil {
-			clk = config.Clock
+		clock = config.nowMicros
+		if config.clock != nil {
+			clk = config.clock
 		}
 	}
 
 	var endpoint *endpointInfo
-	var peerTsDiff time.Duration
+	var peerTimestampDiff time.Duration
 	var peerRecvWindow uint32
 
 	if syn != nil {
@@ -397,7 +397,7 @@ func newConnection(
 
 		// No delay is measured from the SYN, so the SYN-ACK echoes a timestamp
 		// difference of zero, which means "no sample yet".
-		peerTsDiff = 0
+		peerTimestampDiff = 0
 		peerRecvWindow = syn.Header.WndSize
 	} else {
 		synNum := randomUint16()
@@ -406,35 +406,35 @@ func newConnection(
 			SynNum:   synNum,
 			Attempts: 0,
 		}
-		peerTsDiff = 0
+		peerTimestampDiff = 0
 		peerRecvWindow = math.MaxUint32
 	}
 
 	unackTimeoutCh := make(chan *packet, unackTimeoutQueueLen)
 
 	c := &connection{
-		ctx:            ctx,
-		logger:         logger,
-		clk:            clk,
-		clock:          clock,
-		state:          newConnState(connected),
-		cid:            cid,
-		config:         config,
-		endpoint:       endpoint,
-		peerTsDiff:     peerTsDiff,
-		peerRecvWindow: peerRecvWindow,
-		socketEvents:   socketEvents,
-		timers:         timers,
-		timerScope:     timers.newScope(),
-		armed:          make(map[uint16]struct{}),
-		unackTimeoutCh: unackTimeoutCh,
-		kick:           make(chan struct{}, 1),
-		reads:          reads,
-		abandoned:      abandoned,
-		readable:       make(chan struct{}, 3),
-		pendingWrites:  make([]*queuedWrite, 0),
-		writable:       make(chan struct{}, 3),
-		latestTimeout:  nil,
+		ctx:               ctx,
+		logger:            logger,
+		clk:               clk,
+		clock:             clock,
+		state:             newConnState(connected),
+		cid:               cid,
+		config:            config,
+		endpoint:          endpoint,
+		peerTimestampDiff: peerTimestampDiff,
+		peerRecvWindow:    peerRecvWindow,
+		socketEvents:      socketEvents,
+		timers:            timers,
+		timerScope:        timers.newScope(),
+		armed:             make(map[uint16]struct{}),
+		unackTimeoutCh:    unackTimeoutCh,
+		kick:              make(chan struct{}, 1),
+		reads:             reads,
+		abandoned:         abandoned,
+		readable:          make(chan struct{}, 3),
+		pendingWrites:     make([]*queuedWrite, 0),
+		writable:          make(chan struct{}, 3),
+		latestTimeout:     nil,
 		// The ceiling is the largest packet this connection will try, and the
 		// first it sends; a lost probe brings it down. See newMtuSearch.
 		mtu: newMtuSearch(uint32(config.MaxPacketSize), clk.Now()),
@@ -462,9 +462,9 @@ func (c *connection) sampleMetrics(now time.Time, force bool) {
 
 	m := ConnectionMetrics{
 		At:                   now,
-		Cid:                  c.cid,
+		CID:                  c.cid,
 		PeerRecvWindow:       c.peerRecvWindow,
-		PeerTsDiff:           c.peerTsDiff,
+		PeerTimestampDiff:    c.peerTimestampDiff,
 		PacketsSent:          c.packetsSent,
 		BytesSent:            c.bytesSent,
 		PacketsRetransmitted: c.packetsRetransmitted,
@@ -524,12 +524,12 @@ func (c *connection) now() time.Time {
 	return time.Now()
 }
 
-// timeSource returns this connection's Clock, never nil.
-func (c *connection) timeSource() Clock {
+// timeSource returns this connection's clockSource, never nil.
+func (c *connection) timeSource() clockSource {
 	if c.clk != nil {
 		return c.clk
 	}
-	return RealClock
+	return defaultClock
 }
 
 // nowMicros reads this connection's wall clock in the uint32 microseconds uTP

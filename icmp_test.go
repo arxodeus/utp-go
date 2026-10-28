@@ -18,9 +18,9 @@ func icmpQuietLog() *slog.Logger {
 // quotedDatagram builds the bytes an ICMP message would quote: a uTP datagram
 // this side sent, carrying connId. Routers quote the start of the offending
 // datagram, so 20 bytes of header is all a caller can rely on.
-func quotedDatagram(t *testing.T, pktType packetType, connId uint16) []byte {
+func quotedDatagram(t *testing.T, pktType packetType, connID uint16) []byte {
 	t.Helper()
-	p := newPacketBuilder(pktType, connId, uint32(time.Now().UnixMicro()), 1024*1024, 1).Build()
+	p := newPacketBuilder(pktType, connID, uint32(time.Now().UnixMicro()), 1024*1024, 1).Build()
 	encoded := p.Encode()
 	if len(encoded) < minimalHeaderSize {
 		t.Fatalf("encoded packet is %d bytes, shorter than a header", len(encoded))
@@ -33,10 +33,10 @@ func quotedDatagram(t *testing.T, pktType packetType, connId uint16) []byte {
 // initiator's socket, its stream, the acceptor's stream, and the initiator's
 // connection id.
 type icmpPair struct {
-	sa, sb   *UtpSocket
-	client   *UtpStream
-	server   *UtpStream
-	cidA     *ConnectionId
+	sa, sb   *Socket
+	client   *Stream
+	server   *Stream
+	cidA     *ConnectionID
 	peerB    ConnectionPeer
 	metrics  chan ConnectionMetrics
 	shutdown func()
@@ -57,8 +57,8 @@ func newICMPPair(t *testing.T, ctx context.Context) *icmpPair {
 	aAddr := sa.LocalAddr().(*net.UDPAddr)
 	bAddr := sb.LocalAddr().(*net.UDPAddr)
 
-	cidA := NewConnectionId(NewUdpPeer(bAddr), 2000, 2001)
-	cidB := NewConnectionId(NewUdpPeer(aAddr), 2001, 2000)
+	cidA := NewConnectionID(NewUDPPeer(bAddr), 2000, 2001)
+	cidB := NewConnectionID(NewUDPPeer(aAddr), 2001, 2000)
 
 	// The observer runs on the connection's goroutine, so it must not block;
 	// a buffered channel that drops the oldest sample keeps the latest.
@@ -81,14 +81,14 @@ func newICMPPair(t *testing.T, ctx context.Context) *icmpPair {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	var server *UtpStream
+	var server *Stream
 	var serverErr error
 	go func() {
 		defer wg.Done()
-		server, serverErr = sb.AcceptWithCid(ctx, cidB, NewConnectionConfig())
+		server, serverErr = sb.AcceptWithCID(ctx, cidB, NewConnectionConfig())
 	}()
 
-	client, err := sa.ConnectWithCid(ctx, cidA, cfg)
+	client, err := sa.ConnectWithCID(ctx, cidA, cfg)
 	if err != nil {
 		sa.Close()
 		sb.Close()
@@ -105,7 +105,7 @@ func newICMPPair(t *testing.T, ctx context.Context) *icmpPair {
 		sa: sa, sb: sb,
 		client: client, server: server,
 		cidA:    cidA,
-		peerB:   NewUdpPeer(bAddr),
+		peerB:   NewUDPPeer(bAddr),
 		metrics: samples,
 		shutdown: func() {
 			sa.Close()
@@ -154,7 +154,7 @@ func TestProcessICMPFragmentationLowersTheCeiling(t *testing.T) {
 			before, wantCeiling)
 	}
 
-	quoted := quotedDatagram(t, st_data, p.cidA.Send)
+	quoted := quotedDatagram(t, stData, p.cidA.Send)
 	if !p.sa.ProcessICMPFragmentation(quoted, p.peerB, linkMTU) {
 		t.Fatal("ProcessICMPFragmentation did not recognise a datagram this socket's own connection sent")
 	}
@@ -201,7 +201,7 @@ func TestProcessICMPErrorResetsAnEstablishedConnection(t *testing.T) {
 		readErr <- err
 	}()
 
-	quoted := quotedDatagram(t, st_data, p.cidA.Send)
+	quoted := quotedDatagram(t, stData, p.cidA.Send)
 	if !p.sa.ProcessICMPError(quoted, p.peerB) {
 		t.Fatal("ProcessICMPError did not recognise a datagram this socket's own connection sent")
 	}
@@ -237,21 +237,21 @@ func TestProcessICMPErrorRefusesAPendingConnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer silent.Close()
-	peer := NewUdpPeer(silent.LocalAddr().(*net.UDPAddr))
+	peer := NewUDPPeer(silent.LocalAddr().(*net.UDPAddr))
 
 	cfg := NewConnectionConfig()
-	cid := NewConnectionId(peer, 3000, 3001)
+	cid := NewConnectionID(peer, 3000, 3001)
 
 	connectDone := make(chan error, 1)
 	start := time.Now()
 	go func() {
-		_, err := sa.ConnectWithCid(ctx, cid, cfg)
+		_, err := sa.ConnectWithCID(ctx, cid, cfg)
 		connectDone <- err
 	}()
 
 	// A SYN carries the sender's own receive id, so that is what the router
 	// would quote back.
-	quoted := quotedDatagram(t, st_syn, cid.Recv)
+	quoted := quotedDatagram(t, stSyn, cid.Recv)
 
 	// Wait until the connection exists to be found, then report the error.
 	// Retrying keeps the test from depending on how fast Connect gets going.
@@ -292,20 +292,20 @@ func TestProcessICMPIgnoresWhatItCannotMatch(t *testing.T) {
 	p := newICMPPair(t, ctx)
 	defer p.shutdown()
 
-	good := quotedDatagram(t, st_data, p.cidA.Send)
+	good := quotedDatagram(t, stData, p.cidA.Send)
 
 	runt := good[:minimalHeaderSize-1]
 	badVersion := append([]byte(nil), good...)
 	badVersion[0] = (badVersion[0] & 0xF0) | 2
 	badType := append([]byte(nil), good...)
 	badType[0] = 0xF0 | (badType[0] & 0x0F)
-	unknownId := quotedDatagram(t, st_data, p.cidA.Send+64)
+	unknownID := quotedDatagram(t, stData, p.cidA.Send+64)
 
 	otherAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	otherPeer := NewUdpPeer(otherAddr)
+	otherPeer := NewUDPPeer(otherAddr)
 
 	cases := []struct {
 		name   string
@@ -316,7 +316,7 @@ func TestProcessICMPIgnoresWhatItCannotMatch(t *testing.T) {
 		{"empty", nil, p.peerB},
 		{"wrong version", badVersion, p.peerB},
 		{"unknown packet type", badType, p.peerB},
-		{"unknown connection id", unknownId, p.peerB},
+		{"unknown connection id", unknownID, p.peerB},
 		{"right id, wrong peer", good, otherPeer},
 		{"nil peer", good, nil},
 	}
@@ -353,7 +353,7 @@ func TestProcessICMPMatchesAnAcceptedConnection(t *testing.T) {
 	defer p.shutdown()
 
 	// sb accepted, so its send id is cidB.Send, which is cidA.Recv.
-	quoted := quotedDatagram(t, st_data, p.cidA.Recv)
+	quoted := quotedDatagram(t, stData, p.cidA.Recv)
 
 	readErr := make(chan error, 1)
 	go func() {
@@ -363,7 +363,7 @@ func TestProcessICMPMatchesAnAcceptedConnection(t *testing.T) {
 	}()
 
 	aAddr := p.sa.LocalAddr().(*net.UDPAddr)
-	if !p.sb.ProcessICMPError(quoted, NewUdpPeer(aAddr)) {
+	if !p.sb.ProcessICMPError(quoted, NewUDPPeer(aAddr)) {
 		t.Fatal("the acceptor's socket did not match a datagram its own connection sent")
 	}
 

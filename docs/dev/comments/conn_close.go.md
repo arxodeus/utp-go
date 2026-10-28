@@ -256,7 +256,7 @@ Every comment in `conn_close.go` at e56c9aa, verbatim.
 
 ```
 // onCloseRead applies libutp's read_shutdown: from here on, what arrives is
-// acknowledged and dropped rather than delivered. See UtpStream.CloseRead for
+// acknowledged and dropped rather than delivered. See Stream.CloseRead for
 // why the acknowledgement half matters.
 ```
 

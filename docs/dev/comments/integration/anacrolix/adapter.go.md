@@ -2,10 +2,10 @@
 
 Every comment in `integration/anacrolix/adapter.go` at e56c9aa, verbatim.
 
-## Line 11 — type UtpSocket
+## Line 11 — type Socket
 
 ```
-// UtpSocket is the interface github.com/anacrolix/torrent requires of a uTP
+// Socket is the interface github.com/anacrolix/torrent requires of a uTP
 // implementation. It is copied from that package's unexported `utpSocket`
 // (utp.go), which cannot be referred to from outside it.
 //

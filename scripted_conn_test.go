@@ -201,7 +201,7 @@ func describePackets(pkts [][]byte) string {
 			continue
 		}
 		fmt.Fprintf(&b, "\n  [%d] %s conn=%d seq=%d ack=%d wnd=%d body=%d",
-			i, p.Header.PacketType.String(), p.Header.ConnectionId,
+			i, p.Header.PacketType.String(), p.Header.ConnectionID,
 			p.Header.SeqNum, p.Header.AckNum, p.Header.WndSize, len(p.Body))
 		if p.Eack != nil {
 			fmt.Fprintf(&b, " sack=%x", p.Eack.Encode())

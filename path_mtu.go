@@ -42,12 +42,12 @@ func udpAddrForPeer(peer ConnectionPeer) (*net.UDPAddr, bool) {
 	switch p := peer.(type) {
 	case nil:
 		return nil, false
-	case *ConnectionId:
+	case *ConnectionID:
 		if p.Peer == nil {
 			return nil, false
 		}
 		return udpAddrForPeer(p.Peer)
-	case *UdpPeer:
+	case *UDPPeer:
 		if p.addr == nil {
 			return nil, false
 		}

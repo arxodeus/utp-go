@@ -98,7 +98,7 @@ func (c *connection) processReads() {
 	}
 	// Bytes waiting for a reader with a full queue wait until it makes
 	// room; only then does a read reopen the receive window. See
-	// UtpStream.notifyRead.
+	// Stream.notifyRead.
 	c.readsHeld.Store(recvBuf != nil && recvBuf.Readable() > 0)
 
 	c.onReadDrained()
@@ -147,7 +147,7 @@ func (c *connection) onReadDrained() {
 // Unlike processReads it waits for room in the read queue, since anything
 // not delivered now is lost. The wait ends when the connection's context
 // ends or the consumer closes the stream: a consumer that closed without
-// reading is not owed the bytes, and UtpStream.Close is itself waiting for
+// reading is not owed the bytes, and Stream.Close is itself waiting for
 // this goroutine.
 func (c *connection) drainReadsForTeardown() {
 	recvBuf := c.state.RecvBuf
@@ -191,7 +191,7 @@ func (c *connection) deliverTerminalRead() {
 	// reader learns that the stream ended.
 	c.terminalErr.Store(&terminalError{err: err})
 
-	// Do not block the event loop here either: UtpStream.Close waits for
+	// Do not block the event loop here either: Stream.Close waits for
 	// this goroutine, and only the reader drains c.reads. If there is no
 	// room the marker is not sent; closing c.reads when the loop exits
 	// signals the end just as well, with the error in terminalErr.

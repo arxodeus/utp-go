@@ -134,10 +134,10 @@ func TestCloseWriteDeliversWhatThePeerSendsAfterIt(t *testing.T) {
 		}
 	}()
 
-	sock := utp.WithSocket(ctx, ours, quiet())
+	sock := utp.NewSocket(ctx, ours, quiet())
 	defer sock.Close()
-	cid := utp.NewConnectionId(theirs.Addr(), connSeed, connSeed+1)
-	stream, err := sock.ConnectWithCid(ctx, cid, utp.NewConnectionConfig())
+	cid := utp.NewConnectionID(theirs.Addr(), connSeed, connSeed+1)
+	stream, err := sock.ConnectWithCID(ctx, cid, utp.NewConnectionConfig())
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

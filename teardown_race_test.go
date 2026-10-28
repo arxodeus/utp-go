@@ -81,8 +81,8 @@ func TestTeardownRace(t *testing.T) {
 			mode := i % 4
 			recv := uint16(3000 + cycle*conns*2 + i*2)
 			send := recv + 1
-			cidClient := NewConnectionId(NewUdpPeer(serverAddr), recv, send)
-			cidServer := NewConnectionId(NewUdpPeer(clientAddr), send, recv)
+			cidClient := NewConnectionID(NewUDPPeer(serverAddr), recv, send)
+			cidServer := NewConnectionID(NewUDPPeer(clientAddr), send, recv)
 
 			// Each connection gets its own context so one can be canceled
 			// mid-flight without disturbing the others.
@@ -91,7 +91,7 @@ func TestTeardownRace(t *testing.T) {
 			wg.Add(2)
 			go func(mode int) {
 				defer wg.Done()
-				stream, err := server.AcceptWithCid(connCtx, cidServer, cfg())
+				stream, err := server.AcceptWithCID(connCtx, cidServer, cfg())
 				if err != nil {
 					return
 				}
@@ -116,7 +116,7 @@ func TestTeardownRace(t *testing.T) {
 			go func(mode int, cancelConn context.CancelFunc) {
 				defer wg.Done()
 				defer cancelConn()
-				stream, err := client.ConnectWithCid(connCtx, cidClient, cfg())
+				stream, err := client.ConnectWithCID(connCtx, cidClient, cfg())
 				if err != nil {
 					return
 				}

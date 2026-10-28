@@ -16,14 +16,14 @@ import (
 // the acknowledgement number; only delivery is skipped.
 
 func TestDecoderAcceptsZeroLengthData(t *testing.T) {
-	pkt := newPacketBuilder(st_data, 4242, 12345, 100_000, 7).
+	pkt := newPacketBuilder(stData, 4242, 12345, 100_000, 7).
 		WithAckNum(3).
 		Build()
 
 	encoded := pkt.Encode()
 	decoded, err := decodePacket(encoded, false)
 	require.NoError(t, err, "a zero-length ST_DATA must decode; libutp accepts one")
-	require.Equal(t, st_data, decoded.Header.PacketType)
+	require.Equal(t, stData, decoded.Header.PacketType)
 	require.Equal(t, uint16(7), decoded.Header.SeqNum)
 	require.Empty(t, decoded.Body, "payload should be empty")
 }
@@ -36,9 +36,9 @@ func TestZeroLengthDataAdvancesTheAckNumber(t *testing.T) {
 	congestionCtrl := newDefaultController(fromConnConfig(conn.config))
 	conn.state = &connState{
 		stateType:   connConnected,
-		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
+		SendBuf:     newSendBuffer(testBufferSize),
 		SentPackets: newSentPacketsWithoutLogger(synAck, congestionCtrl),
-		RecvBuf:     newReceiveBuffer(TEST_BUFFER_SIZE, syn),
+		RecvBuf:     newReceiveBuffer(testBufferSize, syn),
 	}
 
 	before := conn.state.RecvBuf.AckNum()
@@ -72,7 +72,7 @@ func TestSynRetransmissionBackoffDoubles(t *testing.T) {
 	conn := newRecordingConn()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	sock := WithSocket(ctx, conn, testSocketLogger())
+	sock := NewSocket(ctx, conn, testSocketLogger())
 	defer sock.Close()
 
 	cfg := NewConnectionConfig()
@@ -81,17 +81,17 @@ func TestSynRetransmissionBackoffDoubles(t *testing.T) {
 	cfg.MaxConnAttempts = 4
 
 	// Connect to a peer that never answers, so every SYN times out.
-	cid := NewConnectionId(&testPeer{name: "silent"}, 200, 201)
+	cid := NewConnectionID(&testPeer{name: "silent"}, 200, 201)
 	connectDone := make(chan struct{})
 	go func() {
 		defer close(connectDone)
-		_, _ = sock.ConnectWithCid(ctx, cid, cfg)
+		_, _ = sock.ConnectWithCID(ctx, cid, cfg)
 	}()
 
 	// Four attempts at 200/400/800ms is 1.4s of backoff; allow generously.
-	waitFor(t, 8*time.Second, func() bool { return conn.countType(st_syn) >= cfg.MaxConnAttempts })
+	waitFor(t, 8*time.Second, func() bool { return conn.countType(stSyn) >= cfg.MaxConnAttempts })
 
-	stamps := conn.stampsOfType(st_syn)
+	stamps := conn.stampsOfType(stSyn)
 	t.Logf("SYN transmissions at %v", relativeStamps(stamps))
 	require.GreaterOrEqual(t, len(stamps), 4,
 		"expected MaxConnAttempts SYN transmissions")
@@ -122,7 +122,7 @@ func TestConnectGivesUpAfterMaxAttempts(t *testing.T) {
 	conn := newRecordingConn()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	sock := WithSocket(ctx, conn, testSocketLogger())
+	sock := NewSocket(ctx, conn, testSocketLogger())
 	defer sock.Close()
 
 	cfg := NewConnectionConfig()
@@ -132,10 +132,10 @@ func TestConnectGivesUpAfterMaxAttempts(t *testing.T) {
 	require.Equal(t, 3, cfg.MaxConnAttempts,
 		"default should match libutp's three SYN transmissions")
 
-	cid := NewConnectionId(&testPeer{name: "silent"}, 300, 301)
+	cid := NewConnectionID(&testPeer{name: "silent"}, 300, 301)
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := sock.ConnectWithCid(ctx, cid, cfg)
+		_, err := sock.ConnectWithCID(ctx, cid, cfg)
 		errCh <- err
 	}()
 
@@ -147,7 +147,7 @@ func TestConnectGivesUpAfterMaxAttempts(t *testing.T) {
 		t.Fatal("connect never gave up on a silent peer")
 	}
 
-	require.LessOrEqual(t, conn.countType(st_syn), cfg.MaxConnAttempts,
+	require.LessOrEqual(t, conn.countType(stSyn), cfg.MaxConnAttempts,
 		"sent more SYNs than MaxConnAttempts allows")
 }
 

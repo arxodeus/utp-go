@@ -90,7 +90,7 @@ type Summary struct {
 	// RTTMin -- the queue this flow actually left standing on the path.
 	//
 	// This exists because QueueingDelay below cannot be trusted for that
-	// question. QueueingDelay is `PeerTsDiff - BaseDelay`, and BaseDelay is
+	// question. QueueingDelay is `PeerTimestampDiff - BaseDelay`, and BaseDelay is
 	// the *controller's own estimate* of the empty path. A delay-based
 	// controller whose base-delay estimate has drifted upwards -- which is
 	// precisely the failure LEDBAT++ exists to fix -- reports a small

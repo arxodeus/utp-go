@@ -41,16 +41,16 @@ Every comment in `socket_accept.go` at e56c9aa, verbatim.
 ## Line 83 — func (*acceptRequest).wait
 
 ```
-// wait is what Accept and AcceptWithCid do once the request is queued.
+// wait is what Accept and AcceptWithCID do once the request is queued.
 //
 // It ends with the socket as well as with the caller. It used to watch only
 // the caller's context, so an Accept on context.Background() outlived the
 // socket it was queued on: the dispatcher that would have answered it was
-// gone, and so, for AcceptWithCid, was the expiry wheel that would have timed
+// gone, and so, for AcceptWithCID, was the expiry wheel that would have timed
 // it out. From the release review of 9c44c4f (R7).
 ```
 
-## Line 123 — func (*UtpSocket).eventLoop
+## Line 123 — func (*Socket).eventLoop
 
 ```
 // Receive without acting, so that a virtual clock can be told the
@@ -58,14 +58,14 @@ Every comment in `socket_accept.go` at e56c9aa, verbatim.
 		// connection. See idleBarrier.
 ```
 
-## Line 134 — func (*UtpSocket).eventLoop
+## Line 134 — func (*Socket).eventLoop
 
 ```
 // Every connection's context ends with this one, and a resting
 			// connection has no loop to see it.
 ```
 
-## Line 142 — func (*UtpSocket).eventLoop
+## Line 142 — func (*Socket).eventLoop
 
 ```
 // An Accept changes the routing tables the reader consults, so it is
@@ -73,7 +73,7 @@ Every comment in `socket_accept.go` at e56c9aa, verbatim.
 		// this loop: the reader routes them itself (dispatch).
 ```
 
-## Line 155 — func (*UtpSocket).holdAnswered
+## Line 155 — func (*Socket).holdAnswered
 
 ```
 // holdAnswered keeps a connection the socket answered with nobody waiting,
@@ -82,7 +82,7 @@ Every comment in `socket_accept.go` at e56c9aa, verbatim.
 // connection, and any that comes later looks here first.
 ```
 
-## Line 160 — func (*UtpSocket).holdAnswered
+## Line 160 — func (*Socket).holdAnswered
 
 ```
 // Those that ended while waiting -- reset, timed out, closed by the
@@ -90,7 +90,7 @@ Every comment in `socket_accept.go` at e56c9aa, verbatim.
 	// here they would pile up behind a socket nobody accepts on.
 ```
 
-## Line 175 — func (*UtpSocket).takeAnswered
+## Line 175 — func (*Socket).takeAnswered
 
 ```
 // takeAnswered removes and returns the oldest answered connection still
@@ -98,14 +98,14 @@ Every comment in `socket_accept.go` at e56c9aa, verbatim.
 // Called with dispatchMu held.
 ```
 
-## Line 223 — func (*UtpSocket).handleNewAcceptEvent
+## Line 223 — func (*Socket).handleNewAcceptEvent
 
 ```
 // A connection already answered satisfies this immediately, and so does
 	// a SYN that already arrived.
 ```
 
-## Line 233 — func (*UtpSocket).handleNewAcceptEvent
+## Line 233 — func (*Socket).handleNewAcceptEvent
 
 ```
 // Otherwise wait for one, so that the ordinary server pattern -- call
@@ -123,27 +123,27 @@ Every comment in `socket_accept.go` at e56c9aa, verbatim.
 // abandoned reports whether the caller has stopped waiting for this request.
 ```
 
-## Line 260 — func (*UtpSocket).takePendingAccept
+## Line 260 — func (*Socket).takePendingAccept
 
 ```
 // takePendingAccept returns the oldest waiting cid-less Accept whose caller
 // has not already given up, or nil.
 ```
 
-## Line 266 — func (*UtpSocket).takePendingAccept
+## Line 266 — func (*Socket).takePendingAccept
 
 ```
 // Skip callers that have already returned.
 ```
 
-## Line 318 — func (*UtpSocket).AcceptBacklog
+## Line 318 — func (*Socket).AcceptBacklog
 
 ```
 // AcceptBacklog reports how many incoming connections are waiting for an
 // Accept to take them.
 ```
 
-## Line 358 — func (*UtpSocket).selectAcceptHelper
+## Line 358 — func (*Socket).selectAcceptHelper
 
 ```
 // selectAcceptHelper makes the connection for an incoming SYN and hands it to

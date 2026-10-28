@@ -225,8 +225,8 @@ func TestInteropConcurrentGoInitiators(t *testing.T) {
 			// packet back to its connection, and reusing one across peers is
 			// exactly the allocation bug this looks for.
 			base := uint16(5000 + index*2)
-			cid := utp.NewConnectionId(utp.NewUdpPeer(loopback(p.Port())), base, base+1)
-			stream, err := sock.ConnectWithCid(ctx, cid, utp.NewConnectionConfig())
+			cid := utp.NewConnectionID(utp.NewUDPPeer(loopback(p.Port())), base, base+1)
+			stream, err := sock.ConnectWithCID(ctx, cid, utp.NewConnectionConfig())
 			if err != nil {
 				errs <- fmt.Errorf("peer %d: our connect failed: %w", index, err)
 				return

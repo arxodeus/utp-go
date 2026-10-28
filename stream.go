@@ -14,16 +14,16 @@ import (
 var (
 	// ErrNotConnected is returned by Write after CloseWrite or Close, and
 	// for a connection that ended without an error of its own.
-	ErrNotConnected = errors.New("not connected")
+	ErrNotConnected = errors.New("utp: not connected")
 	// ErrReadClosed is returned by Read after CloseRead. The connection is
 	// still alive and may still send; this end has stopped taking delivery.
-	ErrReadClosed = errors.New("read side closed")
+	ErrReadClosed = errors.New("utp: read side closed")
 	// ErrSocketClosed is reported by a connection whose socket has been
 	// closed. It wraps net.ErrClosed.
 	ErrSocketClosed = fmt.Errorf("utp: socket closed: %w", net.ErrClosed)
 )
 
-// UtpStream is one uTP connection, as returned by UtpSocket's Connect and
+// Stream is one uTP connection, as returned by Socket's Connect and
 // Accept methods.
 //
 // It lives as long as the socket, not the call that created it: canceling a
@@ -31,16 +31,16 @@ var (
 // and Write each take a context that governs that one call. CloseWrite sends
 // a FIN once what is written has been sent, CloseRead stops delivery, and
 // Close does both and returns at once while the connection delivers what it
-// holds in the background; UtpSocket.Close waits for that while the peer
+// holds in the background; Socket.Close waits for that while the peer
 // still answers. Done is closed when the connection has ended.
-type UtpStream struct {
+type Stream struct {
 	// socketCtx is the context of the socket the stream runs on; streamCtx
 	// is the stream's own, which ends with it. See endWait.
 	socketCtx    context.Context
 	streamCtx    context.Context
 	streamCancel context.CancelFunc
 	logger       *ulogger
-	cid          *ConnectionId
+	cid          *ConnectionID
 	reads        chan *readOrWriteResult
 	writes       chan *queuedWrite
 	streamEvents chan *streamEvent
@@ -67,8 +67,8 @@ type UtpStream struct {
 	connHandle *sync.WaitGroup
 	conn       *connection
 	// linger, set by the socket that created this stream, takes it over at
-	// Close. See UtpSocket.linger.
-	linger    func(*UtpStream)
+	// Close. See Socket.linger.
+	linger    func(*Stream)
 	closeOnce sync.Once
 	// abandoned is closed by Close, telling the connection that whatever is
 	// still buffered for this reader is owed to nobody.
@@ -98,7 +98,7 @@ const writeQueueLen = 16
 func newUtpStream(
 	ctx context.Context,
 	logger *ulogger,
-	cid *ConnectionId,
+	cid *ConnectionID,
 	config *ConnectionConfig,
 	syn *packet,
 	socketEvents chan *socketEvent,
@@ -106,7 +106,7 @@ func newUtpStream(
 	streamEvents chan *streamEvent,
 	connected chan error,
 	timers *retransmitTimers,
-) *UtpStream {
+) *Stream {
 	if logger.Enabled(baseContext, LevelTrace) {
 		logger.Trace("new a utp stream", "dst.peer", cid.Peer, "dst.send", cid.Send, "dst.recv", cid.Recv)
 	}
@@ -114,7 +114,7 @@ func newUtpStream(
 	connHandle.Add(1)
 	streamCtx, cancel := context.WithCancel(ctx)
 
-	utpStream := &UtpStream{
+	utpStream := &Stream{
 		socketCtx:    ctx,
 		streamCtx:    streamCtx,
 		streamCancel: cancel,
@@ -146,7 +146,7 @@ func newUtpStream(
 // times out or is canceled must say so explicitly, or the attempt would keep
 // retrying its SYN. Canceling the stream's context is immediate; Close would
 // wait for the event loop, which keeps retrying until MaxConnAttempts.
-func (s *UtpStream) abandonDial() {
+func (s *Stream) abandonDial() {
 	s.shutdown.Store(true)
 	s.streamCancel()
 	// Nothing watches the context of a resting connection. A dial is never
@@ -154,7 +154,7 @@ func (s *UtpStream) abandonDial() {
 	s.wakeLoop()
 }
 
-func (s *UtpStream) notifyRead() {
+func (s *Stream) notifyRead() {
 	if s.conn == nil {
 		return
 	}
@@ -174,7 +174,7 @@ func (s *UtpStream) notifyRead() {
 
 // wakeLoop starts the connection's event loop if it is resting, for an event
 // just queued for it. See dormant.go.
-func (s *UtpStream) wakeLoop() {
+func (s *Stream) wakeLoop() {
 	if s.conn != nil {
 		s.conn.wake()
 	}
@@ -183,7 +183,7 @@ func (s *UtpStream) wakeLoop() {
 // terminalErr returns the error the connection recorded when the stream
 // ended, for a reader that learned of the end from the read channel closing
 // rather than from the end-of-stream marker. A clean end returns nil.
-func (s *UtpStream) terminalErr() error {
+func (s *Stream) terminalErr() error {
 	if s.conn == nil {
 		return nil
 	}
@@ -197,7 +197,7 @@ func (s *UtpStream) terminalErr() error {
 // nil if it is still running or ended without one. The reader's
 // ErrReadClosed for a clean but incomplete end (readEndErr) is not an error
 // here.
-func (s *UtpStream) endedErr() error {
+func (s *Stream) endedErr() error {
 	select {
 	case <-s.ended:
 	default:
@@ -214,7 +214,7 @@ func (s *UtpStream) endedErr() error {
 
 // writeErr returns what a write is told once the connection has ended: the
 // error it ended with, or ErrNotConnected if none.
-func (s *UtpStream) writeErr() error {
+func (s *Stream) writeErr() error {
 	if err := s.endedErr(); err != nil {
 		return err
 	}
@@ -227,7 +227,7 @@ func (s *UtpStream) writeErr() error {
 // returns ctx's error if that comes first. This is what makes a connection
 // whose socket was closed report ErrSocketClosed consistently, after any
 // data that had already arrived.
-func (s *UtpStream) endWait(ctx context.Context) error {
+func (s *Stream) endWait(ctx context.Context) error {
 	select {
 	case <-s.ended:
 		return nil
@@ -238,7 +238,7 @@ func (s *UtpStream) endWait(ctx context.Context) error {
 
 // shutErr returns what a write is told on a stream already shut down: why its
 // connection ended, if it is ending, or ErrNotConnected after Close.
-func (s *UtpStream) shutErr(ctx context.Context) error {
+func (s *Stream) shutErr(ctx context.Context) error {
 	if s.streamCtx.Err() == nil {
 		return ErrNotConnected
 	}
@@ -248,12 +248,12 @@ func (s *UtpStream) shutErr(ctx context.Context) error {
 	return s.writeErr()
 }
 
-// Cid returns the stream's connection id.
-func (s *UtpStream) Cid() *ConnectionId {
+// CID returns the stream's connection id.
+func (s *Stream) CID() *ConnectionID {
 	return s.cid
 }
 
-func (s *UtpStream) start() {
+func (s *Stream) start() {
 	if err, final := s.conn.eventLoop(s); final {
 		s.conn.finishLoop()
 		s.loopEnded(err)
@@ -262,7 +262,7 @@ func (s *UtpStream) start() {
 
 // loopEnded runs when the connection's event loop ends, on whichever
 // goroutine ran it last.
-func (s *UtpStream) loopEnded(err error) {
+func (s *Stream) loopEnded(err error) {
 	if err != nil {
 		s.logger.Error("utp stream evenLoop has error and return", "err", err,
 			"cid.send", s.cid.Send, "cid.recv", s.cid.Recv)
@@ -274,7 +274,7 @@ func (s *UtpStream) loopEnded(err error) {
 // ReadToEOF reads until the peer ends the stream, replacing the contents of
 // *buf. It reuses the capacity *buf already has, so a caller that knows how
 // much is coming can size it once.
-func (s *UtpStream) ReadToEOF(ctx context.Context, buf *[]byte) (int, error) {
+func (s *Stream) ReadToEOF(ctx context.Context, buf *[]byte) (int, error) {
 	if s.readClosed.Load() {
 		return 0, ErrReadClosed
 	}
@@ -325,7 +325,7 @@ func (s *UtpStream) ReadToEOF(ctx context.Context, buf *[]byte) (int, error) {
 //
 // Do not mix Read and ReadToEOF on the same stream; each would consume
 // chunks the other expected.
-func (s *UtpStream) Read(ctx context.Context, buf []byte) (int, error) {
+func (s *Stream) Read(ctx context.Context, buf []byte) (int, error) {
 	if len(buf) == 0 {
 		return 0, nil
 	}
@@ -400,7 +400,7 @@ func (s *UtpStream) Read(ctx context.Context, buf []byte) (int, error) {
 //
 // After CloseWrite or Close it returns ErrNotConnected, and once the
 // connection has ended, the reason it ended.
-func (s *UtpStream) Write(ctx context.Context, buf []byte) (int, error) {
+func (s *Stream) Write(ctx context.Context, buf []byte) (int, error) {
 	if s.writeClosed.Load() {
 		return 0, ErrNotConnected
 	}
@@ -429,7 +429,7 @@ func (s *UtpStream) Write(ctx context.Context, buf []byte) (int, error) {
 
 // lockWrite waits for the preceding write to finish, for as long as ctx, the
 // stream and its write side allow.
-func (s *UtpStream) lockWrite(ctx context.Context) error {
+func (s *Stream) lockWrite(ctx context.Context) error {
 	select {
 	case s.writeSem <- struct{}{}:
 	default:
@@ -453,7 +453,7 @@ func (s *UtpStream) lockWrite(ctx context.Context) error {
 	return nil
 }
 
-func (s *UtpStream) unlockWrite() { <-s.writeSem }
+func (s *Stream) unlockWrite() { <-s.writeSem }
 
 // lockRead waits for the reads ahead of this one under its own context, as
 // lockWrite does for writes. A waiting read gives up if the read side
@@ -461,7 +461,7 @@ func (s *UtpStream) unlockWrite() { <-s.writeSem }
 //
 // It uses a flag and a channel created only for a read that must wait,
 // rather than a semaphore, so an idle stream carries no channel.
-func (s *UtpStream) lockRead(ctx context.Context) error {
+func (s *Stream) lockRead(ctx context.Context) error {
 	for {
 		s.readShutMu.Lock()
 		if !s.readBusy {
@@ -490,7 +490,7 @@ func (s *UtpStream) lockRead(ctx context.Context) error {
 }
 
 // unlockRead ends a read, and lets the reads waiting for it try again.
-func (s *UtpStream) unlockRead() {
+func (s *Stream) unlockRead() {
 	s.readShutMu.Lock()
 	s.readBusy = false
 	if s.readWake != nil {
@@ -502,7 +502,7 @@ func (s *UtpStream) unlockRead() {
 
 // writeChunk returns the most a write copies at once: the send buffer's
 // size, which is the most the connection can take from it at once.
-func (s *UtpStream) writeChunk() int {
+func (s *Stream) writeChunk() int {
 	if n := s.conn.config.BufferSize; n > 0 {
 		return n
 	}
@@ -513,7 +513,7 @@ func (s *UtpStream) writeChunk() int {
 // from the caller's buffers once the previous one has been taken. A write
 // holds at most one send buffer's worth beyond the send buffer itself.
 // lockWrite keeps the chunks of one write together.
-func (s *UtpStream) writeChunked(ctx context.Context, total int, fill func(dst []byte, off int)) (int, error) {
+func (s *Stream) writeChunked(ctx context.Context, total int, fill func(dst []byte, off int)) (int, error) {
 	if err := s.lockWrite(ctx); err != nil {
 		return 0, err
 	}
@@ -539,7 +539,7 @@ func (s *UtpStream) writeChunked(ctx context.Context, total int, fill func(dst [
 // joining them first, saving a copy. It returns the number of bytes written,
 // which on success is their sum, and otherwise behaves like Write. Empty and
 // nil buffers are skipped; a call with nothing to write returns 0, nil.
-func (s *UtpStream) WriteV(ctx context.Context, bufs [][]byte) (int, error) {
+func (s *Stream) WriteV(ctx context.Context, bufs [][]byte) (int, error) {
 	if s.writeClosed.Load() {
 		return 0, ErrNotConnected
 	}
@@ -577,7 +577,7 @@ func (s *UtpStream) WriteV(ctx context.Context, bufs [][]byte) (int, error) {
 // it to be accepted. Shared by Write and WriteV. It also waits on the
 // connection's end, so a write to a connection that has ended returns the
 // reason at once.
-func (s *UtpStream) writeQueued(ctx context.Context, queued []byte, resCh chan *readOrWriteResult) (int, error) {
+func (s *Stream) writeQueued(ctx context.Context, queued []byte, resCh chan *readOrWriteResult) (int, error) {
 	write := &queuedWrite{data: queued, resultCh: resCh}
 	select {
 	case s.writes <- write:
@@ -645,7 +645,7 @@ func (s *UtpStream) writeQueued(ctx context.Context, queued []byte, resCh chan *
 //
 // Afterwards Write returns ErrNotConnected. Read is unaffected and returns
 // data until the peer closes too. Close ends the connection.
-func (s *UtpStream) CloseWrite() error {
+func (s *Stream) CloseWrite() error {
 	if s.shutdown.Load() {
 		return ErrNotConnected
 	}
@@ -671,7 +671,7 @@ func (s *UtpStream) CloseWrite() error {
 //
 // Afterwards Read returns ErrReadClosed. Write is unaffected. It is named
 // after net.TCPConn.CloseRead.
-func (s *UtpStream) CloseRead() error {
+func (s *Stream) CloseRead() error {
 	if s.shutdown.Load() {
 		return ErrNotConnected
 	}
@@ -695,7 +695,7 @@ func (s *UtpStream) CloseRead() error {
 
 // readClosedSignal returns a channel closed once CloseRead has been called,
 // so a Read already waiting returns.
-func (s *UtpStream) readClosedSignal() <-chan struct{} {
+func (s *Stream) readClosedSignal() <-chan struct{} {
 	s.readShutMu.Lock()
 	defer s.readShutMu.Unlock()
 	if s.readShutCh == nil {
@@ -710,7 +710,7 @@ func (s *UtpStream) readClosedSignal() <-chan struct{} {
 // Done returns a channel closed once the connection has ended: its close
 // handshake finished or gave up, it was reset or timed out, or the socket
 // closed. Data delivered before then can still be read.
-func (s *UtpStream) Done() <-chan struct{} {
+func (s *Stream) Done() <-chan struct{} {
 	return s.ended
 }
 
@@ -718,21 +718,21 @@ func (s *UtpStream) Done() <-chan struct{} {
 // in bytes, overriding ConnectionConfig.WindowSize. It takes effect at once:
 // nothing more is sent beyond it, and a larger window is cut to it. Zero
 // restores the default.
-func (s *UtpStream) SetWindowSize(bytes uint32) {
+func (s *Stream) SetWindowSize(bytes uint32) {
 	s.conn.setWindowCeiling(bytes)
 }
 
 // WindowSize returns the upper bound set by SetWindowSize or the
 // connection's config.
-func (s *UtpStream) WindowSize() uint32 {
+func (s *Stream) WindowSize() uint32 {
 	return s.conn.windowCeilingSetting()
 }
 
 // Close ends the stream and returns at once. What has been written continues
 // to be delivered in the background, followed by the FIN, until the peer has
-// acknowledged everything or stopped answering; UtpSocket.Close waits for
+// acknowledged everything or stopped answering; Socket.Close waits for
 // that.
-func (s *UtpStream) Close() {
+func (s *Stream) Close() error {
 	s.closeOnce.Do(func() {
 		if s.logger.Enabled(baseContext, LevelTrace) {
 			s.logger.Trace("call close utp stream", "dst.Peer", s.cid.Peer, "dst.send", s.cid.Send, "dst.recv", s.cid.Recv)
@@ -750,7 +750,7 @@ func (s *UtpStream) Close() {
 		}
 		s.wakeLoop()
 		// Return and let the connection finish in the background. Closing
-		// the socket waits for it (UtpSocket.awaitLingering), so a program
+		// the socket waits for it (Socket.awaitLingering), so a program
 		// that closes the socket before exiting loses nothing in flight.
 		if s.linger != nil {
 			s.linger(s)
@@ -761,6 +761,7 @@ func (s *UtpStream) Close() {
 			s.streamCancel()
 		}()
 	})
+	return nil
 }
 
 // closeStallTimeout is how long Close keeps waiting for a connection that
@@ -779,7 +780,7 @@ const closeStallPollInterval = 20 * time.Millisecond
 // the loop finished. Giving up stops only the waiting: the event loop keeps
 // retransmitting and exits on its own, so the caller must not cancel the
 // stream's context on this path.
-func (s *UtpStream) waitForFlush() bool {
+func (s *Stream) waitForFlush() bool {
 	done := make(chan struct{})
 	go func() {
 		s.connHandle.Wait()
@@ -813,7 +814,7 @@ func (s *UtpStream) waitForFlush() bool {
 
 // peerActivity reports how many packets the connection has received, or zero
 // if there is no connection to ask.
-func (s *UtpStream) peerActivity() uint64 {
+func (s *Stream) peerActivity() uint64 {
 	if s.conn == nil {
 		return 0
 	}

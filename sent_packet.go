@@ -13,10 +13,10 @@ var lostFreeList = btree.NewFreeListG[uint16](btree.DefaultFreeListSize)
 
 const lossThreshold = 3
 
-var errInvalidAckNum = errors.New("invalid ack number")
-var errNoneAckNum = errors.New("none ack number")
-var errCannotFindLostPacket = errors.New("cannot mark unsent packet lost")
-var errSentPacketMarkLost = errors.New("lost packet was previously sent")
+var errInvalidAckNum = errors.New("utp: invalid ack number")
+var errNoneAckNum = errors.New("utp: none ack number")
+var errCannotFindLostPacket = errors.New("utp: cannot mark unsent packet lost")
+var errSentPacketMarkLost = errors.New("utp: lost packet was previously sent")
 
 type lostPacket struct {
 	SeqNum     uint16

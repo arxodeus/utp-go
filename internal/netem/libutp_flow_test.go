@@ -268,7 +268,7 @@ func libutpToGo(ctx context.Context, n *Network, from, to *Endpoint, payload []b
 
 	// Our end reads in batches, as libutp's does here (Inject then IssueAcks
 	// above) and as both do from a real socket.
-	sock := utp.WithSocket(ctx, batchedReader{to}, flowLogger())
+	sock := utp.NewSocket(ctx, batchedReader{to}, flowLogger())
 	defer func() {
 		lastReceiverResets.Store(sock.PacketsResetSent())
 		sock.Close()
@@ -276,7 +276,7 @@ func libutpToGo(ctx context.Context, n *Network, from, to *Endpoint, payload []b
 
 	// A libutp initiator puts its recv_id in the SYN, so our acceptor mirrors
 	// it: send on what arrived, receive on one more.
-	cid := utp.NewConnectionId(from.Addr(), uint16(connSeed)+1, uint16(connSeed))
+	cid := utp.NewConnectionID(from.Addr(), uint16(connSeed)+1, uint16(connSeed))
 
 	var (
 		wg       sync.WaitGroup
@@ -287,7 +287,7 @@ func libutpToGo(ctx context.Context, n *Network, from, to *Endpoint, payload []b
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		stream, err := sock.AcceptWithCid(ctx, cid, utp.NewConnectionConfig())
+		stream, err := sock.AcceptWithCID(ctx, cid, utp.NewConnectionConfig())
 		if err != nil {
 			acceptEr = fmt.Errorf("accept from libutp: %w", err)
 			return
@@ -341,11 +341,11 @@ func goToLibutp(ctx context.Context, n *Network, from, to *Endpoint, payload []b
 	defer receiver.Close()
 	receiver.expect = len(payload)
 
-	sock := utp.WithSocket(ctx, batchedReader{from}, quiet()) // as in libutpToGo
+	sock := utp.NewSocket(ctx, batchedReader{from}, quiet()) // as in libutpToGo
 	defer sock.Close()
 
 	// libutp is listening and will take whatever ids the SYN carries.
-	cid := utp.NewConnectionId(to.Addr(), uint16(connSeed), uint16(connSeed)+1)
+	cid := utp.NewConnectionID(to.Addr(), uint16(connSeed), uint16(connSeed)+1)
 
 	var (
 		wg      sync.WaitGroup
@@ -354,7 +354,7 @@ func goToLibutp(ctx context.Context, n *Network, from, to *Endpoint, payload []b
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		stream, err := sock.ConnectWithCid(ctx, cid, utp.NewConnectionConfig())
+		stream, err := sock.ConnectWithCID(ctx, cid, utp.NewConnectionConfig())
 		if err != nil {
 			sendErr = fmt.Errorf("connect to libutp: %w", err)
 			return

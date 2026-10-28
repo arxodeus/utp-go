@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	maxUdpPayloadSize            = math.MaxUint16
+	maxUDPPayloadSize            = math.MaxUint16
 	cidGenerationTryWarningCount = 10
 	awaitingConnectionTimeout    = time.Second * 20
 
@@ -43,12 +43,12 @@ type rstInfoKey struct {
 }
 
 var (
-	// ErrAcceptTimedOut is returned by AcceptWithCid when no matching SYN
+	// ErrAcceptTimedOut is returned by AcceptWithCID when no matching SYN
 	// arrives within 20 seconds.
-	ErrAcceptTimedOut = errors.New("utp_socket: timed out waiting for incoming connection")
+	ErrAcceptTimedOut = errors.New("utp: timed out waiting for incoming connection")
 )
 
-// Conn is the datagram transport a UtpSocket runs over.
+// Conn is the datagram transport a Socket runs over.
 //
 // WriteTo must behave like a UDP socket's: it may wait for the local send
 // path, but never for the peer to read. The socket writes from the goroutine
@@ -88,9 +88,9 @@ type peerHolder interface {
 	ReleasePeer(peer ConnectionPeer)
 }
 
-// UtpSocket is a uTP endpoint: one datagram transport carrying any number of
-// connections. Create one with Bind or WithSocket.
-type UtpSocket struct {
+// Socket is a uTP endpoint: one datagram transport carrying any number of
+// connections. Create one with Bind or NewSocket.
+type Socket struct {
 	// dispatchMu serializes the routing of incoming packets with everything
 	// that changes the routing tables: registering a new connection and
 	// serving an Accept. The reader holds it for each datagram it routes.
@@ -114,8 +114,8 @@ type UtpSocket struct {
 	cancel      context.CancelFunc
 	logger      *ulogger
 	// clk is this socket's clock, handed to every connection it creates. Nil
-	// means RealClock.
-	clk        Clock
+	// means defaultClock.
+	clk        clockSource
 	connsMutex sync.RWMutex
 	conns      map[string]chan *streamEvent
 	// holder is socket, if it is a peerHolder, and held counts the
@@ -137,14 +137,14 @@ type UtpSocket struct {
 	// waiting for any incoming SYN. Guarded by dispatchMu.
 	pendingAccepts []*acceptRequest
 	// answered holds connections whose SYN was answered with no Accept
-	// waiting, oldest first, until an Accept or AcceptWithCid takes one. Only
+	// waiting, oldest first, until an Accept or AcceptWithCID takes one. Only
 	// a socket with WithAcceptConfig does this. Guarded by dispatchMu.
-	answered []*UtpStream
+	answered []*Stream
 	// rstInfo remembers RESETs recently sent for connections we do not have.
 	rstInfo            *syncMap[struct{}]
 	rstInfoExpirations *timeWheel[any, rstInfoKey]
-	// ownsSocket is true when this UtpSocket created the underlying Conn
-	// (Bind) and must close it. A Conn passed to WithSocket belongs to the
+	// ownsSocket is true when this Socket created the underlying Conn
+	// (Bind) and must close it. A Conn passed to NewSocket belongs to the
 	// caller.
 	ownsSocket bool
 	// droppedFullConnQueue counts packets discarded because a connection's
@@ -167,7 +167,7 @@ type UtpSocket struct {
 	closeOnce         sync.Once
 	// lingering holds the streams the application has closed whose
 	// connections are still delivering. Close waits for them. See linger.
-	lingering sync.Map // *UtpStream -> struct{}
+	lingering sync.Map // *Stream -> struct{}
 	// firewall, when set, is consulted for every SYN for a connection this
 	// socket does not have, before any state is created for it. Returning
 	// true refuses the connection. Set at construction and read-only after.
@@ -181,10 +181,10 @@ type UtpSocket struct {
 	// refusedAtCapacity counts SYNs refused because the socket was at its
 	// connection limit.
 	refusedAtCapacity atomic.Uint64
-	// refusedIdInUse counts SYNs refused because a connection we dialed
+	// refusedIDInUse counts SYNs refused because a connection we dialed
 	// already receives on the id the new one would use. See
 	// handleIncomingBuf.
-	refusedIdInUse atomic.Uint64
+	refusedIDInUse atomic.Uint64
 }
 
 // DefaultMaxConnections is the default limit on connections a socket holds
@@ -202,7 +202,7 @@ const DefaultMaxConnections = 3000
 // n == 0 means DefaultMaxConnections, the default without this option. n < 0
 // means no limit.
 func WithMaxConnections(n int) SocketOption {
-	return func(s *UtpSocket) {
+	return func(s *Socket) {
 		switch {
 		case n == 0:
 			s.maxConns = DefaultMaxConnections
@@ -217,25 +217,25 @@ func WithMaxConnections(n int) SocketOption {
 // ConnectionsRefusedAtCapacity reports how many incoming connections were
 // refused because the socket was at its connection cap. See
 // WithMaxConnections.
-func (s *UtpSocket) ConnectionsRefusedAtCapacity() uint64 {
+func (s *Socket) ConnectionsRefusedAtCapacity() uint64 {
 	return s.refusedAtCapacity.Load()
 }
 
-// ConnectionsRefusedIdInUse reports how many incoming connections were
+// ConnectionsRefusedIDInUse reports how many incoming connections were
 // refused because a connection this socket dialed to the same peer already
 // receives on the id the new one would use.
-func (s *UtpSocket) ConnectionsRefusedIdInUse() uint64 {
-	return s.refusedIdInUse.Load()
+func (s *Socket) ConnectionsRefusedIDInUse() uint64 {
+	return s.refusedIDInUse.Load()
 }
 
 // connectionCount returns the number the connection limit is checked
 // against. See WithMaxConnections.
-func (s *UtpSocket) connectionCount() int {
+func (s *Socket) connectionCount() int {
 	return s.NumConnections() + s.incomingConns.len()
 }
 
-// SocketOption configures a UtpSocket at construction.
-type SocketOption func(*UtpSocket)
+// SocketOption configures a Socket at construction.
+type SocketOption func(*Socket)
 
 // WithFirewall refuses incoming connections the callback rejects.
 //
@@ -247,13 +247,13 @@ type SocketOption func(*UtpSocket)
 // The callback runs on the socket's receive path. It must not block or call
 // back into the socket.
 func WithFirewall(refuse func(peer ConnectionPeer) bool) SocketOption {
-	return func(s *UtpSocket) { s.firewall = refuse }
+	return func(s *Socket) { s.firewall = refuse }
 }
 
 // WithAcceptConfig gives the socket its own configuration for incoming
 // connections, read as each one is created. With it, a SYN is answered as it
 // arrives, whether or not an Accept is waiting, and the connection is held
-// until an Accept or AcceptWithCid takes it.
+// until an Accept or AcceptWithCID takes it.
 //
 // The function's configuration is used for every connection answered before
 // an Accept asks, and for one accepted with a nil config. An Accept given a
@@ -268,11 +268,11 @@ func WithFirewall(refuse func(peer ConnectionPeer) bool) SocketOption {
 // Answered connections count against WithMaxConnections and are held until
 // the application accepts them.
 func WithAcceptConfig(config func() *ConnectionConfig) SocketOption {
-	return func(s *UtpSocket) { s.acceptConfig = config }
+	return func(s *Socket) { s.acceptConfig = config }
 }
 
 // configForAccept returns the configuration an accepted connection gets.
-func (s *UtpSocket) configForAccept(accept *acceptRequest, peer ConnectionPeer) *ConnectionConfig {
+func (s *Socket) configForAccept(accept *acceptRequest, peer ConnectionPeer) *ConnectionConfig {
 	config := accept.config
 	if config == nil && s.acceptConfig != nil {
 		config = s.acceptConfig()
@@ -284,19 +284,19 @@ func (s *UtpSocket) configForAccept(accept *acceptRequest, peer ConnectionPeer) 
 }
 
 // clock returns this socket's clock, never nil.
-func (s *UtpSocket) clock() Clock {
+func (s *Socket) clock() clockSource {
 	if s.clk != nil {
 		return s.clk
 	}
-	return RealClock
+	return defaultClock
 }
 
-// WithClock runs this socket's retransmission wheel on clk and makes it the
+// withClock runs this socket's retransmission wheel on clk and makes it the
 // default for every connection the socket creates. The wheel is shared by
 // every connection on the socket, so the clock is chosen per socket. It is
-// intended for tests; see Clock.
-func WithClock(clk Clock) SocketOption {
-	return func(s *UtpSocket) {
+// used by tests; see clockSource.
+func withClock(clk clockSource) SocketOption {
+	return func(s *Socket) {
 		if clk == nil {
 			return
 		}
@@ -318,7 +318,7 @@ const DefaultSocketBufferSize = 4 * 1024 * 1024
 // Bind opens a UDP socket on addr and runs a uTP socket on it, which owns it
 // and closes it on Close. logger receives the socket's logging; nil discards
 // it. LevelTrace is its per-packet level.
-func Bind(ctx context.Context, network string, addr *net.UDPAddr, logger *slog.Logger, opts ...SocketOption) (*UtpSocket, error) {
+func Bind(ctx context.Context, network string, addr *net.UDPAddr, logger *slog.Logger, opts ...SocketOption) (*Socket, error) {
 	conn, err := net.ListenUDP(network, addr)
 	if err != nil {
 		return nil, err
@@ -330,22 +330,22 @@ func Bind(ctx context.Context, network string, addr *net.UDPAddr, logger *slog.L
 	if err := conn.SetWriteBuffer(DefaultSocketBufferSize); err != nil && logger != nil {
 		logger.Debug("could not enlarge UDP write buffer", "err", err)
 	}
-	sock := WithSocket(ctx, &udpConn{base: conn}, logger, opts...)
+	sock := NewSocket(ctx, &udpConn{base: conn}, logger, opts...)
 	sock.ownsSocket = true
 	return sock, nil
 }
 
-// WithSocket runs a uTP socket on socket, which remains the caller's. logger
+// NewSocket runs a uTP socket on socket, which remains the caller's. logger
 // receives the socket's logging; nil discards it. LevelTrace is its
 // per-packet level.
-func WithSocket(ctx context.Context, socket Conn, logger *slog.Logger, opts ...SocketOption) *UtpSocket {
+func NewSocket(ctx context.Context, socket Conn, logger *slog.Logger, opts ...SocketOption) *Socket {
 	ctx, cancel := context.WithCancel(ctx)
 	ulog := newLogger(logger)
 
 	awaitingMap := newSyncMap[*acceptRequest]()
 	handleAwaitExpirations := func(key any, accReq *acceptRequest) {
 		awaitingMap.remove(key)
-		// Report it to the caller, so AcceptWithCid does not wait forever.
+		// Report it to the caller, so AcceptWithCID does not wait forever.
 		select {
 		case accReq.stream <- &streamResult{err: ErrAcceptTimedOut}:
 		default:
@@ -374,7 +374,7 @@ func WithSocket(ctx context.Context, socket Conn, logger *slog.Logger, opts ...S
 		recentlyClosed.remove(key)
 	})
 
-	utp := &UtpSocket{
+	utp := &Socket{
 		recentlyClosed:            recentlyClosed,
 		recentlyClosedExpirations: recentlyClosedExpirations,
 		ctx:                       ctx,
@@ -415,23 +415,23 @@ func WithSocket(ctx context.Context, socket Conn, logger *slog.Logger, opts ...S
 // PacketsDroppedFullConnQueue reports how many received packets this socket
 // discarded because the destination connection's event queue was full. It
 // should be zero.
-func (s *UtpSocket) PacketsDroppedFullConnQueue() uint64 {
+func (s *Socket) PacketsDroppedFullConnQueue() uint64 {
 	return s.droppedFullConnQueue.Load()
 }
 
 // ConnectionsRefusedByFirewall reports how many incoming connections the
 // firewall callback rejected.
-func (s *UtpSocket) ConnectionsRefusedByFirewall() uint64 {
+func (s *Socket) ConnectionsRefusedByFirewall() uint64 {
 	return s.refusedByFirewall.Load()
 }
 
 // PacketsResetSent reports how many RESETs this socket sent in answer to
 // packets for connections it does not have.
-func (s *UtpSocket) PacketsResetSent() uint64 { return s.resetsSent.Load() }
+func (s *Socket) PacketsResetSent() uint64 { return s.resetsSent.Load() }
 
 // LocalAddr returns the address the underlying socket is bound to, or nil if
 // it cannot report one. After binding to port 0 it reports the chosen port.
-func (s *UtpSocket) LocalAddr() net.Addr {
+func (s *Socket) LocalAddr() net.Addr {
 	type localAddresser interface{ LocalAddr() net.Addr }
 	if la, ok := s.socket.(localAddresser); ok {
 		return la.LocalAddr()
@@ -440,7 +440,7 @@ func (s *UtpSocket) LocalAddr() net.Addr {
 }
 
 // NumConnections returns how many connections the socket currently tracks.
-func (s *UtpSocket) NumConnections() int {
+func (s *Socket) NumConnections() int {
 	s.connsMutex.Lock()
 	defer s.connsMutex.Unlock()
 	return len(s.conns)
@@ -451,7 +451,8 @@ func (s *UtpSocket) NumConnections() int {
 // It first waits for streams already closed to finish delivering what was
 // written to them, while each one's peer keeps answering (awaitLingering);
 // everything else ends at once.
-func (s *UtpSocket) Close() {
+func (s *Socket) Close() error {
+	var err error
 	s.closeOnce.Do(func() {
 		s.awaitLingering()
 		s.cancel()
@@ -465,19 +466,18 @@ func (s *UtpSocket) Close() {
 		// Close the underlying socket if we opened it, which releases the
 		// port and stops readLoop.
 		if s.ownsSocket {
-			if err := s.socket.Close(); err != nil {
-				s.logger.Debug("error closing underlying socket", "err", err)
-			}
+			err = s.socket.Close()
 		}
 	})
+	return err
 }
 
 // linger keeps a closed stream's connection running until it has
 // delivered what was queued and ended, and lets Close wait for it.
-// UtpStream.Close returns at once and the connection keeps sending in the
+// Stream.Close returns at once and the connection keeps sending in the
 // background; closing the socket waits for it, so that writing, closing the
 // stream, closing the socket and exiting delivers every byte.
-func (s *UtpSocket) linger(stream *UtpStream) {
+func (s *Socket) linger(stream *Stream) {
 	s.lingering.Store(stream, struct{}{})
 	go func() {
 		stream.connHandle.Wait()
@@ -489,11 +489,11 @@ func (s *UtpSocket) linger(stream *UtpStream) {
 // awaitLingering waits for every closed stream's connection to finish
 // delivering, while its peer is still answering: a connection whose peer has
 // been silent for closeStallTimeout is waited for no longer, and the socket's
-// cancellation then ends it. See UtpStream.waitForFlush.
-func (s *UtpSocket) awaitLingering() {
+// cancellation then ends it. See Stream.waitForFlush.
+func (s *Socket) awaitLingering() {
 	var wg sync.WaitGroup
 	s.lingering.Range(func(key, _ any) bool {
-		stream := key.(*UtpStream)
+		stream := key.(*Stream)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -506,7 +506,7 @@ func (s *UtpSocket) awaitLingering() {
 
 // wakeConns starts the event loop of every resting connection on the socket.
 // See dormant.go.
-func (s *UtpSocket) wakeConns() {
+func (s *Socket) wakeConns() {
 	s.connsMutex.RLock()
 	conns := make([]*connection, 0, len(s.inlineConns))
 	for _, c := range s.inlineConns {
@@ -518,7 +518,7 @@ func (s *UtpSocket) wakeConns() {
 	}
 }
 
-func (s *UtpSocket) sendShutdownEventToConns() {
+func (s *Socket) sendShutdownEventToConns() {
 	// Snapshot the channels rather than send under the lock: a blocking send
 	// to one stuck connection would hold connsMutex and stall packet
 	// delivery for every other connection.
@@ -548,16 +548,16 @@ func (s *UtpSocket) sendShutdownEventToConns() {
 // ceiling lowered when the socket's Conn can report what the local path
 // carries. The caller's config is copied, never modified. See
 // pathMTUCeiling.
-func (s *UtpSocket) configForPeer(config *ConnectionConfig, peer ConnectionPeer) *ConnectionConfig {
+func (s *Socket) configForPeer(config *ConnectionConfig, peer ConnectionPeer) *ConnectionConfig {
 	// Nil means the defaults, as for an accept (configForAccept).
 	if config == nil {
 		config = NewConnectionConfig()
 	}
 	// A socket-wide clock is applied here, unless the connection's config
 	// sets its own.
-	if s.clk != nil && config.Clock == nil {
+	if s.clk != nil && config.clock == nil {
 		adjusted := *config
-		adjusted.Clock = s.clk
+		adjusted.clock = s.clk
 		config = &adjusted
 	}
 	if s.socket == nil {

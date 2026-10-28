@@ -49,7 +49,7 @@ func TestResetAfterTheFinTakesNothingBack(t *testing.T) {
 	server.conn.mu.Lock()
 	lastSent := server.conn.state.SentPackets.NextSeqNum() - 1
 	server.conn.mu.Unlock()
-	reset := newPacketBuilder(st_reset, cid+1, 0, 0, randomUint16()).WithAckNum(lastSent).Build()
+	reset := newPacketBuilder(stReset, cid+1, 0, 0, randomUint16()).WithAckNum(lastSent).Build()
 	client.conn.out(newOutgoingSocketEvent(reset, client.conn.cid.Peer))
 	// The connection ends once its reader has taken what it holds; wait for
 	// the reset to land first.

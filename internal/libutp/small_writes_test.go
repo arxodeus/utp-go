@@ -68,7 +68,7 @@ func smallWrites(t *testing.T, libutpSends bool, path pathConfig, count, size in
 	var dataEv []relayEvent
 	var senderPort uint16
 	var peer *libutp.Peer
-	var sock *utp.UtpSocket
+	var sock *utp.Socket
 	if libutpSends {
 		p, err := libutp.NewPeer(0)
 		if err != nil {
@@ -97,13 +97,13 @@ func smallWrites(t *testing.T, libutpSends bool, path pathConfig, count, size in
 		}
 		write = func(b []byte) { _, _ = peer.Write(b) }
 	} else {
-		cid := utp.NewConnectionId(utp.NewUdpPeer(loopback(r.LibutpFacingPort())), 5100, 5101)
+		cid := utp.NewConnectionID(utp.NewUDPPeer(loopback(r.LibutpFacingPort())), 5100, 5101)
 		// The bridge tells libutp its path carries 1472-byte datagrams
 		// (bridge.cpp, cb_get_udp_mtu); the same ceiling here, so that the
 		// packets compared are the same size.
 		cfg := utp.NewConnectionConfig()
 		cfg.MaxPacketSize = 1472
-		stream, err := sock.ConnectWithCid(ctx, cid, cfg)
+		stream, err := sock.ConnectWithCID(ctx, cid, cfg)
 		if err != nil {
 			t.Fatal(err)
 		}

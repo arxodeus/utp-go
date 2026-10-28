@@ -56,9 +56,9 @@ func TestWindowDecayIsRateLimited(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	sockA := utp.WithSocket(ctx, a, quiet())
+	sockA := utp.NewSocket(ctx, a, quiet())
 	defer sockA.Close()
-	sockB := utp.WithSocket(ctx, b, quiet())
+	sockB := utp.NewSocket(ctx, b, quiet())
 	defer sockB.Close()
 
 	var (
@@ -88,8 +88,8 @@ func TestWindowDecayIsRateLimited(t *testing.T) {
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	cid := utp.NewConnectionId(b.Addr(), 9700, 9701)
-	stream, err := sockA.ConnectWithCid(ctx, cid, cfg)
+	cid := utp.NewConnectionID(b.Addr(), 9700, 9701)
+	stream, err := sockA.ConnectWithCID(ctx, cid, cfg)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

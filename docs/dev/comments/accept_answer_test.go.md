@@ -21,7 +21,7 @@ Every comment in `accept_answer_test.go` at e56c9aa, verbatim.
 ## Line 102 — func TestAcceptWithCidTakesAnAnsweredConnection
 
 ```
-// AcceptWithCid takes the answered connection it names, leaving others for
+// AcceptWithCID takes the answered connection it names, leaving others for
 // Accept.
 ```
 

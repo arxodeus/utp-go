@@ -215,19 +215,19 @@ func ourRetransmitSchedule(t *testing.T, cfg *ConnectionConfig, afterHandshake b
 	defer cancel()
 
 	clk := newVirtualClock(time.Unix(1, 0))
-	cfg.Clock = clk
-	cfg.NowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
+	cfg.clock = clk
+	cfg.nowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
 
 	conn := newScriptedConn()
 	defer conn.Close()
-	sock := WithSocket(ctx, conn, conformanceLogger(), WithClock(clk))
+	sock := NewSocket(ctx, conn, conformanceLogger(), withClock(clk))
 	defer sock.Close()
 
-	cid := NewConnectionId(conn.peer, initiatorConnSeed, initiatorConnSeed+1)
-	connected := make(chan *UtpStream, 1)
+	cid := NewConnectionID(conn.peer, initiatorConnSeed, initiatorConnSeed+1)
+	connected := make(chan *Stream, 1)
 	connectErr := make(chan error, 1)
 	go func() {
-		stream, err := sock.ConnectWithCid(ctx, cid, cfg)
+		stream, err := sock.ConnectWithCID(ctx, cid, cfg)
 		if err != nil {
 			connectErr <- err
 			return
@@ -262,7 +262,7 @@ func ourRetransmitSchedule(t *testing.T, cfg *ConnectionConfig, afterHandshake b
 
 	if !afterHandshake {
 		// Giving up ends the connection's event loop within the step that did
-		// it. ConnectWithCid reports it later, from a goroutine the clock does
+		// it. ConnectWithCID reports it later, from a goroutine the clock does
 		// not wait for.
 		participants := clk.Participants()
 		any := func(*packet) bool { return true }
@@ -276,7 +276,7 @@ func ourRetransmitSchedule(t *testing.T, cfg *ConnectionConfig, afterHandshake b
 				case <-connected:
 					t.Fatal("the connection ended, and connected")
 				case <-time.After(5 * time.Second):
-					t.Fatal("the connection ended, and ConnectWithCid did not return")
+					t.Fatal("the connection ended, and ConnectWithCID did not return")
 				}
 				return resends, gaveUp
 			}
@@ -289,7 +289,7 @@ func ourRetransmitSchedule(t *testing.T, cfg *ConnectionConfig, afterHandshake b
 	// the loss probe.
 	clk.Advance(10 * time.Millisecond)
 	clk.AwaitReactionTo(func() { conn.inject(initiatorSynAck()) })
-	var stream *UtpStream
+	var stream *Stream
 	select {
 	case stream = <-connected:
 	case err := <-connectErr:
@@ -307,7 +307,7 @@ func ourRetransmitSchedule(t *testing.T, cfg *ConnectionConfig, afterHandshake b
 	var firstDataSeq uint16
 	var haveSeq bool
 	isFirstData := func(p *packet) bool {
-		if p.Header.PacketType != st_data {
+		if p.Header.PacketType != stData {
 			return false
 		}
 		if !haveSeq {

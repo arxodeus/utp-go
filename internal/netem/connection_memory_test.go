@@ -92,22 +92,22 @@ func idleConnectionMemory(t *testing.T, keepAlive, wait time.Duration) int64 {
 	}
 	before := heap()
 	stackBefore, goroutinesBefore := stackInUse(), runtime.NumGoroutine()
-	streams := make([]*utp.UtpStream, 0, 2*conns)
+	streams := make([]*utp.Stream, 0, 2*conns)
 	payload := make([]byte, 1024)
 	buf := make([]byte, 2048)
 	for i := 0; i < conns; i++ {
 		base := uint16(2000 + 4*i)
-		accCid := utp.NewConnectionId(a.Addr(), base+1, base)
-		iniCid := utp.NewConnectionId(b.Addr(), base, base+1)
-		accepted := make(chan *utp.UtpStream, 1)
+		accCid := utp.NewConnectionID(a.Addr(), base+1, base)
+		iniCid := utp.NewConnectionID(b.Addr(), base, base+1)
+		accepted := make(chan *utp.Stream, 1)
 		go func() {
-			s, err := pair.SockB.AcceptWithCid(ctx, accCid, config())
+			s, err := pair.SockB.AcceptWithCID(ctx, accCid, config())
 			if err != nil {
 				t.Errorf("accept %d: %v", i, err)
 			}
 			accepted <- s
 		}()
-		s, err := pair.SockA.ConnectWithCid(ctx, iniCid, config())
+		s, err := pair.SockA.ConnectWithCID(ctx, iniCid, config())
 		if err != nil {
 			t.Fatalf("connect %d: %v", i, err)
 		}

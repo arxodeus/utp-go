@@ -96,7 +96,7 @@ Every comment in `metrics.go` at e56c9aa, verbatim.
 	// `our_hist` (utp_internal.cpp:2016-2021). It is the direction this
 	// sender's packets travel, and therefore the one LEDBAT controls.
 	//
-	// Not to be confused with PeerTsDiff below, which measures the other
+	// Not to be confused with PeerTimestampDiff below, which measures the other
 	// direction entirely.
 ```
 
@@ -187,7 +187,7 @@ Every comment in `metrics.go` at e56c9aa, verbatim.
 ## Line 116 — type ConnectionMetrics
 
 ```
-// PeerTsDiff is the one-way delay this end measured from the peer's
+// PeerTimestampDiff is the one-way delay this end measured from the peer's
 	// timestamps: how long the peer's last packet took to arrive here. It is
 	// what gets echoed back in timestamp_difference_microseconds, and it is
 	// libutp's `their_delay` (utp_internal.cpp:2000-2001).

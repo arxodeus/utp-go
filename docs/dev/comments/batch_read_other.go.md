@@ -17,6 +17,6 @@ Every comment in `batch_read_other.go` at e56c9aa, verbatim.
 ## Line 8 — func (udpConnReader).readBatch
 
 ```
-// readBatch is unsupported here; UtpSocket.readLoop falls back to one
+// readBatch is unsupported here; Socket.readLoop falls back to one
 // datagram per read, each its own batch.
 ```

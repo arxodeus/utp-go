@@ -1,6 +1,6 @@
 package utp
 
-func (s *UtpSocket) removeConnStream(key string) {
+func (s *Socket) removeConnStream(key string) {
 	s.connsMutex.Lock()
 	defer s.connsMutex.Unlock()
 	if s.logger.Enabled(baseContext, LevelTrace) {
@@ -22,7 +22,7 @@ func (s *UtpSocket) removeConnStream(key string) {
 // registerLocked adds a connection to peer to the table under key. The first
 // time key is added, it tells a transport that tracks peers (HoldPeer) that
 // this one is in use. Called with connsMutex held for writing.
-func (s *UtpSocket) registerLocked(key string, ch chan *streamEvent, peer ConnectionPeer) {
+func (s *Socket) registerLocked(key string, ch chan *streamEvent, peer ConnectionPeer) {
 	if _, ok := s.conns[key]; !ok && s.holder != nil {
 		if s.held == nil {
 			s.held = make(map[string]ConnectionPeer)
@@ -36,7 +36,7 @@ func (s *UtpSocket) registerLocked(key string, ch chan *streamEvent, peer Connec
 
 // attachInline lets the reader hand packets on ch straight to c. Called
 // with dispatchMu held, after c is set up.
-func (s *UtpSocket) attachInline(key string, ch chan *streamEvent, c *connection) {
+func (s *Socket) attachInline(key string, ch chan *streamEvent, c *connection) {
 	s.connsMutex.Lock()
 	defer s.connsMutex.Unlock()
 	// A connection that has already gone, its entry removed, stays gone.
@@ -52,20 +52,20 @@ func (s *UtpSocket) attachInline(key string, ch chan *streamEvent, c *connection
 // routeCandidates that the socket has, and its inline connection. Called by
 // the reader with dispatchMu held. Keys are built in a reused buffer, so a
 // lookup does not allocate.
-func (s *UtpSocket) route(packetPtr *packet, peerKey string) (send, recv uint16, ch chan *streamEvent, c *connection) {
+func (s *Socket) route(packetPtr *packet, peerKey string) (send, recv uint16, ch chan *streamEvent, c *connection) {
 	// Consecutive datagrams usually belong to one flow and the tables
 	// rarely change, so the last route is reused while the tables are
 	// unchanged. A SYN always takes the full path.
 	gen := s.connsGen.Load()
 	r := &s.lastRoute
-	isSyn := packetPtr.Header.PacketType == st_syn
+	isSyn := packetPtr.Header.PacketType == stSyn
 	if !isSyn && r.ch != nil && r.gen == gen &&
-		r.connID == packetPtr.Header.ConnectionId && r.peerKey == peerKey {
+		r.connID == packetPtr.Header.ConnectionID && r.peerKey == peerKey {
 		return r.send, r.recv, r.ch, r.conn
 	}
 	send, recv, ch, c = s.routeLocked(packetPtr, peerKey)
 	if !isSyn && ch != nil {
-		*r = cachedRoute{gen: gen, connID: packetPtr.Header.ConnectionId, peerKey: peerKey,
+		*r = cachedRoute{gen: gen, connID: packetPtr.Header.ConnectionID, peerKey: peerKey,
 			send: send, recv: recv, ch: ch, conn: c}
 	}
 	return send, recv, ch, c
@@ -73,7 +73,7 @@ func (s *UtpSocket) route(packetPtr *packet, peerKey string) (send, recv uint16,
 
 // cachedRoute is the route one datagram took: its connection id and peer,
 // what they led to, and the routing tables' generation at the time. See
-// UtpSocket.route.
+// Socket.route.
 type cachedRoute struct {
 	gen        uint64
 	connID     uint16
@@ -84,7 +84,7 @@ type cachedRoute struct {
 }
 
 // routeLocked is route's lookup proper, through every derivation in order.
-func (s *UtpSocket) routeLocked(packetPtr *packet, peerKey string) (send, recv uint16, ch chan *streamEvent, c *connection) {
+func (s *Socket) routeLocked(packetPtr *packet, peerKey string) (send, recv uint16, ch chan *streamEvent, c *connection) {
 	s.connsMutex.RLock()
 	defer s.connsMutex.RUnlock()
 	var pairs [4][2]uint16
@@ -111,12 +111,12 @@ func (s *UtpSocket) routeLocked(packetPtr *packet, peerKey string) (send, recv u
 //     ours if we dialed (send id one above), the peer's if we accepted (send
 //     id one below).
 func routeCandidates(p *packet, pairs *[4][2]uint16) [][2]uint16 {
-	id := p.Header.ConnectionId
+	id := p.Header.ConnectionID
 	switch p.Header.PacketType {
-	case st_syn:
+	case stSyn:
 		pairs[0] = [2]uint16{id, id + 1}
 		return pairs[:1]
-	case st_reset:
+	case stReset:
 		pairs[0] = [2]uint16{id + 1, id}
 		pairs[1] = [2]uint16{id - 1, id}
 		pairs[2] = [2]uint16{id, id - 1}
@@ -132,7 +132,7 @@ func routeCandidates(p *packet, pairs *[4][2]uint16) [][2]uint16 {
 // idInUseLocked reports whether a connection to the peer, live or ended in
 // the last idQuarantine, sends or receives on id. Called with connsMutex
 // held.
-func (s *UtpSocket) idInUseLocked(id uint16, peerKey string) bool {
+func (s *Socket) idInUseLocked(id uint16, peerKey string) bool {
 	var buf [96]byte
 	for _, pair := range [4][2]uint16{{id + 1, id}, {id - 1, id}, {id, id + 1}, {id, id - 1}} {
 		key := appendConnKey(buf[:0], pair[0], pair[1], peerKey)
@@ -146,9 +146,9 @@ func (s *UtpSocket) idInUseLocked(id uint16, peerKey string) bool {
 	return false
 }
 
-// recvIdTakenLocked reports whether a connection to the peer already receives
+// recvIDTakenLocked reports whether a connection to the peer already receives
 // on recv, whichever side opened it. Called with connsMutex held.
-func (s *UtpSocket) recvIdTakenLocked(recv uint16, peerKey string) bool {
+func (s *Socket) recvIDTakenLocked(recv uint16, peerKey string) bool {
 	var buf [96]byte
 	for _, send := range [2]uint16{recv + 1, recv - 1} {
 		key := appendConnKey(buf[:0], send, recv, peerKey)
@@ -159,14 +159,14 @@ func (s *UtpSocket) recvIdTakenLocked(recv uint16, peerKey string) bool {
 	return false
 }
 
-func (s *UtpSocket) getConnStream(key string) (chan *streamEvent, bool) {
+func (s *Socket) getConnStream(key string) (chan *streamEvent, bool) {
 	s.connsMutex.RLock()
 	defer s.connsMutex.RUnlock()
 	ch, ok := s.conns[key]
 	return ch, ok
 }
 
-func (s *UtpSocket) putConnStream(cid *ConnectionId, streamCh chan *streamEvent) {
+func (s *Socket) putConnStream(cid *ConnectionID, streamCh chan *streamEvent) {
 	s.connsMutex.Lock()
 	defer s.connsMutex.Unlock()
 	key := cid.Hash()
@@ -179,20 +179,20 @@ func (s *UtpSocket) putConnStream(cid *ConnectionId, streamCh chan *streamEvent)
 type idType int
 
 const (
-	idTypeRecvId idType = iota
-	idTypeSendIdWeInitiated
-	idTypeSendIdPeerInitiated
+	idTypeRecvID idType = iota
+	idTypeSendIDWeInitiated
+	idTypeSendIDPeerInitiated
 )
 
-var cidTypes []idType = []idType{idTypeSendIdPeerInitiated, idTypeSendIdWeInitiated, idTypeRecvId}
+var cidTypes []idType = []idType{idTypeSendIDPeerInitiated, idTypeSendIDWeInitiated, idTypeRecvID}
 
 func (i idType) String() string {
 	switch i {
-	case idTypeRecvId:
+	case idTypeRecvID:
 		return "idTypeRecvId"
-	case idTypeSendIdWeInitiated:
+	case idTypeSendIDWeInitiated:
 		return "idTypeSendIdWeInitiated"
-	case idTypeSendIdPeerInitiated:
+	case idTypeSendIDPeerInitiated:
 		return "idTypeSendIdPeerInitiated"
 	default:
 		return "Unknown"
@@ -203,31 +203,31 @@ func cidFromPacket(
 	packet *packet,
 	src ConnectionPeer,
 	idType idType,
-) *ConnectionId {
+) *ConnectionID {
 	send, recv := cidIds(packet, idType)
-	return NewConnectionId(src, recv, send)
+	return NewConnectionID(src, recv, send)
 }
 
-// cidIds is cidFromPacket's send and receive ids, without the ConnectionId.
+// cidIds is cidFromPacket's send and receive ids, without the ConnectionID.
 func cidIds(packet *packet, idType idType) (send, recv uint16) {
 	switch idType {
-	case idTypeRecvId:
+	case idTypeRecvID:
 		switch packet.Header.PacketType {
-		case st_syn:
-			send = packet.Header.ConnectionId
-			recv = packet.Header.ConnectionId + 1 // wrapping add
-		case st_state, st_data, st_fin, st_reset: // State, Data, Fin, reset
-			send = packet.Header.ConnectionId - 1 // wrapping sub
-			recv = packet.Header.ConnectionId
+		case stSyn:
+			send = packet.Header.ConnectionID
+			recv = packet.Header.ConnectionID + 1 // wrapping add
+		case stState, stData, stFin, stReset: // State, Data, Fin, reset
+			send = packet.Header.ConnectionID - 1 // wrapping sub
+			recv = packet.Header.ConnectionID
 		}
 
-	case idTypeSendIdWeInitiated:
-		send = packet.Header.ConnectionId + 1 // wrapping add
-		recv = packet.Header.ConnectionId
+	case idTypeSendIDWeInitiated:
+		send = packet.Header.ConnectionID + 1 // wrapping add
+		recv = packet.Header.ConnectionID
 
-	case idTypeSendIdPeerInitiated:
-		send = packet.Header.ConnectionId
-		recv = packet.Header.ConnectionId - 1 // wrapping sub
+	case idTypeSendIDPeerInitiated:
+		send = packet.Header.ConnectionID
+		recv = packet.Header.ConnectionID - 1 // wrapping sub
 	}
 	return send, recv
 }

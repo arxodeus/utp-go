@@ -5,81 +5,81 @@ import (
 	"testing"
 )
 
-const SIZE = 8192
+const bufSize = 8192
 
 func TestAvailable(t *testing.T) {
-	buf := newSendBuffer(SIZE)
-	if buf.Available() != SIZE {
-		t.Errorf("Expected available size %d, got %d", SIZE, buf.Available())
+	buf := newSendBuffer(bufSize)
+	if buf.Available() != bufSize {
+		t.Errorf("Expected available size %d, got %d", bufSize, buf.Available())
 	}
 
-	const WRITE_LEN = 512
-	const NUM_WRITES = 3
-	const READ_LEN = 64
+	const writeLen = 512
+	const numWrites = 3
+	const readLen = 64
 
-	for i := 0; i < NUM_WRITES; i++ {
-		data := make([]byte, WRITE_LEN)
+	for i := 0; i < numWrites; i++ {
+		data := make([]byte, writeLen)
 		buf.Write(data)
 	}
-	expectedAvailable := SIZE - (WRITE_LEN * NUM_WRITES)
+	expectedAvailable := bufSize - (writeLen * numWrites)
 	if buf.Available() != expectedAvailable {
 		t.Errorf("Expected available size %d, got %d", expectedAvailable, buf.Available())
 	}
 
-	data := make([]byte, READ_LEN)
+	data := make([]byte, readLen)
 	buf.Read(data)
-	expectedAvailable += READ_LEN
+	expectedAvailable += readLen
 	if buf.Available() != expectedAvailable {
 		t.Errorf("Expected available size %d, got %d", expectedAvailable, buf.Available())
 	}
 
-	for i := 0; i < NUM_WRITES; i++ {
-		data := make([]byte, WRITE_LEN)
+	for i := 0; i < numWrites; i++ {
+		data := make([]byte, writeLen)
 		buf.Read(data)
 	}
-	if buf.Available() != SIZE {
-		t.Errorf("Expected available size %d, got %d", SIZE, buf.Available())
+	if buf.Available() != bufSize {
+		t.Errorf("Expected available size %d, got %d", bufSize, buf.Available())
 	}
 }
 
 func TestRead(t *testing.T) {
-	buf := newSendBuffer(SIZE)
+	buf := newSendBuffer(bufSize)
 
 	// Read of empty buffer returns zero.
-	readBuf := make([]byte, SIZE)
+	readBuf := make([]byte, bufSize)
 	read := buf.Read(readBuf)
 	if read != 0 {
 		t.Errorf("Expected read size 0, got %d", read)
 	}
 
-	const WRITE_LEN = 1024
-	const READ_LEN = 784
+	const writeLen = 1024
+	const readLen = 784
 
-	readBuf = make([]byte, READ_LEN)
+	readBuf = make([]byte, readLen)
 
-	writeOne := bytes.Repeat([]byte{0xef}, WRITE_LEN)
-	writeTwo := bytes.Repeat([]byte{0xfe}, WRITE_LEN)
+	writeOne := bytes.Repeat([]byte{0xef}, writeLen)
+	writeTwo := bytes.Repeat([]byte{0xfe}, writeLen)
 	buf.Write(writeOne)
 	buf.Write(writeTwo)
 
 	// Read first chunk of first write.
 	read = buf.Read(readBuf)
-	if read != READ_LEN || !bytes.Equal(readBuf[:READ_LEN], writeOne[:READ_LEN]) {
-		t.Errorf("First read failed, expected %d bytes, got %d", READ_LEN, read)
+	if read != readLen || !bytes.Equal(readBuf[:readLen], writeOne[:readLen]) {
+		t.Errorf("First read failed, expected %d bytes, got %d", readLen, read)
 	}
 
 	// The rest of the first write, and the second continues it: a read
 	// fills its buffer across writes (TestSendBufferReadSpansWrites).
-	readBuf = make([]byte, READ_LEN)
+	readBuf = make([]byte, readLen)
 	read = buf.Read(readBuf)
-	want := append(append([]byte(nil), writeOne[READ_LEN:]...), writeTwo[:2*READ_LEN-WRITE_LEN]...)
-	if read != READ_LEN || !bytes.Equal(readBuf[:read], want) {
-		t.Errorf("Second read failed, expected %d bytes spanning both writes, got %d", READ_LEN, read)
+	want := append(append([]byte(nil), writeOne[readLen:]...), writeTwo[:2*readLen-writeLen]...)
+	if read != readLen || !bytes.Equal(readBuf[:read], want) {
+		t.Errorf("Second read failed, expected %d bytes spanning both writes, got %d", readLen, read)
 	}
 
 	// What is left of the second write.
 	read = buf.Read(readBuf)
-	if rest := 2*WRITE_LEN - 2*READ_LEN; read != rest || !bytes.Equal(readBuf[:read], writeTwo[2*READ_LEN-WRITE_LEN:]) {
+	if rest := 2*writeLen - 2*readLen; read != rest || !bytes.Equal(readBuf[:read], writeTwo[2*readLen-writeLen:]) {
 		t.Errorf("Third read failed, expected %d bytes, got %d", rest, read)
 	}
 
@@ -92,14 +92,14 @@ func TestRead(t *testing.T) {
 }
 
 func TestWrite(t *testing.T) {
-	buf := newSendBuffer(SIZE)
+	buf := newSendBuffer(bufSize)
 
-	const WRITE_LEN = 1024
+	const writeLen = 1024
 
-	data := bytes.Repeat([]byte{0xef}, WRITE_LEN)
+	data := bytes.Repeat([]byte{0xef}, writeLen)
 	written := buf.Write(data)
-	if written != WRITE_LEN {
-		t.Errorf("Expected written size %d, got %d", WRITE_LEN, written)
+	if written != writeLen {
+		t.Errorf("Expected written size %d, got %d", writeLen, written)
 	}
 
 	if len(buf.pending) == 0 || !bytes.Equal(buf.pending[0], data) {
@@ -107,7 +107,7 @@ func TestWrite(t *testing.T) {
 	}
 }
 
-// The buffer owns the bytes it holds. UtpStream.Write returns as soon as
+// The buffer owns the bytes it holds. Stream.Write returns as soon as
 // the data is accepted here, and io.Writer implementations must not retain
 // p, so callers reuse their buffers at once.
 func TestSendBufferDoesNotRetainCallerSlice(t *testing.T) {

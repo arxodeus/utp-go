@@ -29,13 +29,13 @@ func dupAckConnN(t *testing.T, n uint16) (*connection, uint16) {
 
 	now := time.Now()
 	for i := uint16(1); i <= n; i++ {
-		sentPackets.OnTransmit(synAck+i, st_data, []byte{byte(i)}, 64, now)
+		sentPackets.OnTransmit(synAck+i, stData, []byte{byte(i)}, 64, now)
 	}
 	conn.state = &connState{
 		stateType:   connConnected,
 		SentPackets: sentPackets,
-		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
-		RecvBuf:     newReceiveBuffer(TEST_BUFFER_SIZE, syn),
+		SendBuf:     newSendBuffer(testBufferSize),
+		RecvBuf:     newReceiveBuffer(testBufferSize, syn),
 	}
 
 	conn.mtu = newMtuSearch(1400, now)
@@ -59,7 +59,7 @@ func TestDuplicateAckLowersTheMtuCeiling(t *testing.T) {
 	ceilingBefore := conn.mtu.ceiling
 
 	for i := 1; i <= 2; i++ {
-		conn.noteDuplicateAck(st_state, dup)
+		conn.noteDuplicateAck(stState, dup)
 		if conn.mtu.ceiling != ceilingBefore {
 			t.Fatalf("the ceiling moved on duplicate %d; libutp acts on the third", i)
 		}
@@ -68,7 +68,7 @@ func TestDuplicateAckLowersTheMtuCeiling(t *testing.T) {
 		}
 	}
 
-	conn.noteDuplicateAck(st_state, dup)
+	conn.noteDuplicateAck(stState, dup)
 	if conn.mtu.ceiling != 1200-1 {
 		t.Errorf("after three duplicates the ceiling is %d; the probe was 1200 bytes, "+
 			"so libutp sets it to 1199", conn.mtu.ceiling)
@@ -82,7 +82,7 @@ func TestDuplicateAckLowersTheMtuCeiling(t *testing.T) {
 // was most likely sent because the peer had data, so on a bidirectional
 // connection it would look like a duplicate after every packet.
 func TestDuplicateAckIgnoresDataPackets(t *testing.T) {
-	for _, pt := range []packetType{st_data, st_fin} {
+	for _, pt := range []packetType{stData, stFin} {
 		t.Run(pt.String(), func(t *testing.T) {
 			conn, dup := dupAckConn(t)
 			ceilingBefore := conn.mtu.ceiling
@@ -106,11 +106,11 @@ func TestDuplicateAckCountResets(t *testing.T) {
 	conn, dup := dupAckConn(t)
 	ceilingBefore := conn.mtu.ceiling
 
-	conn.noteDuplicateAck(st_state, dup)
-	conn.noteDuplicateAck(st_state, dup)
+	conn.noteDuplicateAck(stState, dup)
+	conn.noteDuplicateAck(stState, dup)
 	// Something else in between.
-	conn.noteDuplicateAck(st_state, dup+7)
-	conn.noteDuplicateAck(st_state, dup)
+	conn.noteDuplicateAck(stState, dup+7)
+	conn.noteDuplicateAck(stState, dup)
 
 	if conn.mtu.ceiling != ceilingBefore {
 		t.Errorf("the ceiling moved to %d after 2 duplicates, an unrelated ack and 1 more; "+
@@ -118,8 +118,8 @@ func TestDuplicateAckCountResets(t *testing.T) {
 	}
 
 	// Two more reach three consecutive.
-	conn.noteDuplicateAck(st_state, dup)
-	conn.noteDuplicateAck(st_state, dup)
+	conn.noteDuplicateAck(stState, dup)
+	conn.noteDuplicateAck(stState, dup)
 	if conn.mtu.ceiling != 1200-1 {
 		t.Errorf("three consecutive duplicates after the reset left the ceiling at %d",
 			conn.mtu.ceiling)
@@ -140,7 +140,7 @@ func TestDuplicateAckForANonProbeHoleForgetsTheProbe(t *testing.T) {
 	dup := conn.state.SentPackets.LastAckedSeqNum()
 
 	for i := 0; i < 3; i++ {
-		conn.noteDuplicateAck(st_state, dup)
+		conn.noteDuplicateAck(stState, dup)
 	}
 
 	if conn.mtu.ceiling != ceilingBefore {
@@ -159,8 +159,8 @@ func TestDuplicateAckIgnoredWithNothingOutstanding(t *testing.T) {
 	conn, dup := dupAckConn(t)
 
 	// Two duplicates with packets outstanding.
-	conn.noteDuplicateAck(st_state, dup)
-	conn.noteDuplicateAck(st_state, dup)
+	conn.noteDuplicateAck(stState, dup)
+	conn.noteDuplicateAck(stState, dup)
 
 	// Now nothing is outstanding.
 	empty := newSentPacketsWithoutLogger(101, newDefaultController(fromConnConfig(conn.config)))
@@ -168,7 +168,7 @@ func TestDuplicateAckIgnoredWithNothingOutstanding(t *testing.T) {
 	if empty.UnackedCount() != 0 {
 		t.Fatalf("the replacement tracker has %d unacked; this test needs none", empty.UnackedCount())
 	}
-	conn.noteDuplicateAck(st_state, dup)
+	conn.noteDuplicateAck(stState, dup)
 	if conn.duplicateAcks != 2 {
 		t.Errorf("the count is %d; an acknowledgement arriving with nothing outstanding "+
 			"is neither counted nor a reset", conn.duplicateAcks)
@@ -184,7 +184,7 @@ func TestSelectiveAckSetsTheDuplicateCount(t *testing.T) {
 	// Bits 0 and 1 are dup+2 and dup+3: the two packets after the probe.
 	sack := newSelectiveAck([]bool{true, true})
 
-	conn.noteDuplicateAck(st_state, dup)
+	conn.noteDuplicateAck(stState, dup)
 	conn.noteSelectiveAckCount(dup, sack)
 	if conn.duplicateAcks != 2 {
 		t.Fatalf("a selective ack naming two packets in the window set the count to %d", conn.duplicateAcks)
@@ -192,7 +192,7 @@ func TestSelectiveAckSetsTheDuplicateCount(t *testing.T) {
 	if conn.mtu.ceiling != ceilingBefore {
 		t.Fatalf("the ceiling moved before the count reached three")
 	}
-	conn.noteDuplicateAck(st_state, dup)
+	conn.noteDuplicateAck(stState, dup)
 	if conn.mtu.ceiling != 1200-1 {
 		t.Errorf("after a selective ack naming two packets and one more duplicate the ceiling is "+
 			"%d; libutp's count is three there and it sets the ceiling to 1199", conn.mtu.ceiling)
@@ -217,14 +217,14 @@ func TestSelectiveAckSetsTheDuplicateCountOnArrival(t *testing.T) {
 	bits := make([]bool, 32)
 	bits[0], bits[1] = true, true // dup+2 and dup+3, the packets after the probe
 
-	withSack := newPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()),
+	withSack := newPacketBuilder(stState, conn.cid.Send, uint32(now.UnixMicro()),
 		DefaultWindowSize, syn+1).WithAckNum(dup).WithSelectiveAck(newSelectiveAck(bits)).Build()
 	conn.onPacket(withSack, now)
 	if conn.duplicateAcks != 2 {
 		t.Fatalf("after a duplicate carrying a selective ack for two packets the count is %d; "+
 			"libutp's is 2 (utp_internal.cpp:1612)", conn.duplicateAcks)
 	}
-	bare := newPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()),
+	bare := newPacketBuilder(stState, conn.cid.Send, uint32(now.UnixMicro()),
 		DefaultWindowSize, syn+1).WithAckNum(dup).Build()
 	conn.onPacket(bare, now.Add(time.Millisecond))
 	if conn.mtu.ceiling != 1200-1 {
@@ -260,10 +260,10 @@ func TestDuplicateRunJudgesOnce(t *testing.T) {
 	conn, dup := dupAckConnN(t, 8)
 	probeSeq := conn.mtu.probeSeq
 	for i := 0; i < 6; i++ {
-		conn.noteDuplicateAck(st_state, dup)
+		conn.noteDuplicateAck(stState, dup)
 	}
 	conn.noteSelectiveAckCount(dup, newSelectiveAck([]bool{true, true, true, true}))
-	conn.noteDuplicateAck(st_state, dup)
+	conn.noteDuplicateAck(stState, dup)
 	if conn.mtuProbesLostToDuplicateAcks != 1 {
 		t.Fatalf("one run of duplicates judged the probe %d times", conn.mtuProbesLostToDuplicateAcks)
 	}
@@ -271,9 +271,9 @@ func TestDuplicateRunJudgesOnce(t *testing.T) {
 	// A new probe, and an acknowledgement that is not the repeated one, ends
 	// the run: the next three judge again.
 	conn.mtu.beginProbe(probeSeq, 1100)
-	conn.noteDuplicateAck(st_state, dup+5)
+	conn.noteDuplicateAck(stState, dup+5)
 	for i := 0; i < 3; i++ {
-		conn.noteDuplicateAck(st_state, dup)
+		conn.noteDuplicateAck(stState, dup)
 	}
 	if conn.mtuProbesLostToDuplicateAcks != 2 {
 		t.Errorf("a second run judged %d probes in all, want 2", conn.mtuProbesLostToDuplicateAcks)
@@ -289,7 +289,7 @@ func TestAResentProbeIsNotJudged(t *testing.T) {
 	probeSeq := conn.mtu.probeSeq
 	floorBefore := conn.mtu.floor
 
-	resend := newPacketBuilder(st_data, conn.cid.Send, 0, 0, probeSeq).WithPayload(make([]byte, 1000)).Build()
+	resend := newPacketBuilder(stData, conn.cid.Send, 0, 0, probeSeq).WithPayload(make([]byte, 1000)).Build()
 	conn.transmit(resend, time.Now(), false)
 
 	if conn.mtu.onAck(probeSeq, time.Now()) {

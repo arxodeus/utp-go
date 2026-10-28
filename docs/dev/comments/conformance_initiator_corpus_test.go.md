@@ -42,14 +42,14 @@ Every comment in `conformance_initiator_corpus_test.go` at e56c9aa, verbatim.
 ```
 // streamCh carries the connected stream once the handshake completes.
 	// A channel rather than a field: it is written by the goroutine running
-	// ConnectWithCid and read by the test, and a plain field would be a data
+	// ConnectWithCID and read by the test, and a plain field would be a data
 	// race the race detector finds on the first run.
 ```
 
 ## Line 43 — type initiatorRun
 
 ```
-// dialErr carries ConnectWithCid's error, if it failed.
+// dialErr carries ConnectWithCID's error, if it failed.
 ```
 
 ## Line 54 — func (*initiatorRun).close
@@ -85,7 +85,7 @@ Every comment in `conformance_initiator_corpus_test.go` at e56c9aa, verbatim.
 ```
 // Three participants register when the socket is built -- the
 	// retransmission wheel and the read and event loops -- and the
-	// connection's event loop is the fourth as soon as ConnectWithCid runs.
+	// connection's event loop is the fourth as soon as ConnectWithCID runs.
 ```
 
 ## Line 137 — func (*initiatorRun).step

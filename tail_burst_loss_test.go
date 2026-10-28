@@ -25,16 +25,16 @@ func tailBurstRecovery(t *testing.T, rtt time.Duration, burst int) (time.Duratio
 	defer pinRandom(ourSeq)()
 
 	conn := newScriptedConn()
-	sock := WithSocket(ctx, conn, conformanceLogger(), WithClock(clk))
+	sock := NewSocket(ctx, conn, conformanceLogger(), withClock(clk))
 	defer sock.Close()
 	cfg := NewConnectionConfig()
-	cfg.Clock = clk
-	cfg.NowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
+	cfg.clock = clk
+	cfg.nowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
 
-	cid := NewConnectionId(conn.peer, peerID+1, peerID)
-	accepted := make(chan *UtpStream, 1)
+	cid := NewConnectionID(conn.peer, peerID+1, peerID)
+	accepted := make(chan *Stream, 1)
 	go func() {
-		s, err := sock.AcceptWithCid(ctx, cid, cfg)
+		s, err := sock.AcceptWithCID(ctx, cid, cfg)
 		if err != nil {
 			t.Errorf("accept: %v", err)
 		}
@@ -43,7 +43,7 @@ func tailBurstRecovery(t *testing.T, rtt time.Duration, burst int) (time.Duratio
 	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(newPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+		conn.inject(newPacketBuilder(stSyn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
 	})
 	stream := <-accepted
 	if stream == nil {
@@ -68,8 +68,8 @@ func tailBurstRecovery(t *testing.T, rtt time.Duration, burst int) (time.Duratio
 		}
 		// A one-way delay of half the round trip: without a delay sample LEDBAT
 		// holds the window where it is.
-		b := newPacketBuilder(st_state, peerID+1, uint32(clk.Now().UnixMicro()), 1<<20, peerSeq+1).
-			WithAckNum(cum).WithTsDiffMicros(uint32(rtt.Microseconds() / 2))
+		b := newPacketBuilder(stState, peerID+1, uint32(clk.Now().UnixMicro()), 1<<20, peerSeq+1).
+			WithAckNum(cum).WithTimestampDiffMicros(uint32(rtt.Microseconds() / 2))
 		if stray != 0 && wrappingLessThan(cum+1, stray) {
 			bits := make([]bool, 32)
 			bits[stray-cum-2] = true
@@ -80,7 +80,7 @@ func tailBurstRecovery(t *testing.T, rtt time.Duration, burst int) (time.Duratio
 	sentData := func() []uint16 {
 		var seqs []uint16
 		for _, raw := range conn.takeEmitted() {
-			if p, err := decodePacket(raw, false); err == nil && p.Header.PacketType == st_data {
+			if p, err := decodePacket(raw, false); err == nil && p.Header.PacketType == stData {
 				seqs = append(seqs, p.Header.SeqNum)
 			}
 		}

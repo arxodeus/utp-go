@@ -6,6 +6,10 @@ found, what was measured, and what was tried before. The code now says what
 it does and why in a few lines, and points here for the rest.
 
 Sections are named for the declaration they explain.
+
+Names here are those of the code at the time: `UtpSocket`, `UtpStream`,
+`UdpPeer` and `ConnectionId` are now `Socket`, `Stream`, `UDPPeer` and
+`ConnectionID`, and `Cid` is `CID` throughout.
 Line numbers, measurements and test names are as they were when the comment
 was written; [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) and
 [DEVIATIONS.md](DEVIATIONS.md) are where the current state of each is kept.
@@ -883,7 +887,7 @@ its connection once its FIN is acknowledged, and answers whatever the
 other side sends next -- a window update as its reader drains -- with a
 RESET (:2179-2182, :2907-2944). Here that reset turned a complete
 transfer into "read: reset", one 16 MB loopback transfer in ten under
-load (integrated.TestUdpTransfer).
+load (integrated.TestUDPTransfer).
 
 ## outsideReorderWindow
 

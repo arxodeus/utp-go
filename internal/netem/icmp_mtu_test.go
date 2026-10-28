@@ -34,7 +34,7 @@ func icmpTransfer(t *testing.T, linkMTU int, payloadLen int, cid uint16, withICM
 	t.Helper()
 
 	var res icmpTransferResult
-	var sendSock atomic.Pointer[utp.UtpSocket]
+	var sendSock atomic.Pointer[utp.Socket]
 	var reports, matched atomic.Uint64
 
 	cfg := Config{
@@ -74,14 +74,14 @@ func icmpTransfer(t *testing.T, linkMTU int, payloadLen int, cid uint16, withICM
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	sendSocket := utp.WithSocket(ctx, a, quiet())
+	sendSocket := utp.NewSocket(ctx, a, quiet())
 	defer sendSocket.Close()
 	sendSock.Store(sendSocket)
-	recvSock := utp.WithSocket(ctx, b, quiet())
+	recvSock := utp.NewSocket(ctx, b, quiet())
 	defer recvSock.Close()
 
-	acceptCid := utp.NewConnectionId(a.Addr(), cid+1, cid)
-	connectCid := utp.NewConnectionId(b.Addr(), cid, cid+1)
+	acceptCid := utp.NewConnectionID(a.Addr(), cid+1, cid)
+	connectCid := utp.NewConnectionID(b.Addr(), cid, cid+1)
 
 	var mu sync.Mutex
 	var samples int
@@ -112,7 +112,7 @@ func icmpTransfer(t *testing.T, linkMTU int, payloadLen int, cid uint16, withICM
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		stream, err := recvSock.AcceptWithCid(ctx, acceptCid, recvCfg)
+		stream, err := recvSock.AcceptWithCID(ctx, acceptCid, recvCfg)
 		if err != nil {
 			mu.Lock()
 			res.readErr = err
@@ -130,7 +130,7 @@ func icmpTransfer(t *testing.T, linkMTU int, payloadLen int, cid uint16, withICM
 	}()
 	go func() {
 		defer wg.Done()
-		stream, err := sendSocket.ConnectWithCid(ctx, connectCid, sendCfg)
+		stream, err := sendSocket.ConnectWithCID(ctx, connectCid, sendCfg)
 		if err != nil {
 			mu.Lock()
 			res.writeErr = err

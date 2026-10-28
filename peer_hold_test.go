@@ -42,7 +42,7 @@ func TestADialHoldsItsPeerUntilTheSocketForgetsIt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	conn := &holdingConn{scriptedConn: newScriptedConn(), held: map[string]int{}}
-	sock := WithSocket(ctx, conn, conformanceLogger())
+	sock := NewSocket(ctx, conn, conformanceLogger())
 	defer sock.Close()
 
 	dial, stop := context.WithCancel(ctx)

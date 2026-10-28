@@ -35,9 +35,9 @@ func TestTheSecondFinIsAcknowledgedPromptly(t *testing.T) {
 	const cycles = 60
 	for i := 0; i < cycles; i++ {
 		recv := uint16(2000 + i*2)
-		done := make(chan *UtpStream, 1)
+		done := make(chan *Stream, 1)
 		go func() {
-			s, err := server.AcceptWithCid(ctx, NewConnectionId(NewUdpPeer(ca), recv+1, recv), nil)
+			s, err := server.AcceptWithCID(ctx, NewConnectionID(NewUDPPeer(ca), recv+1, recv), nil)
 			if err != nil {
 				done <- nil
 				return
@@ -47,7 +47,7 @@ func TestTheSecondFinIsAcknowledgedPromptly(t *testing.T) {
 			s.Close()
 			done <- s
 		}()
-		cs, err := client.ConnectWithCid(ctx, NewConnectionId(NewUdpPeer(sa), recv, recv+1), nil)
+		cs, err := client.ConnectWithCID(ctx, NewConnectionID(NewUDPPeer(sa), recv, recv+1), nil)
 		if err != nil {
 			t.Fatal(err)
 		}

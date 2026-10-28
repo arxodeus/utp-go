@@ -13,19 +13,19 @@ func TestConformanceDuplicateOutOfOrderData(t *testing.T) {
 		{name: "handshake", inject: synPacketFor(corpusSynConnID, corpusSynSeq)},
 		{
 			name: "out-of-order data is selectively acknowledged",
-			inject: newPacketBuilder(st_data, corpusSynConnID+1, 200000, corpusWindow, corpusSynSeq+2).
+			inject: newPacketBuilder(stData, corpusSynConnID+1, 200000, corpusWindow, corpusSynSeq+2).
 				WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("second")).Build(),
 			wantAck: ackNum(corpusSynSeq),
 		},
 		{
 			name: "the same packet again draws nothing",
-			inject: newPacketBuilder(st_data, corpusSynConnID+1, 210000, corpusWindow, corpusSynSeq+2).
+			inject: newPacketBuilder(stData, corpusSynConnID+1, 210000, corpusWindow, corpusSynSeq+2).
 				WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("second")).Build(),
 			wantNoEmission: true,
 		},
 		{
 			name: "control: the missing packet is acknowledged with both",
-			inject: newPacketBuilder(st_data, corpusSynConnID+1, 220000, corpusWindow, corpusSynSeq+1).
+			inject: newPacketBuilder(stData, corpusSynConnID+1, 220000, corpusWindow, corpusSynSeq+1).
 				WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("first")).Build(),
 			wantAck: ackNum(corpusSynSeq + 2),
 		},
@@ -41,7 +41,7 @@ func establishedSteps() []step {
 		{name: "handshake", inject: synPacketFor(corpusSynConnID, corpusSynSeq)},
 		{
 			name: "first data completes the connection",
-			inject: newPacketBuilder(st_data, corpusSynConnID+1, 190000, corpusWindow, corpusSynSeq+1).
+			inject: newPacketBuilder(stData, corpusSynConnID+1, 190000, corpusWindow, corpusSynSeq+1).
 				WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("first")).Build(),
 			wantAck: ackNum(corpusSynSeq + 1),
 		},
@@ -54,19 +54,19 @@ func TestConformanceDataPastTheFinIsDropped(t *testing.T) {
 	runResponderCorpus(t, append(establishedSteps(), []step{
 		{
 			name: "a FIN ahead of a gap",
-			inject: newPacketBuilder(st_fin, corpusSynConnID+1, 200000, corpusWindow, corpusSynSeq+4).
+			inject: newPacketBuilder(stFin, corpusSynConnID+1, 200000, corpusWindow, corpusSynSeq+4).
 				WithAckNum(corpusPinnedSeq - 1).Build(),
 			wantAck: ackNum(corpusSynSeq + 1),
 		},
 		{
 			name: "data numbered past the FIN draws nothing",
-			inject: newPacketBuilder(st_data, corpusSynConnID+1, 210000, corpusWindow, corpusSynSeq+6).
+			inject: newPacketBuilder(stData, corpusSynConnID+1, 210000, corpusWindow, corpusSynSeq+6).
 				WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("too late")).Build(),
 			wantNoEmission: true,
 		},
 		{
 			name: "control: data inside the stream is still acknowledged",
-			inject: newPacketBuilder(st_data, corpusSynConnID+1, 220000, corpusWindow, corpusSynSeq+2).
+			inject: newPacketBuilder(stData, corpusSynConnID+1, 220000, corpusWindow, corpusSynSeq+2).
 				WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("in time")).Build(),
 			wantAck: ackNum(corpusSynSeq + 2),
 		},
@@ -79,19 +79,19 @@ func TestConformanceSecondFinDoesNotMoveTheEnd(t *testing.T) {
 	runResponderCorpus(t, append(establishedSteps(), []step{
 		{
 			name: "a FIN ahead of a gap",
-			inject: newPacketBuilder(st_fin, corpusSynConnID+1, 200000, corpusWindow, corpusSynSeq+4).
+			inject: newPacketBuilder(stFin, corpusSynConnID+1, 200000, corpusWindow, corpusSynSeq+4).
 				WithAckNum(corpusPinnedSeq - 1).Build(),
 			wantAck: ackNum(corpusSynSeq + 1),
 		},
 		{
 			name: "a second FIN, earlier",
-			inject: newPacketBuilder(st_fin, corpusSynConnID+1, 210000, corpusWindow, corpusSynSeq+3).
+			inject: newPacketBuilder(stFin, corpusSynConnID+1, 210000, corpusWindow, corpusSynSeq+3).
 				WithAckNum(corpusPinnedSeq - 1).Build(),
 			wantAck: ackNum(corpusSynSeq + 1),
 		},
 		{
 			name: "the gap fills, and the stream ends at the first FIN",
-			inject: newPacketBuilder(st_data, corpusSynConnID+1, 220000, corpusWindow, corpusSynSeq+2).
+			inject: newPacketBuilder(stData, corpusSynConnID+1, 220000, corpusWindow, corpusSynSeq+2).
 				WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("in time")).Build(),
 			wantAck:               ackNum(corpusSynSeq + 4),
 			libutpExtraDuplicates: 1,
@@ -137,13 +137,13 @@ func TestConformanceExtensionBitsMustBeEightBytes(t *testing.T) {
 	runResponderCorpus(t, append(establishedSteps(), []step{
 		{
 			name: "data with 4 bytes of extension bits draws nothing",
-			injectRaw: withExtensionBits(newPacketBuilder(st_data, corpusSynConnID+1, 200000, corpusWindow, corpusSynSeq+2).
+			injectRaw: withExtensionBits(newPacketBuilder(stData, corpusSynConnID+1, 200000, corpusWindow, corpusSynSeq+2).
 				WithAckNum(corpusPinnedSeq-1).WithPayload([]byte("short bits")).Build(), 4),
 			wantNoEmission: true,
 		},
 		{
 			name: "the same with 8 bytes is acknowledged",
-			injectRaw: withExtensionBits(newPacketBuilder(st_data, corpusSynConnID+1, 210000, corpusWindow, corpusSynSeq+2).
+			injectRaw: withExtensionBits(newPacketBuilder(stData, corpusSynConnID+1, 210000, corpusWindow, corpusSynSeq+2).
 				WithAckNum(corpusPinnedSeq-1).WithPayload([]byte("full bits")).Build(), 8),
 			wantAck: ackNum(corpusSynSeq + 2),
 		},

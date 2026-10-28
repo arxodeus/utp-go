@@ -29,21 +29,21 @@ func TestKeepAliveLeavesOneIntervalAfterTheLastPacket(t *testing.T) {
 	defer pinRandom(ourSeq)()
 
 	conn := newScriptedConn()
-	sock := WithSocket(ctx, conn, conformanceLogger(), WithClock(clk))
+	sock := NewSocket(ctx, conn, conformanceLogger(), withClock(clk))
 	defer sock.Close()
 
 	cfg := NewConnectionConfig()
-	cfg.Clock = clk
-	cfg.NowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
+	cfg.clock = clk
+	cfg.nowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
 	if cfg.KeepAliveInterval != interval {
 		t.Fatalf("the default interval is %v, not libutp's 29s; this case is "+
 			"written against libutp's", cfg.KeepAliveInterval)
 	}
 
-	cid := NewConnectionId(conn.peer, peerID+1, peerID)
+	cid := NewConnectionID(conn.peer, peerID+1, peerID)
 	accepted := make(chan error, 1)
 	go func() {
-		_, err := sock.AcceptWithCid(ctx, cid, cfg)
+		_, err := sock.AcceptWithCID(ctx, cid, cfg)
 		accepted <- err
 	}()
 
@@ -53,7 +53,7 @@ func TestKeepAliveLeavesOneIntervalAfterTheLastPacket(t *testing.T) {
 	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(newPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+		conn.inject(newPacketBuilder(stSyn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
 	})
 	select {
 	case err := <-accepted:
@@ -71,7 +71,7 @@ func TestKeepAliveLeavesOneIntervalAfterTheLastPacket(t *testing.T) {
 	// packet the connection sends before it goes quiet.
 	clk.Advance(quietFrom)
 	clk.AwaitReactionTo(func() {
-		conn.inject(newPacketBuilder(st_data, peerID+1, 190000, 1<<20, peerSeq+1).
+		conn.inject(newPacketBuilder(stData, peerID+1, 190000, 1<<20, peerSeq+1).
 			WithAckNum(ourSeq - 1).WithPayload([]byte("last word")).Build().Encode())
 	})
 	if n := len(conn.takeEmitted()); n != 1 {
@@ -97,7 +97,7 @@ func TestKeepAliveLeavesOneIntervalAfterTheLastPacket(t *testing.T) {
 		if err != nil {
 			t.Fatalf("keep-alive %d does not decode: %v", i, err)
 		}
-		if pkt.Header.PacketType != st_state || pkt.Header.AckNum != peerSeq {
+		if pkt.Header.PacketType != stState || pkt.Header.AckNum != peerSeq {
 			t.Fatalf("keep-alive %d: %s, expected a STATE acknowledging %d, one "+
 				"behind what we have (send_keep_alive, utp_internal.cpp:834-844)",
 				i, describePackets(emitted), peerSeq)
@@ -109,7 +109,7 @@ func TestKeepAliveLeavesOneIntervalAfterTheLastPacket(t *testing.T) {
 		// Answer it, as a live peer does. The answer must not itself draw a
 		// packet, or it would move lastSent.
 		clk.AwaitReactionTo(func() {
-			conn.inject(newPacketBuilder(st_state, peerID+1, 200000, 1<<20, peerSeq+2).
+			conn.inject(newPacketBuilder(stState, peerID+1, 200000, 1<<20, peerSeq+2).
 				WithAckNum(ourSeq - 1).Build().Encode())
 		})
 		if emitted := conn.takeEmitted(); len(emitted) != 0 {
@@ -136,22 +136,22 @@ func TestKeepAliveSelectiveAckMatchesItsAckNumber(t *testing.T) {
 	defer pinRandom(ourSeq)()
 
 	conn := newScriptedConn()
-	sock := WithSocket(ctx, conn, conformanceLogger(), WithClock(clk))
+	sock := NewSocket(ctx, conn, conformanceLogger(), withClock(clk))
 	defer sock.Close()
 	cfg := NewConnectionConfig()
-	cfg.Clock = clk
-	cfg.NowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
+	cfg.clock = clk
+	cfg.nowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
 
-	cid := NewConnectionId(conn.peer, peerID+1, peerID)
+	cid := NewConnectionID(conn.peer, peerID+1, peerID)
 	accepted := make(chan error, 1)
 	go func() {
-		_, err := sock.AcceptWithCid(ctx, cid, cfg)
+		_, err := sock.AcceptWithCID(ctx, cid, cfg)
 		accepted <- err
 	}()
 	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(newPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+		conn.inject(newPacketBuilder(stSyn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
 	})
 	if err := <-accepted; err != nil {
 		t.Fatalf("accept: %v", err)
@@ -163,7 +163,7 @@ func TestKeepAliveSelectiveAckMatchesItsAckNumber(t *testing.T) {
 	// peerSeq+1 never arrives; peerSeq+2 does. The acknowledgement stays at
 	// peerSeq, with peerSeq+2 selectively acknowledged.
 	clk.AwaitReactionTo(func() {
-		conn.inject(newPacketBuilder(st_data, peerID+1, 190000, 1<<20, peerSeq+2).
+		conn.inject(newPacketBuilder(stData, peerID+1, 190000, 1<<20, peerSeq+2).
 			WithAckNum(ourSeq - 1).WithPayload([]byte("after the gap")).Build().Encode())
 	})
 	conn.takeEmitted()
@@ -177,7 +177,7 @@ func TestKeepAliveSelectiveAckMatchesItsAckNumber(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pkt.Header.PacketType != st_state || pkt.Header.AckNum != peerSeq-1 {
+	if pkt.Header.PacketType != stState || pkt.Header.AckNum != peerSeq-1 {
 		t.Fatalf("keep-alive: %s, expected a STATE acknowledging %d", describePackets(emitted), peerSeq-1)
 	}
 	if pkt.Eack == nil {
@@ -216,18 +216,18 @@ func TestIdleTimeoutRunsFromTheLastPacketHeard(t *testing.T) {
 	defer pinRandom(ourSeq)()
 
 	conn := newScriptedConn()
-	sock := WithSocket(ctx, conn, conformanceLogger(), WithClock(clk))
+	sock := NewSocket(ctx, conn, conformanceLogger(), withClock(clk))
 	defer sock.Close()
 
 	cfg := NewConnectionConfig()
-	cfg.Clock = clk
-	cfg.NowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
+	cfg.clock = clk
+	cfg.nowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
 	cfg.MaxIdleTimeout = idleTimeout
 
-	cid := NewConnectionId(conn.peer, peerID+1, peerID)
-	accepted := make(chan *UtpStream, 1)
+	cid := NewConnectionID(conn.peer, peerID+1, peerID)
+	accepted := make(chan *Stream, 1)
 	go func() {
-		s, err := sock.AcceptWithCid(ctx, cid, cfg)
+		s, err := sock.AcceptWithCID(ctx, cid, cfg)
 		if err != nil {
 			t.Errorf("accept: %v", err)
 		}
@@ -237,9 +237,9 @@ func TestIdleTimeoutRunsFromTheLastPacketHeard(t *testing.T) {
 	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(newPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+		conn.inject(newPacketBuilder(stSyn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
 	})
-	var stream *UtpStream
+	var stream *Stream
 	select {
 	case stream = <-accepted:
 	case <-time.After(10 * time.Second):
@@ -254,7 +254,7 @@ func TestIdleTimeoutRunsFromTheLastPacketHeard(t *testing.T) {
 
 	clk.Advance(heardAt)
 	clk.AwaitReactionTo(func() {
-		conn.inject(newPacketBuilder(st_data, peerID+1, 190000, 1<<20, peerSeq+1).
+		conn.inject(newPacketBuilder(stData, peerID+1, 190000, 1<<20, peerSeq+1).
 			WithAckNum(ourSeq - 1).WithPayload([]byte("still here")).Build().Encode())
 	})
 

@@ -10,7 +10,7 @@ import (
 // more than these tests send, so that only the Nagle rule can hold a packet.
 func nagleTestConn(t *testing.T) (*connection, uint32) {
 	t.Helper()
-	conn := drainTestConn(t, 0, TEST_BUFFER_SIZE)
+	conn := drainTestConn(t, 0, testBufferSize)
 	conn.state.SendBuf = newSendBuffer(64 * 1024)
 	conn.mtu = newMtuSearch(uint32(conn.config.MaxPacketSize), time.Now())
 	p := conn.mtu.payloadSize()

@@ -179,7 +179,7 @@ const ackNrAllowedWindow = uint16(3)
 // sent; anything above acknowledges a packet that does not exist yet, which
 // implies a spoofed or malicious packet.
 func (c *connection) invalidAckNum(pkt *packet) bool {
-	if pkt.Header.PacketType == st_syn {
+	if pkt.Header.PacketType == stSyn {
 		// A SYN arriving in CS_SYN_RECV has no earlier packets to acknowledge.
 		return false
 	}
@@ -333,7 +333,7 @@ func (c *connection) processAck(
 // acknowledgement number cancels a pending one (transmit).
 func (c *connection) statePacket() *packet {
 	now := int64(c.nowMicros())
-	tsDiffMicros := uint32(c.peerTsDiff.Microseconds())
+	tsDiffMicros := uint32(c.peerTimestampDiff.Microseconds())
 
 	switch c.state.stateType {
 	case connConnecting:
@@ -343,8 +343,8 @@ func (c *connection) statePacket() *packet {
 
 		syn := c.endpoint.SynNum
 		synAck := c.endpoint.SynAck
-		return newPacketBuilder(st_state, c.cid.Send, uint32(now), c.config.WindowSize, synAck).
-			WithTsDiffMicros(tsDiffMicros).
+		return newPacketBuilder(stState, c.cid.Send, uint32(now), c.config.WindowSize, synAck).
+			WithTimestampDiffMicros(tsDiffMicros).
 			WithAckNum(syn).
 			Build()
 
@@ -363,8 +363,8 @@ func (c *connection) statePacket() *packet {
 			selectiveAck = c.state.RecvBuf.SelectiveAck()
 		}
 
-		return newPacketBuilder(st_state, c.cid.Send, uint32(now), recvWindow, seqNum).
-			WithTsDiffMicros(tsDiffMicros).
+		return newPacketBuilder(stState, c.cid.Send, uint32(now), recvWindow, seqNum).
+			WithTimestampDiffMicros(tsDiffMicros).
 			WithAckNum(ackNum).
 			WithSelectiveAck(selectiveAck).
 			Build()

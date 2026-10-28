@@ -134,7 +134,7 @@ func TestUnsendableDialFailsAtOnce(t *testing.T) {
 
 // The Socket is a PacketConn for everything that is not uTP, alongside its
 // connections, with working deadlines.
-func TestNonUtpDatagramsShareThePort(t *testing.T) {
+func TestNonUTPDatagramsShareThePort(t *testing.T) {
 	s, err := NewSocket("udp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer s.Close()

@@ -9,7 +9,7 @@ import (
 //
 // If torrent's interface gains a method, or changes one, this stops
 // compiling. That is the point -- an assertion in a comment would not.
-var _ UtpSocket = (*utpnet.Socket)(nil)
+var _ Socket = (*utpnet.Socket)(nil)
 
 // Not covered here, and worth saying plainly:
 //

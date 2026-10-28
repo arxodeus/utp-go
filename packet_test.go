@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func (p *packetHeaderV1) Generate(rand *rand.Rand, size int) reflect.Value {
+func (h *packetHeaderV1) Generate(rand *rand.Rand, size int) reflect.Value {
 	packetType := packetType(rand.Intn(5))
 	// The extension byte must name a known extension, since the decoder
 	// rejects anything above maxKnownExtension.
@@ -20,7 +20,7 @@ func (p *packetHeaderV1) Generate(rand *rand.Rand, size int) reflect.Value {
 		PacketType:    packetType,
 		Version:       protocolVersionOne,
 		Extension:     extension,
-		ConnectionId:  uint16(rand.Intn(math.MaxUint16)),
+		ConnectionID:  uint16(rand.Intn(math.MaxUint16)),
 		Timestamp:     int64(rand.Uint32()),
 		TimestampDiff: rand.Uint32(),
 		WndSize:       rand.Uint32(),
@@ -30,7 +30,7 @@ func (p *packetHeaderV1) Generate(rand *rand.Rand, size int) reflect.Value {
 	return reflect.ValueOf(header)
 }
 
-func (a *selectiveAck) Generate(rand *rand.Rand, size int) reflect.Value {
+func (s *selectiveAck) Generate(rand *rand.Rand, size int) reflect.Value {
 	bits := rand.Intn(size)
 	acked := make([]bool, bits)
 	for i := 0; i < bits; i++ {
@@ -158,7 +158,7 @@ func TestPacket(t *testing.T) {
 // its selective ack gets that edit written in the ack's place. The fuzzer
 // checks the unedited round trip; these are the edits it cannot make.
 func TestDecodedPacketKeepsExtensionsThroughEdits(t *testing.T) {
-	base := newPacketBuilder(st_state, 5, 1, 2, 3).
+	base := newPacketBuilder(stState, 5, 1, 2, 3).
 		WithSelectiveAck(newSelectiveAck([]bool{true, false, false, false})).Build().Encode()
 	// Chain an unknown extension, type 99, after the selective ack.
 	sackEnd := minimalHeaderSize + 2 + 4

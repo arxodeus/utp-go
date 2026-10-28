@@ -6,8 +6,8 @@ import "time"
 type ConnectionMetrics struct {
 	// At is when the snapshot was taken.
 	At time.Time
-	// Cid identifies the connection.
-	Cid *ConnectionId
+	// CID identifies the connection.
+	CID *ConnectionID
 
 	// --- congestion control ---
 
@@ -38,7 +38,7 @@ type ConnectionMetrics struct {
 	//
 	// Both measure the outbound path, as reported by the peer in the
 	// timestamp_difference field; that is the direction LEDBAT controls.
-	// PeerTsDiff measures the inbound path.
+	// PeerTimestampDiff measures the inbound path.
 	BaseDelay    time.Duration
 	CurrentDelay time.Duration
 	// ClockSkewCorrection is how much has been added to BaseDelay to cancel
@@ -78,11 +78,11 @@ type ConnectionMetrics struct {
 	// acknowledgement for incoming data already carries a current window.
 	WindowReopenedAcks uint64
 
-	// PeerTsDiff is the one-way delay measured from the peer's timestamps:
+	// PeerTimestampDiff is the one-way delay measured from the peer's timestamps:
 	// how long the peer's last packet took to arrive. It is echoed back in
 	// timestamp_difference_microseconds. It measures the inbound path,
 	// whereas BaseDelay and CurrentDelay measure the outbound one.
-	PeerTsDiff time.Duration
+	PeerTimestampDiff time.Duration
 	// TargetDelayMicros is the standing queue the controller aims for.
 	TargetDelayMicros uint32
 	// SlowStart reports whether the controller is still in slow start.

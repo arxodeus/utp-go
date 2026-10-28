@@ -13,7 +13,7 @@ go get github.com/arxodeus/utp
 
 | Package | Purpose |
 | --- | --- |
-| [`utp`](https://pkg.go.dev/github.com/arxodeus/utp) | The protocol: `UtpSocket` and `UtpStream`, with context-aware reads and writes. |
+| [`utp`](https://pkg.go.dev/github.com/arxodeus/utp) | The protocol: `utp.Socket` and `utp.Stream`, with context-aware reads and writes. |
 | [`utpnet`](https://pkg.go.dev/github.com/arxodeus/utp/utpnet) | The same, as `net.Conn` and `net.PacketConn`, with non-uTP datagrams on the port passed through to `ReadFrom`. |
 | [`compat/golibutp`](compat/golibutp) | A drop-in replacement for `github.com/anacrolix/go-libutp`, as a separate module. |
 

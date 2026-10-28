@@ -12,7 +12,7 @@ import (
 func TestAcceptObservesSocketCancellation(t *testing.T) {
 	socketCtx, socketCancel := context.WithCancel(context.Background())
 	defer socketCancel()
-	s := &UtpSocket{ctx: socketCtx, accepts: make(chan *acceptRequest)}
+	s := &Socket{ctx: socketCtx, accepts: make(chan *acceptRequest)}
 	result := make(chan error, 1)
 	go func() {
 		_, err := s.Accept(context.Background(), nil)
@@ -35,7 +35,7 @@ func TestAcceptReturnsWhenTheSocketCloses(t *testing.T) {
 	ctx := context.Background()
 	conn := newScriptedConn()
 	defer conn.Close()
-	sock := WithSocket(ctx, conn, conformanceLogger())
+	sock := NewSocket(ctx, conn, conformanceLogger())
 
 	errs := make(chan error, 2)
 	go func() {
@@ -43,7 +43,7 @@ func TestAcceptReturnsWhenTheSocketCloses(t *testing.T) {
 		errs <- err
 	}()
 	go func() {
-		_, err := sock.AcceptWithCid(context.Background(), NewConnectionId(conn.peer, 10, 11), nil)
+		_, err := sock.AcceptWithCID(context.Background(), NewConnectionID(conn.peer, 10, 11), nil)
 		errs <- err
 	}()
 	time.Sleep(100 * time.Millisecond) // both queued
@@ -65,7 +65,7 @@ func TestTimedOutAcceptsAreNotRetained(t *testing.T) {
 	ctx := context.Background()
 	conn := newScriptedConn()
 	defer conn.Close()
-	sock := WithSocket(ctx, conn, conformanceLogger())
+	sock := NewSocket(ctx, conn, conformanceLogger())
 	defer sock.Close()
 
 	for i := 0; i < 500; i++ {
@@ -87,17 +87,17 @@ func TestTimedOutAcceptsAreNotRetained(t *testing.T) {
 func TestConnectWithANilConfig(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	bind := func() *UtpSocket {
+	bind := func() *Socket {
 		s, err := Bind(ctx, "udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(s.Close)
+		t.Cleanup(func() { s.Close() })
 		return s
 	}
 	sa, sb := bind(), bind()
 	go sb.Accept(ctx, nil)
-	s, err := sa.Connect(ctx, NewUdpPeer(sb.LocalAddr().(*net.UDPAddr)), nil)
+	s, err := sa.Connect(ctx, NewUDPPeer(sb.LocalAddr().(*net.UDPAddr)), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

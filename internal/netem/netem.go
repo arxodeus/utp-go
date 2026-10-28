@@ -6,7 +6,7 @@
 // look like "it works". This package makes the difference measurable.
 //
 // An Endpoint satisfies the utp.Conn interface (ReadFrom/WriteTo/Close), so
-// it drops straight into utp.WithSocket in place of a UDP socket. No root,
+// it drops straight into utp.NewSocket in place of a UDP socket. No root,
 // no network namespaces, no external tooling.
 //
 // # Determinism

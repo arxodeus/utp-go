@@ -46,14 +46,14 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 ## Line 50 — var ErrAcceptTimedOut
 
 ```
-// ErrAcceptTimedOut is returned by Accept/AcceptWithCid when no matching
+// ErrAcceptTimedOut is returned by Accept/AcceptWithCID when no matching
 	// SYN arrived within 20 seconds.
 ```
 
 ## Line 55 — type Conn
 
 ```
-// Conn is the datagram transport a UtpSocket runs over.
+// Conn is the datagram transport a Socket runs over.
 //
 // WriteTo must behave like a UDP socket's: it may wait for the local send
 // path, but never for the peer to read. The socket writes from the goroutine
@@ -91,7 +91,7 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 // with. See Conn.
 ```
 
-## Line 98 — type UtpSocket
+## Line 98 — type Socket
 
 ```
 // dispatchMu serialises the routing of incoming packets with everything
@@ -100,14 +100,14 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 	// dispatch.
 ```
 
-## Line 103 — type UtpSocket
+## Line 103 — type Socket
 
 ```
 // keyScratch is where the reader builds the keys it routes by. Used only
 	// under dispatchMu.
 ```
 
-## Line 106 — type UtpSocket
+## Line 106 — type Socket
 
 ```
 // connsGen counts changes to conns and inlineConns, each made with
@@ -115,35 +115,35 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 	// the route the last datagram took, good while connsGen has not moved.
 ```
 
-## Line 111 — type UtpSocket
+## Line 111 — type Socket
 
 ```
 // writeMu keeps an ordinary write from landing while an MTU probe has the
 	// don't-fragment bit set on the socket. See writeDatagram.
 ```
 
-## Line 114 — type UtpSocket
+## Line 114 — type Socket
 
 ```
 // inlineConns maps a connection's event channel to the connection, so
 	// the reader can hand it a packet directly. Guarded by connsMutex.
 ```
 
-## Line 120 — type UtpSocket
+## Line 120 — type Socket
 
 ```
 // clk is this socket's clock, handed to every connection it creates.
 	// Nil means the real one.
 ```
 
-## Line 125 — type UtpSocket
+## Line 125 — type Socket
 
 ```
 // holder is socket, if it is a peerHolder, and held the peer each entry
 	// in conns holds it for. Guarded by connsMutex. See registerLocked.
 ```
 
-## Line 136 — type UtpSocket
+## Line 136 — type Socket
 
 ```
 // retransmitTimers is one timer wheel for every connection on this
@@ -151,36 +151,36 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 	// retransmit_timer.go.
 ```
 
-## Line 140 — type UtpSocket
+## Line 140 — type Socket
 
 ```
 // pendingAccepts holds Accept calls that named no connection id and are
 	// waiting for any incoming SYN. Guarded by dispatchMu.
 ```
 
-## Line 143 — type UtpSocket
+## Line 143 — type Socket
 
 ```
 // answered holds connections whose SYN was answered with no Accept
-	// waiting, oldest first, until an Accept or AcceptWithCid takes one. Only
+	// waiting, oldest first, until an Accept or AcceptWithCID takes one. Only
 	// a socket with WithAcceptConfig answers so. Guarded by dispatchMu.
 ```
 
-## Line 147 — type UtpSocket
+## Line 147 — type Socket
 
 ```
 // rstInfo remembers RESETs recently sent for connections we do not have.
 ```
 
-## Line 150 — type UtpSocket
+## Line 150 — type Socket
 
 ```
-// ownsSocket is true when this UtpSocket created the underlying Conn
+// ownsSocket is true when this Socket created the underlying Conn
 	// (via Bind) and is therefore responsible for closing it. A Conn handed
 	// in through WithSocket belongs to the caller.
 ```
 
-## Line 154 — type UtpSocket
+## Line 154 — type Socket
 
 ```
 // droppedFullConnQueue counts packets discarded because a connection's
@@ -196,7 +196,7 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 	// across a transfer whose reader stalls.
 ```
 
-## Line 166 — type UtpSocket
+## Line 166 — type Socket
 
 ```
 // lingerAcks holds, for a connection that has just closed after reaching
@@ -204,14 +204,14 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 	// again. See connection.lingerAck.
 ```
 
-## Line 171 — type UtpSocket
+## Line 171 — type Socket
 
 ```
 // recentlyClosed holds the keys of connections that ended in the last
 	// idQuarantine. See GenerateCid.
 ```
 
-## Line 175 — type UtpSocket
+## Line 175 — type Socket
 
 ```
 // resetsSent counts RESETs answered to packets for connections this
@@ -219,27 +219,27 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 	// connection that draws one has been killed by us.
 ```
 
-## Line 179 — type UtpSocket
+## Line 179 — type Socket
 
 ```
 // refusedByFirewall counts SYNs the firewall callback rejected. It exists
 	// so a test can tell "refused" from "lost".
 ```
 
-## Line 183 — type UtpSocket
+## Line 183 — type Socket
 
 ```
 // lingering holds the streams the application has closed whose
 	// connections are still delivering. Close waits for them. See linger.
 ```
 
-## Line 185 — type UtpSocket
+## Line 185 — type Socket
 
 ```
-// *UtpStream -> struct{}
+// *Stream -> struct{}
 ```
 
-## Line 186 — type UtpSocket
+## Line 186 — type Socket
 
 ```
 // firewall, when set, is asked about every SYN for a connection this
@@ -248,13 +248,13 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 	// only read afterwards.
 ```
 
-## Line 191 — type UtpSocket
+## Line 191 — type Socket
 
 ```
 // acceptConfig is WithAcceptConfig's function, or nil.
 ```
 
-## Line 193 — type UtpSocket
+## Line 193 — type Socket
 
 ```
 // maxConns is the incoming-connection cap: a new incoming connection is
@@ -262,14 +262,14 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 	// less means no cap. See WithMaxConnections.
 ```
 
-## Line 197 — type UtpSocket
+## Line 197 — type Socket
 
 ```
 // refusedAtCapacity counts SYNs refused because the socket was at its
 	// connection cap. It exists so a test can tell "refused" from "lost".
 ```
 
-## Line 200 — type UtpSocket
+## Line 200 — type Socket
 
 ```
 // refusedIdInUse counts SYNs refused because a connection we dialled
@@ -314,7 +314,7 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 // this option. n < 0 means no cap.
 ```
 
-## Line 248 — func (*UtpSocket).ConnectionsRefusedAtCapacity
+## Line 248 — func (*Socket).ConnectionsRefusedAtCapacity
 
 ```
 // ConnectionsRefusedAtCapacity reports how many incoming connections were
@@ -322,15 +322,15 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 // WithMaxConnections.
 ```
 
-## Line 255 — func (*UtpSocket).ConnectionsRefusedIdInUse
+## Line 255 — func (*Socket).ConnectionsRefusedIDInUse
 
 ```
-// ConnectionsRefusedIdInUse reports how many incoming connections were
+// ConnectionsRefusedIDInUse reports how many incoming connections were
 // refused because a connection this socket dialled to the same peer already
 // receives on the id the new one would have. libutp refuses these too.
 ```
 
-## Line 262 — func (*UtpSocket).connectionCount
+## Line 262 — func (*Socket).connectionCount
 
 ```
 // connectionCount is what the incoming-connection cap is measured against:
@@ -340,7 +340,7 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 ## Line 268 — type SocketOption
 
 ```
-// SocketOption configures a UtpSocket at construction.
+// SocketOption configures a Socket at construction.
 ```
 
 ## Line 271 — func WithFirewall
@@ -370,14 +370,14 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 // WithAcceptConfig gives the socket a configuration of its own for incoming
 // connections, read as each one is made, and with it libutp's way of
 // accepting: a SYN is answered as it arrives, whether or not an Accept is
-// waiting, and the connection is held until an Accept or AcceptWithCid takes
+// waiting, and the connection is held until an Accept or AcceptWithCID takes
 // it. libutp creates the socket and sends the SYN-ACK in utp_process_udp
 // (utp_internal.cpp:2984-2990) with the context's options as they stand
 // (:2616-2621), and hands the connection to its embedder.
 //
 // The function's configuration is used for every connection the socket
 // answers before an Accept asks, and for one accepted with a nil config. An
-// Accept or AcceptWithCid given a config of its own still applies it to a
+// Accept or AcceptWithCID given a config of its own still applies it to a
 // connection whose SYN arrives while it waits; one that takes a connection
 // already answered gets that connection as it was made.
 //
@@ -392,22 +392,22 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 // application leaves them.
 ```
 
-## Line 318 — func (*UtpSocket).configForAccept
+## Line 318 — func (*Socket).configForAccept
 
 ```
 // configForAccept is the configuration an accepted connection gets.
 ```
 
-## Line 330 — func (*UtpSocket).clock
+## Line 330 — func (*Socket).clock
 
 ```
 // clock is this socket's clock, never nil.
 ```
 
-## Line 338 — func WithClock
+## Line 338 — func withClock
 
 ```
-// WithClock runs this socket's retransmission wheel on the given clock, and
+// withClock runs this socket's retransmission wheel on the given clock, and
 // makes it the default for every connection the socket creates.
 //
 // The wheel is shared by every connection on a socket, so the clock has to be
@@ -456,7 +456,7 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 ## Line 399 — func WithSocket
 
 ```
-// Tell the caller. Dropping the request silently left AcceptWithCid
+// Tell the caller. Dropping the request silently left AcceptWithCID
 		// blocked on accReq.stream forever whenever the caller's own context
 		// had no deadline.
 ```
@@ -468,7 +468,7 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 	// socket.
 ```
 
-## Line 468 — func (*UtpSocket).PacketsDroppedFullConnQueue
+## Line 468 — func (*Socket).PacketsDroppedFullConnQueue
 
 ```
 // LocalAddr returns the address the underlying socket is bound to, or nil if
@@ -485,7 +485,7 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 // peer must now retransmit, and is a bug rather than a tuning signal.
 ```
 
-## Line 484 — func (*UtpSocket).ConnectionsRefusedByFirewall
+## Line 484 — func (*Socket).ConnectionsRefusedByFirewall
 
 ```
 // PacketsResetSent reports how many RESETs this socket answered to packets for
@@ -494,7 +494,7 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 // firewall callback rejected.
 ```
 
-## Line 508 — func (*UtpSocket).Close
+## Line 508 — func (*Socket).Close
 
 ```
 // Close shuts the socket down. It is idempotent: `defer sock.Close()`
@@ -506,7 +506,7 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 // (awaitLingering); everything else is ended at once.
 ```
 
-## Line 526 — func (*UtpSocket).Close
+## Line 526 — func (*Socket).Close
 
 ```
 // Close the underlying socket when we opened it. Without this the UDP
@@ -516,13 +516,13 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 		// test in one process failed with "address already in use".
 ```
 
-## Line 539 — func (*UtpSocket).linger
+## Line 539 — func (*Socket).linger
 
 ```
 // linger keeps a closed stream's connection going until it has delivered
 // what was queued and ended, and lets Close wait for it.
 //
-// UtpStream.Close returns at once, as libutp's utp_close does
+// Stream.Close returns at once, as libutp's utp_close does
 // (utp_internal.cpp:3358-3380): the FIN is queued and the connection goes on
 // sending in the background. libutp leaves the rest to its embedder, which
 // must keep the context alive and pumping until its sockets have finished;
@@ -532,23 +532,23 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 // byte.
 ```
 
-## Line 559 — func (*UtpSocket).awaitLingering
+## Line 559 — func (*Socket).awaitLingering
 
 ```
 // awaitLingering waits for every closed stream's connection to finish
 // delivering, while its peer is still answering: a connection whose peer has
 // been silent for closeStallTimeout is waited for no longer, and the socket's
-// cancellation then ends it. See UtpStream.waitForFlush.
+// cancellation then ends it. See Stream.waitForFlush.
 ```
 
-## Line 577 — func (*UtpSocket).wakeConns
+## Line 577 — func (*Socket).wakeConns
 
 ```
 // wakeConns starts the event loop of every resting connection on the socket.
 // See dormant.go.
 ```
 
-## Line 592 — func (*UtpSocket).sendShutdownEventToConns
+## Line 592 — func (*Socket).sendShutdownEventToConns
 
 ```
 // Snapshot the channels rather than sending under the lock: a blocking
@@ -556,14 +556,14 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 	// packet delivery for every other connection on this socket.
 ```
 
-## Line 608 — func (*UtpSocket).sendShutdownEventToConns
+## Line 608 — func (*Socket).sendShutdownEventToConns
 
 ```
 // The connection's queue is full; it is already being torn down
 			// by the cancelled socket context.
 ```
 
-## Line 617 — func (*UtpSocket).configForPeer
+## Line 617 — func (*Socket).configForPeer
 
 ```
 // getConnStreamForQuotedId finds the connection that sent the packet an ICMP
@@ -598,15 +598,15 @@ Every comment in `utp_socket.go` at e56c9aa, verbatim.
 // before changing anything. See pathMTUCeiling.
 ```
 
-## Line 648 — func (*UtpSocket).configForPeer
+## Line 648 — func (*Socket).configForPeer
 
 ```
 // Nil is the defaults, for a dial as for an accept (configForAccept). It
-	// was passed on as it was, and a Connect or ConnectWithCid given nil
+	// was passed on as it was, and a Connect or ConnectWithCID given nil
 	// panicked making the connection.
 ```
 
-## Line 654 — func (*UtpSocket).configForPeer
+## Line 654 — func (*Socket).configForPeer
 
 ```
 // A socket-wide clock reaches its connections here, so a caller that

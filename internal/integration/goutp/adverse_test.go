@@ -17,10 +17,10 @@ func netemPair(t *testing.T, ctx context.Context, cfg netem.Config, seed int64) 
 	n := netem.NewNetwork(seed)
 	a, b := n.MustAddEndpoint("ours"), n.MustAddEndpoint("purego")
 	n.Connect(a, b, cfg)
-	t.Cleanup(n.Close)
+	t.Cleanup(func() { n.Close() })
 
-	ours := utp.WithSocket(ctx, a, quietLogger())
-	t.Cleanup(ours.Close)
+	ours := utp.NewSocket(ctx, a, quietLogger())
+	t.Cleanup(func() { ours.Close() })
 	pc := newNetemPacketConn(b, a)
 	theirs, err := purego.NewSocketFromPacketConn(pc,
 		purego.WithLogger(puregoLogger()), purego.WithAddrResolver(pc.resolve))

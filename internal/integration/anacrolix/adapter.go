@@ -8,7 +8,7 @@ import (
 	"github.com/arxodeus/utp/utpnet"
 )
 
-// UtpSocket is the interface github.com/anacrolix/torrent requires of a uTP
+// Socket is the interface github.com/anacrolix/torrent requires of a uTP
 // implementation. It is copied from that package's unexported `utpSocket`
 // (utp.go), which cannot be referred to from outside it.
 //
@@ -17,17 +17,17 @@ import (
 // be assignable to the real thing -- see the compile-time assertion in
 // adapter_check.go, which uses torrent.NewUtpSocket's own signature and so
 // fails if the real interface changes shape.
-type UtpSocket interface {
+type Socket interface {
 	net.PacketConn
 	Accept() (net.Conn, error)
 	Addr() net.Addr
 	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
-// NewUtpSocket has the signature torrent.NewUtpSocket has, so it can replace
+// NewSocket has the signature torrent.NewSocket has, so it can replace
 // it. The firewall callback is accepted and ignored; see the note in
 // adapter_check.go.
-func NewUtpSocket(network, addr string, fw FirewallCallback, logger alog.Logger) (UtpSocket, error) {
+func NewSocket(network, addr string, fw FirewallCallback, logger alog.Logger) (Socket, error) {
 	// The firewall callback is honored: torrent uses it to refuse
 	// connections before any state exists for them.
 	opts := &utpnet.Options{}

@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	TEST_BUFFER_SIZE     = 2048
-	TEST_DELAYtime       = time.Millisecond * 100
-	TEST_INITIAL_TIMEOUT = time.Second
+	testBufferSize     = 2048
+	testDelayTime      = time.Millisecond * 100
+	testInitialTimeout = time.Second
 )
 
 func CreateTestConnection(endpoint endpointInfo) *connection {
@@ -29,33 +29,33 @@ func CreateTestConnection(endpoint endpointInfo) *connection {
 	}
 
 	// Create the connection id.
-	cid := ConnectionId{
+	cid := ConnectionID{
 		Send: 101,
 		Recv: 100,
 		Peer: peer,
 	}
 
 	unackTimeoutCh := make(chan *packet, 1000)
-	timers := newRetransmitTimers(TEST_INITIAL_TIMEOUT/4, 8)
+	timers := newRetransmitTimers(testInitialTimeout/4, 8)
 	conn := &connection{
-		logger:         newLogger(nil),
-		state:          newConnState(make(chan error, 1)),
-		cid:            &cid,
-		config:         NewConnectionConfig(),
-		endpoint:       &endpoint,
-		peerTsDiff:     100 * time.Millisecond,
-		peerRecvWindow: math.MaxUint32,
-		socketEvents:   socketEvents,
-		timers:         timers,
-		timerScope:     timers.newScope(),
-		armed:          make(map[uint16]struct{}),
-		unackTimeoutCh: unackTimeoutCh,
-		ctx:            context.Background(),
-		reads:          reads,
-		readable:       make(chan struct{}, 1),
-		pendingWrites:  make([]*queuedWrite, 0),
-		writable:       make(chan struct{}, 1),
-		latestTimeout:  nil,
+		logger:            newLogger(nil),
+		state:             newConnState(make(chan error, 1)),
+		cid:               &cid,
+		config:            NewConnectionConfig(),
+		endpoint:          &endpoint,
+		peerTimestampDiff: 100 * time.Millisecond,
+		peerRecvWindow:    math.MaxUint32,
+		socketEvents:      socketEvents,
+		timers:            timers,
+		timerScope:        timers.newScope(),
+		armed:             make(map[uint16]struct{}),
+		unackTimeoutCh:    unackTimeoutCh,
+		ctx:               context.Background(),
+		reads:             reads,
+		readable:          make(chan struct{}, 1),
+		pendingWrites:     make([]*queuedWrite, 0),
+		writable:          make(chan struct{}, 1),
+		latestTimeout:     nil,
 		// As newConnection sets it.
 		mtu: newMtuSearch(uint32(NewConnectionConfig().MaxPacketSize), time.Now()),
 	}
@@ -73,7 +73,7 @@ func TestOnSynInitiator(t *testing.T) {
 	before := conn.state.stateType
 
 	// A SYN at a connection we dialed is not ours to answer, and is ignored.
-	conn.onPacket(newPacketBuilder(st_syn, 7, 0, 1<<20, syn).Build(), time.Now())
+	conn.onPacket(newPacketBuilder(stSyn, 7, 0, 1<<20, syn).Build(), time.Now())
 
 	require.Equal(t, before, conn.state.stateType, "a stray SYN changed the connection's state")
 	require.NoError(t, conn.state.Err, "a stray SYN ended the connection")
@@ -111,7 +111,7 @@ func TestOnSynAcceptorNonMatchingSyn(t *testing.T) {
 	// Step 2: a SYN with a different sequence number belongs to another
 	// connection that drew the same ids. It is ignored.
 	altSyn := uint16(128)
-	conn.onPacket(newPacketBuilder(st_syn, 7, 0, 1<<20, altSyn).Build(), time.Now())
+	conn.onPacket(newPacketBuilder(stSyn, 7, 0, 1<<20, altSyn).Build(), time.Now())
 	require.Equal(t, before, conn.state.stateType,
 		"a SYN that was not this connection's changed its state")
 	require.NoError(t, conn.state.Err, "a SYN that was not this connection's ended it")
@@ -157,15 +157,15 @@ func TestOnPacketInvalidAckNum(t *testing.T) {
 	now := time.Now()
 	sentPackets.OnTransmit(
 		synAck+1,
-		st_data,
+		stData,
 		data,
 		length,
 		now,
 	)
 
 	// Setup buffers and state
-	sendBuf := newSendBuffer(TEST_BUFFER_SIZE)
-	recvBuf := newReceiveBuffer(TEST_BUFFER_SIZE, syn)
+	sendBuf := newSendBuffer(testBufferSize)
+	recvBuf := newReceiveBuffer(testBufferSize, syn)
 
 	conn.state = &connState{
 		stateType:   connConnected,
@@ -200,10 +200,10 @@ func TestOnFinEstablished(t *testing.T) {
 	conn := CreateTestConnection(endpoint)
 
 	// Create buffers and controllers
-	sendBuf := newSendBuffer(TEST_BUFFER_SIZE)
+	sendBuf := newSendBuffer(testBufferSize)
 	congestionCtrl := newDefaultController(fromConnConfig(conn.config))
 	sentPackets := newSentPacketsWithoutLogger(synAck, congestionCtrl)
-	recvBuf := newReceiveBuffer(TEST_BUFFER_SIZE, syn)
+	recvBuf := newReceiveBuffer(testBufferSize, syn)
 
 	// Set connected state
 	conn.state = &connState{
@@ -239,10 +239,10 @@ func TestOnFinClosing(t *testing.T) {
 	conn := CreateTestConnection(endpoint)
 
 	// Step 2: Setup buffers and controllers
-	sendBuf := newSendBuffer(TEST_BUFFER_SIZE)
+	sendBuf := newSendBuffer(testBufferSize)
 	congestionCtrl := newDefaultController(fromConnConfig(conn.config))
 	sentPackets := newSentPacketsWithoutLogger(synAck, congestionCtrl)
-	recvBuf := newReceiveBuffer(TEST_BUFFER_SIZE, syn)
+	recvBuf := newReceiveBuffer(testBufferSize, syn)
 
 	// Step 3: Set local fin
 	localFin := synAck + 3
@@ -286,10 +286,10 @@ func TestOnFinClosingNonMatchingFin(t *testing.T) {
 	conn := CreateTestConnection(endpoint)
 
 	// Step 2: Setup buffers
-	sendBuf := newSendBuffer(TEST_BUFFER_SIZE)
+	sendBuf := newSendBuffer(testBufferSize)
 	congestionCtrl := newDefaultController(fromConnConfig(conn.config))
 	sentPackets := newSentPacketsWithoutLogger(synAck, congestionCtrl)
-	recvBuf := newReceiveBuffer(TEST_BUFFER_SIZE, syn)
+	recvBuf := newReceiveBuffer(testBufferSize, syn)
 
 	// Step 3: Set initial fin
 	fin := syn + 3

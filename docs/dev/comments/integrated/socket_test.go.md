@@ -237,7 +237,7 @@ Every comment in `integrated/socket_test.go` at e56c9aa, verbatim.
 ## Line 367 — func TestEmptySocketConnCount
 
 ```
-// 假设我们有一个 UtpSocket 的包装结构
+// 假设我们有一个 Socket 的包装结构
 ```
 
 ## Line 378 — func TestSocketReportsTwoConns

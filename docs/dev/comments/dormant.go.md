@@ -20,7 +20,7 @@ Every comment in `dormant.go` at e56c9aa, verbatim.
 // loop return: it rests. Everything that can need the loop again restarts it
 // (wake): a write, a read freeing room in the read queue, a close, an event
 // the socket queues, a timer armed by a pass the socket's reader runs inline,
-// the socket's context ending (UtpSocket.wakeConns) or a dial being abandoned,
+// the socket's context ending (Socket.wakeConns) or a dial being abandoned,
 // and a timer of its own -- one function timer, set for the earliest of the
 // deadlines a quiet connection keeps:
 //

@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func answerPair(t *testing.T, ctx context.Context, opts ...SocketOption) (dialer, acceptor *UtpSocket) {
+func answerPair(t *testing.T, ctx context.Context, opts ...SocketOption) (dialer, acceptor *Socket) {
 	t.Helper()
 	lg := duplexQuietLog()
 	var err error
@@ -15,19 +15,19 @@ func answerPair(t *testing.T, ctx context.Context, opts ...SocketOption) (dialer
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(dialer.Close)
+	t.Cleanup(func() { dialer.Close() })
 	acceptor, err = Bind(ctx, "udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}, lg, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(acceptor.Close)
+	t.Cleanup(func() { acceptor.Close() })
 	return dialer, acceptor
 }
 
-func dialWithin(ctx context.Context, from, to *UtpSocket, within time.Duration) (*UtpStream, error) {
+func dialWithin(ctx context.Context, from, to *Socket, within time.Duration) (*Stream, error) {
 	dctx, cancel := context.WithTimeout(ctx, within)
 	defer cancel()
-	return from.Connect(dctx, NewUdpPeer(to.LocalAddr().(*net.UDPAddr)), NewConnectionConfig())
+	return from.Connect(dctx, NewUDPPeer(to.LocalAddr().(*net.UDPAddr)), NewConnectionConfig())
 }
 
 // With its own configuration, a socket answers a SYN as it arrives: the dial
@@ -98,9 +98,9 @@ func TestSynWaitsForAcceptWithoutASocketConfig(t *testing.T) {
 	}
 }
 
-// AcceptWithCid takes the answered connection it names, leaving others for
+// AcceptWithCID takes the answered connection it names, leaving others for
 // Accept.
-func TestAcceptWithCidTakesAnAnsweredConnection(t *testing.T) {
+func TestAcceptWithCIDTakesAnAnsweredConnection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	dialer, acceptor := answerPair(t, ctx, WithAcceptConfig(NewConnectionConfig))
@@ -118,22 +118,22 @@ func TestAcceptWithCidTakesAnAnsweredConnection(t *testing.T) {
 
 	// The acceptor's ids for the second connection: it sends on the
 	// dialer's receive id and receives on the dialer's send id.
-	dcid := second.Cid()
-	want := NewConnectionId(NewUdpPeer(dialer.LocalAddr().(*net.UDPAddr)), dcid.Send, dcid.Recv)
-	got, err := acceptor.AcceptWithCid(ctx, want, NewConnectionConfig())
+	dcid := second.CID()
+	want := NewConnectionID(NewUDPPeer(dialer.LocalAddr().(*net.UDPAddr)), dcid.Send, dcid.Recv)
+	got, err := acceptor.AcceptWithCID(ctx, want, NewConnectionConfig())
 	if err != nil {
-		t.Fatalf("AcceptWithCid for an answered connection: %v", err)
+		t.Fatalf("AcceptWithCID for an answered connection: %v", err)
 	}
 	defer got.Close()
-	if got.Cid().Hash() != want.Hash() {
-		t.Fatalf("AcceptWithCid returned %v, want %v", got.Cid(), want)
+	if got.CID().Hash() != want.Hash() {
+		t.Fatalf("AcceptWithCID returned %v, want %v", got.CID(), want)
 	}
 	rest, err := acceptor.Accept(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rest.Close()
-	if rest.Cid().Hash() == want.Hash() {
-		t.Fatal("Accept returned the connection AcceptWithCid already took")
+	if rest.CID().Hash() == want.Hash() {
+		t.Fatal("Accept returned the connection AcceptWithCID already took")
 	}
 }

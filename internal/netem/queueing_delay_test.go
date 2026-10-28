@@ -13,7 +13,7 @@ import (
 // sends into. The two directions here have very different propagation delays
 // and no bottleneck, so neither has a standing queue and the right answer is
 // about zero. BaseDelay and CurrentDelay both measure the outbound path;
-// subtracting the inbound PeerTsDiff instead would report the path
+// subtracting the inbound PeerTimestampDiff instead would report the path
 // asymmetry, about 90ms here, as queue.
 //
 // Both are judged on the median sample. Reporting the asymmetry would show in
@@ -36,13 +36,13 @@ func TestQueueingDelayMeasuresTheOutboundQueue(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	sendSock := utp.WithSocket(ctx, sender, quiet())
+	sendSock := utp.NewSocket(ctx, sender, quiet())
 	defer sendSock.Close()
-	recvSock := utp.WithSocket(ctx, receiver, quiet())
+	recvSock := utp.NewSocket(ctx, receiver, quiet())
 	defer recvSock.Close()
 
-	acceptCid := utp.NewConnectionId(sender.Addr(), 861, 860)
-	connectCid := utp.NewConnectionId(receiver.Addr(), 860, 861)
+	acceptCid := utp.NewConnectionID(sender.Addr(), 861, 860)
+	connectCid := utp.NewConnectionID(receiver.Addr(), 860, 861)
 
 	var (
 		mu       sync.Mutex
@@ -74,7 +74,7 @@ func TestQueueingDelayMeasuresTheOutboundQueue(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		stream, err := recvSock.AcceptWithCid(ctx, acceptCid, utp.NewConnectionConfig())
+		stream, err := recvSock.AcceptWithCID(ctx, acceptCid, utp.NewConnectionConfig())
 		if err != nil {
 			t.Errorf("accept: %v", err)
 			return
@@ -87,7 +87,7 @@ func TestQueueingDelayMeasuresTheOutboundQueue(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		stream, err := sendSock.ConnectWithCid(ctx, connectCid, sendCfg)
+		stream, err := sendSock.ConnectWithCID(ctx, connectCid, sendCfg)
 		if err != nil {
 			t.Errorf("connect: %v", err)
 			return
@@ -111,7 +111,7 @@ func TestQueueingDelayMeasuresTheOutboundQueue(t *testing.T) {
 	cross := make([]time.Duration, 0, len(samples))
 	for _, m := range samples {
 		queue = append(queue, m.QueueingDelay())
-		cross = append(cross, max(m.PeerTsDiff-m.BaseDelay, 0))
+		cross = append(cross, max(m.PeerTimestampDiff-m.BaseDelay, 0))
 	}
 	medianQueue, medianCross := medianDuration(queue), medianDuration(cross)
 
@@ -158,13 +158,13 @@ func TestQueueingDelayTracksARealQueue(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	sendSock := utp.WithSocket(ctx, sender, quiet())
+	sendSock := utp.NewSocket(ctx, sender, quiet())
 	defer sendSock.Close()
-	recvSock := utp.WithSocket(ctx, receiver, quiet())
+	recvSock := utp.NewSocket(ctx, receiver, quiet())
 	defer recvSock.Close()
 
-	acceptCid := utp.NewConnectionId(sender.Addr(), 871, 870)
-	connectCid := utp.NewConnectionId(receiver.Addr(), 870, 871)
+	acceptCid := utp.NewConnectionID(sender.Addr(), 871, 870)
+	connectCid := utp.NewConnectionID(receiver.Addr(), 870, 871)
 
 	var (
 		mu      sync.Mutex
@@ -197,7 +197,7 @@ func TestQueueingDelayTracksARealQueue(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		stream, err := recvSock.AcceptWithCid(ctx, acceptCid, utp.NewConnectionConfig())
+		stream, err := recvSock.AcceptWithCID(ctx, acceptCid, utp.NewConnectionConfig())
 		if err != nil {
 			t.Errorf("accept: %v", err)
 			return
@@ -210,7 +210,7 @@ func TestQueueingDelayTracksARealQueue(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		stream, err := sendSock.ConnectWithCid(ctx, connectCid, sendCfg)
+		stream, err := sendSock.ConnectWithCID(ctx, connectCid, sendCfg)
 		if err != nil {
 			t.Errorf("connect: %v", err)
 			return

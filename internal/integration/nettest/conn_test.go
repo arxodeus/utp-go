@@ -30,7 +30,7 @@ import (
 // under the race detector, and its own documentation warns that some issues
 // surface only across repeated runs -- so this is worth running more than once
 // (`go test -race -count=5 ./...`).
-func TestUtpConnSatisfiesNetConn(t *testing.T) {
+func TestUTPConnSatisfiesNetConn(t *testing.T) {
 	nettest.TestConn(t, makeUtpPipe)
 }
 

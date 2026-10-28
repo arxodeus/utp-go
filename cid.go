@@ -13,20 +13,20 @@ type ConnectionPeer interface {
 	Hash() string
 }
 
-// UdpPeer is a ConnectionPeer for a UDP address.
-type UdpPeer struct {
+// UDPPeer is a ConnectionPeer for a UDP address.
+type UDPPeer struct {
 	addr *net.UDPAddr
 	// hash caches addr.String().
 	hash string
 }
 
-// NewUdpPeer returns a peer for addr.
-func NewUdpPeer(addr *net.UDPAddr) *UdpPeer {
-	return &UdpPeer{addr: addr, hash: addr.String()}
+// NewUDPPeer returns a peer for addr.
+func NewUDPPeer(addr *net.UDPAddr) *UDPPeer {
+	return &UDPPeer{addr: addr, hash: addr.String()}
 }
 
 // Hash returns the peer's address as text.
-func (p *UdpPeer) Hash() string {
+func (p *UDPPeer) Hash() string {
 	if p.hash != "" {
 		return p.hash
 	}
@@ -34,12 +34,12 @@ func (p *UdpPeer) Hash() string {
 }
 
 // Addr returns the peer's UDP address.
-func (p *UdpPeer) Addr() *net.UDPAddr {
+func (p *UDPPeer) Addr() *net.UDPAddr {
 	return p.addr
 }
 
 // String returns the peer's address.
-func (p *UdpPeer) String() string {
+func (p *UDPPeer) String() string {
 	return p.addr.String()
 }
 
@@ -55,9 +55,9 @@ func (p *tcpPeer) String() string {
 	return p.addr.String()
 }
 
-// ConnectionId identifies a connection by its send and receive ids and its
+// ConnectionID identifies a connection by its send and receive ids and its
 // peer.
-type ConnectionId struct {
+type ConnectionID struct {
 	// Send is the id this end sends with: the peer's receive id.
 	Send uint16
 	// Recv is the id this end receives on.
@@ -67,23 +67,23 @@ type ConnectionId struct {
 	hash string
 }
 
-// NewConnectionId returns the connection id for peer with the given receive
+// NewConnectionID returns the connection id for peer with the given receive
 // and send ids.
-func NewConnectionId(peer ConnectionPeer, recvId uint16, sendId uint16) *ConnectionId {
-	connId := &ConnectionId{
+func NewConnectionID(peer ConnectionPeer, recvID uint16, sendID uint16) *ConnectionID {
+	connID := &ConnectionID{
 		Peer: peer,
-		Recv: recvId,
-		Send: sendId,
+		Recv: recvID,
+		Send: sendID,
 	}
-	connId.hash = genHash(connId)
-	return connId
+	connID.hash = genHash(connID)
+	return connID
 }
 
 // genHash returns the connection's key: its ids and its peer's key, as text.
 // The ids contain no colon, so distinct triples give distinct keys.
-func genHash(connId *ConnectionId) string {
-	peer := connId.Peer.Hash()
-	return string(appendConnKey(make([]byte, 0, len(peer)+12), connId.Send, connId.Recv, peer))
+func genHash(connID *ConnectionID) string {
+	peer := connID.Peer.Hash()
+	return string(appendConnKey(make([]byte, 0, len(peer)+12), connID.Send, connID.Recv, peer))
 }
 
 // appendConnKey appends the key genHash returns for these ids and peer key,
@@ -96,10 +96,10 @@ func appendConnKey(b []byte, send, recv uint16, peer string) []byte {
 	return append(b, peer...)
 }
 
-// Hash returns the key the connection is tracked under. NewConnectionId
-// caches it; for a ConnectionId built as a struct literal it is computed on
+// Hash returns the key the connection is tracked under. NewConnectionID
+// caches it; for a ConnectionID built as a struct literal it is computed on
 // each call.
-func (id *ConnectionId) Hash() string {
+func (id *ConnectionID) Hash() string {
 	if id.hash == "" {
 		return genHash(id)
 	}
@@ -107,6 +107,6 @@ func (id *ConnectionId) Hash() string {
 }
 
 // String returns a description of the id for logging.
-func (id *ConnectionId) String() string {
+func (id *ConnectionID) String() string {
 	return fmt.Sprintf("send_id: %d recv_id:%d peer:%v hash: %s", id.Send, id.Recv, id.Peer, id.hash)
 }

@@ -17,7 +17,7 @@ func TestFinOvertakingDataAfterAFullSequenceCycle(t *testing.T) {
 	}
 	c := &connection{
 		logger: newLogger(nil),
-		cid:    &ConnectionId{},
+		cid:    &ConnectionID{},
 		state:  &connState{stateType: connConnected, RecvBuf: rb},
 	}
 	if err := c.onFin(1001, nil); err != nil {
@@ -40,7 +40,7 @@ func TestDataPastTheFinIsStillDropped(t *testing.T) {
 		rb.consumed = 65534
 		c := &connection{
 			logger: newLogger(nil),
-			cid:    &ConnectionId{},
+			cid:    &ConnectionID{},
 			state:  &connState{stateType: connConnected, RecvBuf: rb},
 		}
 		fin := rb.AckNum() + 3

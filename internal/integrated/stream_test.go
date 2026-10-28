@@ -34,31 +34,31 @@ func TestCloseWhenWriteCompletes(t *testing.T) {
 
 	// Create sockets
 	loggerA := slog.Default().With("local", "peerA")
-	aSocket := utp.WithSocket(ctx, aLink, loggerA)
+	aSocket := utp.NewSocket(ctx, aLink, loggerA)
 	loggerB := slog.Default().With("local", "peerB")
 	//loggerB := slog.New(log.DiscardHandler())
-	bSocket := utp.WithSocket(ctx, bLink, loggerB)
+	bSocket := utp.NewSocket(ctx, bLink, loggerB)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	// Accept connection
-	var recvStream *utp.UtpStream
+	var recvStream *utp.Stream
 	var recvErr error
 	go func() {
 		defer wg.Done()
 		slog.Debug("accepting with cid", "src.peer", bCid.Peer)
-		recvStream, recvErr = bSocket.AcceptWithCid(ctx, bCid, connConfig)
+		recvStream, recvErr = bSocket.AcceptWithCID(ctx, bCid, connConfig)
 		slog.Debug("accepted with cid", "src.peer", bCid.Peer)
 	}()
 
 	// Connect
-	var sendStream *utp.UtpStream
+	var sendStream *utp.Stream
 	var sendErr error
 	go func() {
 		defer wg.Done()
 		slog.Debug("Connecting with cid", "dst.peer", aCid.Peer)
-		sendStream, sendErr = aSocket.ConnectWithCid(ctx, aCid, connConfig)
+		sendStream, sendErr = aSocket.ConnectWithCID(ctx, aCid, connConfig)
 		if sendErr != nil {
 			t.Error("failed to connect with cid", "dst.peer", aCid.Peer)
 		}
@@ -83,7 +83,7 @@ func TestCloseWhenWriteCompletes(t *testing.T) {
 	sendWg.Add(1)
 	go func() {
 		defer sendWg.Done()
-		slog.Debug("will write to", "dst.peer", sendStream.Cid().Peer)
+		slog.Debug("will write to", "dst.peer", sendStream.CID().Peer)
 		written, err := sendStream.Write(ctx, data)
 		if err != nil {
 			t.Errorf("Error sending data: %v", err)
@@ -100,7 +100,7 @@ func TestCloseWhenWriteCompletes(t *testing.T) {
 	go func() {
 		defer recvWg.Done()
 		readBuf := make([]byte, 0)
-		slog.Debug("will read from", "src.peer", recvStream.Cid().Peer)
+		slog.Debug("will read from", "src.peer", recvStream.CID().Peer)
 		_, err := recvStream.ReadToEOF(ctx, &readBuf)
 		if err != nil {
 			t.Errorf("Error receiving data: %v", err)
@@ -146,26 +146,26 @@ func TestCloseErrorsIfAllPacketsDropped(t *testing.T) {
 
 	// Create sockets
 	ctx := context.Background()
-	sendSocket := utp.WithSocket(ctx, aLink, slog.Default().With("local", "sender"))
-	recvSocket := utp.WithSocket(ctx, bLink, slog.Default().With("local", "receiver"))
+	sendSocket := utp.NewSocket(ctx, aLink, slog.Default().With("local", "sender"))
+	recvSocket := utp.NewSocket(ctx, bLink, slog.Default().With("local", "receiver"))
 
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	// Accept connection
-	var recvStream *utp.UtpStream
+	var recvStream *utp.Stream
 	var recvErr error
 	go func() {
 		defer wg.Done()
-		recvStream, recvErr = recvSocket.AcceptWithCid(ctx, bCid, connConfig)
+		recvStream, recvErr = recvSocket.AcceptWithCID(ctx, bCid, connConfig)
 	}()
 
 	// Connect
-	var sendStream *utp.UtpStream
+	var sendStream *utp.Stream
 	var sendErr error
 	go func() {
 		defer wg.Done()
-		sendStream, sendErr = sendSocket.ConnectWithCid(ctx, aCid, connConfig)
+		sendStream, sendErr = sendSocket.ConnectWithCID(ctx, aCid, connConfig)
 	}()
 
 	wg.Wait()
@@ -253,27 +253,27 @@ func TestCloseSucceedsIfOnlyFinAckDropped(t *testing.T) {
 
 	// Create UTP sockets
 	ctx := context.Background()
-	sendSocket := utp.WithSocket(ctx, sendLink, slog.Default().With("local", "sender"))
-	recvSocket := utp.WithSocket(ctx, recvLink, slog.Default().With("local", "receiver"))
+	sendSocket := utp.NewSocket(ctx, sendLink, slog.Default().With("local", "sender"))
+	recvSocket := utp.NewSocket(ctx, recvLink, slog.Default().With("local", "receiver"))
 
 	// Create channels for coordination
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	// Accept connection in goroutine
-	var recvStream *utp.UtpStream
+	var recvStream *utp.Stream
 	var recvErr error
 	go func() {
 		defer wg.Done()
-		recvStream, recvErr = recvSocket.AcceptWithCid(ctx, recvCid, connConfig)
+		recvStream, recvErr = recvSocket.AcceptWithCID(ctx, recvCid, connConfig)
 	}()
 
 	// Connect
-	var sendStream *utp.UtpStream
+	var sendStream *utp.Stream
 	var sendErr error
 	go func() {
 		defer wg.Done()
-		sendStream, sendErr = sendSocket.ConnectWithCid(ctx, sendCid, connConfig)
+		sendStream, sendErr = sendSocket.ConnectWithCID(ctx, sendCid, connConfig)
 	}()
 
 	// Wait for connection establishment
@@ -369,8 +369,8 @@ func TestDataValidWhenResendingSynStateResponse(t *testing.T) {
 
 	// Create UTP sockets
 	ctx := context.Background()
-	acceptor := utp.WithSocket(ctx, acceptorSocket, slog.Default().With("local", "acceptor"))
-	connector := utp.WithSocket(ctx, connectorSocket, slog.Default().With("local", "connector"))
+	acceptor := utp.NewSocket(ctx, acceptorSocket, slog.Default().With("local", "acceptor"))
+	connector := utp.NewSocket(ctx, connectorSocket, slog.Default().With("local", "connector"))
 
 	// Create channels for coordination
 	var wg sync.WaitGroup
@@ -378,19 +378,19 @@ func TestDataValidWhenResendingSynStateResponse(t *testing.T) {
 
 	// Accept connection in goroutine
 	// Accept connection
-	var acceptorStream *utp.UtpStream
+	var acceptorStream *utp.Stream
 	var acceptorErr error
 	go func() {
 		defer wg.Done()
-		acceptorStream, acceptorErr = acceptor.AcceptWithCid(ctx, acceptorCid, connConfig)
+		acceptorStream, acceptorErr = acceptor.AcceptWithCID(ctx, acceptorCid, connConfig)
 	}()
 
 	// Connect
-	var connectorStream *utp.UtpStream
+	var connectorStream *utp.Stream
 	var connectorErr error
 	go func() {
 		defer wg.Done()
-		connectorStream, connectorErr = connector.ConnectWithCid(ctx, connectorCid, connConfig)
+		connectorStream, connectorErr = connector.ConnectWithCID(ctx, connectorCid, connConfig)
 	}()
 
 	// Wait for connection establishment

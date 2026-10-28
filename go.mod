@@ -6,7 +6,7 @@ require (
 	github.com/google/btree v1.1.3
 	github.com/stretchr/testify v1.9.0
 	github.com/valyala/fastrand v1.1.0
-	golang.org/x/sys v0.28.0
+	golang.org/x/sys v0.41.0
 )
 
 require (

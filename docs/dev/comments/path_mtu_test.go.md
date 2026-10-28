@@ -13,7 +13,7 @@ Every comment in `path_mtu_test.go` at e56c9aa, verbatim.
 ## Line 23 — func (*fakePathMTU).LocalAddr
 
 ```
-// LocalAddr is forwarded explicitly: UtpSocket.LocalAddr duck-types for it,
+// LocalAddr is forwarded explicitly: Socket.LocalAddr duck-types for it,
 // and embedding the Conn interface promotes only the methods Conn declares.
 ```
 

@@ -2,14 +2,14 @@
 
 Every comment in `socket_receive.go` at e56c9aa, verbatim.
 
-## Line 15 — func (*UtpSocket).readLoop
+## Line 15 — func (*Socket).readLoop
 
 ```
 // The inbound path starts here, so a virtual clock must not move while a
 	// packet is between the wire and a connection. See idleBarrier.
 ```
 
-## Line 27 — func (*UtpSocket).readLoop
+## Line 27 — func (*Socket).readLoop
 
 ```
 // Each read is a batch. A connection holds the acknowledgement owed for
@@ -22,14 +22,14 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 	// nothing back.
 ```
 
-## Line 38 — func (*UtpSocket).readLoop
+## Line 38 — func (*Socket).readLoop
 
 ```
 // run counts the datagrams read since the last batch ended, while a
 	// QueuedReader says more are waiting.
 ```
 
-## Line 46 — func (*UtpSocket).readLoop
+## Line 46 — func (*Socket).readLoop
 
 ```
 // Part way through a run the read cannot block, so this loop is
@@ -37,7 +37,7 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 			// still owed for the run. See idleBarrier.
 ```
 
-## Line 86 — func (*UtpSocket).readLoop
+## Line 86 — func (*Socket).readLoop
 
 ```
 // Decoded from buf, which the next read reuses: a packet
@@ -46,7 +46,7 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 			// allocation for every packet received.
 ```
 
-## Line 100 — func (*UtpSocket).dispatch
+## Line 100 — func (*Socket).dispatch
 
 ```
 // dispatch routes one datagram, on the reader's goroutine. A packet for an
@@ -70,7 +70,7 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 // tenth of a packet's cost on a reader woken with its caches cold.
 ```
 
-## Line 128 — func (*UtpSocket).endBatch
+## Line 128 — func (*Socket).endBatch
 
 ```
 // endBatch acknowledges, for each connection a read batch delivered to, what
@@ -88,7 +88,7 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 // on a UDP socket that do not mean it is finished.
 ```
 
-## Line 147 — func (*UtpSocket).readFailed
+## Line 147 — func (*Socket).readFailed
 
 ```
 // readFailed handles a read error, and reports whether the read loop should
@@ -102,27 +102,27 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 // waiting on it fails at once with ErrClosed-shaped errors instead.
 ```
 
-## Line 175 — func (*UtpSocket).readFailed
+## Line 175 — func (*Socket).readFailed
 
 ```
 // In the background: Close waits for this loop's peers to settle, and
 	// this loop is one of the things it tears down.
 ```
 
-## Line 181 — func (*UtpSocket).handleIncomingBuf
+## Line 181 — func (*Socket).handleIncomingBuf
 
 ```
 // handleIncomingBuf routes one datagram, and returns the connection that
 // took it inline, or nil. Called with dispatchMu held.
 ```
 
-## Line 184 — func (*UtpSocket).handleIncomingBuf
+## Line 184 — func (*Socket).handleIncomingBuf
 
 ```
 // Handle incoming packets
 ```
 
-## Line 187 — func (*UtpSocket).handleIncomingBuf
+## Line 187 — func (*Socket).handleIncomingBuf
 
 ```
 // Not uTP, or not well formed. Ordinary on a port shared with
@@ -131,18 +131,18 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 		// a warning per datagram is a way to flood the log.
 ```
 
-## Line 205 — func (*UtpSocket).handleIncomingBuf
+## Line 205 — func (*Socket).handleIncomingBuf
 
 ```
 // Each derivation is looked up by its key alone, built into a reused
-	// buffer: no ConnectionId and no string per attempt. This ran three
+	// buffer: no ConnectionID and no string per attempt. This ran three
 	// cidFromPacket calls for every datagram -- for an accepted connection the
 	// match is the third -- each formatting the peer's address and the key
 	// anew: 9 of the 23 allocations a data packet cost, and most of the time
-	// routing took. A ConnectionId is built below only for a SYN.
+	// routing took. A ConnectionID is built below only for a SYN.
 ```
 
-## Line 217 — func (*UtpSocket).handleIncomingBuf
+## Line 217 — func (*Socket).handleIncomingBuf
 
 ```
 // The last hop of the inbound path: a virtual clock must not
@@ -159,20 +159,20 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 		// takes for nothing else. See idleBarrier.
 ```
 
-## Line 233 — func (*UtpSocket).handleIncomingBuf
+## Line 233 — func (*Socket).handleIncomingBuf
 
 ```
 // Queued, so kept past this read. See packet.own.
 ```
 
-## Line 244 — func (*UtpSocket).handleIncomingBuf
+## Line 244 — func (*Socket).handleIncomingBuf
 
 ```
 // See droppedFullConnQueue. This is a real packet loss that the
 			// peer has to recover from, and it is ours, not the network's.
 ```
 
-## Line 268 — func (*UtpSocket).handleIncomingBuf
+## Line 268 — func (*Socket).handleIncomingBuf
 
 ```
 // An unmatched RESET is dropped, never answered: replying to a reset
@@ -181,7 +181,7 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 		// (utp_internal.cpp:2850-2881).
 ```
 
-## Line 273 — func (*UtpSocket).handleIncomingBuf
+## Line 273 — func (*Socket).handleIncomingBuf
 
 ```
 // A FIN or data packet retransmitted after we closed is
@@ -190,14 +190,14 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 			// always wins.
 ```
 
-## Line 285 — func (*UtpSocket).handleIncomingBuf
+## Line 285 — func (*Socket).handleIncomingBuf
 
 ```
 // A SYN is kept, by the connection it starts or until an Accept takes
 	// it. See packet.own.
 ```
 
-## Line 291 — func (*UtpSocket).handleIncomingBuf
+## Line 291 — func (*Socket).handleIncomingBuf
 
 ```
 // A connection we dialled may already receive on the id this one would:
@@ -207,7 +207,7 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 	// dialler, hearing nothing, gives up or retries on its own terms.
 ```
 
-## Line 308 — func (*UtpSocket).handleIncomingBuf
+## Line 308 — func (*Socket).handleIncomingBuf
 
 ```
 // The connection cap is checked here, where libutp checks it: after the
@@ -217,7 +217,7 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 	// and does not count against the cap.
 ```
 
-## Line 324 — func (*UtpSocket).handleIncomingBuf
+## Line 324 — func (*Socket).handleIncomingBuf
 
 ```
 // The firewall is asked here: every lookup above has missed, so this is a
@@ -229,7 +229,7 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 	// listening, which is the opposite of what a blocklist is for.
 ```
 
-## Line 363 — func (*UtpSocket).handleIncomingBuf
+## Line 363 — func (*Socket).handleIncomingBuf
 
 ```
 // The socket's context, not the Accept call's: an accepted connection
@@ -237,7 +237,7 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 		// outlives its dial. The sibling branch above already used s.ctx.
 ```
 
-## Line 368 — func (*UtpSocket).handleIncomingBuf
+## Line 368 — func (*Socket).handleIncomingBuf
 
 ```
 // Nobody is waiting, and the socket has a configuration of its own:
@@ -251,14 +251,14 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 		// that received the SYN (utp_call_on_accept, utp_internal.cpp:3001).
 ```
 
-## Line 380 — func (*UtpSocket).handleIncomingBuf
+## Line 380 — func (*Socket).handleIncomingBuf
 
 ```
 // Already held. A connection that fails ends, and is dropped
 			// from answered once it has.
 ```
 
-## Line 393 — func (*UtpSocket).rememberLingerAck
+## Line 393 — func (*Socket).rememberLingerAck
 
 ```
 // maybeSendReset answers a packet addressed to a connection this socket does
@@ -278,7 +278,7 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 // on its own and a RESET is the right answer anyway.
 ```
 
-## Line 416 — func (*UtpSocket).reAckLingering
+## Line 416 — func (*Socket).reAckLingering
 
 ```
 // reAckLingering answers a FIN or a data packet retransmitted for a connection
@@ -302,7 +302,7 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 // Either way the answer is never a RESET, and this returns true for both.
 ```
 
-## Line 445 — func (*UtpSocket).reAckLingering
+## Line 445 — func (*Socket).reAckLingering
 
 ```
 // Data past the stored acknowledgement number is not a retransmission
@@ -329,7 +329,7 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 		// connection, and any clock its config gave it, has gone.
 ```
 
-## Line 480 — func (*UtpSocket).reAckLingering
+## Line 480 — func (*Socket).reAckLingering
 
 ```
 // Refresh, as below: a peer still writing is still there, and
@@ -339,27 +339,27 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 			// half of the exchange.
 ```
 
-## Line 492 — func (*UtpSocket).reAckLingering
+## Line 492 — func (*Socket).reAckLingering
 
 ```
 // Refresh the entry: a peer still retransmitting is still waiting.
 ```
 
-## Line 508 — func (*UtpSocket).maybeSendReset
+## Line 508 — func (*Socket).maybeSendReset
 
 ```
 // Already answered this one. Refresh its expiry and stay quiet, as
 		// libutp does at utp_internal.cpp:2918.
 ```
 
-## Line 514 — func (*UtpSocket).maybeSendReset
+## Line 514 — func (*Socket).maybeSendReset
 
 ```
 // Past this point libutp stops answering entirely rather than let the
 		// table grow without bound (utp_internal.cpp:2928).
 ```
 
-## Line 526 — func (*UtpSocket).maybeSendReset
+## Line 526 — func (*Socket).maybeSendReset
 
 ```
 // Fields match libutp's send_rst (utp_internal.cpp:846-863) exactly:
@@ -374,7 +374,7 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 	//     header and never fills them in for a reset.
 ```
 
-## Line 543 — func (*UtpSocket).ProcessICMPFragmentation
+## Line 543 — func (*Socket).ProcessICMPFragmentation
 
 ```
 // ProcessICMPFragmentation reports an ICMP "fragmentation needed" message
@@ -397,7 +397,7 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 // feeding it in is the embedder's job.
 ```
 
-## Line 568 — func (*UtpSocket).ProcessICMPError
+## Line 568 — func (*Socket).ProcessICMPError
 
 ```
 // ProcessICMPError reports an ICMP message that should tear a connection
@@ -411,14 +411,14 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 // caller's: libutp draws that line in its callers too.
 ```
 
-## Line 581 — func (*UtpSocket).deliverICMP
+## Line 581 — func (*Socket).deliverICMP
 
 ```
 // deliverICMP is libutp's parse_icmp_payload (utp_internal.cpp:3019-3067)
 // followed by the delivery its two callers share.
 ```
 
-## Line 588 — func (*UtpSocket).deliverICMP
+## Line 588 — func (*Socket).deliverICMP
 
 ```
 // "ICMP packets are only required to quote the first 8 bytes of the
@@ -428,7 +428,7 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 	// because by this point the UDP header is already off (:3032-3041).
 ```
 
-## Line 597 — func (*UtpSocket).deliverICMP
+## Line 597 — func (*Socket).deliverICMP
 
 ```
 // libutp reads the version and connection id straight out of the quoted
@@ -439,7 +439,7 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 	// off, and requiring them would throw away the report.
 ```
 
-## Line 626 — func (*UtpSocket).deliverICMP
+## Line 626 — func (*Socket).deliverICMP
 
 ```
 // The connection's queue is full. Dropping the report costs a probe,
@@ -448,19 +448,19 @@ Every comment in `socket_receive.go` at e56c9aa, verbatim.
 		// unrecognised would be wrong -- the connection was found.
 ```
 
-## Line 638 — func (*UtpSocket).getConnStreamForQuotedId
+## Line 638 — func (*Socket).getConnStreamForQuotedId
 
 ```
 // recv == id (the quoted packet is our SYN), either role
 ```
 
-## Line 641 — func (*UtpSocket).getConnStreamForQuotedId
+## Line 641 — func (*Socket).getConnStreamForQuotedId
 
 ```
 // recv == id+1 && send == id: we accepted this connection
 ```
 
-## Line 643 — func (*UtpSocket).getConnStreamForQuotedId
+## Line 643 — func (*Socket).getConnStreamForQuotedId
 
 ```
 // recv == id-1 && send == id: we initiated it

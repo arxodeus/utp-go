@@ -19,7 +19,7 @@ type fakePathMTU struct {
 
 func (f *fakePathMTU) PathMTU(ConnectionPeer) (int, bool) { return f.mtu, f.ok }
 
-// LocalAddr is forwarded explicitly: UtpSocket.LocalAddr checks for it, and
+// LocalAddr is forwarded explicitly: Socket.LocalAddr checks for it, and
 // embedding the Conn interface promotes only Conn's methods.
 func (f *fakePathMTU) LocalAddr() net.Addr { return f.local }
 
@@ -33,7 +33,7 @@ func pathMTUTestPeer(t *testing.T) ConnectionPeer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewUdpPeer(addr)
+	return NewUDPPeer(addr)
 }
 
 // A discovered path MTU may lower the configured ceiling and never raise it.
@@ -180,7 +180,7 @@ func TestNarrowPathLowersTheConnectionCeiling(t *testing.T) {
 		ok:    true,
 		local: base.LocalAddr(),
 	}
-	sa := WithSocket(ctx, narrowConn, lg)
+	sa := NewSocket(ctx, narrowConn, lg)
 	defer sa.Close()
 
 	sb, err := Bind(ctx, "udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}, lg)
@@ -192,8 +192,8 @@ func TestNarrowPathLowersTheConnectionCeiling(t *testing.T) {
 	aAddr := sa.LocalAddr().(*net.UDPAddr)
 	bAddr := sb.LocalAddr().(*net.UDPAddr)
 
-	cidA := NewConnectionId(NewUdpPeer(bAddr), 5000, 5001)
-	cidB := NewConnectionId(NewUdpPeer(aAddr), 5001, 5000)
+	cidA := NewConnectionID(NewUDPPeer(bAddr), 5000, 5001)
+	cidB := NewConnectionID(NewUDPPeer(aAddr), 5001, 5000)
 
 	// Collected under a lock rather than through a channel: the observer
 	// runs on the connection's goroutine for its whole life, so there is no
@@ -211,16 +211,16 @@ func TestNarrowPathLowersTheConnectionCeiling(t *testing.T) {
 		mu.Unlock()
 	}
 
-	accepted := make(chan *UtpStream, 1)
+	accepted := make(chan *Stream, 1)
 	go func() {
-		s, err := sb.AcceptWithCid(ctx, cidB, NewConnectionConfig())
+		s, err := sb.AcceptWithCID(ctx, cidB, NewConnectionConfig())
 		if err != nil {
 			accepted <- nil
 			return
 		}
 		accepted <- s
 	}()
-	client, err := sa.ConnectWithCid(ctx, cidA, cfg)
+	client, err := sa.ConnectWithCID(ctx, cidA, cfg)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -295,11 +295,11 @@ func TestIPv6PeersGetTheIPv6SafeCeiling(t *testing.T) {
 		configured uint16
 		want       uint16
 	}{
-		{"IPv6 peer", NewUdpPeer(v6), 1400, 1232},
-		{"zoned link-local IPv6 peer", NewUdpPeer(&net.UDPAddr{IP: net.ParseIP("fe80::1"), Zone: "eth0", Port: 1}), 1400, 1232},
-		{"IPv6 peer, smaller ceiling configured", NewUdpPeer(v6), 1000, 1000},
-		{"IPv4 peer", NewUdpPeer(&net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 6881}), 1400, 1400},
-		{"IPv4-mapped IPv6 peer travels as IPv4", NewUdpPeer(&net.UDPAddr{IP: net.ParseIP("::ffff:192.0.2.1"), Port: 6881}), 1400, 1400},
+		{"IPv6 peer", NewUDPPeer(v6), 1400, 1232},
+		{"zoned link-local IPv6 peer", NewUDPPeer(&net.UDPAddr{IP: net.ParseIP("fe80::1"), Zone: "eth0", Port: 1}), 1400, 1232},
+		{"IPv6 peer, smaller ceiling configured", NewUDPPeer(v6), 1000, 1000},
+		{"IPv4 peer", NewUDPPeer(&net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 6881}), 1400, 1400},
+		{"IPv4-mapped IPv6 peer travels as IPv4", NewUDPPeer(&net.UDPAddr{IP: net.ParseIP("::ffff:192.0.2.1"), Port: 6881}), 1400, 1400},
 		{"peer without an address", fakePeerHash("somewhere"), 1400, 1400},
 	} {
 		if got := ipv6Ceiling(tc.peer, tc.configured); got != tc.want {

@@ -2,34 +2,34 @@ package utp
 
 import "time"
 
-// Clock is the source of time and timers for a connection. It exists so
-// tests can run connections on a virtual clock; the default, RealClock, uses
-// the time package. ConnectionConfig.NowMicros controls the timestamps sent
-// on the wire; Clock controls deadlines and intervals.
-type Clock interface {
+// clockSource is the source of time and timers for a connection. It exists so
+// tests can run connections on a virtual clock; the default, defaultClock, uses
+// the time package. ConnectionConfig.nowMicros controls the timestamps sent
+// on the wire; clockSource controls deadlines and intervals.
+type clockSource interface {
 	// Now returns the current time.
 	Now() time.Time
 	// NewTimer returns a timer that fires once after d.
-	NewTimer(d time.Duration) Timer
+	NewTimer(d time.Duration) clockTimer
 	// NewTicker returns a ticker that fires every d.
-	NewTicker(d time.Duration) Ticker
+	NewTicker(d time.Duration) clockTicker
 }
 
-// Timer is the subset of *time.Timer this package uses. C is a method
+// clockTimer is the subset of *time.Timer this package uses. C is a method
 // because an interface cannot have fields.
-type Timer interface {
+type clockTimer interface {
 	C() <-chan time.Time
 	Reset(d time.Duration) bool
 	Stop() bool
 }
 
-// Ticker is the subset of *time.Ticker this package uses.
-type Ticker interface {
+// clockTicker is the subset of *time.Ticker this package uses.
+type clockTicker interface {
 	C() <-chan time.Time
 	Stop()
 }
 
-// idleBarrier is implemented by a Clock that must know when every
+// idleBarrier is implemented by a clockSource that must know when every
 // participant has finished reacting before it advances time.
 //
 // An event loop reports each time it is about to block, and the clock waits
@@ -38,7 +38,7 @@ type Ticker interface {
 // missed. The retransmission wheel reports for itself as well, since most of
 // its ticks reach no connection.
 //
-// RealClock does not implement it.
+// defaultClock does not implement it.
 type idleBarrier interface {
 	// Register announces a participant whose parking matters. Called once,
 	// when the loop starts.
@@ -61,22 +61,22 @@ type idleBarrier interface {
 // realClock uses the time package.
 type realClock struct{}
 
-// RealClock is the clock a connection uses unless another is configured.
-var RealClock Clock = realClock{}
+// defaultClock is the clock a connection uses unless another is configured.
+var defaultClock clockSource = realClock{}
 
 func (realClock) Now() time.Time { return time.Now() }
 
-func (realClock) NewTimer(d time.Duration) Timer {
+func (realClock) NewTimer(d time.Duration) clockTimer {
 	return &realTimer{t: time.NewTimer(d)}
 }
 
 // AfterFunc runs f in its own goroutine after d. The returned timer's
 // channel is nil. See funcTimerClock.
-func (realClock) AfterFunc(d time.Duration, f func()) Timer {
+func (realClock) AfterFunc(d time.Duration, f func()) clockTimer {
 	return &realTimer{t: time.AfterFunc(d, f)}
 }
 
-func (realClock) NewTicker(d time.Duration) Ticker {
+func (realClock) NewTicker(d time.Duration) clockTicker {
 	return &realTicker{t: time.NewTicker(d)}
 }
 

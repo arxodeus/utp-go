@@ -16,7 +16,7 @@ const maxReadBatch = 4096
 type udpConnReader struct {
 	// peers caches the peer for each source address the read loop has seen.
 	// See peerForKey.
-	peers map[peerKey]*UdpPeer
+	peers map[peerKey]*UDPPeer
 	// arena holds the datagrams of the last batch read, and batch the list of
 	// them: both are reused by the next. See lend.
 	arena []byte
@@ -40,7 +40,7 @@ const maxCachedPeers = 4096
 
 // readBatch returns every datagram the kernel has queued, waiting only for
 // the first. The socket then flushes deferred acknowledgements once per
-// batch; see UtpSocket.readLoop. drain does the reading: recvmmsg on Linux,
+// batch; see Socket.readLoop. drain does the reading: recvmmsg on Linux,
 // recvfrom elsewhere.
 func (c *udpConn) readBatch() ([]datagram, error) {
 	rc, err := c.base.SyscallConn()
@@ -69,14 +69,14 @@ func (c *udpConn) lend(b []byte) []byte {
 // the previous datagram from the same address, which saves formatting the
 // address for every packet. Only the read loop calls it, so the cache needs
 // no lock.
-func (c *udpConn) peerForKey(k peerKey) *UdpPeer {
+func (c *udpConn) peerForKey(k peerKey) *UDPPeer {
 	if p, ok := c.peers[k]; ok {
 		return p
 	}
 	if c.peers == nil || len(c.peers) >= maxCachedPeers {
-		c.peers = make(map[peerKey]*UdpPeer)
+		c.peers = make(map[peerKey]*UDPPeer)
 	}
-	p := NewUdpPeer(k.udpAddr())
+	p := NewUDPPeer(k.udpAddr())
 	c.peers[k] = p
 	return p
 }

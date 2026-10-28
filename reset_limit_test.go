@@ -100,7 +100,7 @@ func testSocketLogger() *slog.Logger {
 // dataPacketFor builds an ST_DATA packet addressed to a connection id that no
 // socket in the test has, which is what provokes a RESET.
 func dataPacketFor(connID, seqNum uint16) *packet {
-	return newPacketBuilder(st_data, connID, uint32(time.Now().UnixMicro()), 100_000, seqNum).
+	return newPacketBuilder(stData, connID, uint32(time.Now().UnixMicro()), 100_000, seqNum).
 		WithAckNum(1).
 		WithPayload([]byte("x")).
 		Build()
@@ -110,7 +110,7 @@ func TestResetIsSentOnceForARepeatedUnknownPacket(t *testing.T) {
 	conn := newRecordingConn()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	sock := WithSocket(ctx, conn, testSocketLogger())
+	sock := NewSocket(ctx, conn, testSocketLogger())
 	defer sock.Close()
 
 	// The same unanswerable packet, repeatedly: the first is answered and
@@ -120,10 +120,10 @@ func TestResetIsSentOnceForARepeatedUnknownPacket(t *testing.T) {
 		conn.inject(dataPacketFor(4242, 7))
 	}
 
-	waitFor(t, 3*time.Second, func() bool { return conn.countType(st_reset) >= 1 })
+	waitFor(t, 3*time.Second, func() bool { return conn.countType(stReset) >= 1 })
 	time.Sleep(300 * time.Millisecond) // give any extras a chance to appear
 
-	got := conn.countType(st_reset)
+	got := conn.countType(stReset)
 	t.Logf("%d identical unknown packets produced %d RESETs", repeats, got)
 	if got != 1 {
 		t.Errorf("got %d RESETs for %d repeats of one packet, want exactly 1", got, repeats)
@@ -134,7 +134,7 @@ func TestResetIsSentForEachDistinctUnknownPacket(t *testing.T) {
 	conn := newRecordingConn()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	sock := WithSocket(ctx, conn, testSocketLogger())
+	sock := NewSocket(ctx, conn, testSocketLogger())
 	defer sock.Close()
 
 	// Distinct sequence numbers are distinct events, and each is answered,
@@ -144,8 +144,8 @@ func TestResetIsSentForEachDistinctUnknownPacket(t *testing.T) {
 		conn.inject(dataPacketFor(4242, uint16(i)))
 	}
 
-	waitFor(t, 3*time.Second, func() bool { return conn.countType(st_reset) >= distinct })
-	got := conn.countType(st_reset)
+	waitFor(t, 3*time.Second, func() bool { return conn.countType(stReset) >= distinct })
+	got := conn.countType(stReset)
 	t.Logf("%d distinct unknown packets produced %d RESETs", distinct, got)
 	if got != distinct {
 		t.Errorf("got %d RESETs for %d distinct packets, want %d", got, distinct, distinct)
@@ -156,17 +156,17 @@ func TestResetIsNeverSentInReplyToAReset(t *testing.T) {
 	conn := newRecordingConn()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	sock := WithSocket(ctx, conn, testSocketLogger())
+	sock := NewSocket(ctx, conn, testSocketLogger())
 	defer sock.Close()
 
 	// Answering a reset with a reset would let two hosts exchange them
 	// indefinitely.
 	for i := 0; i < 20; i++ {
-		conn.inject(newPacketBuilder(st_reset, 4242, uint32(time.Now().UnixMicro()), 100_000, uint16(i)).Build())
+		conn.inject(newPacketBuilder(stReset, 4242, uint32(time.Now().UnixMicro()), 100_000, uint16(i)).Build())
 	}
 
 	time.Sleep(500 * time.Millisecond)
-	if got := conn.countType(st_reset); got != 0 {
+	if got := conn.countType(stReset); got != 0 {
 		t.Errorf("replied to unknown RESETs with %d RESETs, want 0", got)
 	}
 }
@@ -180,7 +180,7 @@ func TestResetStopsAtTheStoredLimit(t *testing.T) {
 	conn := newRecordingConn()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	sock := WithSocket(ctx, conn, testSocketLogger())
+	sock := NewSocket(ctx, conn, testSocketLogger())
 	defer sock.Close()
 
 	total := rstInfoLimit + 500
@@ -189,10 +189,10 @@ func TestResetStopsAtTheStoredLimit(t *testing.T) {
 		conn.inject(dataPacketFor(uint16(i), uint16(i)))
 	}
 
-	waitFor(t, 10*time.Second, func() bool { return conn.countType(st_reset) > rstInfoLimit-10 })
+	waitFor(t, 10*time.Second, func() bool { return conn.countType(stReset) > rstInfoLimit-10 })
 	time.Sleep(500 * time.Millisecond)
 
-	got := conn.countType(st_reset)
+	got := conn.countType(stReset)
 	t.Logf("%d distinct unknown packets produced %d RESETs (limit %d)", total, got, rstInfoLimit)
 	if got > rstInfoLimit+1 {
 		t.Errorf("sent %d RESETs, more than the %d limit allows", got, rstInfoLimit)

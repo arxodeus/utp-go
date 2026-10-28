@@ -92,7 +92,7 @@ Every comment in `conn_read.go` at e56c9aa, verbatim.
 ```
 // Bytes ready for a reader whose queue is full wait for it to make room,
 	// and only then can a read change anything here: it is what reopens the
-	// receive window. See UtpStream.notifyRead.
+	// receive window. See Stream.notifyRead.
 ```
 
 ## Line 129 — func (*connection).drainable
@@ -157,14 +157,14 @@ Every comment in `conn_read.go` at e56c9aa, verbatim.
 // context, and the consumer closing the stream. The second is what keeps the
 // deadlock from coming back. A consumer that closed without reading is not
 // owed these bytes, and waiting for it to take them would be waiting forever,
-// because UtpStream.Close is itself blocked waiting for this goroutine.
+// because Stream.Close is itself blocked waiting for this goroutine.
 ```
 
 ## Line 224 — func (*connection).deliverTerminalRead
 
 ```
 // deliverTerminalRead hands the reader the single end-of-stream marker: a
-// result with an empty Data slice, which is what UtpStream.ReadToEOF treats as
+// result with an empty Data slice, which is what Stream.ReadToEOF treats as
 // the end of the stream. It is delivered at most once.
 //
 // Every path that closes the connection must reach this, including idle
@@ -190,7 +190,7 @@ Every comment in `conn_read.go` at e56c9aa, verbatim.
 ## Line 246 — func (*connection).deliverTerminalRead
 
 ```
-// Never block the event loop on this either. UtpStream.Close waits for
+// Never block the event loop on this either. Stream.Close waits for
 	// this goroutine to finish, and only the reader drains c.reads, so a
 	// consumer that stopped reading and then closed deadlocked against
 	// itself: Close waited for the loop, the loop waited for the reader, and

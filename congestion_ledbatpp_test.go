@@ -326,14 +326,14 @@ func TestWindowCeilingIsNeverBelowTheFloor(t *testing.T) {
 // ppStepClock is a clock that reads whatever time the test sets, so the
 // send times the controller records and the times the test passes in agree.
 type ppStepClock struct {
-	Clock
+	clockSource
 	t time.Time
 }
 
 func (c *ppStepClock) Now() time.Time { return c.t }
 
 func newPPTestController(t0 time.Time) (*defaultController, *ppStepClock) {
-	clk := &ppStepClock{Clock: RealClock, t: t0}
+	clk := &ppStepClock{clockSource: defaultClock, t: t0}
 	config := defaultCtrlConfig()
 	config.Algorithm = AlgorithmLEDBATPP
 	config.Clock = clk

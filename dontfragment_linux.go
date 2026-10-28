@@ -8,7 +8,7 @@ import (
 // setDontFragment sets or clears the don't-fragment bit, IPv4 and IPv6, for
 // the next datagram sent on the socket. The option is per socket, so the
 // caller sets it, sends one datagram and clears it, with no other write in
-// between (UtpSocket.writeDatagram).
+// between (Socket.writeDatagram).
 //
 // It uses IP_PMTUDISC_PROBE rather than IP_PMTUDISC_DO: both set the bit,
 // but DO refuses a datagram larger than the kernel's cached path MTU, which

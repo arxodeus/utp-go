@@ -25,17 +25,17 @@ func TestCloseAfterThePeersFinDeliversWhatWasWritten(t *testing.T) {
 		n.Connect(a, b, Config{Delay: 10 * time.Millisecond, BandwidthBps: 10_000_000, QueueBytes: 256 * 1024, LossRate: 0.05})
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		sa := utp.WithSocket(ctx, a, quiet())
-		sb := utp.WithSocket(ctx, b, quiet())
+		sa := utp.NewSocket(ctx, a, quiet())
+		sb := utp.NewSocket(ctx, b, quiet())
 
 		var wg sync.WaitGroup
 		var got []byte
 		var readErr error
-		accepted := make(chan *utp.UtpStream, 1)
+		accepted := make(chan *utp.Stream, 1)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s, err := sb.AcceptWithCid(ctx, utp.NewConnectionId(a.Addr(), 501, 500), nil)
+			s, err := sb.AcceptWithCID(ctx, utp.NewConnectionID(a.Addr(), 501, 500), nil)
 			if err != nil {
 				readErr = err
 				accepted <- nil
@@ -47,7 +47,7 @@ func TestCloseAfterThePeersFinDeliversWhatWasWritten(t *testing.T) {
 			readErr = func() error { _, err := s.ReadToEOF(ctx, &got); return err }()
 			s.Close()
 		}()
-		client, err := sa.ConnectWithCid(ctx, utp.NewConnectionId(b.Addr(), 500, 501), nil)
+		client, err := sa.ConnectWithCID(ctx, utp.NewConnectionID(b.Addr(), 500, 501), nil)
 		if err != nil {
 			t.Fatal(err)
 		}

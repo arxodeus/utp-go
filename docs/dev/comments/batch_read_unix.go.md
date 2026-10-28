@@ -23,7 +23,7 @@ Every comment in `batch_read_unix.go` at e56c9aa, verbatim.
 // readBatch returns every datagram the kernel already has queued, waiting only
 // for the first one: libutp's embedder loop of recvfrom until EWOULDBLOCK,
 // after which it calls utp_issue_deferred_acks once (utp.h:512-517;
-// native/libutp/bridge.cpp). See UtpSocket.readLoop. drain does the reading:
+// native/libutp/bridge.cpp). See Socket.readLoop. drain does the reading:
 // recvmmsg on Linux (batch_drain_linux.go), recvfrom elsewhere
 // (batch_drain_recvfrom.go).
 // udpConnReader is what udpConn's batched reads keep between reads.

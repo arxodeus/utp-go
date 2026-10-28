@@ -22,8 +22,8 @@ import (
 )
 
 const (
-	test_socket_data_len = 1_000_000
-	defaultNumTransfers  = 1000
+	testSocketDataLen   = 1_000_000
+	defaultNumTransfers = 1000
 	// raceNumTransfers is the default under the race detector. All the
 	// transfers share one receiving socket, whose buffer the kernel caps at
 	// net.core.rmem_max, 208 KB on a stock Linux host: about 150 packets,
@@ -135,14 +135,14 @@ func TestManyConcurrentTransfers(t *testing.T) {
 	ctx := context.Background()
 	//recv, _, send, _ := buildConnectedPair()
 	// Create sockets
-	//recvLink := utp.WithSocket(ctx, recv, logger1.With("local", ":3400"))
+	//recvLink := utp.NewSocket(ctx, recv, logger1.With("local", ":3400"))
 	recvLink, err := utp.Bind(ctx, "udp4", recvAddr, logger1.With("local", ":3400"))
 	if err != nil {
 		t.Fatalf("Failed to bind recv socket: %v", err)
 	}
 	defer recvLink.Close()
 
-	//sendLink := utp.WithSocket(ctx, send, logger2.With("local", ":3401"))
+	//sendLink := utp.NewSocket(ctx, send, logger2.With("local", ":3401"))
 	sendLink, err := utp.Bind(ctx, "udp4", sendAddr, logger2.With("local", ":3401"))
 	if err != nil {
 		t.Fatalf("Failed to bind send socket: %v", err)
@@ -153,7 +153,7 @@ func TestManyConcurrentTransfers(t *testing.T) {
 	start := time.Now()
 	dropsBefore, haveDrops := udpReceiveBufferErrors()
 
-	data := make([]byte, test_socket_data_len)
+	data := make([]byte, testSocketDataLen)
 	_, _ = io.ReadFull(rand.Reader, data)
 
 	// Start transfers
@@ -186,7 +186,7 @@ func TestManyConcurrentTransfers(t *testing.T) {
 	require.ErrorIs(t, timeoutCtx.Err(), context.Canceled, "Timed out waiting for transfer to complete")
 
 	elapsed := time.Since(start)
-	megabitsSent := float64(n) * float64(test_socket_data_len) * 8.0 / 1_000_000.0
+	megabitsSent := float64(n) * float64(testSocketDataLen) * 8.0 / 1_000_000.0
 	transferRate := megabitsSent / elapsed.Seconds()
 
 	t.Logf("finished high concurrency load test of %d simultaneous transfers, in %v, at a rate of %.0f Mbps",
@@ -204,9 +204,9 @@ func TestManyConcurrentTransfers(t *testing.T) {
 	}
 }
 
-// TestUdpTransfer performs a single large transfer over uTP on real UDP
+// TestUDPTransfer performs a single large transfer over uTP on real UDP
 // sockets, the path a BitTorrent client uses.
-func TestUdpTransfer(t *testing.T) {
+func TestUDPTransfer(t *testing.T) {
 	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 4})
 	logger := slog.New(handler)
 
@@ -228,8 +228,8 @@ func TestUdpTransfer(t *testing.T) {
 
 	connConfig := utp.NewConnectionConfig()
 	const initiatorCid, responderCid = 3700, 3701
-	recvCid := utp.NewConnectionId(utp.NewUdpPeer(sendAddr), responderCid, initiatorCid)
-	sendCid := utp.NewConnectionId(utp.NewUdpPeer(recvAddr), initiatorCid, responderCid)
+	recvCid := utp.NewConnectionID(utp.NewUDPPeer(sendAddr), responderCid, initiatorCid)
+	sendCid := utp.NewConnectionID(utp.NewUDPPeer(recvAddr), initiatorCid, responderCid)
 
 	start := time.Now()
 	var wg sync.WaitGroup
@@ -239,7 +239,7 @@ func TestUdpTransfer(t *testing.T) {
 	var recvBuf []byte
 	go func() {
 		defer wg.Done()
-		stream, err := recvLink.AcceptWithCid(ctx, recvCid, connConfig)
+		stream, err := recvLink.AcceptWithCID(ctx, recvCid, connConfig)
 		if err != nil {
 			recvErr = fmt.Errorf("accept: %w", err)
 			return
@@ -261,7 +261,7 @@ func TestUdpTransfer(t *testing.T) {
 	var sendErr error
 	go func() {
 		defer wg.Done()
-		stream, err := sendLink.ConnectWithCid(ctx, sendCid, connConfig)
+		stream, err := sendLink.ConnectWithCID(ctx, sendCid, connConfig)
 		if err != nil {
 			sendErr = fmt.Errorf("connect: %w", err)
 			return
@@ -390,7 +390,7 @@ func OneHugeDataTransfer(t *testing.T, i int) {
 func TestEmptySocketConnCount(t *testing.T) {
 	socketAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3402}
 
-	// 假设我们有一个 UtpSocket 的包装结构
+	// 假设我们有一个 utp.Socket 的包装结构
 	utpSocket, err := utp.Bind(context.Background(), "udp", socketAddr, nil)
 	require.NoError(t, err, "Failed to bind socket")
 	defer utpSocket.Close()
@@ -412,26 +412,26 @@ func TestSocketReportsTwoConns(t *testing.T) {
 	require.NoError(t, err, "Failed to bind send socket")
 
 	// 定义连接ID
-	recvOneCid := &utp.ConnectionId{
+	recvOneCid := &utp.ConnectionID{
 		Send: 100,
 		Recv: 101,
-		Peer: utp.NewUdpPeer(sendAddr),
+		Peer: utp.NewUDPPeer(sendAddr),
 	}
-	sendOneCid := &utp.ConnectionId{
+	sendOneCid := &utp.ConnectionID{
 		Send: 101,
 		Recv: 100,
-		Peer: utp.NewUdpPeer(recvAddr),
+		Peer: utp.NewUDPPeer(recvAddr),
 	}
 
-	recvTwoCid := &utp.ConnectionId{
+	recvTwoCid := &utp.ConnectionID{
 		Send: 200,
 		Recv: 201,
-		Peer: utp.NewUdpPeer(sendAddr),
+		Peer: utp.NewUDPPeer(sendAddr),
 	}
-	sendTwoCid := &utp.ConnectionId{
+	sendTwoCid := &utp.ConnectionID{
 		Send: 201,
 		Recv: 200,
-		Peer: utp.NewUdpPeer(recvAddr),
+		Peer: utp.NewUDPPeer(recvAddr),
 	}
 
 	var wg sync.WaitGroup
@@ -440,23 +440,23 @@ func TestSocketReportsTwoConns(t *testing.T) {
 	// 启动第一对连接
 	go func() {
 		defer wg.Done()
-		_, _ = recv.AcceptWithCid(ctx, recvOneCid, connConfig)
+		_, _ = recv.AcceptWithCID(ctx, recvOneCid, connConfig)
 	}()
 
 	go func() {
 		defer wg.Done()
-		_, _ = send.ConnectWithCid(ctx, sendOneCid, connConfig)
+		_, _ = send.ConnectWithCID(ctx, sendOneCid, connConfig)
 	}()
 
 	// 启动第二对连接
 	go func() {
 		defer wg.Done()
-		_, _ = recv.AcceptWithCid(ctx, recvTwoCid, connConfig)
+		_, _ = recv.AcceptWithCID(ctx, recvTwoCid, connConfig)
 	}()
 
 	go func() {
 		defer wg.Done()
-		_, _ = send.ConnectWithCid(ctx, sendTwoCid, connConfig)
+		_, _ = send.ConnectWithCID(ctx, sendTwoCid, connConfig)
 	}()
 
 	wg.Wait()
@@ -474,18 +474,18 @@ func initiateTransfer(
 	ctx context.Context,
 	i uint16,
 	recvAddr *net.UDPAddr,
-	recv *utp.UtpSocket,
+	recv *utp.Socket,
 	sendAddr *net.UDPAddr,
-	send *utp.UtpSocket,
+	send *utp.Socket,
 	data []byte,
 	wg *sync.WaitGroup) {
 	connConfig := utp.NewConnectionConfig()
 	initiatorCid := uint16(100) + i
 	responderCid := uint16(100) + i + 1
 
-	recvCid := utp.NewConnectionId(utp.NewUdpPeer(sendAddr), responderCid, initiatorCid)
+	recvCid := utp.NewConnectionID(utp.NewUDPPeer(sendAddr), responderCid, initiatorCid)
 
-	sendCid := utp.NewConnectionId(utp.NewUdpPeer(recvAddr), initiatorCid, responderCid)
+	sendCid := utp.NewConnectionID(utp.NewUDPPeer(recvAddr), initiatorCid, responderCid)
 
 	// Start receiver goroutine
 	go func() {
@@ -493,7 +493,7 @@ func initiateTransfer(
 			t.Log("recv wg done")
 			wg.Done()
 		}()
-		stream, err := recv.AcceptWithCid(ctx, recvCid, connConfig)
+		stream, err := recv.AcceptWithCID(ctx, recvCid, connConfig)
 		if err != nil {
 			panic(fmt.Errorf("accept failed: %w", err))
 		}
@@ -520,7 +520,7 @@ func initiateTransfer(
 			t.Log("writer wg done")
 			wg.Done()
 		}()
-		stream, err := send.ConnectWithCid(ctx, sendCid, connConfig)
+		stream, err := send.ConnectWithCID(ctx, sendCid, connConfig)
 		assert.NoError(t, err, "connect failed: %w", err)
 		require.NotNil(t, stream, "stream should not be nil")
 		n, err := stream.Write(ctx, data)

@@ -54,17 +54,17 @@ func twoWayTransfer(seed int64, cfg Config, size int) (time.Duration, error) {
 	defer cancel()
 	pair := NewUtpPair(ctx, n, a, b, quiet())
 
-	var sa, sb *utp.UtpStream
+	var sa, sb *utp.Stream
 	var errA, errB error
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		sb, errB = pair.SockB.AcceptWithCid(ctx, utp.NewConnectionId(a.Addr(), 501, 500), utp.NewConnectionConfig())
+		sb, errB = pair.SockB.AcceptWithCID(ctx, utp.NewConnectionID(a.Addr(), 501, 500), utp.NewConnectionConfig())
 	}()
 	go func() {
 		defer wg.Done()
-		sa, errA = pair.SockA.ConnectWithCid(ctx, utp.NewConnectionId(b.Addr(), 500, 501), utp.NewConnectionConfig())
+		sa, errA = pair.SockA.ConnectWithCID(ctx, utp.NewConnectionID(b.Addr(), 500, 501), utp.NewConnectionConfig())
 	}()
 	wg.Wait()
 	if errA != nil || errB != nil {
@@ -84,7 +84,7 @@ func twoWayTransfer(seed int64, cfg Config, size int) (time.Duration, error) {
 		mu.Unlock()
 	}
 	start := time.Now()
-	side := func(s *utp.UtpStream) {
+	side := func(s *utp.Stream) {
 		defer wg.Done()
 		wg.Add(1)
 		go func() {

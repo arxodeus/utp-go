@@ -126,7 +126,7 @@ func FuzzResponderPacketSequence(f *testing.F) {
 	f.Add([]byte{4, 0xFF, 0xFF, 0xFF, 0xFF})
 	f.Add(append([]byte{22}, append(make([]byte, 20), 1, 0)...))
 
-	data := newPacketBuilder(st_data, fuzzConnID+1, 200000, fuzzWindow, fuzzSynSeq+1).
+	data := newPacketBuilder(stData, fuzzConnID+1, 200000, fuzzWindow, fuzzSynSeq+1).
 		WithAckNum(fuzzSynSeq).WithPayload([]byte("seed")).Build().Encode()
 	f.Add(append([]byte{byte(len(data))}, data...))
 
@@ -141,18 +141,18 @@ func FuzzResponderPacketSequence(f *testing.F) {
 
 		conn := newFuzzConn()
 		defer conn.Close()
-		sock := WithSocket(ctx, conn, fuzzLogger())
+		sock := NewSocket(ctx, conn, fuzzLogger())
 		defer sock.Close()
 
-		cid := NewConnectionId(conn.peer, fuzzConnID+1, fuzzConnID)
+		cid := NewConnectionID(conn.peer, fuzzConnID+1, fuzzConnID)
 		accepted := make(chan struct{})
 		go func() {
 			defer close(accepted)
-			_, _ = sock.AcceptWithCid(ctx, cid, NewConnectionConfig())
+			_, _ = sock.AcceptWithCID(ctx, cid, NewConnectionConfig())
 		}()
 
 		// Establish, then feed the sequence.
-		conn.inject(newPacketBuilder(st_syn, fuzzConnID, 100000, fuzzWindow, fuzzSynSeq).Build().Encode())
+		conn.inject(newPacketBuilder(stSyn, fuzzConnID, 100000, fuzzWindow, fuzzSynSeq).Build().Encode())
 		time.Sleep(fuzzSettle)
 
 		for _, pkt := range packets {
@@ -163,16 +163,16 @@ func FuzzResponderPacketSequence(f *testing.F) {
 		// The socket must still be alive: after whatever the fuzzer sent, a
 		// fresh connection still gets an answer.
 		before := conn.emittedCount()
-		fresh := NewConnectionId(conn.peer, fuzzConnID+3, fuzzConnID+2)
+		fresh := NewConnectionID(conn.peer, fuzzConnID+3, fuzzConnID+2)
 		freshDone := make(chan struct{})
 		go func() {
 			defer close(freshDone)
 			freshCtx, freshCancel := context.WithTimeout(ctx, 2*time.Second)
 			defer freshCancel()
-			_, _ = sock.AcceptWithCid(freshCtx, fresh, NewConnectionConfig())
+			_, _ = sock.AcceptWithCID(freshCtx, fresh, NewConnectionConfig())
 		}()
 		time.Sleep(fuzzSettle)
-		conn.inject(newPacketBuilder(st_syn, fuzzConnID+2, 300000, fuzzWindow, 900).Build().Encode())
+		conn.inject(newPacketBuilder(stSyn, fuzzConnID+2, 300000, fuzzWindow, 900).Build().Encode())
 
 		deadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) {

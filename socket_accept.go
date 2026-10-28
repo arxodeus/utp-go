@@ -2,12 +2,12 @@ package utp
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"sync"
 )
 
 type streamResult struct {
-	stream *UtpStream
+	stream *Stream
 	err    error
 }
 
@@ -15,7 +15,7 @@ type acceptRequest struct {
 	ctx    context.Context
 	stream chan *streamResult
 	config *ConnectionConfig
-	cid    *ConnectionId
+	cid    *ConnectionID
 	hasCid bool
 	// mu orders the handover against the caller giving up: a connection
 	// is either queued for a caller still waiting, or closed. See hand.
@@ -26,7 +26,7 @@ type acceptRequest struct {
 	onHand func(*streamResult)
 }
 
-func newAccept(ctx context.Context, cid *ConnectionId, config *ConnectionConfig) *acceptRequest {
+func newAccept(ctx context.Context, cid *ConnectionID, config *ConnectionConfig) *acceptRequest {
 	return &acceptRequest{
 		ctx:    ctx,
 		stream: make(chan *streamResult, 1),
@@ -75,9 +75,9 @@ func (a *acceptRequest) giveUp() *streamResult {
 	}
 }
 
-// wait is what Accept and AcceptWithCid do once the request is queued. It
+// wait is what Accept and AcceptWithCID do once the request is queued. It
 // returns when the caller's context ends or the socket closes.
-func (a *acceptRequest) wait(ctx, sockCtx context.Context) (*UtpStream, error) {
+func (a *acceptRequest) wait(ctx, sockCtx context.Context) (*Stream, error) {
 	var res *streamResult
 	select {
 	case res = <-a.stream:
@@ -91,7 +91,7 @@ func (a *acceptRequest) wait(ctx, sockCtx context.Context) (*UtpStream, error) {
 		}
 	}
 	if res == nil {
-		return nil, fmt.Errorf("stream creation failed")
+		return nil, errors.New("utp: stream creation failed")
 	}
 	if res.err != nil {
 		return nil, res.err
@@ -99,7 +99,7 @@ func (a *acceptRequest) wait(ctx, sockCtx context.Context) (*UtpStream, error) {
 	return res.stream, nil
 }
 
-func (s *UtpSocket) eventLoop() {
+func (s *Socket) eventLoop() {
 	barrier, _ := s.clock().(idleBarrier)
 	if barrier != nil {
 		barrier.Register()
@@ -144,7 +144,7 @@ func (s *UtpSocket) eventLoop() {
 // until an Accept takes it (takeAnswered). Called with dispatchMu held, as
 // the SYN is answered: no Accept is waiting then, or it would have had the
 // connection, and any that comes later looks here first.
-func (s *UtpSocket) holdAnswered(st *UtpStream) {
+func (s *Socket) holdAnswered(st *Stream) {
 	// Drop connections that ended while waiting (reset, timed out,
 	// closed by the peer), so they do not accumulate on a socket nobody
 	// accepts on.
@@ -163,7 +163,7 @@ func (s *UtpSocket) holdAnswered(st *UtpStream) {
 // takeAnswered removes and returns the oldest answered connection still
 // alive, or the one for key if key is not empty; nil if there is none.
 // Called with dispatchMu held.
-func (s *UtpSocket) takeAnswered(key string) *UtpStream {
+func (s *Socket) takeAnswered(key string) *Stream {
 	for i := 0; i < len(s.answered); i++ {
 		st := s.answered[i]
 		select {
@@ -173,7 +173,7 @@ func (s *UtpSocket) takeAnswered(key string) *UtpStream {
 			continue
 		default:
 		}
-		if key != "" && st.Cid().Hash() != key {
+		if key != "" && st.CID().Hash() != key {
 			continue
 		}
 		s.answered = append(s.answered[:i], s.answered[i+1:]...)
@@ -182,7 +182,7 @@ func (s *UtpSocket) takeAnswered(key string) *UtpStream {
 	return nil
 }
 
-func (s *UtpSocket) handleNewAcceptWithCidEvent(acceptWithCid *acceptRequest) {
+func (s *Socket) handleNewAcceptWithCidEvent(acceptWithCid *acceptRequest) {
 	s.logger.Debug("get a accept event with cid",
 		"accept.cid.Send", acceptWithCid.cid.Send,
 		"accept.cid.Recv",
@@ -207,7 +207,7 @@ func (s *UtpSocket) handleNewAcceptWithCidEvent(acceptWithCid *acceptRequest) {
 	}
 }
 
-func (s *UtpSocket) handleNewAcceptEvent(accept *acceptRequest) {
+func (s *Socket) handleNewAcceptEvent(accept *acceptRequest) {
 	// A connection already answered satisfies this immediately, and so does
 	// a SYN that already arrived.
 	if st := s.takeAnswered(""); st != nil {
@@ -244,7 +244,7 @@ func (a *acceptRequest) abandoned() bool {
 
 // takePendingAccept returns the oldest waiting cid-less Accept whose caller
 // has not already given up, or nil.
-func (s *UtpSocket) takePendingAccept() *acceptRequest {
+func (s *Socket) takePendingAccept() *acceptRequest {
 	for len(s.pendingAccepts) > 0 {
 		accept := s.pendingAccepts[0]
 		s.pendingAccepts = s.pendingAccepts[1:]
@@ -257,27 +257,27 @@ func (s *UtpSocket) takePendingAccept() *acceptRequest {
 	return nil
 }
 
-func (s *UtpSocket) getAwaiting(key string) (*acceptRequest, bool) {
+func (s *Socket) getAwaiting(key string) (*acceptRequest, bool) {
 	accept, ok := s.awaiting.get(key)
 	return accept, ok
 }
 
-func (s *UtpSocket) putAwaiting(key string, acceptWithCid *acceptRequest) {
+func (s *Socket) putAwaiting(key string, acceptWithCid *acceptRequest) {
 	s.awaiting.put(key, acceptWithCid)
 	s.awaitingExpirations.put(key, acceptWithCid, awaitingConnectionTimeout)
 }
 
-func (s *UtpSocket) removeAwaiting(key string) {
+func (s *Socket) removeAwaiting(key string) {
 	s.awaiting.remove(key)
 	s.awaitingExpirations.remove(key)
 }
 
-func (s *UtpSocket) putIncomingConn(key string, incomingConn *incomingPacket) {
+func (s *Socket) putIncomingConn(key string, incomingConn *incomingPacket) {
 	s.incomingConns.put(key, incomingConn)
 	s.incomingConnsExpirations.put(key, incomingConn, awaitingConnectionTimeout)
 }
 
-func (s *UtpSocket) removeIncomingConn(key string) (*incomingPacket, bool) {
+func (s *Socket) removeIncomingConn(key string) (*incomingPacket, bool) {
 	incomingConn, exists := s.incomingConns.get(key)
 	if exists {
 		s.incomingConns.remove(key)
@@ -286,7 +286,7 @@ func (s *UtpSocket) removeIncomingConn(key string) (*incomingPacket, bool) {
 	return incomingConn, exists
 }
 
-func (s *UtpSocket) nextIncomingConn() *incomingPacket {
+func (s *Socket) nextIncomingConn() *incomingPacket {
 	var cidHash string
 	var incomingAccept *incomingPacket
 	s.incomingConns.Range(func(key any, accept *incomingPacket) bool {
@@ -302,7 +302,7 @@ func (s *UtpSocket) nextIncomingConn() *incomingPacket {
 
 // AcceptBacklog reports how many incoming connections are waiting for an
 // Accept to take them.
-func (s *UtpSocket) AcceptBacklog() int {
+func (s *Socket) AcceptBacklog() int {
 	s.dispatchMu.Lock()
 	defer s.dispatchMu.Unlock()
 	n := s.incomingConns.len()
@@ -319,7 +319,7 @@ func (s *UtpSocket) AcceptBacklog() int {
 // Accept waits for an incoming connection from any peer and returns it once
 // connected. config applies to the connection; nil means the socket's accept
 // configuration (WithAcceptConfig) or the defaults.
-func (s *UtpSocket) Accept(ctx context.Context, config *ConnectionConfig) (*UtpStream, error) {
+func (s *Socket) Accept(ctx context.Context, config *ConnectionConfig) (*Stream, error) {
 	accept := newAccept(ctx, nil, config)
 	select {
 	case s.accepts <- accept:
@@ -331,10 +331,10 @@ func (s *UtpSocket) Accept(ctx context.Context, config *ConnectionConfig) (*UtpS
 	return accept.wait(ctx, s.ctx)
 }
 
-// AcceptWithCid waits for the incoming connection with the given id and
+// AcceptWithCID waits for the incoming connection with the given id and
 // returns it once connected. It fails with ErrAcceptTimedOut if no matching
 // SYN arrives within 20 seconds.
-func (s *UtpSocket) AcceptWithCid(ctx context.Context, cid *ConnectionId, config *ConnectionConfig) (*UtpStream, error) {
+func (s *Socket) AcceptWithCID(ctx context.Context, cid *ConnectionID, config *ConnectionConfig) (*Stream, error) {
 	accept := newAccept(ctx, cid, config)
 	select {
 	case s.acceptsWithCidCh <- accept:
@@ -350,13 +350,13 @@ func (s *UtpSocket) AcceptWithCid(ctx context.Context, cid *ConnectionId, config
 // to accept once connected. The connection runs on the socket's context, so
 // it outlives the Accept call that returned it, as a dialed connection
 // outlives its dial.
-func (s *UtpSocket) selectAcceptHelper(
-	cid *ConnectionId,
+func (s *Socket) selectAcceptHelper(
+	cid *ConnectionID,
 	syn *packet,
 	accept *acceptRequest,
-) *UtpStream {
+) *Stream {
 	if _, exists := s.getConnStream(cid.Hash()); exists {
-		accept.hand(&streamResult{err: fmt.Errorf("connection ID unavailable")})
+		accept.hand(&streamResult{err: errors.New("utp: connection ID unavailable")})
 		return nil
 	}
 

@@ -235,7 +235,7 @@ libutp it was, and the tests named are what stands behind each verdict.
 | `last_measured_delay` | none | N/A: written, never read |
 | `utp_create_socket`: `rto` 3000; `rtt_var` 800; `max_window_user` 255 x 1435; `ssthresh` = `opt_sndbuf`; `fast_resend_seq_nr` = 1 | controller and connection defaults | `rto` matched (measured: both first resend at 3.1 s, `TestPeerFinDoesNotTimeOutWhatIsInFlight`); `rtt_var` is overwritten by the first sample, N/A; `max_window_user` matters only before the SYN-ACK, when nothing can be sent, N/A; `ssthresh` matched (`TestConformanceLedbatRules`); `fast_resend_seq_nr` is the recorded initiator deviation |
 | context and socket options: target delay, send and receive buffers | `ConnectionConfig` | Matched (KNOWN-LIMITATIONS.md, "The libutp API surface, audited function by function") |
-| `utp_connect`: random id and sequence number, SYN with no extension and our window, first timeout 3000 ms | `ConnectWithCid`, SYN path | Matched (initiator corpus); the attempt count is a recorded deviation |
+| `utp_connect`: random id and sequence number, SYN with no extension and our window, first timeout 3000 ms | `ConnectWithCID`, SYN path | Matched (initiator corpus); the attempt count is a recorded deviation |
 | `utp_process_udp`: short or non-version-1 datagram dropped | `decodePacket` | Matched |
 | RESET looked up by id, id + 1 or id - 1 with a matching send id; `ECONNREFUSED` while connecting | `socket_receive.go`, `socket_routing.go` | Matched (corpus) |
 | unknown non-SYN answered with a rate-limited RESET (`RST_INFO_*`) | `socket_receive.go` | Matched, flood corpus |
@@ -256,9 +256,9 @@ libutp it was, and the tests named are what stands behind each verdict.
 | `utp_read_drained` | `onReadDrained` | Matched, measured (KNOWN-LIMITATIONS.md, "The M4b sweep") |
 | `utp_issue_deferred_acks` | `flushAck` once the socket read that brought the data has been handed out (`udpConn.readBatch` reads until the socket would block, as libutp's embedder does) | Matched; letting an acknowledgement wait for more packets is a recorded deviation |
 | `utp_check_timeouts`: 500 ms pass, `RST_INFO_TIMEOUT` expiry, sockets destroyed | timers, `utp_socket.go` | Deviation: "Timeouts act when due"; reset bookkeeping matched (flood corpus) |
-| `utp_getpeername`, `utp_get_context`, user data | `Cid().Peer`, Go values | N/A (API shape) |
+| `utp_getpeername`, `utp_get_context`, user data | `CID().Peer`, Go values | N/A (API shape) |
 | `utp_get_delays`: our filtered delay, the peer's, and an age | `controllerStats` | N/A: a diagnostic. Ours reports the base and the latest raw sample, not the filtered value |
-| `utp_close`: read side shut, FIN queued, destroyed once it is acknowledged; destroyed at once if still connecting | `Close` | Matched: returns at once, and the connection goes on delivering. `UtpSocket.Close` waits for closed streams while their peers answer, where destroying a libutp context discards them (DEVIATIONS.md, "Closing a stream returns at once") |
+| `utp_close`: read side shut, FIN queued, destroyed once it is acknowledged; destroyed at once if still connecting | `Close` | Matched: returns at once, and the connection goes on delivering. `Socket.Close` waits for closed streams while their peers answer, where destroying a libutp context discards them (DEVIATIONS.md, "Closing a stream returns at once") |
 | `utp_shutdown(SHUT_RD / SHUT_WR)` | `CloseRead`, `CloseWrite` | Matched (KNOWN-LIMITATIONS.md, "`utp_shutdown(SHUT_RD)`") |
 | logging, `utp_get_stats` | `slog`, `ConnectionMetrics` | N/A |
 
@@ -272,6 +272,6 @@ libutp it was, and the tests named are what stands behind each verdict.
 | `utp_utils.cpp`: UDP overhead 28 or 76 bytes | none | N/A (statistics) |
 | `utp_utils.cpp`: `rand()` for ids and sequence numbers | `randomUint16` | Matched in effect: any uniform source |
 | `utp_callbacks.cpp`: each callback a no-op or 0 when unset; `get_read_buffer_size` 0, so the window is the whole `opt_rcvbuf` | the receive buffer | Matched (the advertised window is what the buffer has free) |
-| `utp_packedsockaddr.cpp`: IPv4 stored IPv4-mapped, compared with port; the IPv6 zone dropped | `UdpPeer.Hash` | IPv4 and mapped forms matched; the zone is N30 |
+| `utp_packedsockaddr.cpp`: IPv4 stored IPv4-mapped, compared with port; the IPv6 zone dropped | `UDPPeer.Hash` | IPv4 and mapped forms matched; the zone is N30 |
 | `utp_internal.h`: `RST_Info`; sockets keyed by address and receive id; the context | `utp_socket.go`, `socket_routing.go` | Matched (flood corpus; connection lookup corpus) |
 | `utp_hash.cpp`, `utp_templates.h`: hash table, growable array, `min`/`max`/`clamp` | Go maps and slices | N/A (storage) |

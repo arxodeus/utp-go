@@ -30,7 +30,7 @@ type Conn struct {
 	//
 	// us is the connection's stream while it is open, and nil once it has
 	// ended or its Socket has closed.
-	us          *utpgo.UtpStream
+	us          *utpgo.Stream
 	closed      bool
 	err         error
 	userOnError func(error)

@@ -22,7 +22,7 @@ Every comment in `send_buffer.go` at e56c9aa, verbatim.
 ```
 // Write copies data into the buffer and reports how much it took.
 //
-// The copy is not an optimisation to remove. UtpStream.Write returns as soon
+// The copy is not an optimisation to remove. Stream.Write returns as soon
 // as the bytes are accepted here -- before they are transmitted -- and
 // io.Writer's contract says "Implementations must not retain p": io.Copy,
 // bufio.Writer and every echo loop reuse their buffer between writes.
@@ -35,7 +35,7 @@ Every comment in `send_buffer.go` at e56c9aa, verbatim.
 // Adopt takes data into the buffer without copying it, and reports how much
 // it took. data must be the buffer's to keep: nothing else may change it.
 //
-// The write path's data already is. UtpStream.Write and WriteV each copy the
+// The write path's data already is. Stream.Write and WriteV each copy the
 // caller's bytes once, into a slice of their own, before queueing them -- that
 // copy is what keeps the caller's buffer free the moment Write returns (see
 // Write above) -- and Write here then copied that private slice a second time.

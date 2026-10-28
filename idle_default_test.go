@@ -24,17 +24,17 @@ func TestSilentPeerDoesNotCloseAnIdleConnectionByDefault(t *testing.T) {
 	defer pinRandom(ourSeq)()
 
 	conn := newScriptedConn()
-	sock := WithSocket(ctx, conn, conformanceLogger(), WithClock(clk))
+	sock := NewSocket(ctx, conn, conformanceLogger(), withClock(clk))
 	defer sock.Close()
 
 	cfg := NewConnectionConfig()
-	cfg.Clock = clk
-	cfg.NowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
+	cfg.clock = clk
+	cfg.nowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
 
-	cid := NewConnectionId(conn.peer, peerID+1, peerID)
-	accepted := make(chan *UtpStream, 1)
+	cid := NewConnectionID(conn.peer, peerID+1, peerID)
+	accepted := make(chan *Stream, 1)
 	go func() {
-		s, err := sock.AcceptWithCid(ctx, cid, cfg)
+		s, err := sock.AcceptWithCID(ctx, cid, cfg)
 		if err != nil {
 			t.Errorf("accept: %v", err)
 		}
@@ -43,7 +43,7 @@ func TestSilentPeerDoesNotCloseAnIdleConnectionByDefault(t *testing.T) {
 	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(newPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+		conn.inject(newPacketBuilder(stSyn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
 	})
 	stream := <-accepted
 	if stream == nil {
@@ -63,7 +63,7 @@ func TestSilentPeerDoesNotCloseAnIdleConnectionByDefault(t *testing.T) {
 			if err != nil {
 				t.Fatalf("after %v of silence: undecodable packet: %v", elapsed+interval, err)
 			}
-			if pkt.Header.PacketType != st_state {
+			if pkt.Header.PacketType != stState {
 				t.Fatalf("after %v of silence the connection sent %s, not a keep-alive",
 					elapsed+interval, describePackets([][]byte{raw}))
 			}
@@ -79,7 +79,7 @@ func TestSilentPeerDoesNotCloseAnIdleConnectionByDefault(t *testing.T) {
 
 	// The peer comes back.
 	clk.AwaitReactionTo(func() {
-		conn.inject(newPacketBuilder(st_data, peerID+1, 200000, 1<<20, peerSeq+1).
+		conn.inject(newPacketBuilder(stData, peerID+1, 200000, 1<<20, peerSeq+1).
 			WithAckNum(ourSeq - 1).WithPayload([]byte("back")).Build().Encode())
 	})
 	emitted := conn.takeEmitted()
@@ -87,7 +87,7 @@ func TestSilentPeerDoesNotCloseAnIdleConnectionByDefault(t *testing.T) {
 		t.Fatalf("the peer's data after %v drew %d packets, expected one acknowledgement",
 			silence, len(emitted))
 	}
-	if pkt, err := decodePacket(emitted[0], false); err != nil || pkt.Header.PacketType != st_state ||
+	if pkt, err := decodePacket(emitted[0], false); err != nil || pkt.Header.PacketType != stState ||
 		pkt.Header.AckNum != peerSeq+1 {
 		t.Fatalf("the peer's data after %v drew %s, expected a STATE acknowledging %d",
 			silence, describePackets(emitted), peerSeq+1)

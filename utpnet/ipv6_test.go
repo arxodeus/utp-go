@@ -228,7 +228,7 @@ func TestIPv6AddressPlumbing(t *testing.T) {
 	}
 }
 
-// hashOnlyPeer is a caller-supplied peer type: not *utp.UdpPeer, so
+// hashOnlyPeer is a caller-supplied peer type: not *utp.UDPPeer, so
 // peerUDPAddr takes its parsing fallback.
 type hashOnlyPeer string
 
@@ -315,8 +315,8 @@ func TestIPv6PeersDifferingOnlyInAddressAreDistinct(t *testing.T) {
 				// only on the retransmission, so a dial that needs one is the
 				// failure.
 				dialCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				cid := utp.NewConnectionId(utp.NewUdpPeer(serverAddr), 7000, 7001)
-				stream, err := client.sock.ConnectWithCid(dialCtx, cid, client.config.Load())
+				cid := utp.NewConnectionID(utp.NewUDPPeer(serverAddr), 7000, 7001)
+				stream, err := client.sock.ConnectWithCID(dialCtx, cid, client.config.Load())
 				cancel()
 				if err != nil {
 					t.Fatalf("dialling from %s while the other peer's connection is open: %v", addr, err)

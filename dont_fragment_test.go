@@ -50,10 +50,10 @@ func (c *dfConn) taken() ([]bool, []int) {
 	return append([]bool(nil), c.sends...), append([]int(nil), c.sizes...)
 }
 
-func newDFSocket(t *testing.T, conn Conn) (*UtpSocket, context.CancelFunc) {
+func newDFSocket(t *testing.T, conn Conn) (*Socket, context.CancelFunc) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	return WithSocket(ctx, conn, conformanceLogger()), cancel
+	return NewSocket(ctx, conn, conformanceLogger()), cancel
 }
 
 // The bit reaches a Conn that can honor it, and only for a probe.
@@ -63,7 +63,7 @@ func TestDontFragmentReachesTheConn(t *testing.T) {
 	defer cancel()
 	defer s.Close()
 
-	peer := &UdpPeer{}
+	peer := &UDPPeer{}
 	if _, err := s.writeDatagram([]byte("probe"), peer, true); err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestDontFragmentUnsupportedStillSends(t *testing.T) {
 	defer cancel()
 	defer s.Close()
 
-	n, err := s.writeDatagram([]byte("probe"), &UdpPeer{}, true)
+	n, err := s.writeDatagram([]byte("probe"), &UDPPeer{}, true)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestDontFragmentConnWithoutTheInterface(t *testing.T) {
 	defer cancel()
 	defer s.Close()
 
-	if _, err := s.writeDatagram([]byte("probe"), &UdpPeer{}, true); err != nil {
+	if _, err := s.writeDatagram([]byte("probe"), &UDPPeer{}, true); err != nil {
 		t.Fatalf("probe: %v", err)
 	}
 	sends, _ := inner.taken()
@@ -133,7 +133,7 @@ func TestDontFragmentTravelsOnTheSocketEvent(t *testing.T) {
 	events := make(chan *socketEvent, 2)
 	c := &connection{socketEvents: events}
 
-	pkt := newPacketBuilder(st_data, 1, 0, 1024, 1).WithPayload([]byte("x")).Build()
+	pkt := newPacketBuilder(stData, 1, 0, 1024, 1).WithPayload([]byte("x")).Build()
 	c.emitPacket(pkt, true)
 	c.emitPacket(pkt, false)
 

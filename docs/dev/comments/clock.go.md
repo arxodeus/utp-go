@@ -128,10 +128,10 @@ Every comment in `clock.go` at e56c9aa, verbatim.
 // realClock is the standard library, and the default for every connection.
 ```
 
-## Line 103 — var RealClock
+## Line 103 — var defaultClock
 
 ```
-// RealClock is the clock a connection uses unless one is configured.
+// defaultClock is the clock a connection uses unless one is configured.
 ```
 
 ## Line 112 — func (realClock).AfterFunc

@@ -15,7 +15,7 @@ import (
 
 // deadAccepted returns an accepted stream that has read one packet of data,
 // after kill has ended its connection.
-func deadAccepted(t *testing.T, kill func(conn *scriptedConn, clk *virtualClock, stream *UtpStream)) (*UtpStream, func()) {
+func deadAccepted(t *testing.T, kill func(conn *scriptedConn, clk *virtualClock, stream *Stream)) (*Stream, func()) {
 	t.Helper()
 	stream, conn, clk, done := liveAccepted(t)
 	kill(conn, clk, stream)
@@ -31,7 +31,7 @@ func deadAccepted(t *testing.T, kill func(conn *scriptedConn, clk *virtualClock,
 
 // liveAccepted returns an accepted stream, on a virtual clock and a scripted
 // peer, that has read one packet of data.
-func liveAccepted(t *testing.T) (*UtpStream, *scriptedConn, *virtualClock, func()) {
+func liveAccepted(t *testing.T) (*Stream, *scriptedConn, *virtualClock, func()) {
 	t.Helper()
 	const (
 		ourSeq  = 0x4321
@@ -43,16 +43,16 @@ func liveAccepted(t *testing.T) (*UtpStream, *scriptedConn, *virtualClock, func(
 	restore := pinRandom(ourSeq)
 
 	conn := newScriptedConn()
-	sock := WithSocket(ctx, conn, conformanceLogger(), WithClock(clk))
+	sock := NewSocket(ctx, conn, conformanceLogger(), withClock(clk))
 
 	cfg := NewConnectionConfig()
-	cfg.Clock = clk
-	cfg.NowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
+	cfg.clock = clk
+	cfg.nowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
 
-	cid := NewConnectionId(conn.peer, peerID+1, peerID)
-	accepted := make(chan *UtpStream, 1)
+	cid := NewConnectionID(conn.peer, peerID+1, peerID)
+	accepted := make(chan *Stream, 1)
 	go func() {
-		s, err := sock.AcceptWithCid(ctx, cid, cfg)
+		s, err := sock.AcceptWithCID(ctx, cid, cfg)
 		if err != nil {
 			t.Errorf("accept: %v", err)
 		}
@@ -61,7 +61,7 @@ func liveAccepted(t *testing.T) (*UtpStream, *scriptedConn, *virtualClock, func(
 	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(newPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+		conn.inject(newPacketBuilder(stSyn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
 	})
 	stream := <-accepted
 	if stream == nil {
@@ -70,7 +70,7 @@ func liveAccepted(t *testing.T) (*UtpStream, *scriptedConn, *virtualClock, func(
 	clk.AwaitParticipants(4)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(newPacketBuilder(st_data, peerID+1, 110000, 1<<20, peerSeq+1).
+		conn.inject(newPacketBuilder(stData, peerID+1, 110000, 1<<20, peerSeq+1).
 			WithAckNum(ourSeq - 1).WithPayload([]byte("hello")).Build().Encode())
 	})
 	buf := make([]byte, 16)
@@ -84,18 +84,18 @@ func liveAccepted(t *testing.T) (*UtpStream, *scriptedConn, *virtualClock, func(
 	}
 }
 
-func deadByReset(t *testing.T) (*UtpStream, func()) {
-	return deadAccepted(t, func(conn *scriptedConn, clk *virtualClock, _ *UtpStream) {
+func deadByReset(t *testing.T) (*Stream, func()) {
+	return deadAccepted(t, func(conn *scriptedConn, clk *virtualClock, _ *Stream) {
 		clk.AwaitReactionTo(func() {
-			conn.inject(newPacketBuilder(st_reset, 6000+1, 120000, 0, 902).
+			conn.inject(newPacketBuilder(stReset, 6000+1, 120000, 0, 902).
 				WithAckNum(0x4321 - 1).Build().Encode())
 		})
 		clk.AwaitQuiet()
 	})
 }
 
-func deadByGivingUp(t *testing.T) (*UtpStream, func()) {
-	return deadAccepted(t, func(conn *scriptedConn, clk *virtualClock, stream *UtpStream) {
+func deadByGivingUp(t *testing.T) (*Stream, func()) {
+	return deadAccepted(t, func(conn *scriptedConn, clk *virtualClock, stream *Stream) {
 		// Data the peer never acknowledges: the sender retransmits, backs
 		// off, and gives up.
 		wctx, wcancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -118,7 +118,7 @@ func deadByGivingUp(t *testing.T) (*UtpStream, func()) {
 func TestDeadConnectionWritesFailWithTheReason(t *testing.T) {
 	for _, c := range []struct {
 		name string
-		dead func(*testing.T) (*UtpStream, func())
+		dead func(*testing.T) (*Stream, func())
 		want error
 	}{
 		{"reset", deadByReset, ErrReset},
@@ -141,7 +141,7 @@ func TestDeadConnectionWritesFailWithTheReason(t *testing.T) {
 func TestDeadConnectionReadsReportTheReason(t *testing.T) {
 	for _, c := range []struct {
 		name string
-		dead func(*testing.T) (*UtpStream, func())
+		dead func(*testing.T) (*Stream, func())
 		want error
 	}{
 		{"reset", deadByReset, ErrReset},

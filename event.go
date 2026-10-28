@@ -54,7 +54,7 @@ type streamEvent struct {
 type socketEvent struct {
 	Type         socketEventType
 	Packet       *packet
-	ConnectionId ConnectionPeer
+	ConnectionID ConnectionPeer
 	// DontFragment marks the datagram as an MTU probe, to be sent with
 	// fragmentation disabled if the Conn supports it. See
 	// DontFragmentWriter.
@@ -65,7 +65,7 @@ func newOutgoingSocketEvent(p *packet, cid ConnectionPeer) *socketEvent {
 	return &socketEvent{
 		Type:         outgoing,
 		Packet:       p,
-		ConnectionId: cid,
+		ConnectionID: cid,
 	}
 }
 
@@ -74,7 +74,7 @@ func newOutgoingProbeSocketEvent(p *packet, cid ConnectionPeer) *socketEvent {
 	return &socketEvent{
 		Type:         outgoing,
 		Packet:       p,
-		ConnectionId: cid,
+		ConnectionID: cid,
 		DontFragment: true,
 	}
 }
@@ -87,6 +87,6 @@ func newShutdownSocketEvent(cid ConnectionPeer, lingerAck *packet) *socketEvent 
 	return &socketEvent{
 		Type:         socketShutdown,
 		Packet:       lingerAck,
-		ConnectionId: cid,
+		ConnectionID: cid,
 	}
 }

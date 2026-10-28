@@ -102,7 +102,7 @@ func (c *demuxConn) ReadFrom(b []byte) (int, utp.ConnectionPeer, error) {
 			pc.restoreHeld(pkt.from, pkt.native)
 			c.handed = pkt.from
 		}
-		return n, utp.NewUdpPeer(pkt.from), nil
+		return n, utp.NewUDPPeer(pkt.from), nil
 	case <-c.closed:
 		return 0, nil, ErrSocketClosed
 	}
@@ -146,9 +146,9 @@ func (c *demuxConn) close() {
 // peerUDPAddr recovers the UDP address a uTP peer names.
 func peerUDPAddr(dst utp.ConnectionPeer) (*net.UDPAddr, error) {
 	switch peer := dst.(type) {
-	case *utp.UdpPeer:
+	case *utp.UDPPeer:
 		return peer.Addr(), nil
-	case *utp.ConnectionId:
+	case *utp.ConnectionID:
 		return peerUDPAddr(peer.Peer)
 	case nil:
 		return nil, ErrNilPeer

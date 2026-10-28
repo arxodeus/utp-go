@@ -178,7 +178,7 @@ Every comment in `conformance_timing_test.go` at e56c9aa, verbatim.
 
 ```
 // Giving up ends the connection's event loop, which leaves the
-		// clock within the step that did it. ConnectWithCid reports it later,
+		// clock within the step that did it. ConnectWithCID reports it later,
 		// from a goroutine the clock does not wait for.
 ```
 

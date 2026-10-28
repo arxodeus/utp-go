@@ -22,19 +22,19 @@ func TestStaleAckIsIgnoredNotFatal(t *testing.T) {
 	congestionCtrl := newDefaultController(fromConnConfig(conn.config))
 	sentPackets := newSentPacketsWithoutLogger(synAck, congestionCtrl)
 	now := time.Now()
-	sentPackets.OnTransmit(synAck+1, st_data, []byte{0xef}, 64, now)
+	sentPackets.OnTransmit(synAck+1, stData, []byte{0xef}, 64, now)
 
 	conn.state = &connState{
 		stateType:   connConnected,
 		SentPackets: sentPackets,
-		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
-		RecvBuf:     newReceiveBuffer(TEST_BUFFER_SIZE, syn),
+		SendBuf:     newSendBuffer(testBufferSize),
+		RecvBuf:     newReceiveBuffer(testBufferSize, syn),
 	}
 
 	// Two sequence numbers behind the connection's first: inside the window
 	// invalidAckNum tolerates, outside everything sentPackets tracks. That
 	// gap is the only way to reach this branch.
-	stale := newPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()),
+	stale := newPacketBuilder(stState, conn.cid.Send, uint32(now.UnixMicro()),
 		DefaultWindowSize, syn+1).WithAckNum(synAck - 2).Build()
 	if conn.invalidAckNum(stale) {
 		t.Fatal("the pre-filter rejected this packet, so the branch under test is never reached")
@@ -55,7 +55,7 @@ func TestStaleAckIsIgnoredNotFatal(t *testing.T) {
 	}
 
 	// A real acknowledgement for the outstanding packet is still acted on.
-	good := newPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()),
+	good := newPacketBuilder(stState, conn.cid.Send, uint32(now.UnixMicro()),
 		DefaultWindowSize, syn+2).WithAckNum(synAck + 1).Build()
 	conn.onPacket(good, now.Add(10*time.Millisecond))
 
@@ -76,16 +76,16 @@ func TestAckForAPacketNeverSentIsDropped(t *testing.T) {
 	congestionCtrl := newDefaultController(fromConnConfig(conn.config))
 	sentPackets := newSentPacketsWithoutLogger(synAck, congestionCtrl)
 	now := time.Now()
-	sentPackets.OnTransmit(synAck+1, st_data, []byte{0xef}, 64, now)
+	sentPackets.OnTransmit(synAck+1, stData, []byte{0xef}, 64, now)
 
 	conn.state = &connState{
 		stateType:   connConnected,
 		SentPackets: sentPackets,
-		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
-		RecvBuf:     newReceiveBuffer(TEST_BUFFER_SIZE, syn),
+		SendBuf:     newSendBuffer(testBufferSize),
+		RecvBuf:     newReceiveBuffer(testBufferSize, syn),
 	}
 
-	forged := newPacketBuilder(st_state, conn.cid.Send, uint32(now.UnixMicro()),
+	forged := newPacketBuilder(stState, conn.cid.Send, uint32(now.UnixMicro()),
 		DefaultWindowSize, syn+1).WithAckNum(synAck + 30000).Build()
 
 	if !conn.invalidAckNum(forged) {
@@ -115,8 +115,8 @@ func TestReadShutdownAcksWithoutBuffering(t *testing.T) {
 	conn.state = &connState{
 		stateType:   connConnected,
 		SentPackets: newSentPacketsWithoutLogger(synAck, congestionCtrl),
-		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
-		RecvBuf:     newReceiveBuffer(TEST_BUFFER_SIZE, syn),
+		SendBuf:     newSendBuffer(testBufferSize),
+		RecvBuf:     newReceiveBuffer(testBufferSize, syn),
 	}
 
 	availableBefore := conn.state.RecvBuf.Available()
@@ -154,8 +154,8 @@ func TestReadShutdownStillReorders(t *testing.T) {
 	conn.state = &connState{
 		stateType:   connConnected,
 		SentPackets: newSentPacketsWithoutLogger(synAck, congestionCtrl),
-		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
-		RecvBuf:     newReceiveBuffer(TEST_BUFFER_SIZE, syn),
+		SendBuf:     newSendBuffer(testBufferSize),
+		RecvBuf:     newReceiveBuffer(testBufferSize, syn),
 	}
 	conn.onCloseRead()
 

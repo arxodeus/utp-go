@@ -26,14 +26,14 @@ type initiatorRun struct {
 	drv *libutp.Driver
 	clk *virtualClock
 	// streamCh carries the connected stream once the handshake completes. It
-	// is written by the goroutine running ConnectWithCid and read by the
+	// is written by the goroutine running ConnectWithCID and read by the
 	// test, so a plain field would be a data race.
-	streamCh <-chan *UtpStream
-	// dialErr carries ConnectWithCid's error, if it failed.
+	streamCh <-chan *Stream
+	// dialErr carries ConnectWithCID's error, if it failed.
 	dialErr <-chan error
-	stream  *UtpStream
+	stream  *Stream
 	conn    *scriptedConn
-	sock    *UtpSocket
+	sock    *Socket
 	cancel  context.CancelFunc
 	unpin   func()
 	start   time.Time
@@ -78,17 +78,17 @@ func newInitiatorRunMTU(t *testing.T, udpMTU uint16) (*initiatorRun, [][]byte, [
 	unpin := pinRandom(initiatorConnSeed)
 
 	conn := newScriptedConn()
-	sock := WithSocket(ctx, conn, conformanceLogger(), WithClock(clk))
+	sock := NewSocket(ctx, conn, conformanceLogger(), withClock(clk))
 
 	cfg := NewConnectionConfig()
-	cfg.Clock = clk
-	cfg.NowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
+	cfg.clock = clk
+	cfg.nowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
 
-	cid := NewConnectionId(conn.peer, initiatorConnSeed, initiatorConnSeed+1)
-	streamCh := make(chan *UtpStream, 1)
+	cid := NewConnectionID(conn.peer, initiatorConnSeed, initiatorConnSeed+1)
+	streamCh := make(chan *Stream, 1)
 	dialErr := make(chan error, 1)
 	go func() {
-		s, err := sock.ConnectWithCid(ctx, cid, cfg)
+		s, err := sock.ConnectWithCID(ctx, cid, cfg)
 		if err != nil {
 			dialErr <- err
 		}
@@ -102,7 +102,7 @@ func newInitiatorRunMTU(t *testing.T, udpMTU uint16) (*initiatorRun, [][]byte, [
 
 	// Three participants register when the socket is built (the
 	// retransmission wheel and the read and event loops), and the
-	// connection's event loop is the fourth once ConnectWithCid runs.
+	// connection's event loop is the fourth once ConnectWithCID runs.
 	clk.AwaitParticipants(4)
 	clk.AwaitQuiet()
 	ourSyn := conn.takeEmitted()
@@ -173,7 +173,7 @@ func (r *initiatorRun) step(i int, st step) {
 
 // waitForStream returns the connected stream, or nil if the handshake never
 // completed.
-func (r *initiatorRun) waitForStream() *UtpStream {
+func (r *initiatorRun) waitForStream() *Stream {
 	if r.stream != nil {
 		return r.stream
 	}
@@ -208,7 +208,7 @@ const initiatorFirstInOrder = 900
 // initiatorData builds a data packet from the peer, offset packets past the
 // first one expected, acking our SYN.
 func initiatorData(offset uint16, tsMicros uint32, body []byte) *packet {
-	return newPacketBuilder(st_data, initiatorConnSeed, tsMicros, corpusWindow,
+	return newPacketBuilder(stData, initiatorConnSeed, tsMicros, corpusWindow,
 		initiatorFirstInOrder+offset).
 		WithAckNum(initiatorConnSeed).WithPayload(body).Build()
 }
@@ -220,7 +220,7 @@ func TestInitiatorHandshake(t *testing.T) {
 		{
 			name:   "peer answers the SYN",
 			inject: nil,
-			injectRaw: newPacketBuilder(st_state, initiatorConnSeed, 150000, corpusWindow, 900).
+			injectRaw: newPacketBuilder(stState, initiatorConnSeed, 150000, corpusWindow, 900).
 				WithAckNum(initiatorConnSeed).Build().Encode(),
 			// Neither side answers a bare acknowledgement of its SYN: there
 			// is nothing to acknowledge and nothing to send.
@@ -281,7 +281,7 @@ func TestInitiatorResetInsteadOfSynAck(t *testing.T) {
 	compareStep(t, -1, step{name: "our SYN"}, ourSyn, libutpSyn)
 	r.step(0, step{
 		name: "peer resets instead of answering",
-		injectRaw: newPacketBuilder(st_reset, initiatorConnSeed, 150000, corpusWindow, 900).
+		injectRaw: newPacketBuilder(stReset, initiatorConnSeed, 150000, corpusWindow, 900).
 			WithAckNum(initiatorConnSeed).Build().Encode(),
 		// A reset is never answered with a reset; both sides go quiet.
 		wantNoEmission: true,
@@ -303,7 +303,7 @@ func TestInitiatorIncomingFin(t *testing.T) {
 		{name: "data", inject: initiatorData(0, 200000, []byte("one")), wantAck: ackNum(initiatorFirstInOrder)},
 		{
 			name: "peer's FIN",
-			inject: newPacketBuilder(st_fin, initiatorConnSeed, 210000, corpusWindow,
+			inject: newPacketBuilder(stFin, initiatorConnSeed, 210000, corpusWindow,
 				initiatorFirstInOrder+1).
 				WithAckNum(initiatorConnSeed).Build(),
 			// On reaching a FIN the reference implementation acknowledges twice:
@@ -320,7 +320,7 @@ func TestInitiatorIncomingFin(t *testing.T) {
 
 // initiatorState builds a bare ST_STATE from the peer advertising wnd.
 func initiatorState(tsMicros uint32, wnd uint32) []byte {
-	return newPacketBuilder(st_state, initiatorConnSeed, tsMicros, wnd, initiatorFirstInOrder).
+	return newPacketBuilder(stState, initiatorConnSeed, tsMicros, wnd, initiatorFirstInOrder).
 		WithAckNum(initiatorConnSeed).Build().Encode()
 }
 
@@ -365,7 +365,7 @@ func TestInitiatorWriteFlowsWithoutZeroWindow(t *testing.T) {
 // initiatorAckOf builds a bare ST_STATE from the peer acknowledging our
 // packets up to seq.
 func initiatorAckOf(tsMicros uint32, seq uint16) []byte {
-	return newPacketBuilder(st_state, initiatorConnSeed, tsMicros, corpusWindow, initiatorFirstInOrder).
+	return newPacketBuilder(stState, initiatorConnSeed, tsMicros, corpusWindow, initiatorFirstInOrder).
 		WithAckNum(seq).Build().Encode()
 }
 

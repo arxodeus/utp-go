@@ -43,17 +43,17 @@ func dfTransfer(t *testing.T, cfg Config, wrap func(utp.Conn) utp.Conn, batched 
 	if wrap != nil {
 		senderConn = wrap(a)
 	}
-	sendSock := utp.WithSocket(ctx, senderConn, quiet())
+	sendSock := utp.NewSocket(ctx, senderConn, quiet())
 	defer sendSock.Close()
 	var recvConn utp.Conn = b
 	if batched {
 		recvConn = batchedReader{b}
 	}
-	recvSock := utp.WithSocket(ctx, recvConn, quiet())
+	recvSock := utp.NewSocket(ctx, recvConn, quiet())
 	defer recvSock.Close()
 
-	acceptCid := utp.NewConnectionId(a.Addr(), cid+1, cid)
-	connectCid := utp.NewConnectionId(b.Addr(), cid, cid+1)
+	acceptCid := utp.NewConnectionID(a.Addr(), cid+1, cid)
+	connectCid := utp.NewConnectionID(b.Addr(), cid, cid+1)
 
 	var (
 		mu      sync.Mutex
@@ -80,7 +80,7 @@ func dfTransfer(t *testing.T, cfg Config, wrap func(utp.Conn) utp.Conn, batched 
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		stream, err := recvSock.AcceptWithCid(ctx, acceptCid, utp.NewConnectionConfig())
+		stream, err := recvSock.AcceptWithCID(ctx, acceptCid, utp.NewConnectionConfig())
 		if err != nil {
 			t.Errorf("accept: %v", err)
 			return
@@ -93,7 +93,7 @@ func dfTransfer(t *testing.T, cfg Config, wrap func(utp.Conn) utp.Conn, batched 
 	}()
 	go func() {
 		defer wg.Done()
-		stream, err := sendSock.ConnectWithCid(ctx, connectCid, sendCfg)
+		stream, err := sendSock.ConnectWithCID(ctx, connectCid, sendCfg)
 		if err != nil {
 			t.Errorf("connect: %v", err)
 			return

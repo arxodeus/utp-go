@@ -27,12 +27,12 @@ func TestQuietConnectionReleasesReceiveStorage(t *testing.T) {
 	cfg := NewConnectionConfig()
 	cfg.KeepAliveInterval = 200 * time.Millisecond
 	const cid = 4500
-	accepted := make(chan *UtpStream, 1)
+	accepted := make(chan *Stream, 1)
 	go func() {
-		s, _ := sb.AcceptWithCid(ctx, NewConnectionId(NewUdpPeer(sa.LocalAddr().(*net.UDPAddr)), cid+1, cid), cfg)
+		s, _ := sb.AcceptWithCID(ctx, NewConnectionID(NewUDPPeer(sa.LocalAddr().(*net.UDPAddr)), cid+1, cid), cfg)
 		accepted <- s
 	}()
-	client, err := sa.ConnectWithCid(ctx, NewConnectionId(NewUdpPeer(sb.LocalAddr().(*net.UDPAddr)), cid, cid+1), cfg)
+	client, err := sa.ConnectWithCID(ctx, NewConnectionID(NewUDPPeer(sb.LocalAddr().(*net.UDPAddr)), cid, cid+1), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

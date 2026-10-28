@@ -70,12 +70,12 @@ type ackSample struct {
 }
 
 var (
-	errInsufficientWindowSize = errors.New("insufficient window size")
-	errUnknownSeqNum          = errors.New("unknown sequence number")
-	errDuplicateTransmission  = errors.New("duplicate transmission")
-	errOutOfOrderTransmit     = errors.New("out of order transmit")
-	errTransmitExceedsWindow  = errors.New("transmit exceeds available send window")
-	errAckOfUnsent            = errors.New("acknowledgement of a packet never sent")
+	errInsufficientWindowSize = errors.New("utp: insufficient window size")
+	errUnknownSeqNum          = errors.New("utp: unknown sequence number")
+	errDuplicateTransmission  = errors.New("utp: duplicate transmission")
+	errOutOfOrderTransmit     = errors.New("utp: out of order transmit")
+	errTransmitExceedsWindow  = errors.New("utp: transmit exceeds available send window")
+	errAckOfUnsent            = errors.New("utp: acknowledgement of a packet never sent")
 
 	// errInternal ends a connection whose own bookkeeping has failed: a
 	// bug, not anything the peer did or the network lost.
@@ -93,8 +93,8 @@ type ctrlConfig struct {
 	Algorithm             CongestionAlgorithm
 	DelayWindow           time.Duration
 	// Clock is the controller's source of time: the delay window's expiry
-	// and the age of the application-limited mark. Defaults to RealClock.
-	Clock      Clock
+	// and the age of the application-limited mark. Defaults to defaultClock.
+	Clock      clockSource
 	WindowSize uint32
 }
 
@@ -108,7 +108,7 @@ func defaultCtrlConfig() *ctrlConfig {
 		MaxWindowSizeIncBytes: defaultMaxWindowSizeIncBytes,
 		Gain:                  defaultGain,
 		DelayWindow:           defaultDelayWindow,
-		Clock:                 RealClock,
+		Clock:                 defaultClock,
 		// The window ceiling, 1 MB by default.
 		WindowSize: DefaultWindowSize,
 	}
@@ -273,7 +273,7 @@ type defaultController struct {
 
 	// clk is the controller's source of time. Never nil after
 	// newDefaultController; read it through now.
-	clk Clock
+	clk clockSource
 
 	// currentDelay is the most recent delay sample, the newest value of the
 	// series BaseDelay is the minimum of. Reported only.
@@ -311,7 +311,7 @@ type defaultController struct {
 func newDefaultController(config *ctrlConfig) *defaultController {
 	clk := config.Clock
 	if clk == nil {
-		clk = RealClock
+		clk = defaultClock
 	}
 	ctrl := &defaultController{
 		targetDelayMicros:     config.TargetDelayMicros,
@@ -1161,13 +1161,13 @@ const delayBaseHistory = 13
 
 // newBaseDelayHist starts the history at now, so the first rotation is a
 // bucket's length after the connection began.
-func newBaseDelayHist(window time.Duration, clk Clock) *baseDelayHist {
+func newBaseDelayHist(window time.Duration, clk clockSource) *baseDelayHist {
 	bucketLen := window / delayBaseHistory
 	if bucketLen <= 0 {
 		bucketLen = time.Second
 	}
 	if clk == nil {
-		clk = RealClock
+		clk = defaultClock
 	}
 	return &baseDelayHist{bucketLen: bucketLen, rotatedAt: clk.Now()}
 }
@@ -1292,7 +1292,7 @@ type delayAccumulator struct {
 	window time.Duration
 	// clk decides when a sample has aged out of the window. Nil means the
 	// real clock; read it through now.
-	clk Clock
+	clk clockSource
 }
 
 func newDelayAccumulator(window time.Duration) *delayAccumulator {
@@ -1302,7 +1302,7 @@ func newDelayAccumulator(window time.Duration) *delayAccumulator {
 	}
 }
 
-func newDelayAccumulatorWithClock(window time.Duration, clk Clock) *delayAccumulator {
+func newDelayAccumulatorWithClock(window time.Duration, clk clockSource) *delayAccumulator {
 	return &delayAccumulator{
 		delays: &delayWindow{},
 		window: window,

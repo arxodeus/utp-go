@@ -16,7 +16,7 @@ import (
 type UtpPair struct {
 	Net          *Network
 	A, B         *Endpoint
-	SockA, SockB *utp.UtpSocket
+	SockA, SockB *utp.Socket
 }
 
 // NewUtpPair wraps two endpoints in uTP sockets. Close the Network to shut
@@ -26,8 +26,8 @@ func NewUtpPair(ctx context.Context, n *Network, a, b *Endpoint, logger *slog.Lo
 		Net:   n,
 		A:     a,
 		B:     b,
-		SockA: utp.WithSocket(ctx, a, logger),
-		SockB: utp.WithSocket(ctx, b, logger),
+		SockA: utp.NewSocket(ctx, a, logger),
+		SockB: utp.NewSocket(ctx, b, logger),
 	}
 }
 
@@ -80,8 +80,8 @@ func (p *UtpPair) RunTransfer(ctx context.Context, data []byte, opts FlowOptions
 
 func runFlow(
 	ctx context.Context,
-	senderSock *utp.UtpSocket, senderEp *Endpoint,
-	receiverSock *utp.UtpSocket, receiverEp *Endpoint,
+	senderSock *utp.Socket, senderEp *Endpoint,
+	receiverSock *utp.Socket, receiverEp *Endpoint,
 	data []byte,
 	opts FlowOptions,
 ) (*TransferResult, error) {
@@ -110,8 +110,8 @@ func runFlow(
 	// Follow the same cid convention as the rest of the package: the SYN
 	// carries the initiator id, and the acceptor derives the responder id
 	// from it.
-	acceptCid := utp.NewConnectionId(senderEp.Addr(), responderCid, initiatorCid)
-	connectCid := utp.NewConnectionId(receiverEp.Addr(), initiatorCid, responderCid)
+	acceptCid := utp.NewConnectionID(senderEp.Addr(), responderCid, initiatorCid)
+	connectCid := utp.NewConnectionID(receiverEp.Addr(), initiatorCid, responderCid)
 
 	var (
 		wg       sync.WaitGroup
@@ -125,7 +125,7 @@ func runFlow(
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		stream, err := receiverSock.AcceptWithCid(ctx, acceptCid, mkConfig(receiverRec))
+		stream, err := receiverSock.AcceptWithCID(ctx, acceptCid, mkConfig(receiverRec))
 		if err != nil {
 			recvErr = fmt.Errorf("accept: %w", err)
 			return
@@ -144,7 +144,7 @@ func runFlow(
 	start = time.Now()
 	go func() {
 		defer wg.Done()
-		stream, err := senderSock.ConnectWithCid(ctx, connectCid, mkConfig(senderRec))
+		stream, err := senderSock.ConnectWithCID(ctx, connectCid, mkConfig(senderRec))
 		if err != nil {
 			sendErr = fmt.Errorf("connect: %w", err)
 			return

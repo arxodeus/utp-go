@@ -24,7 +24,7 @@ func Example() {
 	}
 	defer client.Close()
 
-	accepted := make(chan *utp.UtpStream, 1)
+	accepted := make(chan *utp.Stream, 1)
 	go func() {
 		stream, err := server.Accept(ctx, nil)
 		if err != nil {
@@ -33,7 +33,7 @@ func Example() {
 		accepted <- stream
 	}()
 
-	peer := utp.NewUdpPeer(server.LocalAddr().(*net.UDPAddr))
+	peer := utp.NewUDPPeer(server.LocalAddr().(*net.UDPAddr))
 	stream, err := client.Connect(ctx, peer, nil)
 	if err != nil {
 		log.Fatal(err)

@@ -10,7 +10,7 @@ import (
 
 // Closing from a consumer that never read must not hang.
 //
-// UtpStream.Close waits for the connection goroutine to finish, and that
+// utp.Stream.Close waits for the connection goroutine to finish, and that
 // goroutine's shutdown path hands bytes to the reader. When that handoff could
 // block, a consumer that accepted a stream, never read it, and then closed it
 // deadlocked against itself: Close waited for the loop, the loop waited for the
@@ -35,20 +35,20 @@ func TestCloseWithoutReadingDoesNotHang(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	sendSock := utp.WithSocket(ctx, a, quiet())
+	sendSock := utp.NewSocket(ctx, a, quiet())
 	defer sendSock.Close()
-	recvSock := utp.WithSocket(ctx, b, quiet())
+	recvSock := utp.NewSocket(ctx, b, quiet())
 	defer recvSock.Close()
 
 	const initiatorCid, responderCid = 500, 501
-	acceptCid := utp.NewConnectionId(a.Addr(), responderCid, initiatorCid)
-	connectCid := utp.NewConnectionId(b.Addr(), initiatorCid, responderCid)
+	acceptCid := utp.NewConnectionID(a.Addr(), responderCid, initiatorCid)
+	connectCid := utp.NewConnectionID(b.Addr(), initiatorCid, responderCid)
 
 	payload := make([]byte, 2<<20)
 
-	accepted := make(chan *utp.UtpStream, 1)
+	accepted := make(chan *utp.Stream, 1)
 	go func() {
-		stream, err := recvSock.AcceptWithCid(ctx, acceptCid, utp.NewConnectionConfig())
+		stream, err := recvSock.AcceptWithCID(ctx, acceptCid, utp.NewConnectionConfig())
 		if err != nil {
 			accepted <- nil
 			return
@@ -57,7 +57,7 @@ func TestCloseWithoutReadingDoesNotHang(t *testing.T) {
 	}()
 
 	go func() {
-		stream, err := sendSock.ConnectWithCid(ctx, connectCid, utp.NewConnectionConfig())
+		stream, err := sendSock.ConnectWithCID(ctx, connectCid, utp.NewConnectionConfig())
 		if err != nil {
 			return
 		}
@@ -65,7 +65,7 @@ func TestCloseWithoutReadingDoesNotHang(t *testing.T) {
 		_, _ = stream.Write(ctx, payload)
 	}()
 
-	var stream *utp.UtpStream
+	var stream *utp.Stream
 	select {
 	case stream = <-accepted:
 	case <-time.After(20 * time.Second):

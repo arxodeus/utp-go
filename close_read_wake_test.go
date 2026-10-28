@@ -53,7 +53,7 @@ func TestCloseReadAppliesWithoutItsEvent(t *testing.T) {
 	stream.readClosed.Store(true)
 	clk.AwaitReactionTo(func() {
 		stream.wakeLoop()
-		conn.inject(newPacketBuilder(st_data, peerID+1, 120000, 1<<20, peerSeq+2).
+		conn.inject(newPacketBuilder(stData, peerID+1, 120000, 1<<20, peerSeq+2).
 			WithAckNum(0x4321 - 1).WithPayload(make([]byte, 1000)).Build().Encode())
 	})
 	c := stream.conn

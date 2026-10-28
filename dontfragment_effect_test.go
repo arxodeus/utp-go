@@ -77,7 +77,7 @@ func TestDontFragmentActuallySetsTheBit(t *testing.T) {
 
 // The same contrast through the public path: udpConn.WriteToDontFragment
 // against udpConn.WriteTo.
-func TestUdpConnWriteToDontFragment(t *testing.T) {
+func TestUDPConnWriteToDontFragment(t *testing.T) {
 	dst := &net.UDPAddr{IP: net.IPv4(203, 0, 113, 7), Port: 9}
 	mtu, ok := pathMTUFor(dst)
 	if !ok || mtu <= 0 || mtu > 65000 {
@@ -90,7 +90,7 @@ func TestUdpConnWriteToDontFragment(t *testing.T) {
 	}
 	defer base.Close()
 	c := &udpConn{base: base}
-	peer := NewUdpPeer(dst)
+	peer := NewUDPPeer(dst)
 
 	oversized := make([]byte, mtu+64)
 	if _, err := c.WriteTo(oversized, peer); err != nil {

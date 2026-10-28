@@ -14,18 +14,18 @@ func TestRouteCacheFollowsTheTables(t *testing.T) {
 	defer cancel()
 	conn := newScriptedConn()
 	defer conn.Close()
-	sock := WithSocket(ctx, conn, conformanceLogger())
+	sock := NewSocket(ctx, conn, conformanceLogger())
 	defer sock.Close()
 
 	const id = 700
-	pkt, err := decodePacket(newPacketBuilder(st_data, id, 0, 1<<20, 1).
+	pkt, err := decodePacket(newPacketBuilder(stData, id, 0, 1<<20, 1).
 		WithPayload([]byte("x")).Build().Encode(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	peerKey := conn.peer.Hash()
 	key := string(appendConnKey(nil, id-1, id, peerKey))
-	cid := NewConnectionId(conn.peer, id, id-1)
+	cid := NewConnectionID(conn.peer, id, id-1)
 	if cid.Hash() != key {
 		t.Fatalf("the connection id is keyed %q, not %q", cid.Hash(), key)
 	}
@@ -81,27 +81,27 @@ func TestReceiverRetiresTheSynTimer(t *testing.T) {
 
 	conn := newScriptedConn()
 	defer conn.Close()
-	sock := WithSocket(ctx, conn, conformanceLogger())
+	sock := NewSocket(ctx, conn, conformanceLogger())
 	defer sock.Close()
 
-	cid := NewConnectionId(conn.peer, 4200, 4201)
-	streamCh := make(chan *UtpStream, 1)
+	cid := NewConnectionID(conn.peer, 4200, 4201)
+	streamCh := make(chan *Stream, 1)
 	go func() {
-		if stream, err := sock.ConnectWithCid(ctx, cid, NewConnectionConfig()); err == nil {
+		if stream, err := sock.ConnectWithCID(ctx, cid, NewConnectionConfig()); err == nil {
 			streamCh <- stream
 		}
 	}()
 	waitFor(t, 2*time.Second, func() bool { return conn.emittedCount() > 0 })
-	conn.inject(newPacketBuilder(st_state, 4200, 150000, 1<<20, 900).
+	conn.inject(newPacketBuilder(stState, 4200, 150000, 1<<20, 900).
 		WithAckNum(4200).Build().Encode())
-	var stream *UtpStream
+	var stream *Stream
 	select {
 	case stream = <-streamCh:
 	case <-time.After(5 * time.Second):
 		t.Fatal("connect never completed")
 	}
 
-	conn.inject(newPacketBuilder(st_data, 4200, 160000, 1<<20, 900).
+	conn.inject(newPacketBuilder(stData, 4200, 160000, 1<<20, 900).
 		WithAckNum(4200).WithPayload([]byte("data")).Build().Encode())
 	conn.settle()
 

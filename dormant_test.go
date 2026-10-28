@@ -11,7 +11,7 @@ import (
 )
 
 // restingPair is two connected streams on two loopback sockets.
-func restingPair(t *testing.T, ctx context.Context, cfg *ConnectionConfig) (sa, sb *UtpSocket, client, server *UtpStream) {
+func restingPair(t *testing.T, ctx context.Context, cfg *ConnectionConfig) (sa, sb *Socket, client, server *Stream) {
 	t.Helper()
 	lg := duplexQuietLog()
 	var err error
@@ -26,12 +26,12 @@ func restingPair(t *testing.T, ctx context.Context, cfg *ConnectionConfig) (sa, 
 	}
 	t.Cleanup(func() { sb.Close() })
 	const cid = 4700
-	accepted := make(chan *UtpStream, 1)
+	accepted := make(chan *Stream, 1)
 	go func() {
-		s, _ := sb.AcceptWithCid(ctx, NewConnectionId(NewUdpPeer(sa.LocalAddr().(*net.UDPAddr)), cid+1, cid), cfg)
+		s, _ := sb.AcceptWithCID(ctx, NewConnectionID(NewUDPPeer(sa.LocalAddr().(*net.UDPAddr)), cid+1, cid), cfg)
 		accepted <- s
 	}()
-	client, err = sa.ConnectWithCid(ctx, NewConnectionId(NewUdpPeer(sb.LocalAddr().(*net.UDPAddr)), cid, cid+1), cfg)
+	client, err = sa.ConnectWithCID(ctx, NewConnectionID(NewUDPPeer(sb.LocalAddr().(*net.UDPAddr)), cid, cid+1), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func restingPair(t *testing.T, ctx context.Context, cfg *ConnectionConfig) (sa, 
 }
 
 // exchange writes n bytes from one stream and reads them at the other.
-func exchange(t *testing.T, ctx context.Context, from, to *UtpStream, n int) {
+func exchange(t *testing.T, ctx context.Context, from, to *Stream, n int) {
 	t.Helper()
 	if _, err := from.Write(ctx, make([]byte, n)); err != nil {
 		t.Fatal(err)
@@ -59,7 +59,7 @@ func exchange(t *testing.T, ctx context.Context, from, to *UtpStream, n int) {
 }
 
 // awaitRest waits for both streams' connections to have let their loops go.
-func awaitRest(t *testing.T, within time.Duration, streams ...*UtpStream) {
+func awaitRest(t *testing.T, within time.Duration, streams ...*Stream) {
 	t.Helper()
 	deadline := time.Now().Add(within)
 	for _, s := range streams {
@@ -141,7 +141,7 @@ func TestRestingConnectionEndsWithItsContext(t *testing.T) {
 	exchange(t, ctx, client, server, 1024)
 	awaitRest(t, 2*time.Second, client, server)
 	sockCancel()
-	for _, s := range []*UtpStream{client, server} {
+	for _, s := range []*Stream{client, server} {
 		awaitEnded(t, s, "its socket's context")
 	}
 }
@@ -149,7 +149,7 @@ func TestRestingConnectionEndsWithItsContext(t *testing.T) {
 // awaitEnded requires s to end within 300ms of what should end it at once.
 // If it does not, it waits longer to tell a slow end from a stuck one, and
 // reports how long it took and, if still running, the goroutines.
-func awaitEnded(t *testing.T, s *UtpStream, cause string) {
+func awaitEnded(t *testing.T, s *Stream, cause string) {
 	t.Helper()
 	start := time.Now()
 	select {

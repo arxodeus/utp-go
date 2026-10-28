@@ -14,7 +14,7 @@ Every comment in `netem/queueing_delay_test.go` at e56c9aa, verbatim.
 //
 // It used to be the difference between the two directions. BaseDelay comes
 // from the peer's measurement of our *outbound* path (libutp's `our_hist`,
-// utp_internal.cpp:2016-2021) and PeerTsDiff is our own measurement of the
+// utp_internal.cpp:2016-2021) and PeerTimestampDiff is our own measurement of the
 // *inbound* one (`their_delay`, :2000-2001); subtracting one from the other
 // gives the path asymmetry, with any real queue buried inside it. On this
 // link that produced about 90ms of queue on a path with none.

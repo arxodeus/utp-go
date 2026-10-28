@@ -44,9 +44,9 @@ func TestSocketReadsOnAfterAReadError(t *testing.T) {
 
 	fa := &failingConn{Endpoint: a}
 	fa.pending.Store(5)
-	sa := utp.WithSocket(ctx, fa, quiet())
+	sa := utp.NewSocket(ctx, fa, quiet())
 	defer sa.Close()
-	sb := utp.WithSocket(ctx, b, quiet())
+	sb := utp.NewSocket(ctx, b, quiet())
 	defer sb.Close()
 	go func() {
 		s, err := sb.Accept(ctx, utp.NewConnectionConfig())
@@ -58,7 +58,7 @@ func TestSocketReadsOnAfterAReadError(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	dialCtx, dialCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer dialCancel()
-	c, err := sa.ConnectWithCid(dialCtx, utp.NewConnectionId(b.Addr(), 900, 901), utp.NewConnectionConfig())
+	c, err := sa.ConnectWithCID(dialCtx, utp.NewConnectionID(b.Addr(), 900, 901), utp.NewConnectionConfig())
 	if err != nil {
 		t.Fatalf("after five read errors the socket no longer reads: %v", err)
 	}
@@ -82,11 +82,11 @@ func TestSocketThatCannotReadCloses(t *testing.T) {
 
 	fa := &failingConn{Endpoint: a}
 	fa.broken.Store(true)
-	sa := utp.WithSocket(ctx, fa, quiet())
+	sa := utp.NewSocket(ctx, fa, quiet())
 	defer sa.Close()
 
 	start := time.Now()
-	_, err := sa.ConnectWithCid(ctx, utp.NewConnectionId(b.Addr(), 900, 901), utp.NewConnectionConfig())
+	_, err := sa.ConnectWithCID(ctx, utp.NewConnectionID(b.Addr(), 900, 901), utp.NewConnectionConfig())
 	took := time.Since(start)
 	t.Logf("the dial returned %v after %v", err, took.Round(time.Millisecond))
 	if err == nil {

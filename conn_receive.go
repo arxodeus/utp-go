@@ -31,7 +31,7 @@ const reorderOldPacketFloor = uint16(1<<16 - 1024)
 // and a RESET is handled before it.
 func (c *connection) outsideReorderWindow(pkt *packet) bool {
 	switch pkt.Header.PacketType {
-	case st_data, st_state, st_fin:
+	case stData, stState, stFin:
 	default:
 		return false
 	}
@@ -44,7 +44,7 @@ func (c *connection) outsideReorderWindow(pkt *packet) bool {
 		return false
 	}
 
-	if distance >= reorderOldPacketFloor && pkt.Header.PacketType != st_state {
+	if distance >= reorderOldPacketFloor && pkt.Header.PacketType != stState {
 		// An old packet the peer is still retransmitting: acknowledge it again
 		// so the peer can stop. Emitted directly rather than through
 		// transmit, since a STATE is neither numbered nor retransmitted.
@@ -65,7 +65,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 		c.logger.Trace("on packet start...",
 			"packet.body.len", len(packet.Body),
 			"packet.type", packet.Header.PacketType.String(),
-			"packet.cid", packet.Header.ConnectionId,
+			"packet.cid", packet.Header.ConnectionID,
 			"packet.seqnum", packet.Header.SeqNum,
 			"packet.acknum", packet.Header.AckNum,
 			"packet.windowSize", packet.Header.WndSize,
@@ -75,8 +75,8 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	// and the connection is unaffected: it may be a peer's new connection
 	// that drew the same ids as one this side still holds. A SYN with this
 	// connection's own sequence number means the peer missed the SYN-ACK,
-	// and is answered (the st_syn case below).
-	if packet.Header.PacketType == st_syn && !c.isOwnSyn(packet.Header.SeqNum) {
+	// and is answered (the stSyn case below).
+	if packet.Header.PacketType == stSyn && !c.isOwnSyn(packet.Header.SeqNum) {
 		if c.logger.Enabled(baseContext, slog.LevelDebug) {
 			c.logger.Debug("ignoring a SYN that is not this connection's",
 				"seq", packet.Header.SeqNum, "cid.send", c.cid.Send, "cid.recv", c.cid.Recv)
@@ -95,7 +95,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	// through the checks below: a RESET acknowledges the packet that drew
 	// it, which may be our next unsent sequence number, and its random
 	// sequence number may fall outside the reorder window.
-	if packet.Header.PacketType == st_reset {
+	if packet.Header.PacketType == stReset {
 		c.onReset()
 		return
 	}
@@ -113,7 +113,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	// An extension-bits extension must be exactly 8 bytes, or the packet is
 	// dropped. Not checked for a SYN, which does not reach here once the
 	// connection exists.
-	if packet.Header.PacketType != st_syn && packet.malformedExtensionBits() {
+	if packet.Header.PacketType != stSyn && packet.malformedExtensionBits() {
 		return
 	}
 
@@ -152,10 +152,10 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	// Read the microsecond clock once for both uses below.
 	var nowMicros uint32
 	if peerStamp == 0 {
-		c.peerTsDiff = 0
+		c.peerTimestampDiff = 0
 	} else {
 		nowMicros = c.nowMicros()
-		c.peerTsDiff = timestampDiffMicros(nowMicros, peerStamp)
+		c.peerTimestampDiff = timestampDiffMicros(nowMicros, peerStamp)
 	}
 	// The delay in the peer's direction is not a congestion signal for this
 	// sender, but it reveals clock drift between the ends. The raw wrapping
@@ -170,15 +170,15 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	// Handle each packet type.
 	var err error
 	switch packet.Header.PacketType {
-	case st_syn:
+	case stSyn:
 		c.onSyn(packet.Header.SeqNum)
-	case st_state:
+	case stState:
 		c.onState(packet.Header.SeqNum, packet.Header.AckNum)
-	case st_data:
+	case stData:
 		err = c.onData(packet.Header.SeqNum, packet.Body)
-	case st_fin:
+	case stFin:
 		err = c.onFin(packet.Header.SeqNum, packet.Body)
-	case st_reset:
+	case stReset:
 		c.onReset()
 	}
 	if err != nil {
@@ -187,7 +187,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 
 	// Process acknowledgments.
 	switch packet.Header.PacketType {
-	case st_state, st_data, st_fin:
+	case stState, stData, stFin:
 		// INT_MAX means the peer has no measurement, not a delay of 35 minutes.
 		replyMicros := packet.Header.TimestampDiff
 		if replyMicros == math.MaxInt32 {
@@ -226,7 +226,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 
 	// Send a STATE packet if appropriate.
 	switch packet.Header.PacketType {
-	case st_syn:
+	case stSyn:
 		if c.synState == nil {
 			// The SYN-ACK is generated at the start of the event loop.
 			c.logger.Warn("missing SYN STATE")
@@ -237,7 +237,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 				// Built as every reset is: no timestamps, no window, and the
 				// sequence number of the packet that drew it.
 				randSeqNum := randomUint16()
-				resetPacket := newPacketBuilder(st_reset, packet.Header.ConnectionId, 0, 0, randSeqNum).
+				resetPacket := newPacketBuilder(stReset, packet.Header.ConnectionID, 0, 0, randSeqNum).
 					WithAckNum(packet.Header.SeqNum).Build()
 				c.emit(resetPacket)
 			}
@@ -254,7 +254,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 			c.emit(c.synState)
 		}
 
-	case st_fin:
+	case stFin:
 		// Acknowledge a FIN immediately rather than deferring it: reaching a
 		// FIN tears the connection down in the same pass, after which there
 		// is nothing left to build the acknowledgement from.
@@ -272,7 +272,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 			c.finAck = statePacket
 			c.emit(statePacket)
 		}
-	case st_data:
+	case stData:
 		// Record that an acknowledgement is owed; do not send it here. It is
 		// sent once per socket read, so packets arriving together draw one
 		// acknowledgement.
@@ -299,7 +299,7 @@ func (c *connection) onPacket(packet *packet, now time.Time) {
 	// acknowledgements ride on its data packets, and a window they open
 	// must be used.
 	switch packet.Header.PacketType {
-	case st_state, st_data, st_fin:
+	case stState, stData, stFin:
 		c.wantWrite = true
 	}
 
@@ -370,7 +370,7 @@ func (c *connection) onData(seqNum uint16, data []byte) error {
 	switch c.state.stateType {
 	case connConnecting:
 		if c.endpoint.Type == acceptor {
-			return errors.New("unreachable: connection should be marked established")
+			return errors.New("utp: unreachable: connection should be marked established")
 		} else {
 			// connection being established.
 			if c.logger.Enabled(baseContext, LevelTrace) {

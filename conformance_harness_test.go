@@ -34,11 +34,11 @@ func (d fieldDiff) String() string {
 
 // pinnedClockConfig returns a connection config whose wall clock is the
 // driver's virtual clock, so the timestamp fields can be compared.
-// NowMicros governs only what is stamped and measured, not scheduling, so
+// nowMicros governs only what is stamped and measured, not scheduling, so
 // such a connection still retransmits on real timers.
 func pinnedClockConfig(drv *libutp.Driver) *ConnectionConfig {
 	cfg := NewConnectionConfig()
-	cfg.NowMicros = func() uint32 { return uint32(drv.Now()) }
+	cfg.nowMicros = func() uint32 { return uint32(drv.Now()) }
 	return cfg
 }
 
@@ -63,7 +63,7 @@ func comparePackets(ours, theirs *packet) []fieldDiff {
 	add("PacketType", ours.Header.PacketType.String(), theirs.Header.PacketType.String())
 	add("Version", ours.Header.Version, theirs.Header.Version)
 	add("Extension", ours.Header.Extension, theirs.Header.Extension)
-	add("ConnectionId", ours.Header.ConnectionId, theirs.Header.ConnectionId)
+	add("ConnectionID", ours.Header.ConnectionID, theirs.Header.ConnectionID)
 	add("SeqNum", ours.Header.SeqNum, theirs.Header.SeqNum)
 	add("AckNum", ours.Header.AckNum, theirs.Header.AckNum)
 	add("WndSize", ours.Header.WndSize, theirs.Header.WndSize)

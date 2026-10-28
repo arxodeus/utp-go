@@ -223,9 +223,9 @@ func ourRecoveryAfterBlackout(t *testing.T, blackout time.Duration) (
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	sockA := utp.WithSocket(ctx, a, quiet())
+	sockA := utp.NewSocket(ctx, a, quiet())
 	defer sockA.Close()
-	sockB := utp.WithSocket(ctx, b, quiet())
+	sockB := utp.NewSocket(ctx, b, quiet())
 	defer sockB.Close()
 
 	var (
@@ -258,8 +258,8 @@ func ourRecoveryAfterBlackout(t *testing.T, blackout time.Duration) (
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	cid := utp.NewConnectionId(b.Addr(), 9800, 9801)
-	stream, err := sockA.ConnectWithCid(ctx, cid, cfg)
+	cid := utp.NewConnectionID(b.Addr(), 9800, 9801)
+	stream, err := sockA.ConnectWithCID(ctx, cid, cfg)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

@@ -12,7 +12,7 @@ import "time"
 // Anything that needs the loop again restarts it (wake): a write, a read that
 // frees room in the read queue, a close, an event from the socket, a timer
 // armed by a pass the reader runs inline, the socket's context ending
-// (UtpSocket.wakeConns), an abandoned dial, or the connection's single rest
+// (Socket.wakeConns), an abandoned dial, or the connection's single rest
 // timer, set for the earliest of:
 //
 //   - the keep-alive, one interval after the last packet sent;
@@ -29,11 +29,11 @@ import "time"
 // resting loop itself if a wake arrived as it left (rest). asleep records the
 // same state under mu, for passes the reader runs inline.
 
-// funcTimerClock is a Clock that can run a function when a timer expires. A
+// funcTimerClock is a clockSource that can run a function when a timer expires. A
 // resting connection has no goroutine to receive from a timer channel, so
-// connections rest only on such a clock. RealClock is one.
+// connections rest only on such a clock. defaultClock is one.
 type funcTimerClock interface {
-	AfterFunc(d time.Duration, f func()) Timer
+	AfterFunc(d time.Duration, f func()) clockTimer
 }
 
 // restingEnabled allows tests to run connections that never rest.

@@ -13,7 +13,7 @@ import (
 // one therefore wakes the loop (kickLoop), which then selects on it.
 type lazyTimer struct {
 	c *connection
-	t Timer
+	t clockTimer
 	// pending is set while the timer is armed and its expiry not yet taken.
 	// A resting connection (dormant.go) has none pending.
 	pending bool
@@ -66,7 +66,7 @@ func (l *lazyTimer) stop() {
 // dormant.go), and so the frame it waits in stays small (see wait).
 type loopTimers struct {
 	// keepAlive is created with the loop and always armed while it runs.
-	keepAlive Timer
+	keepAlive clockTimer
 	// The rest are created when first armed. See lazyTimer.
 	idle, probe, ackHold, idleRto, lossProbe, rack *lazyTimer
 }
@@ -85,7 +85,7 @@ type wakeResult struct {
 // returns the error the connection ended with and whether it ended. A
 // connection that rests (dormant.go) returns with final unset, and its loop
 // is restarted by whatever next needs it.
-func (c *connection) eventLoop(stream *UtpStream) (error, bool) {
+func (c *connection) eventLoop(stream *Stream) (error, bool) {
 	c.setupLoop(stream)
 	return c.runLoop()
 }
@@ -93,7 +93,7 @@ func (c *connection) eventLoop(stream *UtpStream) (error, bool) {
 // setupLoop does the event loop's one-time setup before its first pass.
 // Called with mu held, from newUtpStream; the loop releases mu the first
 // time it waits.
-func (c *connection) setupLoop(stream *UtpStream) {
+func (c *connection) setupLoop(stream *Stream) {
 	if c.logger.Enabled(baseContext, LevelTrace) {
 		c.logger.Trace("uTP conn starting", "dst.peer", c.cid.Peer, "cid.Send", c.cid.Send, "cid.Recv", c.cid.Recv)
 	}
@@ -405,7 +405,7 @@ func (c *connection) react(w wakeResult) (err error, final bool) {
 		c.handleWrite(w.write)
 	case wakeReadable:
 		// Nothing to do but wake: the drain happens in afterPass, before the
-		// acknowledgement. UtpStream.notifyRead signals this when the
+		// acknowledgement. Stream.notifyRead signals this when the
 		// application takes a chunk, which is the only thing that frees
 		// room once the read queue has filled.
 	case wakeWritable:
@@ -668,7 +668,7 @@ func (c *connection) receiveInline(pkt *packet) bool {
 		// Except a FIN, which is acknowledged: the peer closing second is
 		// waiting for it. Sent without touching the connection, which the
 		// teardown reads unlocked.
-		if pkt.Header.PacketType == st_fin {
+		if pkt.Header.PacketType == stFin {
 			if ack := c.closedFinAck(pkt); ack != nil {
 				ev := newOutgoingSocketEvent(ack, c.cid)
 				if c.out != nil {
@@ -693,7 +693,7 @@ func (c *connection) receiveInline(pkt *packet) bool {
 	if c.ready && c.state.stateType == connClosed {
 		// Except a FIN, which is acknowledged, as above, and kept as the FIN's
 		// acknowledgement so the socket's linger state covers it.
-		if pkt.Header.PacketType == st_fin {
+		if pkt.Header.PacketType == stFin {
 			if ack := c.closedFinAck(pkt); ack != nil {
 				c.finAck = ack
 				c.emit(ack)

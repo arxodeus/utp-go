@@ -32,7 +32,7 @@ func (sb *sendBuffer) IsEmpty() bool {
 }
 
 // Write copies data into the buffer and reports how much it took. The copy
-// is required: UtpStream.Write returns once the bytes are accepted, before
+// is required: Stream.Write returns once the bytes are accepted, before
 // they are sent, and io.Writer implementations must not retain p.
 func (sb *sendBuffer) Write(data []byte) int {
 	available := sb.Available()

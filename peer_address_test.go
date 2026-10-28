@@ -6,15 +6,15 @@ import (
 	"time"
 )
 
-// Connections are keyed by the peer's address as a string (UdpPeer.Hash), so
+// Connections are keyed by the peer's address as a string (UDPPeer.Hash), so
 // two renderings of the same address must give the same key and different
 // addresses must not. On a dual-stack socket an address may arrive in its
 // 16-byte v4-mapped form while the caller resolved a 4-byte one;
 // net.IP.String renders both as a dotted quad, which this relies on.
-func TestUdpPeerHashIdentifiesTheAddressNotItsEncoding(t *testing.T) {
+func TestUDPPeerHashIdentifiesTheAddressNotItsEncoding(t *testing.T) {
 	v4 := &net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: 9000}
 	v4in6 := &net.UDPAddr{IP: net.IP{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 127, 0, 0, 1}, Port: 9000}
-	if a, b := NewUdpPeer(v4).Hash(), NewUdpPeer(v4in6).Hash(); a != b {
+	if a, b := NewUDPPeer(v4).Hash(), NewUDPPeer(v4in6).Hash(); a != b {
 		t.Errorf("the same address hashes two ways: 4-byte %q, v4-mapped %q; a dual-stack "+
 			"socket would fail to match its own connections", a, b)
 	}
@@ -33,11 +33,11 @@ func TestUdpPeerHashIdentifiesTheAddressNotItsEncoding(t *testing.T) {
 	}
 	seen := make(map[string]string, len(distinct))
 	for name, addr := range distinct {
-		h := NewUdpPeer(addr).Hash()
+		h := NewUDPPeer(addr).Hash()
 		// "2001:db8::1" and "2001:db8:0:0:0:0:0:1" are one address in two
 		// spellings and must give the same key.
 		if name == "v6 full address" {
-			if want := NewUdpPeer(distinct["v6 other host"]).Hash(); h != want {
+			if want := NewUDPPeer(distinct["v6 other host"]).Hash(); h != want {
 				t.Errorf("%q hashed to %q, but the same address spelled short hashed to %q",
 					name, h, want)
 			}
@@ -53,18 +53,18 @@ func TestUdpPeerHashIdentifiesTheAddressNotItsEncoding(t *testing.T) {
 // An IPv6 peer keys a connection id as an IPv4 one does: the key combines
 // send, recv and the peer, and an empty or unstable peer key would collapse
 // every connection to the peer into one entry.
-func TestConnectionIdHashDistinguishesIPv6Peers(t *testing.T) {
-	peerA := NewUdpPeer(&net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 6881})
-	peerB := NewUdpPeer(&net.UDPAddr{IP: net.ParseIP("2001:db8::2"), Port: 6881})
+func TestConnectionIDHashDistinguishesIPv6Peers(t *testing.T) {
+	peerA := NewUDPPeer(&net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 6881})
+	peerB := NewUDPPeer(&net.UDPAddr{IP: net.ParseIP("2001:db8::2"), Port: 6881})
 
-	same := NewConnectionId(peerA, 1, 2).Hash()
-	if again := NewConnectionId(peerA, 1, 2).Hash(); again != same {
+	same := NewConnectionID(peerA, 1, 2).Hash()
+	if again := NewConnectionID(peerA, 1, 2).Hash(); again != same {
 		t.Errorf("the same v6 connection id hashed two ways: %q then %q", same, again)
 	}
-	for name, other := range map[string]*ConnectionId{
-		"other peer": NewConnectionId(peerB, 1, 2),
-		"other recv": NewConnectionId(peerA, 3, 2),
-		"other send": NewConnectionId(peerA, 1, 3),
+	for name, other := range map[string]*ConnectionID{
+		"other peer": NewConnectionID(peerB, 1, 2),
+		"other recv": NewConnectionID(peerA, 3, 2),
+		"other send": NewConnectionID(peerA, 1, 3),
 	} {
 		if other.Hash() == same {
 			t.Errorf("%s hashes the same as the original connection id", name)
@@ -75,7 +75,7 @@ func TestConnectionIdHashDistinguishesIPv6Peers(t *testing.T) {
 // A peer type this package did not create still receives packets: the
 // address is parsed from its Hash. A Hash that is not an address is an
 // error, not a silently dropped packet.
-func TestUdpConnWritesToForeignPeerTypes(t *testing.T) {
+func TestUDPConnWritesToForeignPeerTypes(t *testing.T) {
 	listener, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
 	if err != nil {
 		t.Fatal(err)

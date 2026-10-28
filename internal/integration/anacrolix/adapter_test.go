@@ -24,7 +24,7 @@ import (
 // that function's signature. Comparing against the real thing means this test
 // fails if torrent changes the interface -- which a hand-copied interface
 // declaration would not.
-func TestSatisfiesTorrentsUtpSocketInterface(t *testing.T) {
+func TestSatisfiesTorrentsUTPSocketInterface(t *testing.T) {
 	fnType := reflect.TypeOf(torrent.NewUtpSocket)
 	if fnType.NumOut() != 2 {
 		t.Fatalf("torrent.NewUtpSocket returns %d values, expected (utpSocket, error); "+
@@ -56,8 +56,8 @@ func TestSatisfiesTorrentsUtpSocketInterface(t *testing.T) {
 }
 
 // And that the constructor this package offers really produces one.
-func TestNewUtpSocket(t *testing.T) {
-	sock, err := NewUtpSocket("utp", "127.0.0.1:0", nil, alog.Default)
+func TestNewUTPSocket(t *testing.T) {
+	sock, err := NewSocket("utp", "127.0.0.1:0", nil, alog.Default)
 	if err != nil {
 		t.Fatalf("creating a socket: %v", err)
 	}

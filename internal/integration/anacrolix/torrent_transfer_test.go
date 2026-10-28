@@ -35,7 +35,7 @@ import (
 // exactly what utpnet.Socket already provides. Every built-in network is
 // disabled here, so the only way a byte can move between these two clients is
 // through this library.
-func TestTorrentTransferOverUtp(t *testing.T) {
+func TestTorrentTransferOverUTP(t *testing.T) {
 	transferTorrent(t, func(t *testing.T, dir string, seed bool) *torrent.Client {
 		cl, _ := newUtpOnlyClient(t, dir, seed)
 		return cl

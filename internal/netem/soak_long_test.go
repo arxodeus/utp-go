@@ -37,7 +37,7 @@ func soakDuration(t *testing.T) time.Duration {
 // streamReader adapts a stream to io.Reader for io.ReadFull.
 type streamReader struct {
 	ctx context.Context
-	s   *utp.UtpStream
+	s   *utp.Stream
 }
 
 func (r streamReader) Read(p []byte) (int, error) { return r.s.Read(r.ctx, p) }
@@ -45,7 +45,7 @@ func (r streamReader) Read(p []byte) (int, error) { return r.s.Read(r.ctx, p) }
 // soakServe answers every message on a connection -- a 4-byte length, then
 // that many bytes -- with the message's SHA-256, until the peer ends its
 // side.
-func soakServe(ctx context.Context, s *utp.UtpStream) error {
+func soakServe(ctx context.Context, s *utp.Stream) error {
 	defer s.Close()
 	r := streamReader{ctx, s}
 	var hdr [4]byte
@@ -69,7 +69,7 @@ func soakServe(ctx context.Context, s *utp.UtpStream) error {
 
 // soakExchange sends one message of n bytes and checks the digest it gets
 // back.
-func soakExchange(ctx context.Context, s *utp.UtpStream, rng *rand.Rand, n int) error {
+func soakExchange(ctx context.Context, s *utp.Stream, rng *rand.Rand, n int) error {
 	msg := make([]byte, 4+n)
 	binary.BigEndian.PutUint32(msg, uint32(n))
 	rng.Read(msg[4:])
@@ -107,7 +107,7 @@ type soakSample struct {
 	exchanges  int64
 }
 
-func soakMeasure(start time.Time, a, b *utp.UtpSocket, exchanges int64) soakSample {
+func soakMeasure(start time.Time, a, b *utp.Socket, exchanges int64) soakSample {
 	runtime.GC()
 	runtime.GC()
 	var m runtime.MemStats
@@ -199,8 +199,8 @@ func TestSoakLongRunning(t *testing.T) {
 			cfg.Metrics = func(m utp.ConnectionMetrics) {
 				// Only while it is being served: an entry for every
 				// connection ever made would be the soak's own leak.
-				if _, live := serverMetrics.Load(m.Cid.Hash()); live {
-					serverMetrics.Store(m.Cid.Hash(), m)
+				if _, live := serverMetrics.Load(m.CID.Hash()); live {
+					serverMetrics.Store(m.CID.Hash(), m)
 				}
 			}
 			s, err := pair.SockB.Accept(acceptCtx, cfg)
@@ -211,8 +211,8 @@ func TestSoakLongRunning(t *testing.T) {
 				return
 			}
 			served.Add(1)
-			key := s.Cid().Hash()
-			serverMetrics.Store(key, utp.ConnectionMetrics{Cid: s.Cid(), At: time.Now(), State: "accepted"})
+			key := s.CID().Hash()
+			serverMetrics.Store(key, utp.ConnectionMetrics{CID: s.CID(), At: time.Now(), State: "accepted"})
 			go func() {
 				defer served.Done()
 				defer serverMetrics.Delete(key)

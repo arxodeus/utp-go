@@ -33,7 +33,7 @@ type rackState struct {
 	// recently sent packet that has been delivered (RACK.xmit_ts,
 	// RACK.end_seq); rtt is the round trip measured to it (RACK.rtt).
 	delivered bool
-	xmitTs    time.Time
+	xmitTime  time.Time
 	endSeq    uint16
 	rtt       time.Duration
 	// xmitOrder is the same packet's position in send order
@@ -115,7 +115,7 @@ func (s *sentPackets) rackOnDelivered(p *sentPacket, now time.Time) {
 	}
 	if !r.delivered || p.sentOrder > r.xmitOrder {
 		sent := p.retransmission
-		r.delivered, r.xmitTs, r.xmitOrder, r.endSeq, r.rtt = true, sent, p.sentOrder, p.seqNum, now.Sub(sent)
+		r.delivered, r.xmitTime, r.xmitOrder, r.endSeq, r.rtt = true, sent, p.sentOrder, p.seqNum, now.Sub(sent)
 	}
 }
 

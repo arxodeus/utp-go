@@ -22,21 +22,21 @@ const (
 )
 
 const (
-	st_data packetType = iota
-	st_fin
-	st_state
-	st_reset
-	st_syn
+	stData packetType = iota
+	stFin
+	stState
+	stReset
+	stSyn
 )
 
 var (
-	errInvalidHeaderSize           = errors.New("invalid header size")
-	errUnsupportedVersion          = errors.New("unsupported protocol version")
-	errUnknownExtension            = errors.New("unknown extension type")
-	errInvalidPacketType           = errors.New("invalid packet type")
-	errInsufficientLen             = errors.New("insufficient length for extension")
-	errInsufficientSelectiveAckLen = errors.New("insufficient length for selective ACK")
-	errInvalidSelectiveAckLen      = errors.New("invalid length for selective ACK")
+	errInvalidHeaderSize           = errors.New("utp: invalid header size")
+	errUnsupportedVersion          = errors.New("utp: unsupported protocol version")
+	errUnknownExtension            = errors.New("utp: unknown extension type")
+	errInvalidPacketType           = errors.New("utp: invalid packet type")
+	errInsufficientLen             = errors.New("utp: insufficient length for extension")
+	errInsufficientSelectiveAckLen = errors.New("utp: insufficient length for selective ACK")
+	errInvalidSelectiveAckLen      = errors.New("utp: invalid length for selective ACK")
 )
 
 type packetType byte
@@ -50,16 +50,16 @@ func (p packetType) Check() error {
 
 func (p *packetType) String() string {
 	switch *p {
-	case st_data:
-		return "st_data"
-	case st_fin:
-		return "st_fin"
-	case st_state:
-		return "st_state"
-	case st_reset:
-		return "st_reset"
-	case st_syn:
-		return "st_syn"
+	case stData:
+		return "stData"
+	case stFin:
+		return "stFin"
+	case stState:
+		return "stState"
+	case stReset:
+		return "stReset"
+	case stSyn:
+		return "stSyn"
 	default:
 		return "UNKNOWN"
 	}
@@ -69,7 +69,7 @@ type packetHeaderV1 struct {
 	PacketType    packetType
 	Version       byte
 	Extension     byte
-	ConnectionId  uint16
+	ConnectionID  uint16
 	Timestamp     int64
 	TimestampDiff uint32
 	WndSize       uint32
@@ -89,7 +89,7 @@ func (h *packetHeaderV1) EncodeToBytes() []byte {
 // appendTo appends the header's 20 bytes to b.
 func (h *packetHeaderV1) appendTo(b []byte) []byte {
 	b = append(b, h.encodeTypeVer(), h.Extension)             // 2
-	b = binary.BigEndian.AppendUint16(b, h.ConnectionId)      // 2
+	b = binary.BigEndian.AppendUint16(b, h.ConnectionID)      // 2
 	b = binary.BigEndian.AppendUint32(b, uint32(h.Timestamp)) // 4
 	b = binary.BigEndian.AppendUint32(b, h.TimestampDiff)     // 4
 	b = binary.BigEndian.AppendUint32(b, h.WndSize)           // 4
@@ -157,7 +157,7 @@ func decodePacketHeaderInto(h *packetHeaderV1, value []byte) error {
 		PacketType:    packetTypeVal,
 		Version:       versionVal,
 		Extension:     extension,
-		ConnectionId:  connID,
+		ConnectionID:  connID,
 		Timestamp:     int64(tsMicros),
 		TimestampDiff: tsDiffMicros,
 		WndSize:       windowSize,
@@ -525,7 +525,7 @@ func newPacketBuilder(
 	}
 }
 
-func (b *packetBuilder) WithTsDiffMicros(tsDiffMicros uint32) *packetBuilder {
+func (b *packetBuilder) WithTimestampDiffMicros(tsDiffMicros uint32) *packetBuilder {
 	b.tsDiffMicros = tsDiffMicros
 	return b
 }
@@ -561,7 +561,7 @@ func (b *packetBuilder) Build() *packet {
 			PacketType:    b.packetType,
 			Version:       protocolVersionOne,
 			Extension:     headerExtension,
-			ConnectionId:  b.connID,
+			ConnectionID:  b.connID,
 			Timestamp:     int64(b.tsMicros),
 			TimestampDiff: b.tsDiffMicros,
 			WndSize:       b.windowSize,

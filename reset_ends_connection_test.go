@@ -19,16 +19,16 @@ func TestResetAnsweringOurAckEndsTheConnection(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		conn := newScriptedConn()
-		sock := WithSocket(ctx, conn, conformanceLogger())
+		sock := NewSocket(ctx, conn, conformanceLogger())
 		peerID := uint16(6000 + 2*i)
-		cid := NewConnectionId(conn.peer, peerID+1, peerID)
-		accepted := make(chan *UtpStream, 1)
+		cid := NewConnectionID(conn.peer, peerID+1, peerID)
+		accepted := make(chan *Stream, 1)
 		go func() {
-			s, _ := sock.AcceptWithCid(ctx, cid, NewConnectionConfig())
+			s, _ := sock.AcceptWithCID(ctx, cid, NewConnectionConfig())
 			accepted <- s
 		}()
 		time.Sleep(time.Millisecond)
-		conn.inject(newPacketBuilder(st_syn, peerID, uint32(time.Now().UnixMicro()), 1<<20, 900).Build().Encode())
+		conn.inject(newPacketBuilder(stSyn, peerID, uint32(time.Now().UnixMicro()), 1<<20, 900).Build().Encode())
 		s := <-accepted
 		if s == nil {
 			t.Fatal("no accept")
@@ -36,13 +36,13 @@ func TestResetAnsweringOurAckEndsTheConnection(t *testing.T) {
 		var ourSeq uint16
 		for ourSeq == 0 {
 			for _, raw := range conn.takeEmitted() {
-				if p, err := decodePacket(raw, false); err == nil && p.Header.PacketType == st_state {
+				if p, err := decodePacket(raw, false); err == nil && p.Header.PacketType == stState {
 					ourSeq = p.Header.SeqNum
 				}
 			}
 			time.Sleep(time.Millisecond)
 		}
-		conn.inject(newPacketBuilder(st_data, peerID+1, uint32(time.Now().UnixMicro()), 1<<20, 901).
+		conn.inject(newPacketBuilder(stData, peerID+1, uint32(time.Now().UnixMicro()), 1<<20, 901).
 			WithAckNum(ourSeq - 1).WithPayload([]byte("hi")).Build().Encode())
 		got := make(chan error, 1)
 		go func() {
@@ -55,7 +55,7 @@ func TestResetAnsweringOurAckEndsTheConnection(t *testing.T) {
 			got <- err
 		}()
 		time.Sleep(time.Duration(i%7) * time.Millisecond)
-		conn.inject(newPacketBuilder(st_reset, peerID+1, 0, 0, 902).WithAckNum(ourSeq).Build().Encode())
+		conn.inject(newPacketBuilder(stReset, peerID+1, 0, 0, 902).WithAckNum(ourSeq).Build().Encode())
 		select {
 		case err := <-got:
 			if !errors.Is(err, ErrReset) {

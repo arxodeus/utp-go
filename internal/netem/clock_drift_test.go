@@ -90,13 +90,13 @@ func runDriftedWith(t *testing.T, ppm float64, runFor time.Duration, cid uint16,
 	if ppm != 0 {
 		sendConn = NewDriftingClock(a, ppm)
 	}
-	sendSock := utp.WithSocket(ctx, sendConn, quiet())
+	sendSock := utp.NewSocket(ctx, sendConn, quiet())
 	defer sendSock.Close()
-	recvSock := utp.WithSocket(ctx, b, quiet())
+	recvSock := utp.NewSocket(ctx, b, quiet())
 	defer recvSock.Close()
 
-	acceptCid := utp.NewConnectionId(a.Addr(), cid+1, cid)
-	connectCid := utp.NewConnectionId(b.Addr(), cid, cid+1)
+	acceptCid := utp.NewConnectionID(a.Addr(), cid+1, cid)
+	connectCid := utp.NewConnectionID(b.Addr(), cid, cid+1)
 
 	var (
 		mu          sync.Mutex
@@ -174,7 +174,7 @@ func runDriftedWith(t *testing.T, ppm float64, runFor time.Duration, cid uint16,
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		stream, err := recvSock.AcceptWithCid(ctx, acceptCid, utp.NewConnectionConfig())
+		stream, err := recvSock.AcceptWithCID(ctx, acceptCid, utp.NewConnectionConfig())
 		if err != nil {
 			t.Errorf("accept: %v", err)
 			return
@@ -193,7 +193,7 @@ func runDriftedWith(t *testing.T, ppm float64, runFor time.Duration, cid uint16,
 	}()
 	go func() {
 		defer wg.Done()
-		stream, err := sendSock.ConnectWithCid(ctx, connectCid, sendCfg)
+		stream, err := sendSock.ConnectWithCID(ctx, connectCid, sendCfg)
 		if err != nil {
 			t.Errorf("connect: %v", err)
 			return
@@ -434,9 +434,9 @@ func TestClockDriftYieldsShareAtASharedBottleneck(t *testing.T) {
 		if ppm != 0 {
 			sendConn = NewDriftingClock(src, ppm)
 		}
-		sendSock := utp.WithSocket(ctx, sendConn, quiet())
+		sendSock := utp.NewSocket(ctx, sendConn, quiet())
 		defer sendSock.Close()
-		recvSock := utp.WithSocket(ctx, dst, quiet())
+		recvSock := utp.NewSocket(ctx, dst, quiet())
 		defer recvSock.Close()
 
 		var (
@@ -456,14 +456,14 @@ func TestClockDriftYieldsShareAtASharedBottleneck(t *testing.T) {
 			mu.Unlock()
 		}
 
-		acceptCid := utp.NewConnectionId(src.Addr(), cid+1, cid)
-		connectCid := utp.NewConnectionId(dst.Addr(), cid, cid+1)
+		acceptCid := utp.NewConnectionID(src.Addr(), cid+1, cid)
+		connectCid := utp.NewConnectionID(dst.Addr(), cid, cid+1)
 
 		var inner sync.WaitGroup
 		inner.Add(2)
 		go func() {
 			defer inner.Done()
-			stream, err := recvSock.AcceptWithCid(ctx, acceptCid, utp.NewConnectionConfig())
+			stream, err := recvSock.AcceptWithCID(ctx, acceptCid, utp.NewConnectionConfig())
 			if err != nil {
 				t.Errorf("%s accept: %v", label, err)
 				return
@@ -482,7 +482,7 @@ func TestClockDriftYieldsShareAtASharedBottleneck(t *testing.T) {
 		}()
 		go func() {
 			defer inner.Done()
-			stream, err := sendSock.ConnectWithCid(ctx, connectCid, sendCfg)
+			stream, err := sendSock.ConnectWithCID(ctx, connectCid, sendCfg)
 			if err != nil {
 				t.Errorf("%s connect: %v", label, err)
 				return

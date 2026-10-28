@@ -199,10 +199,10 @@ func adverseGoToLibutp(t *testing.T, cfg pathConfig, payload []byte, seed int64,
 	defer r.Close()
 
 	const initiatorCid, responderCid = 4100, 4101
-	cid := utp.NewConnectionId(utp.NewUdpPeer(r.GoFacingAddr()), initiatorCid, responderCid)
+	cid := utp.NewConnectionID(utp.NewUDPPeer(r.GoFacingAddr()), initiatorCid, responderCid)
 
 	start := time.Now()
-	stream, err := sock.ConnectWithCid(ctx, cid, connCfg)
+	stream, err := sock.ConnectWithCID(ctx, cid, connCfg)
 	if err != nil {
 		t.Fatalf("could not connect to libutp through the relay: %v; relay to libutp %+v, to us %+v",
 			err, r.toLib.Stats(), r.toGo.Stats())

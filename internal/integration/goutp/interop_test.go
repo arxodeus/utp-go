@@ -39,7 +39,7 @@ func makePayload(t *testing.T, n int) []byte {
 
 // pair is one of our sockets and one of purego's that can reach each other.
 type pair struct {
-	ours   *utp.UtpSocket
+	ours   *utp.Socket
 	theirs *purego.Socket
 	// theirPeer is purego's socket as ours addresses it; ourAddr is ours as
 	// purego dials it.
@@ -55,7 +55,7 @@ func udpPair(t *testing.T, ctx context.Context) *pair {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(ours.Close)
+	t.Cleanup(func() { ours.Close() })
 	theirs, err := purego.NewSocket("udp4", "127.0.0.1:0", purego.WithLogger(puregoLogger()))
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +63,7 @@ func udpPair(t *testing.T, ctx context.Context) *pair {
 	t.Cleanup(func() { _ = theirs.Close() })
 	return &pair{
 		ours: ours, theirs: theirs,
-		theirPeer: utp.NewUdpPeer(theirs.LocalAddr().(*net.UDPAddr)),
+		theirPeer: utp.NewUDPPeer(theirs.LocalAddr().(*net.UDPAddr)),
 		ourAddr:   ours.LocalAddr().String(),
 		network:   "udp4",
 	}
@@ -71,15 +71,15 @@ func udpPair(t *testing.T, ctx context.Context) *pair {
 
 // connect opens a connection between the two, with ours dialling or
 // accepting.
-func (p *pair) connect(t *testing.T, ctx context.Context, oursDials bool) (*utp.UtpStream, net.Conn) {
+func (p *pair) connect(t *testing.T, ctx context.Context, oursDials bool) (*utp.Stream, net.Conn) {
 	t.Helper()
 	type accepted struct {
-		ours   *utp.UtpStream
+		ours   *utp.Stream
 		theirs net.Conn
 		err    error
 	}
 	done := make(chan accepted, 1)
-	var ours *utp.UtpStream
+	var ours *utp.Stream
 	var theirs net.Conn
 	var err error
 	if oursDials {
@@ -116,7 +116,7 @@ func (p *pair) connect(t *testing.T, ctx context.Context, oursDials bool) (*utp.
 }
 
 // readAllOurs reads ours to the end of the stream.
-func readAllOurs(ctx context.Context, s *utp.UtpStream, sizeHint int) ([]byte, error) {
+func readAllOurs(ctx context.Context, s *utp.Stream, sizeHint int) ([]byte, error) {
 	buf := make([]byte, 0, sizeHint)
 	n, err := s.ReadToEOF(ctx, &buf)
 	if err != nil && !errors.Is(err, io.EOF) {
@@ -143,7 +143,7 @@ func roleName(oursDials bool) string {
 // data packet and write nothing before it. Protocols over uTP, such as
 // BitTorrent, have the dialer speak first. This library completes the
 // connection on the handshake, so when it accepts it may send first.
-func helloFirst(ctx context.Context, ours *utp.UtpStream, theirs net.Conn, oursDials, oursSends bool) error {
+func helloFirst(ctx context.Context, ours *utp.Stream, theirs net.Conn, oursDials, oursSends bool) error {
 	if !oursDials || oursSends {
 		return nil
 	}
@@ -161,7 +161,7 @@ func helloFirst(ctx context.Context, ours *utp.UtpStream, theirs net.Conn, oursD
 
 // transfer sends payload one way on an open connection, the sender closing
 // when done, and checks that the receiver read exactly it.
-func transfer(ctx context.Context, ours *utp.UtpStream, theirs net.Conn, oursDials, oursSends bool, payload []byte) error {
+func transfer(ctx context.Context, ours *utp.Stream, theirs net.Conn, oursDials, oursSends bool, payload []byte) error {
 	if err := helloFirst(ctx, ours, theirs, oursDials, oursSends); err != nil {
 		return err
 	}

@@ -196,7 +196,7 @@ func TestMalformedUnknownExtensionTypeInChain(t *testing.T) {
 
 // A packet for a connection id neither side knows. Both answer with a RESET,
 // so this compares rather than expecting silence.
-func TestMalformedUnknownConnectionId(t *testing.T) {
+func TestMalformedUnknownConnectionID(t *testing.T) {
 	runResponderCorpus(t, []step{
 		{name: "handshake", inject: synPacketFor(corpusSynConnID, corpusSynSeq)},
 		{name: "a packet for an unknown connection", injectRaw: wireHeader(0, 1, 0, 44444, 1, 1)},

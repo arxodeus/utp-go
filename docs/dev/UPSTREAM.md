@@ -8,6 +8,10 @@ than raw UDP, but none of these defects are specific to either transport.
 Suggested as **eleven separate pull requests**, smallest and least arguable
 first, so none of them is held up by the others.
 
+Names here are those of the code at the time: `UtpSocket`, `UtpStream`,
+`UdpPeer` and `ConnectionId` are now `Socket`, `Stream`, `UDPPeer` and
+`ConnectionID`, and `Cid` is `CID` throughout.
+
 ## PR 1 — the transfer-path hangs
 
 Highest value, no API change, no judgement calls.
@@ -270,7 +274,7 @@ numbers will move.
 
 Independent of the library. On a clean checkout upstream's suite cannot pass:
 
-- `TestUdpTransfer` never called the library — it blasted raw datagrams
+- `TestUDPTransfer` never called the library — it blasted raw datagrams
   between two `net.UDPConn`s, and its send loop never advanced `offset`, so it
   could only ever end at the timeout. Rewritten to transfer over uTP and
   verify the payload.
@@ -1878,10 +1882,10 @@ Found by a two-hour soak (`netem.TestSoakLongRunning`, 880,000 connections).
   id in use in either direction. libutp has neither rule; a deviation (see
   DEVIATIONS.md, "A dialled connection's ids are clear of every id in use").
 
-`TestPacketReachesTheConnectionItIsFor`, `TestSynForATakenReceiveIdIsRefused`,
+`TestPacketReachesTheConnectionItIsFor`, `TestSynForATakenReceiveIDIsRefused`,
 `TestResetAnsweringOurAckEndsTheConnection`,
 `TestClosedConnectionIdsAreNotReusedAtOnce` and
-`TestDialledConnectionDoesNotSendOnAnIdInUse` each fail without their change.
+`TestDialledConnectionDoesNotSendOnAnIDInUse` each fail without their change.
 The soak then ran two hours clean: 885,718 exchanges, heap flat.
 
 ## PR 69 — RACK loss detection, opt-in

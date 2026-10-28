@@ -34,7 +34,7 @@ Every comment in `utpnet/conn.go` at e56c9aa, verbatim.
 // Write writes all of b, or reports how much of it was written.
 //
 // When the deadline moves while it waits, it carries on with what is left:
-// the stream reports what it had already taken (see UtpStream.Write), and
+// the stream reports what it had already taken (see Stream.Write), and
 // those bytes will be sent. It used to start over from the beginning on any
 // write that came back with nothing reported -- and the stream reported
 // nothing even when it had taken bytes -- so a deadline moved during a

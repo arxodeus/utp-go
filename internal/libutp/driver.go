@@ -26,7 +26,7 @@ import (
 // completion before returning, so there is no scheduling to reason about --
 // except for the clock: Now, SetTime, Advance and Close may be called from
 // any goroutine. A connection of this library given the driver's clock as its
-// own (ConnectionConfig.NowMicros) reads it from its own goroutine, and goes
+// own (ConnectionConfig.nowMicros) reads it from its own goroutine, and goes
 // on reading it after its test has closed the driver: a resting connection
 // woken by its socket's close finishes on its own time. That read went to
 // freed memory and crashed the process -- FuzzDifferentialInitiator's

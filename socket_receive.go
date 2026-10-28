@@ -9,7 +9,7 @@ import (
 	"net"
 )
 
-func (s *UtpSocket) readLoop() {
+func (s *Socket) readLoop() {
 	buf := make([]byte, math.MaxUint16)
 
 	// The inbound path starts here, so a virtual clock must not move while a
@@ -99,7 +99,7 @@ func (s *UtpSocket) readLoop() {
 // (connection.receiveInline), and the connection is recorded in touched, to
 // be acknowledged at the end of the batch. Handling packets on the reader
 // avoids goroutine hand-offs between receiving a packet and acknowledging it.
-func (s *UtpSocket) dispatch(raw *incomingPacketRaw, touched *readBatch) {
+func (s *Socket) dispatch(raw *incomingPacketRaw, touched *readBatch) {
 	s.dispatchMu.Lock()
 	c := s.handleIncomingBuf(raw)
 	s.dispatchMu.Unlock()
@@ -118,7 +118,7 @@ type readBatch struct {
 
 // endBatch sends, for each connection a read batch delivered to, the
 // acknowledgement for what the batch brought it, and empties touched.
-func (s *UtpSocket) endBatch(touched *readBatch) {
+func (s *Socket) endBatch(touched *readBatch) {
 	for i, c := range touched.conns {
 		c.inReadBatch = false
 		c.endBatch()
@@ -136,7 +136,7 @@ const maxConsecutiveReadErrors = 100
 // stop. failures counts the errors since the last successful read. A run of
 // errors is tolerated; a socket that cannot read closes, so everything
 // waiting on it fails promptly.
-func (s *UtpSocket) readFailed(err error, failures *int) bool {
+func (s *Socket) readFailed(err error, failures *int) bool {
 	if err == nil {
 		*failures = 0
 		return false
@@ -162,7 +162,7 @@ func (s *UtpSocket) readFailed(err error, failures *int) bool {
 
 // handleIncomingBuf routes one datagram, and returns the connection that
 // took it inline, or nil. Called with dispatchMu held.
-func (s *UtpSocket) handleIncomingBuf(incomingRaw *incomingPacketRaw) *connection {
+func (s *Socket) handleIncomingBuf(incomingRaw *incomingPacketRaw) *connection {
 	// Handle the packet.
 	packetPtr, err := decodePacket(incomingRaw.payload, incomingRaw.borrowed)
 	if err != nil {
@@ -176,14 +176,14 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *incomingPacketRaw) *connectio
 		s.logger.Trace("receive incoming packet",
 			"src.peer", incomingRaw.peer,
 			"packet.type", packetPtr.Header.PacketType.String(),
-			"packet.cid", packetPtr.Header.ConnectionId,
+			"packet.cid", packetPtr.Header.ConnectionID,
 			"packet.seqNum", packetPtr.Header.SeqNum,
 			"packet.ackNum", packetPtr.Header.AckNum,
 			"packet.Data.len", len(packetPtr.Body))
 	}
 
 	// Each candidate is looked up by its key alone, built into a reused
-	// buffer. A ConnectionId is built below only for a SYN.
+	// buffer. A ConnectionID is built below only for a SYN.
 	peerKey := incomingRaw.peer.Hash()
 	send, recv, connStream, c := s.route(packetPtr, peerKey)
 	if connStream != nil {
@@ -226,7 +226,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *incomingPacketRaw) *connectio
 
 	if s.logger.Enabled(baseContext, LevelTrace) {
 		s.logger.Trace("received uTP packet for non-existing conn",
-			"cid", packetPtr.Header.ConnectionId,
+			"cid", packetPtr.Header.ConnectionID,
 			"packetType", packetPtr.Header.PacketType,
 			"seq", packetPtr.Header.SeqNum,
 			"ack", packetPtr.Header.AckNum,
@@ -234,10 +234,10 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *incomingPacketRaw) *connectio
 			"weInitCid", cidFromPacket(packetPtr, incomingRaw.peer, cidTypes[1]),
 			"accCID", cidFromPacket(packetPtr, incomingRaw.peer, cidTypes[2]))
 	}
-	if packetPtr.Header.PacketType != st_syn {
+	if packetPtr.Header.PacketType != stSyn {
 		// An unmatched RESET is dropped, never answered: answering a reset
 		// with a reset would let two hosts exchange them indefinitely.
-		if packetPtr.Header.PacketType != st_reset {
+		if packetPtr.Header.PacketType != stReset {
 			// A FIN or data packet retransmitted after we closed is
 			// re-acknowledged rather than reset. Checked only after every
 			// lookup above has missed, so a live connection always wins.
@@ -259,10 +259,10 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *incomingPacketRaw) *connectio
 	// use; accepting would leave a packet ambiguous between the two. The SYN
 	// is dropped without an answer, and the dialer retries or gives up.
 	s.connsMutex.RLock()
-	taken := s.recvIdTakenLocked(cid.Recv, peerKey)
+	taken := s.recvIDTakenLocked(cid.Recv, peerKey)
 	s.connsMutex.RUnlock()
 	if taken {
-		s.refusedIdInUse.Add(1)
+		s.refusedIDInUse.Add(1)
 		if s.logger.Enabled(baseContext, slog.LevelDebug) {
 			s.logger.Debug("refusing an incoming connection: its receive id is in use",
 				"src.peer", incomingRaw.peer, "recv", cid.Recv)
@@ -350,7 +350,7 @@ func (s *UtpSocket) handleIncomingBuf(incomingRaw *incomingPacketRaw) *connectio
 // lingerAckTimeout covers the first few retransmissions, where a lost
 // acknowledgement matters; after that the peer gives up and a RESET is the
 // right answer.
-func (s *UtpSocket) rememberLingerAck(key string, ack *packet) {
+func (s *Socket) rememberLingerAck(key string, ack *packet) {
 	if ack == nil {
 		return
 	}
@@ -369,8 +369,8 @@ func (s *UtpSocket) rememberLingerAck(key string, ack *packet) {
 // Data beyond the stored acknowledgement is the peer writing after our FIN.
 // With no application left to deliver it to, it is dropped silently. Either
 // way the answer is never a RESET.
-func (s *UtpSocket) reAckLingering(pkt *packet, peer ConnectionPeer) bool {
-	if pkt.Header.PacketType != st_fin && pkt.Header.PacketType != st_data {
+func (s *Socket) reAckLingering(pkt *packet, peer ConnectionPeer) bool {
+	if pkt.Header.PacketType != stFin && pkt.Header.PacketType != stData {
 		return false
 	}
 	for _, cidType := range cidTypes {
@@ -388,7 +388,7 @@ func (s *UtpSocket) reAckLingering(pkt *packet, peer ConnectionPeer) bool {
 		// acknowledgement to cover it, or a peer that closed second would
 		// retransmit its FIN indefinitely. It is stamped as sent
 		// (freshlyStamped) on the wire clock, since the connection is gone.
-		if pkt.Header.PacketType == st_fin && pkt.Header.SeqNum == ack.Header.AckNum+1 {
+		if pkt.Header.PacketType == stFin && pkt.Header.SeqNum == ack.Header.AckNum+1 {
 			finAck := freshlyStamped(ack, nowMicro(), pkt)
 			finAck.Header.AckNum = pkt.Header.SeqNum
 			s.lingerAcks.put(cid.Hash(), finAck)
@@ -422,10 +422,10 @@ func (s *UtpSocket) reAckLingering(pkt *packet, peer ConnectionPeer) bool {
 // with a RESET. Each packet (peer, connection id and sequence number) is
 // answered once while its entry lasts, and nothing is answered while too many
 // entries are outstanding, so a RESET cannot be used for amplification.
-func (s *UtpSocket) maybeSendReset(pkt *packet, peer ConnectionPeer) {
+func (s *Socket) maybeSendReset(pkt *packet, peer ConnectionPeer) {
 	key := rstInfoKey{
 		peer:   peer.Hash(),
-		connID: pkt.Header.ConnectionId,
+		connID: pkt.Header.ConnectionID,
 		ackNr:  pkt.Header.SeqNum,
 	}
 
@@ -454,7 +454,7 @@ func (s *UtpSocket) maybeSendReset(pkt *packet, peer ConnectionPeer) {
 	//   - windowsize is zero, since there is no connection;
 	//   - the timestamp fields are zero.
 	randSeqNum := randomUint16()
-	resetPacket := newPacketBuilder(st_reset, pkt.Header.ConnectionId, 0, 0, randSeqNum).
+	resetPacket := newPacketBuilder(stReset, pkt.Header.ConnectionID, 0, 0, randSeqNum).
 		WithAckNum(pkt.Header.SeqNum).
 		Build()
 	s.sendEvent(newOutgoingSocketEvent(resetPacket, peer))
@@ -474,7 +474,7 @@ func (s *UtpSocket) maybeSendReset(pkt *packet, peer ConnectionPeer) {
 //
 // The socket does not collect ICMP itself. On Linux the usual source is
 // IP_RECVERR on the UDP socket.
-func (s *UtpSocket) ProcessICMPFragmentation(quoted []byte, peer ConnectionPeer, nextHopMTU uint16) bool {
+func (s *Socket) ProcessICMPFragmentation(quoted []byte, peer ConnectionPeer, nextHopMTU uint16) bool {
 	return s.deliverICMP(quoted, peer, &icmpNotice{
 		Kind:       icmpFragmentationNeeded,
 		NextHopMTU: uint32(nextHopMTU),
@@ -488,13 +488,13 @@ func (s *UtpSocket) ProcessICMPFragmentation(quoted []byte, peer ConnectionPeer,
 //
 // quoted, peer and the result are as for ProcessICMPFragmentation. Which ICMP
 // messages are fatal is for the caller to decide.
-func (s *UtpSocket) ProcessICMPError(quoted []byte, peer ConnectionPeer) bool {
+func (s *Socket) ProcessICMPError(quoted []byte, peer ConnectionPeer) bool {
 	return s.deliverICMP(quoted, peer, &icmpNotice{Kind: icmpUnreachable})
 }
 
 // deliverICMP parses the quoted header and delivers the report to its
 // connection.
-func (s *UtpSocket) deliverICMP(quoted []byte, peer ConnectionPeer, notice *icmpNotice) bool {
+func (s *Socket) deliverICMP(quoted []byte, peer ConnectionPeer, notice *icmpNotice) bool {
 	if peer == nil || notice == nil {
 		return false
 	}
@@ -514,10 +514,10 @@ func (s *UtpSocket) deliverICMP(quoted []byte, peer ConnectionPeer, notice *icmp
 		return false
 	}
 
-	connStream := s.getConnStreamForQuotedId(header.ConnectionId, peer)
+	connStream := s.getConnStreamForQuotedID(header.ConnectionID, peer)
 	if connStream == nil {
 		s.logger.Debug("ignoring ICMP: no matching connection",
-			"id", header.ConnectionId, "peer", peer)
+			"id", header.ConnectionID, "peer", peer)
 		return false
 	}
 
@@ -535,25 +535,25 @@ func (s *UtpSocket) deliverICMP(quoted []byte, peer ConnectionPeer, notice *icmp
 		// and the error by the retransmission timeout. The connection was
 		// found, so this still reports recognized.
 		s.logger.Warn("connection stream channel is full, dropping ICMP report",
-			"id", header.ConnectionId, "peer", peer)
+			"id", header.ConnectionID, "peer", peer)
 	}
 	return true
 }
 
-// getConnStreamForQuotedId finds the connection that sent the packet an ICMP
+// getConnStreamForQuotedID finds the connection that sent the packet an ICMP
 // message quoted. The quoted packet is ours, so its connection id is our send
 // id, except in a SYN, which carries our receive id. The candidates are tried
 // in order: a SYN from either role, then an accepted connection (receive id
 // one above), then a dialed one (receive id one below).
-func (s *UtpSocket) getConnStreamForQuotedId(id uint16, peer ConnectionPeer) chan *streamEvent {
-	candidates := []*ConnectionId{
+func (s *Socket) getConnStreamForQuotedID(id uint16, peer ConnectionPeer) chan *streamEvent {
+	candidates := []*ConnectionID{
 		// recv == id (the quoted packet is our SYN), either role
-		NewConnectionId(peer, id, id+1),
-		NewConnectionId(peer, id, id-1),
+		NewConnectionID(peer, id, id+1),
+		NewConnectionID(peer, id, id-1),
 		// recv == id+1 && send == id: we accepted this connection
-		NewConnectionId(peer, id+1, id),
+		NewConnectionID(peer, id+1, id),
 		// recv == id-1 && send == id: we initiated it
-		NewConnectionId(peer, id-1, id),
+		NewConnectionID(peer, id-1, id),
 	}
 	for _, cid := range candidates {
 		if ch, ok := s.getConnStream(cid.Hash()); ok {

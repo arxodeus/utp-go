@@ -2,7 +2,7 @@
 
 Every comment in `socket_routing.go` at e56c9aa, verbatim.
 
-## Line 22 — func (*UtpSocket).registerLocked
+## Line 22 — func (*Socket).registerLocked
 
 ```
 // registerLocked enters a connection to peer in the table under key, and,
@@ -11,27 +11,27 @@ Every comment in `socket_routing.go` at e56c9aa, verbatim.
 // for writing.
 ```
 
-## Line 38 — func (*UtpSocket).attachInline
+## Line 38 — func (*Socket).attachInline
 
 ```
 // attachInline lets the reader hand packets on ch straight to c. Called
 // with dispatchMu held, after c is set up.
 ```
 
-## Line 43 — func (*UtpSocket).attachInline
+## Line 43 — func (*Socket).attachInline
 
 ```
 // A connection that has already gone, its entry removed, stays gone.
 ```
 
-## Line 47 — func (*UtpSocket).attachInline
+## Line 47 — func (*Socket).attachInline
 
 ```
 // From here the connection may rest: nothing the socket hands it
 		// goes to a loop that is not there. See dormant.go.
 ```
 
-## Line 53 — func (*UtpSocket).route
+## Line 53 — func (*Socket).route
 
 ```
 // route finds the connection a packet is for: the first of the derivations
@@ -41,7 +41,7 @@ Every comment in `socket_routing.go` at e56c9aa, verbatim.
 // does not allocate.
 ```
 
-## Line 59 — func (*UtpSocket).route
+## Line 59 — func (*Socket).route
 
 ```
 // The datagrams of one flow arrive one after another, and the routing
@@ -55,10 +55,10 @@ Every comment in `socket_routing.go` at e56c9aa, verbatim.
 ```
 // cachedRoute is the route one datagram took: its connection id and peer,
 // what they led to, and the routing tables' generation at the time. See
-// UtpSocket.route.
+// Socket.route.
 ```
 
-## Line 90 — func (*UtpSocket).routeLocked
+## Line 90 — func (*Socket).routeLocked
 
 ```
 // routeLocked is route's lookup proper, through every derivation in order.
@@ -88,7 +88,7 @@ Every comment in `socket_routing.go` at e56c9aa, verbatim.
 // "routeCandidates".
 ```
 
-## Line 142 — func (*UtpSocket).idInUseLocked
+## Line 142 — func (*Socket).idInUseLocked
 
 ```
 // idInUseLocked reports whether a connection to the peer, live or ended in
@@ -96,7 +96,7 @@ Every comment in `socket_routing.go` at e56c9aa, verbatim.
 // held.
 ```
 
-## Line 159 — func (*UtpSocket).recvIdTakenLocked
+## Line 159 — func (*Socket).recvIdTakenLocked
 
 ```
 // recvIdTakenLocked reports whether a connection to the peer already receives
@@ -106,7 +106,7 @@ Every comment in `socket_routing.go` at e56c9aa, verbatim.
 ## Line 221 — func cidIds
 
 ```
-// cidIds is cidFromPacket's send and receive ids, without the ConnectionId.
+// cidIds is cidFromPacket's send and receive ids, without the ConnectionID.
 ```
 
 ## Line 228 — func cidIds

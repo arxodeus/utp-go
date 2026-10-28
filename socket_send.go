@@ -26,9 +26,9 @@ var encodeBufs = sync.Pool{New: func() any {
 // goroutine: it writes a packet, or removes a finished connection's entry.
 // Writing from the goroutine that decided to send avoids a hand-off on every
 // send. Conn.WriteTo may be called concurrently, as net.PacketConn allows.
-func (s *UtpSocket) sendEvent(event *socketEvent) {
+func (s *Socket) sendEvent(event *socketEvent) {
 	if s.logger.Enabled(baseContext, LevelTrace) {
-		s.logger.Trace("a socket event should be sent to target", "event.type", event.Type, "event.cid", event.ConnectionId)
+		s.logger.Trace("a socket event should be sent to target", "event.type", event.Type, "event.cid", event.ConnectionID)
 	}
 	switch event.Type {
 	case outgoing:
@@ -36,7 +36,7 @@ func (s *UtpSocket) sendEvent(event *socketEvent) {
 		encoded := event.Packet.appendEncoded((*bufp)[:0])
 		if s.logger.Enabled(baseContext, LevelTrace) {
 			s.logger.Trace("Send a packet out",
-				"target.cid", event.ConnectionId,
+				"target.cid", event.ConnectionID,
 				"packet.type", event.Packet.Header.PacketType.String(),
 				"packet.seqNum", event.Packet.Header.SeqNum,
 				"packet.ackNum", event.Packet.Header.AckNum,
@@ -44,10 +44,10 @@ func (s *UtpSocket) sendEvent(event *socketEvent) {
 				"encoded.len", len(encoded))
 		}
 		var peer ConnectionPeer
-		if cid, ok := event.ConnectionId.(*ConnectionId); ok {
+		if cid, ok := event.ConnectionID.(*ConnectionID); ok {
 			peer = cid.Peer
 		} else {
-			peer = event.ConnectionId
+			peer = event.ConnectionID
 		}
 		_, err := s.writeDatagram(encoded, peer, event.DontFragment)
 		*bufp = encoded[:0]
@@ -60,7 +60,7 @@ func (s *UtpSocket) sendEvent(event *socketEvent) {
 			if s.logger.Enabled(baseContext, LevelTrace) {
 				s.logger.Trace("Failed to send uTP packet",
 					"error", err,
-					"cid", event.Packet.Header.ConnectionId,
+					"cid", event.Packet.Header.ConnectionID,
 					"type", event.Packet.Header.PacketType,
 					"encoded.eack.len", eackEncodeLen,
 					"encoded.len", len(encoded))
@@ -69,10 +69,10 @@ func (s *UtpSocket) sendEvent(event *socketEvent) {
 
 	case socketShutdown:
 		if s.logger.Enabled(baseContext, LevelTrace) {
-			s.logger.Trace("uTP conn shutdown", "cid.Hash", event.ConnectionId.Hash())
+			s.logger.Trace("uTP conn shutdown", "cid.Hash", event.ConnectionID.Hash())
 		}
-		s.rememberLingerAck(event.ConnectionId.Hash(), event.Packet)
-		s.removeConnStream(event.ConnectionId.Hash())
+		s.rememberLingerAck(event.ConnectionID.Hash(), event.Packet)
+		s.removeConnStream(event.ConnectionID.Hash())
 	}
 }
 
@@ -84,7 +84,7 @@ func (s *UtpSocket) sendEvent(event *socketEvent) {
 // A Conn that sets don't-fragment as a socket option around one send holds
 // writeMu exclusively for it; every other write holds it shared. A Conn
 // without don't-fragment support takes no lock.
-func (s *UtpSocket) writeDatagram(b []byte, peer ConnectionPeer, dontFragment bool) (int, error) {
+func (s *Socket) writeDatagram(b []byte, peer ConnectionPeer, dontFragment bool) (int, error) {
 	w, dfw := s.socket.(DontFragmentWriter)
 	if !dfw {
 		return s.socket.WriteTo(b, peer)

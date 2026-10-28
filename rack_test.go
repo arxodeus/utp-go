@@ -28,14 +28,14 @@ func (h *rackHarness) at(ms int) time.Time { return h.t0.Add(time.Duration(ms) *
 // send sends the next packet at ms and returns its index.
 func (h *rackHarness) send(ms int) int {
 	seq := h.sp.NextSeqNum()
-	h.sp.OnTransmit(seq, st_data, []byte{0}, 1, h.at(ms))
+	h.sp.OnTransmit(seq, stData, []byte{0}, 1, h.at(ms))
 	h.seq = append(h.seq, seq)
 	return len(h.seq) - 1
 }
 
 // resend sends packet i again at ms.
 func (h *rackHarness) resend(i, ms int) {
-	h.sp.OnTransmit(h.seq[i], st_data, []byte{0}, 1, h.at(ms))
+	h.sp.OnTransmit(h.seq[i], stData, []byte{0}, 1, h.at(ms))
 }
 
 // ack acknowledges cumulatively through packet upTo (0 for none) and

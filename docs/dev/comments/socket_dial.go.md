@@ -16,7 +16,7 @@ Every comment in `socket_dial.go` at e56c9aa, verbatim.
 // last idQuarantine, every pair of ids a new connection could take.
 ```
 
-## Line 17 — func (*UtpSocket).generateCid
+## Line 17 — func (*Socket).generateCid
 
 ```
 // generateCid picks ids for a new connection to peer, and registers eventCh
@@ -33,19 +33,19 @@ Every comment in `socket_dial.go` at e56c9aa, verbatim.
 // (TestDialWithNoFreeIdFails).
 ```
 
-## Line 44 — func (*UtpSocket).generateCid
+## Line 44 — func (*Socket).generateCid
 
 ```
 // wrapping
 ```
 
-## Line 47 — func (*UtpSocket).generateCid
+## Line 47 — func (*Socket).generateCid
 
 ```
 // Calculate send ID based on initiator status
 ```
 
-## Line 58 — func (*UtpSocket).generateCid
+## Line 58 — func (*Socket).generateCid
 
 ```
 // Free means no connection to this peer receives on the id yet,
@@ -75,13 +75,13 @@ Every comment in `socket_dial.go` at e56c9aa, verbatim.
 		// one connection at most, no packet can be for two.
 ```
 
-## Line 98 — func (*UtpSocket).Connect
+## Line 98 — func (*Socket).Connect
 
 ```
 // Create channels for connection status and events
 ```
 
-## Line 102 — func (*UtpSocket).Connect
+## Line 102 — func (*Socket).Connect
 
 ```
 // Registered under the reader's lock, so the reader never finds the
@@ -90,19 +90,19 @@ Every comment in `socket_dial.go` at e56c9aa, verbatim.
 	// has set it up waits on the connection's own lock. See newUtpStream.
 ```
 
-## Line 107 — func (*UtpSocket).Connect
+## Line 107 — func (*Socket).Connect
 
 ```
 // Generate connection ID
 ```
 
-## Line 114 — func (*UtpSocket).Connect
+## Line 114 — func (*Socket).Connect
 
 ```
 // Create new UTP stream
 ```
 
-## Line 116 — func (*UtpSocket).Connect
+## Line 116 — func (*Socket).Connect
 
 ```
 // The connection's lifetime is the socket's, not the dial's.
@@ -121,13 +121,13 @@ Every comment in `socket_dial.go` at e56c9aa, verbatim.
 	// is for.
 ```
 
-## Line 146 — func (*UtpSocket).Connect
+## Line 146 — func (*Socket).Connect
 
 ```
 // Wait for connection result
 ```
 
-## Line 154 — func (*UtpSocket).Connect
+## Line 154 — func (*Socket).Connect
 
 ```
 // A closed channel with nothing in it means the connection went away
@@ -137,26 +137,26 @@ Every comment in `socket_dial.go` at e56c9aa, verbatim.
 		// was the branch every successful connection took.
 ```
 
-## Line 161 — func (*UtpSocket).Connect
+## Line 161 — func (*Socket).Connect
 
 ```
 // The attempt is the caller's to abandon even though the stream no
 		// longer shares its context.
 ```
 
-## Line 180 — func (*UtpSocket).ConnectWithCid
+## Line 180 — func (*Socket).ConnectWithCID
 
 ```
 // See the note in Connect.
 ```
 
-## Line 192 — func (*UtpSocket).ConnectWithCid
+## Line 192 — func (*Socket).ConnectWithCID
 
 ```
 // The socket's context, not the dial's -- see the note in Connect.
 ```
 
-## Line 208 — func (*UtpSocket).ConnectWithCid
+## Line 208 — func (*Socket).ConnectWithCID
 
 ```
 // Honour the caller's context, as Connect does. A bare receive here meant
@@ -165,7 +165,7 @@ Every comment in `socket_dial.go` at e56c9aa, verbatim.
 	// signalling this channel, so the caller waited forever.
 ```
 
-## Line 218 — func (*UtpSocket).ConnectWithCid
+## Line 218 — func (*Socket).ConnectWithCID
 
 ```
 // Report the reason rather than assuming one. This used to return a
@@ -177,7 +177,7 @@ Every comment in `socket_dial.go` at e56c9aa, verbatim.
 		// ErrConnRefused and ErrTimedOut.
 ```
 
-## Line 240 — func (*UtpSocket).awaitConnected
+## Line 240 — func (*Socket).awaitConnected
 
 ```
 // Report against the stream's connection id, not the accept's. A cid-less

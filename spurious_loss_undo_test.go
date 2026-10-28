@@ -20,7 +20,7 @@ func takeData(t *testing.T, conn *scriptedConn) []dataSent {
 		if err != nil {
 			t.Fatalf("undecodable packet: %v", err)
 		}
-		if p.Header.PacketType == st_data {
+		if p.Header.PacketType == stData {
 			out = append(out, dataSent{p.Header.SeqNum, uint32(p.Header.Timestamp)})
 		}
 	}
@@ -33,8 +33,8 @@ func takeData(t *testing.T, conn *scriptedConn) []dataSent {
 // timestamp, and the sender subtracts it from the STATE's own.
 func peerAck(ackNum uint16, sack *selectiveAck, echo uint32) []byte {
 	const peerClock = 500_000_000
-	b := newPacketBuilder(st_state, 6000+1, peerClock, 1<<20, 900+2).
-		WithAckNum(ackNum).WithTsDiffMicros(peerClock - echo)
+	b := newPacketBuilder(stState, 6000+1, peerClock, 1<<20, 900+2).
+		WithAckNum(ackNum).WithTimestampDiffMicros(peerClock - echo)
 	if sack != nil {
 		b = b.WithSelectiveAck(sack)
 	}

@@ -72,17 +72,17 @@ const benchPayload = 1000
 // benchmarks, accepted from benchConn's peer, and the data packet they feed
 // it. The one datagram is rewritten for each packet; each is handled before
 // the next is written, and the receive buffer copies the payload.
-func benchReceiver(b *testing.B) (*benchConn, *UtpSocket, *UtpStream, []byte) {
+func benchReceiver(b *testing.B) (*benchConn, *Socket, *Stream, []byte) {
 	ctx, cancel := context.WithCancel(context.Background())
 	b.Cleanup(cancel)
 	conn := newBenchConn()
-	sock := WithSocket(ctx, conn, conformanceLogger())
-	b.Cleanup(sock.Close)
+	sock := NewSocket(ctx, conn, conformanceLogger())
+	b.Cleanup(func() { sock.Close() })
 
-	cid := NewConnectionId(conn.peer, benchConnID+1, benchConnID)
-	accepted := make(chan *UtpStream, 1)
+	cid := NewConnectionID(conn.peer, benchConnID+1, benchConnID)
+	accepted := make(chan *Stream, 1)
 	go func() {
-		s, err := sock.AcceptWithCid(ctx, cid, NewConnectionConfig())
+		s, err := sock.AcceptWithCID(ctx, cid, NewConnectionConfig())
 		if err != nil {
 			b.Error(err)
 		}
@@ -90,12 +90,12 @@ func benchReceiver(b *testing.B) (*benchConn, *UtpSocket, *UtpStream, []byte) {
 	}()
 	time.Sleep(20 * time.Millisecond)
 	b.Cleanup(pinRandom(benchOurSeq))
-	conn.in <- newPacketBuilder(st_syn, benchConnID, 100000, benchWindow, benchPeerSeq).Build().Encode()
+	conn.in <- newPacketBuilder(stSyn, benchConnID, 100000, benchWindow, benchPeerSeq).Build().Encode()
 	stream := <-accepted
 	if stream == nil {
 		b.FailNow()
 	}
-	template := newPacketBuilder(st_data, benchConnID+1, 200000, benchWindow, benchPeerSeq+1).
+	template := newPacketBuilder(stData, benchConnID+1, 200000, benchWindow, benchPeerSeq+1).
 		WithAckNum(benchOurSeq - 1).WithPayload(make([]byte, benchPayload)).Build().Encode()
 	return conn, sock, stream, template
 }

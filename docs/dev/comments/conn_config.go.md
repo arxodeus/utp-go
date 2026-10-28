@@ -47,7 +47,7 @@ Every comment in `conn_config.go` at e56c9aa, verbatim.
 
 ```
 // Clock is where this connection reads time and gets its timers.
-	// Defaults to RealClock; see Clock.
+	// Defaults to defaultClock; see Clock.
 	//
 	// It governs *scheduling* -- every deadline comparison, and the
 	// retransmission, keep-alive, probe and idle timers. NowMicros below
@@ -191,7 +191,7 @@ Every comment in `conn_config.go` at e56c9aa, verbatim.
 ## Line 183 — func (*connection).setWindowCeiling
 
 ```
-// setWindowCeiling is UtpStream.SetWindowSize.
+// setWindowCeiling is Stream.SetWindowSize.
 ```
 
 ## Line 189 — func (*connection).setWindowCeiling
@@ -203,5 +203,5 @@ Every comment in `conn_config.go` at e56c9aa, verbatim.
 ## Line 196 — func (*connection).windowCeilingSetting
 
 ```
-// windowCeilingSetting is UtpStream.WindowSize.
+// windowCeilingSetting is Stream.WindowSize.
 ```

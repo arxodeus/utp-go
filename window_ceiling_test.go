@@ -8,7 +8,7 @@ import (
 
 // streamWindow reads a live stream's congestion window and bytes in flight
 // as its event loop sees them.
-func streamWindow(s *UtpStream) (window, inFlight uint32) {
+func streamWindow(s *Stream) (window, inFlight uint32) {
 	c := s.conn
 	c.mu.Lock()
 	defer c.mu.Unlock()

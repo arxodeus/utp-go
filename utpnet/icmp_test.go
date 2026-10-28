@@ -24,12 +24,12 @@ import (
 //	12-15    window size
 //	16-17    sequence number
 //	18-19    acknowledgement number
-func quotedHeader(t *testing.T, connId uint16) []byte {
+func quotedHeader(t *testing.T, connID uint16) []byte {
 	t.Helper()
 	b := make([]byte, 20)
 	b[0] = 0<<4 | 1 // ST_DATA, version 1
 	b[1] = 0        // no extensions
-	binary.BigEndian.PutUint16(b[2:4], connId)
+	binary.BigEndian.PutUint16(b[2:4], connID)
 	binary.BigEndian.PutUint32(b[4:8], uint32(time.Now().UnixMicro()))
 	binary.BigEndian.PutUint32(b[8:12], 0)
 	binary.BigEndian.PutUint32(b[12:16], 1<<20)
@@ -70,7 +70,7 @@ func TestSocketProcessICMPError(t *testing.T) {
 	if !ok {
 		t.Fatalf("Dial returned %T, want *Conn", conn)
 	}
-	cid := uc.stream.Cid()
+	cid := uc.stream.CID()
 
 	readErr := make(chan error, 1)
 	go func() {
@@ -124,7 +124,7 @@ func TestSocketProcessICMPFragmentation(t *testing.T) {
 	}
 	defer srvConn.Close()
 
-	cid := conn.(*Conn).stream.Cid()
+	cid := conn.(*Conn).stream.CID()
 	serverAddr := server.Addr().(*net.UDPAddr)
 	quoted := quotedHeader(t, cid.Send)
 

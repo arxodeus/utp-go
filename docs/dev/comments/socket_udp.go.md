@@ -41,7 +41,7 @@ Every comment in `socket_udp.go` at e56c9aa, verbatim.
 // no per-datagram control message for it -- so it is set, one datagram is
 // sent, and it is cleared again. That is safe here because the socket holds
 // writeMu exclusively for such a send and shared for every other one, so no
-// other write can land between the two. See UtpSocket.writeDatagram.
+// other write can land between the two. See Socket.writeDatagram.
 //
 // It is cleared even when the send fails. Leaving it set would make every
 // subsequent datagram on this socket unfragmentable, which is the one thing

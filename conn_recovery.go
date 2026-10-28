@@ -116,7 +116,7 @@ func (c *connection) onTimeout(originPacket *packet, now time.Time) {
 
 	case connConnected:
 		// If the timed-out packet is a SYN, do nothing.
-		if originPacket.Header.PacketType == st_syn {
+		if originPacket.Header.PacketType == stSyn {
 			return
 		}
 
@@ -237,11 +237,11 @@ func (c *connection) retransmit(originPacket *packet, now time.Time) {
 			Version:    originPacket.Header.Version,
 			// No selective ack: see statePacket.
 			Extension:     0,
-			ConnectionId:  originPacket.Header.ConnectionId,
+			ConnectionID:  originPacket.Header.ConnectionID,
 			SeqNum:        originPacket.Header.SeqNum,
 			WndSize:       c.recvWindow(),
 			Timestamp:     int64(c.nowMicros()),
-			TimestampDiff: uint32(c.peerTsDiff.Microseconds()),
+			TimestampDiff: uint32(c.peerTimestampDiff.Microseconds()),
 			AckNum:        c.state.RecvBuf.AckNum(),
 		},
 		Body: originPacket.Body,
@@ -261,7 +261,7 @@ type lossUndoer interface {
 // tell which copy arrived. See checkSpuriousLoss.
 func (c *connection) noteResend(pkt *packet) {
 	u, ok := c.state.SentPackets.congestionCtrl.(lossUndoer)
-	if !ok || pkt.Header.PacketType != st_data {
+	if !ok || pkt.Header.PacketType != stData {
 		return
 	}
 	seq, pending := u.lossCause()
@@ -316,7 +316,7 @@ func (c *connection) resendSentPacket(pkt *sentPacket, now time.Time) *packet {
 	}
 	// No selective ack: see statePacket.
 	resend := builder.
-		WithTsDiffMicros(uint32(c.peerTsDiff.Microseconds())).
+		WithTimestampDiffMicros(uint32(c.peerTimestampDiff.Microseconds())).
 		WithAckNum(c.state.RecvBuf.AckNum()).
 		Build()
 	c.packetsRetransmitted++
@@ -537,7 +537,7 @@ func (c *connection) noteDuplicateAck(packetType packetType, ackNum uint16) {
 	if c.state.SentPackets.UnackedCount() == 0 {
 		return
 	}
-	if packetType != st_state || ackNum != c.state.SentPackets.LastAckedSeqNum() {
+	if packetType != stState || ackNum != c.state.SentPackets.LastAckedSeqNum() {
 		c.duplicateAcks = 0
 		c.duplicatesJudged = false
 		return
@@ -612,7 +612,7 @@ func (c *connection) retransmitLostPackets(now time.Time) {
 	connID := c.cid.Send
 	nowMicros := int64(c.nowMicros())
 	recvWindow := c.recvWindow()
-	tsDiffMicros := uint32(c.peerTsDiff.Microseconds())
+	tsDiffMicros := uint32(c.peerTimestampDiff.Microseconds())
 
 	for _, lostPacket := range c.state.SentPackets.TakeLostPackets() {
 		seqNum := lostPacket.SeqNum
@@ -626,7 +626,7 @@ func (c *connection) retransmitLostPackets(now time.Time) {
 
 		// No selective ack: see statePacket.
 		packetInst := builder.
-			WithTsDiffMicros(tsDiffMicros).
+			WithTimestampDiffMicros(tsDiffMicros).
 			WithAckNum(c.state.RecvBuf.AckNum()).
 			Build()
 		c.packetsRetransmitted++
@@ -637,7 +637,7 @@ func (c *connection) retransmitLostPackets(now time.Time) {
 				"packet.type", packetInst.Header.PacketType,
 				"packet.seqNum", packetInst.Header.SeqNum,
 				"packet.ackNum", packetInst.Header.AckNum,
-				"packet.cid", packetInst.Header.ConnectionId,
+				"packet.cid", packetInst.Header.ConnectionID,
 				"packet.data.len", len(payload))
 		}
 		// Not a first transmission: a fast retransmission is never an MTU

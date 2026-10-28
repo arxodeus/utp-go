@@ -73,7 +73,7 @@ func TestMtuIcmpFragmentationNeededFallsBackWhenTheFigureIsUnusable(t *testing.T
 
 // The bounds: 576 is IPv4's guaranteed reassembly size and the lowest figure
 // acted on; at 0x2000 and above the router is not believed.
-func TestUdpPayloadForLinkMTUBounds(t *testing.T) {
+func TestUDPPayloadForLinkMTUBounds(t *testing.T) {
 	cases := []struct {
 		link uint32
 		want uint32

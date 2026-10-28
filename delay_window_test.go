@@ -9,10 +9,10 @@ import (
 // stepClock is a clock that only tells the time, moved by hand.
 type stepClock struct{ t time.Time }
 
-func (c *stepClock) Now() time.Time                 { return c.t }
-func (c *stepClock) Advance(d time.Duration)        { c.t = c.t.Add(d) }
-func (c *stepClock) NewTimer(time.Duration) Timer   { panic("not used") }
-func (c *stepClock) NewTicker(time.Duration) Ticker { panic("not used") }
+func (c *stepClock) Now() time.Time                      { return c.t }
+func (c *stepClock) Advance(d time.Duration)             { c.t = c.t.Add(d) }
+func (c *stepClock) NewTimer(time.Duration) clockTimer   { panic("not used") }
+func (c *stepClock) NewTicker(time.Duration) clockTicker { panic("not used") }
 
 // The base delay is the least sample within the window, as a scan over every
 // sample would give it, for samples arriving in time order.

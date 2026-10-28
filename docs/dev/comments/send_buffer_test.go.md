@@ -38,7 +38,7 @@ Every comment in `send_buffer_test.go` at e56c9aa, verbatim.
 ## Line 112 — func TestSendBufferDoesNotRetainCallerSlice
 
 ```
-// The buffer must own the bytes it holds. UtpStream.Write returns as soon as
+// The buffer must own the bytes it holds. Stream.Write returns as soon as
 // the data is accepted here, so the caller is free to reuse its array the
 // moment it returns -- and io.Writer's contract ("Implementations must not
 // retain p") means every stdlib-shaped caller does exactly that.

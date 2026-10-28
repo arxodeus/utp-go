@@ -85,7 +85,7 @@ func rtoResendCase(t *testing.T, ackWindow uint32, belowOnePacket bool) {
 	// The acknowledgement for the oldest brings the next oldest back first,
 	// ahead of anything new: the fast-timeout retry, then the rest in order.
 	clk.AwaitReactionTo(func() {
-		conn.inject(newPacketBuilder(st_state, peerID+1, 250000, ackWindow, peerSeq+2).
+		conn.inject(newPacketBuilder(stState, peerID+1, 250000, ackWindow, peerSeq+2).
 			WithAckNum(oldest).Build().Encode())
 	})
 	clk.Advance(step)
@@ -131,7 +131,7 @@ func dataPackets(t *testing.T, emitted [][]byte) [][]byte {
 		if err != nil {
 			t.Fatalf("emitted packet does not decode: %v", err)
 		}
-		if pkt.Header.PacketType == st_data {
+		if pkt.Header.PacketType == stData {
 			out = append(out, b)
 		}
 	}
@@ -152,7 +152,7 @@ func seqOf(t *testing.T, b []byte) uint16 {
 type virtualAccepted struct {
 	clk    *virtualClock
 	conn   *scriptedConn
-	stream *UtpStream
+	stream *Stream
 	ctx    context.Context
 }
 
@@ -174,20 +174,20 @@ func newVirtualAccepted(t *testing.T, maxPacket uint16) *virtualAccepted {
 	t.Cleanup(pinRandom(ourSeq))
 
 	conn := newScriptedConn()
-	sock := WithSocket(ctx, conn, conformanceLogger(), WithClock(clk))
-	t.Cleanup(sock.Close)
+	sock := NewSocket(ctx, conn, conformanceLogger(), withClock(clk))
+	t.Cleanup(func() { sock.Close() })
 
 	cfg := NewConnectionConfig()
-	cfg.Clock = clk
-	cfg.NowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
+	cfg.clock = clk
+	cfg.nowMicros = func() uint32 { return uint32(clk.Now().UnixMicro()) }
 	if maxPacket != 0 {
 		cfg.MaxPacketSize = maxPacket
 	}
 
-	cid := NewConnectionId(conn.peer, peerID+1, peerID)
-	accepted := make(chan *UtpStream, 1)
+	cid := NewConnectionID(conn.peer, peerID+1, peerID)
+	accepted := make(chan *Stream, 1)
 	go func() {
-		stream, err := sock.AcceptWithCid(ctx, cid, cfg)
+		stream, err := sock.AcceptWithCID(ctx, cid, cfg)
 		if err == nil {
 			accepted <- stream
 		}
@@ -196,9 +196,9 @@ func newVirtualAccepted(t *testing.T, maxPacket uint16) *virtualAccepted {
 	clk.AwaitParticipants(3)
 	clk.AwaitQuiet()
 	clk.AwaitReactionTo(func() {
-		conn.inject(newPacketBuilder(st_syn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
+		conn.inject(newPacketBuilder(stSyn, peerID, 100000, 1<<20, peerSeq).Build().Encode())
 	})
-	var stream *UtpStream
+	var stream *Stream
 	select {
 	case stream = <-accepted:
 	case <-time.After(10 * time.Second):
@@ -209,7 +209,7 @@ func newVirtualAccepted(t *testing.T, maxPacket uint16) *virtualAccepted {
 	// Complete the handshake as a peer would, with data that acknowledges our
 	// SYN-ACK.
 	clk.AwaitReactionTo(func() {
-		conn.inject(newPacketBuilder(st_data, peerID+1, 150000, 1<<20, peerSeq+1).
+		conn.inject(newPacketBuilder(stData, peerID+1, 150000, 1<<20, peerSeq+1).
 			WithAckNum(ourSeq - 1).WithPayload([]byte("hi")).Build().Encode())
 	})
 	conn.takeEmitted()
@@ -242,7 +242,7 @@ func TestAckRetiringEverythingRestartsTheDeadline(t *testing.T) {
 	}
 	vc.clk.Advance(100 * time.Millisecond)
 	vc.clk.AwaitReactionTo(func() {
-		vc.conn.inject(newPacketBuilder(st_state, peerID+1, 250000, 1<<20, peerSeq+2).
+		vc.conn.inject(newPacketBuilder(stState, peerID+1, 250000, 1<<20, peerSeq+2).
 			WithAckNum(seqOf(t, first[0])).Build().Encode())
 	})
 	vc.conn.takeEmitted()

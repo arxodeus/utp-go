@@ -51,22 +51,22 @@ type ConnectionConfig struct {
 	MaxTimeout time.Duration
 	// TargetDelay is the queuing delay classic LEDBAT aims for.
 	TargetDelay time.Duration
-	// Clock is the source of time and timers for this connection. It
-	// defaults to RealClock; see Clock.
+	// clock is the source of time and timers for this connection. It
+	// defaults to defaultClock; see clockSource. Set only by tests.
 	//
 	// It governs scheduling: deadlines and the retransmission, keep-alive,
-	// probe and idle timers. NowMicros governs the timestamps sent on the
+	// probe and idle timers. nowMicros governs the timestamps sent on the
 	// wire. A test that runs a connection entirely off the real clock sets
 	// both.
-	Clock Clock
+	clock clockSource
 
-	// NowMicros returns the wall clock in the uint32 microseconds uTP puts on
-	// the wire. It defaults to nowMicro.
+	// nowMicros returns the wall clock in the uint32 microseconds uTP puts on
+	// the wire. It defaults to nowMicro. Set only by tests.
 	//
 	// It governs only timestamps and the one-way delays derived from them.
-	// Scheduling uses Clock, so a connection with a frozen NowMicros still
+	// Scheduling uses clock, so a connection with a frozen nowMicros still
 	// retransmits on time.
-	NowMicros func() uint32
+	nowMicros func() uint32
 
 	// DelayWindow is how far back the congestion controller looks for its
 	// base delay: the lowest one-way delay seen, taken as the delay of an
@@ -144,8 +144,8 @@ func fromConnConfig(config *ConnectionConfig) *ctrlConfig {
 	ctrlConfigPtr.MaxTimeout = config.MaxTimeout
 	ctrlConfigPtr.TargetDelayMicros = uint32(config.TargetDelay.Microseconds())
 	ctrlConfigPtr.WindowSize = config.WindowSize
-	if config.Clock != nil {
-		ctrlConfigPtr.Clock = config.Clock
+	if config.clock != nil {
+		ctrlConfigPtr.Clock = config.clock
 	}
 	if config.DelayWindow > 0 {
 		ctrlConfigPtr.DelayWindow = config.DelayWindow
@@ -165,7 +165,7 @@ func (c *connection) controllerConfig() *ctrlConfig {
 	return cfg
 }
 
-// setWindowCeiling implements UtpStream.SetWindowSize.
+// setWindowCeiling implements Stream.SetWindowSize.
 func (c *connection) setWindowCeiling(bytes uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -178,7 +178,7 @@ func (c *connection) setWindowCeiling(bytes uint32) {
 	}
 }
 
-// windowCeilingSetting implements UtpStream.WindowSize.
+// windowCeilingSetting implements Stream.WindowSize.
 func (c *connection) windowCeilingSetting() uint32 {
 	c.mu.Lock()
 	defer c.mu.Unlock()

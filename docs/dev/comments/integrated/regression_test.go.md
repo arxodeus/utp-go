@@ -59,7 +59,7 @@ Every comment in `integrated/regression_test.go` at e56c9aa, verbatim.
 
 ```
 // TestAcceptTimesOutWithoutSyn covers the defect where an accept that expired
-// from the awaiting map was dropped silently, blocking AcceptWithCid forever
+// from the awaiting map was dropped silently, blocking AcceptWithCID forever
 // when the caller's own context had no deadline.
 ```
 
@@ -81,7 +81,7 @@ Every comment in `integrated/regression_test.go` at e56c9aa, verbatim.
 
 ```
 // TestConnectionIdHashFromStructLiteral covers the defect where a
-// ConnectionId built as a struct literal (which the exported type invites)
+// ConnectionID built as a struct literal (which the exported type invites)
 // had an empty cached hash, so every such id collided with every other.
 ```
 
@@ -116,7 +116,7 @@ Every comment in `integrated/regression_test.go` at e56c9aa, verbatim.
 ## Line 398 — func TestCloseReturnsPromptly
 
 ```
-// TestCloseReturnsPromptly covers the defect where UtpStream.Close set its
+// TestCloseReturnsPromptly covers the defect where Stream.Close set its
 // shutdown flag and then waited, without waking the connection's event loop.
 //
 // The loop was blocked in a select on cases the flag is not one of, so it only

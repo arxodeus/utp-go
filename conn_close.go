@@ -167,7 +167,7 @@ func (c *connection) shutdown() {
 
 				// No selective ack: see statePacket.
 				fin := newPacketBuilder(
-					st_fin,
+					stFin,
 					c.cid.Send,
 					c.nowMicros(),
 					recvWindow,
@@ -190,7 +190,7 @@ func (c *connection) shutdown() {
 
 				// No selective ack: see statePacket.
 				fin := newPacketBuilder(
-					st_fin,
+					stFin,
 					c.cid.Send,
 					c.nowMicros(),
 					recvWindow,
@@ -294,7 +294,7 @@ func (c *connection) onReset() {
 }
 
 // onCloseRead shuts down the receiving side: from here on, arriving data is
-// acknowledged and dropped rather than delivered. See UtpStream.CloseRead.
+// acknowledged and dropped rather than delivered. See Stream.CloseRead.
 func (c *connection) onCloseRead() {
 	if c.readShutdown {
 		return

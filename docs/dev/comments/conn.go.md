@@ -21,7 +21,7 @@ Every comment in `conn.go` at e56c9aa, verbatim.
 
 ```
 // windowCeiling, when set, replaces config.WindowSize for this
-	// connection: UtpStream.SetWindowSize, libutp's per-socket
+	// connection: Stream.SetWindowSize, libutp's per-socket
 	// utp_setsockopt(UTP_SNDBUF). config may be shared with other
 	// connections, so it is not written. Guarded by mu.
 ```
@@ -101,7 +101,7 @@ Every comment in `conn.go` at e56c9aa, verbatim.
 
 ```
 // peerActivity counts packets received from the peer. It exists for
-	// UtpStream.Close, which needs to tell a connection that is still
+	// Stream.Close, which needs to tell a connection that is still
 	// flushing from one whose peer has stopped answering, and is read from
 	// without mu -- hence the atomic.
 ```
@@ -361,7 +361,7 @@ Every comment in `conn.go` at e56c9aa, verbatim.
 	// goroutine having gone, read and cleared without mu; asleep is the same
 	// under mu. restClock is nil for a connection that never rests.
 	// attached is set once the socket delivers this connection's packets
-	// inline (UtpSocket.attachInline). wakeFn is wake, bound once.
+	// inline (Socket.attachInline). wakeFn is wake, bound once.
 ```
 
 ## Line 303 — type connection
@@ -369,7 +369,7 @@ Every comment in `conn.go` at e56c9aa, verbatim.
 ```
 // readsHeld is set while the receive buffer holds bytes the reader's
 	// full queue has no room for. Written under mu, read without it by
-	// UtpStream.notifyRead.
+	// Stream.notifyRead.
 ```
 
 ## Line 307 — type connection

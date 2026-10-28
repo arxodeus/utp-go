@@ -38,14 +38,14 @@ func TestEventLoopRunsWhileReaderIsStalled(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	sendSock := utp.WithSocket(ctx, a, quiet())
+	sendSock := utp.NewSocket(ctx, a, quiet())
 	defer sendSock.Close()
-	recvSock := utp.WithSocket(ctx, b, quiet())
+	recvSock := utp.NewSocket(ctx, b, quiet())
 	defer recvSock.Close()
 
 	const initiatorCid, responderCid = 600, 601
-	acceptCid := utp.NewConnectionId(a.Addr(), responderCid, initiatorCid)
-	connectCid := utp.NewConnectionId(b.Addr(), initiatorCid, responderCid)
+	acceptCid := utp.NewConnectionID(a.Addr(), responderCid, initiatorCid)
+	connectCid := utp.NewConnectionID(b.Addr(), initiatorCid, responderCid)
 
 	// Every sample is one pass of the receiver's event loop.
 	var loopPasses atomic.Uint64
@@ -61,7 +61,7 @@ func TestEventLoopRunsWhileReaderIsStalled(t *testing.T) {
 
 	accepted := make(chan struct{})
 	go func() {
-		stream, err := recvSock.AcceptWithCid(ctx, acceptCid, recvCfg)
+		stream, err := recvSock.AcceptWithCID(ctx, acceptCid, recvCfg)
 		if err != nil {
 			t.Errorf("accept: %v", err)
 			close(accepted)
@@ -74,7 +74,7 @@ func TestEventLoopRunsWhileReaderIsStalled(t *testing.T) {
 	}()
 
 	go func() {
-		stream, err := sendSock.ConnectWithCid(ctx, connectCid, utp.NewConnectionConfig())
+		stream, err := sendSock.ConnectWithCID(ctx, connectCid, utp.NewConnectionConfig())
 		if err != nil {
 			return
 		}

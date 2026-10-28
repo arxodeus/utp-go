@@ -64,7 +64,7 @@ func (rb *receiveBuffer) Admits(seqNum uint16, n int) bool {
 	if seqNum != rb.initSeqNum+1+rb.consumed {
 		return n <= rb.Available()-rb.gapReserve()
 	}
-	return n <= rb.Available() || (rb.offset == 0 && n <= maxUdpPayloadSize)
+	return n <= rb.Available() || (rb.offset == 0 && n <= maxUDPPayloadSize)
 }
 
 func newReceiveBuffer(size int, initSeqNum uint16) *receiveBuffer {
@@ -211,7 +211,7 @@ func (rb *receiveBuffer) Write(data []byte, seqNum uint16) error {
 	// anything out of order must leave gapReserve free. See gapReserve.
 	next := rb.initSeqNum + 1 + rb.consumed
 	if !rb.Admits(seqNum, len(data)) {
-		return errors.New("insufficient space in buffer")
+		return errors.New("utp: insufficient space in buffer")
 	}
 	if len(data) > rb.largestPacket {
 		rb.largestPacket = len(data)

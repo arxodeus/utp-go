@@ -26,13 +26,13 @@ func TestZeroWindowProbe(t *testing.T) {
 
 	conn := newScriptedConn()
 	defer conn.Close()
-	sock := WithSocket(ctx, conn, conformanceLogger())
+	sock := NewSocket(ctx, conn, conformanceLogger())
 	defer sock.Close()
 
-	cid := NewConnectionId(conn.peer, 4000, 4001)
-	streamCh := make(chan *UtpStream, 1)
+	cid := NewConnectionID(conn.peer, 4000, 4001)
+	streamCh := make(chan *Stream, 1)
 	go func() {
-		stream, err := sock.ConnectWithCid(ctx, cid, cfg)
+		stream, err := sock.ConnectWithCID(ctx, cid, cfg)
 		if err == nil {
 			streamCh <- stream
 		}
@@ -41,10 +41,10 @@ func TestZeroWindowProbe(t *testing.T) {
 	waitFor(t, 2*time.Second, func() bool { return conn.emittedCount() > 0 })
 
 	// Answer the SYN, advertising a full window so the connection completes.
-	conn.inject(newPacketBuilder(st_state, 4000, 150000, 1024*1024, 900).
+	conn.inject(newPacketBuilder(stState, 4000, 150000, 1024*1024, 900).
 		WithAckNum(4000).Build().Encode())
 
-	var stream *UtpStream
+	var stream *Stream
 	select {
 	case stream = <-streamCh:
 	case <-time.After(5 * time.Second):
@@ -52,7 +52,7 @@ func TestZeroWindowProbe(t *testing.T) {
 	}
 
 	// Now tell it the window is closed.
-	conn.inject(newPacketBuilder(st_state, 4000, 160000, 0, 900).
+	conn.inject(newPacketBuilder(stState, 4000, 160000, 0, 900).
 		WithAckNum(4000).Build().Encode())
 	time.Sleep(50 * time.Millisecond)
 	conn.takeEmitted()
@@ -79,7 +79,7 @@ func TestZeroWindowProbe(t *testing.T) {
 			if err != nil {
 				t.Fatalf("probe does not decode: %v", err)
 			}
-			if pkt.Header.PacketType != st_data {
+			if pkt.Header.PacketType != stData {
 				t.Errorf("probe was %s, expected a data packet carrying the queued bytes",
 					pkt.Header.PacketType.String())
 			}
@@ -113,20 +113,20 @@ func TestKeepAlive(t *testing.T) {
 
 	conn := newScriptedConn()
 	defer conn.Close()
-	sock := WithSocket(ctx, conn, conformanceLogger())
+	sock := NewSocket(ctx, conn, conformanceLogger())
 	defer sock.Close()
 
-	cid := NewConnectionId(conn.peer, 4100, 4101)
-	streamCh := make(chan *UtpStream, 1)
+	cid := NewConnectionID(conn.peer, 4100, 4101)
+	streamCh := make(chan *Stream, 1)
 	go func() {
-		stream, err := sock.ConnectWithCid(ctx, cid, cfg)
+		stream, err := sock.ConnectWithCID(ctx, cid, cfg)
 		if err == nil {
 			streamCh <- stream
 		}
 	}()
 
 	waitFor(t, 2*time.Second, func() bool { return conn.emittedCount() > 0 })
-	conn.inject(newPacketBuilder(st_state, 4100, 150000, 1024*1024, 900).
+	conn.inject(newPacketBuilder(stState, 4100, 150000, 1024*1024, 900).
 		WithAckNum(4100).Build().Encode())
 
 	select {
@@ -146,7 +146,7 @@ func TestKeepAlive(t *testing.T) {
 			if err != nil {
 				t.Fatalf("keep-alive does not decode: %v", err)
 			}
-			if pkt.Header.PacketType != st_state {
+			if pkt.Header.PacketType != stState {
 				t.Errorf("keep-alive was %s, libutp sends a STATE", pkt.Header.PacketType.String())
 			}
 			// The keep-alive acknowledges one behind, so it reads as a stale

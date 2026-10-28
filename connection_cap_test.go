@@ -10,22 +10,22 @@ import (
 
 // capTestSocket is a socket on a scripted transport with the given options,
 // and a function that sends it a SYN for a new connection id.
-func capTestSocket(t *testing.T, opts ...SocketOption) (*UtpSocket, *scriptedConn, func(id uint16)) {
+func capTestSocket(t *testing.T, opts ...SocketOption) (*Socket, *scriptedConn, func(id uint16)) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	conn := newScriptedConn()
-	sock := WithSocket(ctx, conn, conformanceLogger(), opts...)
-	t.Cleanup(sock.Close)
+	sock := NewSocket(ctx, conn, conformanceLogger(), opts...)
+	t.Cleanup(func() { sock.Close() })
 	syn := func(id uint16) {
-		conn.inject(newPacketBuilder(st_syn, id, 100000, 1<<20, 900).Build().Encode())
+		conn.inject(newPacketBuilder(stSyn, id, 100000, 1<<20, 900).Build().Encode())
 	}
 	return sock, conn, syn
 }
 
 // settled waits until the socket has dealt with every SYN sent so far, which
 // is when each has either been parked or refused.
-func settled(t *testing.T, sock *UtpSocket, sent int) {
+func settled(t *testing.T, sock *Socket, sent int) {
 	t.Helper()
 	waitFor(t, 2*time.Second, func() bool {
 		return sock.incomingConns.len()+int(sock.ConnectionsRefusedAtCapacity()) >= sent
@@ -120,7 +120,7 @@ func TestConnectionCapCountsDialledConnections(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
-		_, _ = sock.ConnectWithCid(ctx, NewConnectionId(conn.peer, 5000, 5001), NewConnectionConfig())
+		_, _ = sock.ConnectWithCID(ctx, NewConnectionID(conn.peer, 5000, 5001), NewConnectionConfig())
 	}()
 	waitFor(t, 2*time.Second, func() bool { return sock.NumConnections() == 1 })
 

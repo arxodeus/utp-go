@@ -14,8 +14,8 @@ func connectedFixture(t *testing.T) *connection {
 	conn.state = &connState{
 		stateType:   connConnected,
 		SentPackets: newSentPacketsWithoutLogger(synAck, cc),
-		SendBuf:     newSendBuffer(TEST_BUFFER_SIZE),
-		RecvBuf:     newReceiveBuffer(TEST_BUFFER_SIZE, syn),
+		SendBuf:     newSendBuffer(testBufferSize),
+		RecvBuf:     newReceiveBuffer(testBufferSize, syn),
 	}
 	return conn
 }

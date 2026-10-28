@@ -9,8 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const TEST_DELAY = time.Duration(time.Millisecond * 100)
-
 func TestNextSeqNum(t *testing.T) {
 
 }
@@ -25,7 +23,7 @@ func TestOnTransmitInitial(t *testing.T) {
 	data := []byte{0}
 	length := uint32(len(data))
 	now := time.Now()
-	sentPackets.OnTransmit(seqNum, st_data, data, length, now)
+	sentPackets.OnTransmit(seqNum, stData, data, length, now)
 
 	if len(sentPackets.packets) != 1 {
 		t.Errorf("expected 1 packet, got %d", len(sentPackets.packets))
@@ -59,8 +57,8 @@ func TestOnTransmitRetransmit(t *testing.T) {
 	first := time.Now()
 	second := first.Add(time.Millisecond)
 
-	sentPackets.OnTransmit(seqNum, st_data, data, length, first)
-	sentPackets.OnTransmit(seqNum, st_data, data, length, second)
+	sentPackets.OnTransmit(seqNum, stData, data, length, first)
+	sentPackets.OnTransmit(seqNum, stData, data, length, second)
 
 	if len(sentPackets.packets) != 1 {
 		t.Errorf("expected 1 packet, got %d", len(sentPackets.packets))
@@ -95,15 +93,15 @@ func TestOnTransmitOutOfOrder(t *testing.T) {
 	length := uint32(len(data))
 	now := time.Now()
 
-	err := sentPackets.OnTransmit(outOfOrderSeqNum, st_data, data, length, now)
+	err := sentPackets.OnTransmit(outOfOrderSeqNum, stData, data, length, now)
 	require.ErrorIs(t, err, errOutOfOrderTransmit)
 }
 
 func TestOnSelectiveAck(t *testing.T) {
 	const (
-		COUNT    = 10
-		SACK_LEN = COUNT - 2
-		DELAY    = time.Millisecond * 100 // Assume this value.
+		numPackets = 10
+		sackLen    = numPackets - 2
+		ackDelay   = time.Millisecond * 100 // Assume this value.
 	)
 
 	ctrl := newDefaultController(fromConnConfig(NewConnectionConfig()))
@@ -115,14 +113,14 @@ func TestOnSelectiveAck(t *testing.T) {
 	length := uint32(len(data))
 
 	// Send count packets.
-	for i := 0; i < COUNT; i++ {
+	for i := 0; i < numPackets; i++ {
 		now := time.Now()
 		seqNum := sentPackets.NextSeqNum()
-		sentPackets.OnTransmit(seqNum, st_data, data, length, now)
+		sentPackets.OnTransmit(seqNum, stData, data, length, now)
 	}
 
 	// Create a selective ack.
-	acked := make([]bool, SACK_LEN)
+	acked := make([]bool, sackLen)
 	for i := range acked {
 		if i%2 == 0 {
 			acked[i] = true
@@ -132,7 +130,7 @@ func TestOnSelectiveAck(t *testing.T) {
 
 	// Process the ack.
 	now := time.Now()
-	_, _, err := sentPackets.onAck(initSeqNum+1, selectiveAck, DELAY, now)
+	_, _, err := sentPackets.onAck(initSeqNum+1, selectiveAck, ackDelay, now)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -144,7 +142,7 @@ func TestOnSelectiveAck(t *testing.T) {
 	if sentPackets.packets[1].acked {
 		t.Errorf("expected the second packet not acknowledged")
 	}
-	for i := 2; i < COUNT; i++ {
+	for i := 2; i < numPackets; i++ {
 		isEmpty := i%2 != 0
 		require.Equal(t, isEmpty, !sentPackets.packets[i].acked, fmt.Sprintf("packet %d: expected unacknowledged=%v", i, isEmpty))
 	}
@@ -152,9 +150,9 @@ func TestOnSelectiveAck(t *testing.T) {
 
 func TestDetectLostPackets(t *testing.T) {
 	const (
-		COUNT = 10
-		START = COUNT - lossThreshold
-		DELAY = time.Millisecond * 100
+		numPackets = 10
+		firstLost  = numPackets - lossThreshold
+		ackDelay   = time.Millisecond * 100
 	)
 
 	ctrl := newDefaultController(fromConnConfig(NewConnectionConfig()))
@@ -166,13 +164,13 @@ func TestDetectLostPackets(t *testing.T) {
 	length := uint32(len(data))
 
 	// Send packets and selectively acknowledge them.
-	for i := 0; i < COUNT; i++ {
+	for i := 0; i < numPackets; i++ {
 		now := time.Now()
 		seqNum := sentPackets.NextSeqNum()
-		sentPackets.OnTransmit(seqNum, st_data, data, length, now)
+		sentPackets.OnTransmit(seqNum, stData, data, length, now)
 
-		if i >= START {
-			err := sentPackets.Ack(seqNum, DELAY, now)
+		if i >= firstLost {
+			err := sentPackets.Ack(seqNum, ackDelay, now)
 			require.NoError(t, err)
 		}
 	}
@@ -183,7 +181,7 @@ func TestDetectLostPackets(t *testing.T) {
 	lost := sentPackets.DetectLostPackets(firstUnacked)
 
 	// Verify the lost packets.
-	for i := 0; i < START; i++ {
+	for i := 0; i < firstLost; i++ {
 		packetInst := sentPackets.packets[i]
 		var found bool
 		for _, lostSeq := range lost {
@@ -196,7 +194,7 @@ func TestDetectLostPackets(t *testing.T) {
 }
 
 func TestAck(t *testing.T) {
-	const DELAY = time.Millisecond * 100
+	const ackDelay = time.Millisecond * 100
 
 	ctrl := newDefaultController(fromConnConfig(NewConnectionConfig()))
 
@@ -207,14 +205,14 @@ func TestAck(t *testing.T) {
 	data := []byte{0}
 	length := uint32(len(data))
 	now := time.Now()
-	sentPackets.OnTransmit(seqNum, st_data, data, length, now)
+	sentPackets.OnTransmit(seqNum, stData, data, length, now)
 
 	// Insert a packet into the lost packets directly.
 	sentPackets.lostPackets.ReplaceOrInsert(seqNum)
 
 	// Acknowledge the packet.
 	now = time.Now()
-	err := sentPackets.Ack(seqNum, DELAY, now)
+	err := sentPackets.Ack(seqNum, ackDelay, now)
 	require.NoError(t, err)
 
 	index := sentPackets.SeqNumIndex(seqNum)
@@ -235,9 +233,9 @@ func TestAck(t *testing.T) {
 
 func TestAckPriorUnacked(t *testing.T) {
 	const (
-		COUNT   = 10
-		ACK_NUM = uint16(3)
-		DELAY   = time.Millisecond * 100
+		numPackets = 10
+		lastAcked  = uint16(3)
+		ackDelay   = time.Millisecond * 100
 	)
 
 	ctrl := newDefaultController(fromConnConfig(NewConnectionConfig()))
@@ -249,29 +247,29 @@ func TestAckPriorUnacked(t *testing.T) {
 	length := uint32(len(data))
 
 	// Send count packets.
-	for i := 0; i < COUNT; i++ {
+	for i := 0; i < numPackets; i++ {
 		now := time.Now()
 		seqNum := sentPackets.NextSeqNum()
-		sentPackets.OnTransmit(seqNum, st_data, data, length, now)
+		sentPackets.OnTransmit(seqNum, stData, data, length, now)
 	}
 
 	// Verify the preconditions.
-	if int(ACK_NUM) >= COUNT {
-		t.Fatal("ACK_NUM must be less than COUNT")
+	if int(lastAcked) >= numPackets {
+		t.Fatal("lastAcked must be less than numPackets")
 	}
-	if COUNT-int(ACK_NUM) <= 2 {
-		t.Fatal("COUNT minus ACK_NUM must be greater than 2")
+	if numPackets-int(lastAcked) <= 2 {
+		t.Fatal("numPackets minus lastAcked must be greater than 2")
 	}
 
 	// Acknowledge the earlier packets.
 	now := time.Now()
 	firstUnacked, err := sentPackets.FirstUnackedSeqNum()
 	require.NoError(t, err)
-	err = sentPackets.AckPriorUnacked(ACK_NUM, firstUnacked, DELAY, now)
+	err = sentPackets.AckPriorUnacked(lastAcked, firstUnacked, ackDelay, now)
 	require.NoError(t, err)
 
 	// Verify the acknowledgments.
-	for i := 0; i < int(ACK_NUM); i++ {
+	for i := 0; i < int(lastAcked); i++ {
 		if !sentPackets.packets[i].acked {
 			t.Errorf("packet %d: expected it acknowledged", i)
 		}
@@ -279,7 +277,7 @@ func TestAckPriorUnacked(t *testing.T) {
 }
 
 func TestAckUnsent(t *testing.T) {
-	const DELAY = time.Millisecond * 100
+	const ackDelay = time.Millisecond * 100
 
 	ctrl := newDefaultController(fromConnConfig(NewConnectionConfig()))
 
@@ -289,7 +287,7 @@ func TestAckUnsent(t *testing.T) {
 	unsentAckNum := initSeqNum + 2 // wrapping add
 	now := time.Now()
 
-	err := sentPackets.Ack(unsentAckNum, DELAY, now)
+	err := sentPackets.Ack(unsentAckNum, ackDelay, now)
 	require.ErrorIs(t, err, errAckOfUnsent)
 }
 
@@ -318,7 +316,7 @@ func TestFastRetransmitHappensOncePerPacket(t *testing.T) {
 
 	data := []byte{0}
 	for i := 0; i < 8; i++ {
-		sent.OnTransmit(sent.NextSeqNum(), st_data, data, uint32(len(data)), time.Now())
+		sent.OnTransmit(sent.NextSeqNum(), stData, data, uint32(len(data)), time.Now())
 	}
 
 	// 101 is missing; 102 through 105 arrive. That is four acks past the
@@ -361,7 +359,7 @@ func TestFastRetransmitFromAnyInitialSequenceNumber(t *testing.T) {
 		sent := newSentPacketsWithoutLogger(initSeqNum, ctrl)
 		data := []byte{0}
 		for i := 0; i < 8; i++ {
-			sent.OnTransmit(sent.NextSeqNum(), st_data, data, uint32(len(data)), time.Now())
+			sent.OnTransmit(sent.NextSeqNum(), stData, data, uint32(len(data)), time.Now())
 		}
 		// The first packet is missing; the next four arrive.
 		sack := newSelectiveAck([]bool{true, true, true, true})
@@ -386,7 +384,7 @@ func TestFastRetransmitIsCappedPerAck(t *testing.T) {
 
 	data := []byte{0}
 	for i := 0; i < 40; i++ {
-		sent.OnTransmit(sent.NextSeqNum(), st_data, data, uint32(len(data)), time.Now())
+		sent.OnTransmit(sent.NextSeqNum(), stData, data, uint32(len(data)), time.Now())
 	}
 
 	// Ten missing packets with acknowledged packets above all of them:

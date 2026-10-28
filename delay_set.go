@@ -25,8 +25,8 @@ type timeWheel[K comparable, P any] struct {
 	interval time.Duration
 	slots    []map[K]timeWheelItem[K, P]
 	index    map[K]int
-	ticker   Ticker
-	clk      Clock
+	ticker   clockTicker
+	clk      clockSource
 	// nextTick is when the tick that processes slots[current] is due: the
 	// last tick's scheduled time plus one interval. A ticker keeps its
 	// phase, so the next tick is never sooner than this. See put.
@@ -40,12 +40,12 @@ type timeWheel[K comparable, P any] struct {
 }
 
 func newTimeWheel[K comparable, P any](interval time.Duration, slotNum int, handleExpireFunc expireFunc[K, P]) *timeWheel[K, P] {
-	return newTimeWheelWithClock(interval, slotNum, RealClock, handleExpireFunc)
+	return newTimeWheelWithClock(interval, slotNum, defaultClock, handleExpireFunc)
 }
 
 // newTimeWheelWithClock returns a wheel driven by clk. The wheel is shared
 // by every connection on a socket, so they all share its notion of time.
-func newTimeWheelWithClock[K comparable, P any](interval time.Duration, slotNum int, clk Clock, handleExpireFunc expireFunc[K, P]) *timeWheel[K, P] {
+func newTimeWheelWithClock[K comparable, P any](interval time.Duration, slotNum int, clk clockSource, handleExpireFunc expireFunc[K, P]) *timeWheel[K, P] {
 	tw := &timeWheel[K, P]{
 		stopped:          make(chan struct{}),
 		interval:         interval,
@@ -61,7 +61,7 @@ func newTimeWheelWithClock[K comparable, P any](interval time.Duration, slotNum 
 	}
 
 	if clk == nil {
-		clk = RealClock
+		clk = defaultClock
 	}
 	tw.clk = clk
 	// Read before the ticker exists, so the first tick is no sooner than

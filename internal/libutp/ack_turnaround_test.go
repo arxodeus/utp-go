@@ -259,8 +259,8 @@ func runPair(t *testing.T, pair string, cfg pathConfig, payload []byte) {
 			}
 			done <- nil
 		}()
-		cid := utp.NewConnectionId(utp.NewUdpPeer(loopback(r.LibutpFacingPort())), 4200, 4201)
-		stream, err := sender.ConnectWithCid(ctx, cid, utp.NewConnectionConfig())
+		cid := utp.NewConnectionID(utp.NewUDPPeer(loopback(r.LibutpFacingPort())), 4200, 4201)
+		stream, err := sender.ConnectWithCID(ctx, cid, utp.NewConnectionConfig())
 		if err != nil {
 			t.Fatal(err)
 		}

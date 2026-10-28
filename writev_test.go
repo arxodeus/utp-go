@@ -10,33 +10,33 @@ import (
 )
 
 // writevPair brings up a connected pair over loopback and returns both ends.
-func writevPair(t *testing.T, ctx context.Context, cid uint16) (client, server *UtpStream) {
+func writevPair(t *testing.T, ctx context.Context, cid uint16) (client, server *Stream) {
 	t.Helper()
 	lg := duplexQuietLog()
 	sa, err := Bind(ctx, "udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}, lg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(sa.Close)
+	t.Cleanup(func() { sa.Close() })
 	sb, err := Bind(ctx, "udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}, lg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(sb.Close)
+	t.Cleanup(func() { sb.Close() })
 
-	cidA := NewConnectionId(NewUdpPeer(sb.LocalAddr().(*net.UDPAddr)), cid, cid+1)
-	cidB := NewConnectionId(NewUdpPeer(sa.LocalAddr().(*net.UDPAddr)), cid+1, cid)
+	cidA := NewConnectionID(NewUDPPeer(sb.LocalAddr().(*net.UDPAddr)), cid, cid+1)
+	cidB := NewConnectionID(NewUDPPeer(sa.LocalAddr().(*net.UDPAddr)), cid+1, cid)
 
-	accepted := make(chan *UtpStream, 1)
+	accepted := make(chan *Stream, 1)
 	go func() {
-		s, err := sb.AcceptWithCid(ctx, cidB, NewConnectionConfig())
+		s, err := sb.AcceptWithCID(ctx, cidB, NewConnectionConfig())
 		if err != nil {
 			accepted <- nil
 			return
 		}
 		accepted <- s
 	}()
-	client, err = sa.ConnectWithCid(ctx, cidA, NewConnectionConfig())
+	client, err = sa.ConnectWithCID(ctx, cidA, NewConnectionConfig())
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestWriteVMatchesASingleWrite(t *testing.T) {
 	// An awkward split: not on any packet boundary.
 	pieces := [][]byte{payload[:7], payload[7:9000], payload[9000:]}
 
-	read := func(write func(s *UtpStream) error, cid uint16) []byte {
+	read := func(write func(s *Stream) error, cid uint16) []byte {
 		client, server := writevPair(t, ctx, cid)
 		done := make(chan error, 1)
 		go func() {
@@ -133,11 +133,11 @@ func TestWriteVMatchesASingleWrite(t *testing.T) {
 		return got
 	}
 
-	whole := read(func(s *UtpStream) error {
+	whole := read(func(s *Stream) error {
 		_, err := s.Write(ctx, payload)
 		return err
 	}, 4200)
-	vectored := read(func(s *UtpStream) error {
+	vectored := read(func(s *Stream) error {
 		_, err := s.WriteV(ctx, pieces)
 		return err
 	}, 4300)
@@ -228,18 +228,18 @@ func benchmarkVectored(b *testing.B, vectored bool) {
 	}
 	defer sb.Close()
 
-	cidA := NewConnectionId(NewUdpPeer(sb.LocalAddr().(*net.UDPAddr)), 4600, 4601)
-	cidB := NewConnectionId(NewUdpPeer(sa.LocalAddr().(*net.UDPAddr)), 4601, 4600)
-	accepted := make(chan *UtpStream, 1)
+	cidA := NewConnectionID(NewUDPPeer(sb.LocalAddr().(*net.UDPAddr)), 4600, 4601)
+	cidB := NewConnectionID(NewUDPPeer(sa.LocalAddr().(*net.UDPAddr)), 4601, 4600)
+	accepted := make(chan *Stream, 1)
 	go func() {
-		s, err := sb.AcceptWithCid(ctx, cidB, NewConnectionConfig())
+		s, err := sb.AcceptWithCID(ctx, cidB, NewConnectionConfig())
 		if err != nil {
 			accepted <- nil
 			return
 		}
 		accepted <- s
 	}()
-	client, err := sa.ConnectWithCid(ctx, cidA, NewConnectionConfig())
+	client, err := sa.ConnectWithCID(ctx, cidA, NewConnectionConfig())
 	if err != nil {
 		b.Fatal(err)
 	}

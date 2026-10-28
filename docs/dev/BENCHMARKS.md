@@ -78,7 +78,7 @@ Two columns describe queueing, and they are not the same thing:
   flow ever saw. It is the delay this flow imposed on everyone else sharing
   the path, and it is measured, not believed.
 - **`qdelay p50`** is what the congestion controller *thought* it was causing:
-  `PeerTsDiff - BaseDelay`, where `BaseDelay` is the controller's own estimate
+  `PeerTimestampDiff - BaseDelay`, where `BaseDelay` is the controller's own estimate
   of the empty path.
 
 They diverge, and the divergence is the point. On a 40 ms path carrying a
@@ -470,7 +470,7 @@ relearns it as the new base delay.
 
 ## What the write copy cost
 
-`UtpStream.Write` copies the caller's buffer before queueing it, because the
+`Stream.Write` copies the caller's buffer before queueing it, because the
 connection goroutine holds that slice after Write returns and the caller is
 entitled to reuse it (see KNOWN-LIMITATIONS.md). One copy per Write call is
 what that costs, and this is the measurement of it.

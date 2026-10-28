@@ -16,7 +16,7 @@ var ErrNilPeer = errors.New("utpnet: nil peer")
 // Conn is a uTP stream presented as a net.Conn.
 type Conn struct {
 	sock   *Socket
-	stream *utp.UtpStream
+	stream *utp.Stream
 	remote net.Addr
 
 	readDeadline  *deadline
@@ -27,9 +27,9 @@ type Conn struct {
 
 var _ net.Conn = (*Conn)(nil)
 
-func newConn(sock *Socket, stream *utp.UtpStream) *Conn {
+func newConn(sock *Socket, stream *utp.Stream) *Conn {
 	var remote net.Addr
-	if cid := stream.Cid(); cid != nil {
+	if cid := stream.CID(); cid != nil {
 		if addr, err := peerUDPAddr(cid.Peer); err == nil {
 			// Held for as long as the uTP socket has the connection
 			// (demuxConn.HoldPeer).
@@ -47,7 +47,7 @@ func newConn(sock *Socket, stream *utp.UtpStream) *Conn {
 
 // Stream returns the underlying uTP stream, for callers that need the
 // context-taking API or the connection id.
-func (c *Conn) Stream() *utp.UtpStream { return c.stream }
+func (c *Conn) Stream() *utp.Stream { return c.stream }
 
 // Read reads data from the connection, honoring the read deadline.
 func (c *Conn) Read(b []byte) (int, error) {
