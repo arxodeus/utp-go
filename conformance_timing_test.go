@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arxodeus/utp/native/libutp"
+	"github.com/arxodeus/utp/internal/libutp"
 )
 
 // Retransmission timing, compared against libutp.

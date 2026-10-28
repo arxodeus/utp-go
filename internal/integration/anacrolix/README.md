@@ -2,7 +2,7 @@
 
 This is a separate Go module. Its only job is to check, against the real
 thing rather than against a copy of it, that
-[`utpnet.Socket`](../../utpnet) can stand in for a uTP implementation in
+[`utpnet.Socket`](../../../utpnet) can stand in for a uTP implementation in
 [github.com/anacrolix/torrent](https://github.com/anacrolix/torrent).
 
 It is separate because the interface being satisfied is unexported, so proving
@@ -30,7 +30,7 @@ That test is why this module exists rather than only a compile-time
 assertion. It found a defect nothing else had: the send buffer retained the
 caller's slice, so any full-duplex exchange corrupted its own data. Every
 unidirectional test in the repository passed throughout. See
-[KNOWN-LIMITATIONS.md](../../docs/dev/KNOWN-LIMITATIONS.md).
+[KNOWN-LIMITATIONS.md](../../../docs/dev/KNOWN-LIMITATIONS.md).
 
 `TestTorrentTransferOverUtp` runs a real torrent: two `torrent.Client`s, a
 generated 4 MiB torrent in 128 pieces, and BitTorrent's own piece hashes
@@ -49,7 +49,7 @@ could see it.
 ## Wiring it into a torrent client
 
 **The one-line way:** replace go-libutp, which torrent's default build uses,
-with [compat/golibutp](../../compat/golibutp), its API on this library:
+with [compat/golibutp](../../../compat/golibutp), its API on this library:
 
 ```
 replace github.com/anacrolix/go-libutp => github.com/arxodeus/utp/compat/golibutp <version>

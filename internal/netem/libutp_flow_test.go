@@ -14,7 +14,7 @@ import (
 	"time"
 
 	utp "github.com/arxodeus/utp"
-	"github.com/arxodeus/utp/native/libutp"
+	"github.com/arxodeus/utp/internal/libutp"
 )
 
 // Real libutp, running as an endpoint on the emulated network.

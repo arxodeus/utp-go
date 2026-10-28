@@ -4,7 +4,7 @@ This is a separate Go module. It tests this library against go-utp's pure Go
 engine, [`purego`](https://pkg.go.dev/github.com/anacrolix/go-utp/purego): a
 port of libutp to Go, with no cgo, that departs from libutp in a few places
 and so can catch what interop with libutp itself
-([`native/libutp`](../../native/libutp)) cannot.
+([`native/libutp`](../../libutp)) cannot.
 
 It is separate so that go-utp and what its module requires stay out of the
 library's module graph: added to the library's own go.mod, it brought eight

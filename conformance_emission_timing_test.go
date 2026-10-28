@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arxodeus/utp/native/libutp"
+	"github.com/arxodeus/utp/internal/libutp"
 )
 
 // emissionInstants reads the instant each packet was built from the packet

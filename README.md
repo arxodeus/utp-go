@@ -38,7 +38,7 @@ do. See:
 | [CONFORMANCE.md](docs/dev/CONFORMANCE.md) | The conformance corpus: how two implementations are compared packet by packet, what it found, and what it does not cover. |
 | [HARNESS.md](docs/dev/HARNESS.md) | The emulated network harness: what it models, what it measures, and the numbers proving it is sound. |
 | [KNOWN-LIMITATIONS.md](docs/dev/KNOWN-LIMITATIONS.md) | **Read this first.** Root cause of every defect fixed, what has and has not been measured, and everything found but not fixed. |
-| [integration/anacrolix/README.md](integration/anacrolix/README.md) | Using this library with `anacrolix/torrent`: what is checked, and how to wire it in. |
+| [integration/anacrolix/README.md](internal/integration/anacrolix/README.md) | Using this library with `anacrolix/torrent`: what is checked, and how to wire it in. |
 | [compat/golibutp/README.md](compat/golibutp/README.md) | A drop-in replacement for `anacrolix/go-libutp`: one `replace` line in an application's go.mod, and everything that imports go-libutp -- `anacrolix/torrent` included -- runs on this library. |
 | [FUZZING.md](docs/dev/FUZZING.md) | The fuzz targets and soak tests: what each asserts, what they found, and what they do not cover. |
 | [BENCHMARKS.md](docs/dev/BENCHMARKS.md) | Congestion-control measurements: LEDBAT against LEDBAT++, the latecomer experiment, and what the numbers do not prove. |
@@ -47,7 +47,7 @@ do. See:
 | [HISTORY.md](docs/dev/HISTORY.md) | The long reasoning behind particular pieces of code -- the defect each guards against, how it was found and measured -- moved out of the comments, which point to it. |
 | [RELEASING.md](docs/dev/RELEASING.md) | The release gates, and the order in which the two modules are tagged. |
 | [UPSTREAM.md](docs/dev/UPSTREAM.md) | What should go back to `zen-eth/utp-go`, and in what order. |
-| [native/libutp/VENDOR.md](native/libutp/VENDOR.md) | The vendored libutp: provenance, what was taken, and how the bridge works. |
+| [native/libutp/VENDOR.md](internal/libutp/VENDOR.md) | The vendored libutp: provenance, what was taken, and how the bridge works. |
 
 Two things to be aware of before depending on this:
 

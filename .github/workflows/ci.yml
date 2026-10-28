@@ -22,7 +22,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: gofmt
-        run: test -z "$(gofmt -l . | grep -v '^native/libutp/upstream/' | tee /dev/stderr)"
+        run: test -z "$(gofmt -l . | grep -v '^internal/libutp/upstream/' | tee /dev/stderr)"
       - name: vet
         run: go vet ./...
       - name: cross-build
@@ -60,7 +60,7 @@ jobs:
           go-version: stable
       - name: govulncheck
         run: |
-          for m in . compat/golibutp integration/nettest integration/goutp integration/anacrolix; do
+          for m in . compat/golibutp internal/integration/nettest internal/integration/goutp internal/integration/anacrolix; do
             echo "== $m"
             (cd "$m" && go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...)
           done
@@ -98,7 +98,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: [compat/golibutp, integration/nettest, integration/goutp, integration/anacrolix]
+        module: [compat/golibutp, internal/integration/nettest, internal/integration/goutp, internal/integration/anacrolix]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

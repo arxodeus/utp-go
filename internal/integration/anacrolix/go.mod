@@ -1,4 +1,4 @@
-module github.com/arxodeus/utp/integration/anacrolix
+module github.com/arxodeus/utp/internal/integration/anacrolix
 
 go 1.24.2
 
@@ -93,8 +93,8 @@ require (
 	zombiezen.com/go/sqlite v0.13.1 // indirect
 )
 
-replace github.com/arxodeus/utp => ../..
+replace github.com/arxodeus/utp => ../../..
 
 // torrent's default build uses go-libutp; this makes it the drop-in, as an
 // application would. See dropin_test.go.
-replace github.com/anacrolix/go-libutp => ../../compat/golibutp
+replace github.com/anacrolix/go-libutp => ../../../compat/golibutp

@@ -2,7 +2,7 @@
 
 This is a separate Go module. Its only job is to run the Go standard library's
 own `net.Conn` conformance suite — `golang.org/x/net/nettest` — against
-[`utpnet.Conn`](../../utpnet).
+[`utpnet.Conn`](../../../utpnet).
 
 It is separate for the same reason the [anacrolix one](../anacrolix) is: the
 library's own `go.mod` stays small, and nothing a caller depends on grows

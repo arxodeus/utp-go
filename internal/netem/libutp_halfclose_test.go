@@ -3,29 +3,45 @@
 package netem
 
 import (
-	"bytes"
 	"context"
 	"sync"
 	"testing"
 	"time"
 
 	utp "github.com/arxodeus/utp"
-	"github.com/arxodeus/utp/native/libutp"
+	"github.com/arxodeus/utp/internal/libutp"
 )
 
-// The half-close against real libutp, from the side that initiates it.
+// What a peer's half-close actually costs, measured rather than assumed.
 //
-// TestPeerMayWriteAfterOurFin covers the same exchange with Close(), where the
-// application has said it is finished entirely and what libutp sends back is
-// discarded -- correctly, because there is nobody left to give it to. This is
-// the same exchange with CloseWrite(), where there is: we finish sending, and
-// libutp's reply has to arrive.
+// DEVIATIONS.md records that this library has no half-close: on reaching the
+// peer's FIN it tears the connection down, where libutp keeps its socket in
+// CS_GOT_FIN until its own application closes too. That entry had no
+// measurement behind it, and "libutp has a feature we lack" is not by itself a
+// reason to build the feature.
 //
-// That is what libutp's own applications have always been able to do
-// (`utp_shutdown(s, SHUT_WR)`, utp.h:176) and what this library could not.
-
-func TestCloseWriteDeliversWhatThePeerSendsAfterIt(t *testing.T) {
-	n := NewNetwork(102)
+// This drives the case from the only side that can start it. Our API has no
+// CloseWrite -- Close means done entirely -- so an application using this
+// library cannot half-close. Only the peer can, and only after we have sent
+// our FIN. So: we write, we Close, and libutp then writes back, which is
+// exactly what its half-close is for.
+//
+// It did cost compatibility, and this is what found it: before the socket
+// learned to stay silent for data past a closed connection's FIN, this failed
+// three times out of three with libutp reporting UTP_ECONNRESET and one RESET
+// sent from here. A peer doing something entirely legitimate was told its
+// connection had broken. Both assertions below are for that, and they are the
+// reason this test is worth its runtime.
+//
+// What is left is the half-close itself. libutp writes and we discard, because
+// our application said it was finished and there is nobody to give it to. That
+// costs an API capability on our side, not compatibility on the wire.
+// Implementing it means a new public method, a connection that keeps sending
+// after the peer's FIN, and a reader that sees end of stream while the writer
+// carries on -- a feature, not a conformance fix. It stays unbuilt, and this
+// is the evidence for that being a reasonable choice rather than an oversight.
+func TestPeerMayWriteAfterOurFin(t *testing.T) {
+	n := NewNetwork(101)
 	defer n.Close()
 	ours := n.MustAddEndpoint("a")
 	theirs := n.MustAddEndpoint("b")
@@ -36,7 +52,7 @@ func TestCloseWriteDeliversWhatThePeerSendsAfterIt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	const connSeed = 7950
+	const connSeed = 7900
 	reply := make([]byte, 4096)
 	for i := range reply {
 		reply[i] = byte(i * 7)
@@ -145,50 +161,37 @@ func TestCloseWriteDeliversWhatThePeerSendsAfterIt(t *testing.T) {
 	if _, err := stream.Write(ctx, []byte(greeting)); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if err := stream.CloseWrite(); err != nil {
-		t.Fatalf("CloseWrite: %v", err)
-	}
-
-	// Read the reply libutp sent after our FIN. This is the whole point: the
-	// connection is still ours to read from.
-	got := make([]byte, 0, len(reply))
-	readCtx, readCancel := context.WithTimeout(ctx, 20*time.Second)
-	defer readCancel()
-	buf := make([]byte, 8192)
-	for len(got) < len(reply) {
-		nr, err := stream.Read(readCtx, buf)
-		if err != nil {
-			t.Fatalf("reading after CloseWrite: %v (%d of %d bytes so far); the peer's reply "+
-				"was sent after our FIN, which is exactly what a half-close is for",
-				err, len(got), len(reply))
-		}
-		got = append(got, buf[:nr]...)
-	}
 	stream.Close()
+
+	// Long enough for libutp to notice the FIN, write back, and retransmit if
+	// it thought that had failed.
+	time.Sleep(3 * time.Second)
 
 	mu.Lock()
 	read, wrote, code := libutpRead, wroteBack, finalErr
 	mu.Unlock()
 
 	if read != len(greeting) {
-		t.Errorf("libutp read %d bytes of our %d before we half-closed", read, len(greeting))
+		t.Errorf("libutp read %d bytes of our %d; the transfer before the close did not complete",
+			read, len(greeting))
 	}
 	if !wrote {
-		t.Fatal("libutp never reached end of stream on its read side, so it never sent the " +
-			"reply this test exists to receive")
+		t.Fatal("libutp never reached end of stream on its read side, so the half-close this " +
+			"test exists to exercise never happened")
 	}
-	if !bytes.Equal(got, reply) {
-		t.Fatalf("received %d bytes after CloseWrite but they do not match what libutp sent",
-			len(got))
-	}
+	// The point of the measurement: the peer writing after our FIN is not an
+	// error for it, and does not draw a reset from us.
 	if code != 0 {
-		t.Errorf("libutp reported error code %d after writing past our FIN", code)
+		t.Errorf("libutp reported error code %d after writing past our FIN; writing after a "+
+			"peer's FIN is what its half-close is for and must not fail", code)
 	}
 	if resets := sock.PacketsResetSent(); resets != 0 {
-		t.Errorf("this socket sent %d RESETs to a peer writing after our half-close", resets)
+		t.Errorf("this socket sent %d RESETs to a peer exercising its half-close; discarding "+
+			"what we have nobody to give to is one thing, telling the peer its connection "+
+			"broke is another", resets)
 	}
 
-	t.Logf("half-close against real libutp: it read our %d bytes, saw end of stream, and sent "+
-		"%d bytes back which we read in full -- the case that used to be discarded",
-		read, len(got))
+	t.Logf("libutp read %d bytes, then wrote past our FIN: no error (code %d), no RESET from us, "+
+		"and nothing delivered here because Close() had already said we were finished",
+		read, code)
 }

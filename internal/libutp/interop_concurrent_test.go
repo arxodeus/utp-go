@@ -14,7 +14,7 @@ import (
 	"time"
 
 	utp "github.com/arxodeus/utp"
-	"github.com/arxodeus/utp/native/libutp"
+	"github.com/arxodeus/utp/internal/libutp"
 )
 
 // Interop with more than one libutp peer at a time.

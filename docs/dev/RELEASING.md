@@ -17,7 +17,7 @@ workflow, and are run by hand on the release commit and their logs kept.
 | Cross-build | `GOOS=… GOARCH=… go vet ./...` for linux (amd64, arm64, 386), darwin, freebsd, windows | every push |
 | Root tests, cgo and not | `go test -short ./...` with `CGO_ENABLED=1` and `=0` | every push |
 | Race | `go test -race -short ./...` | every push |
-| Each nested module | `go test ./...` and `go test -race ./...` in `compat/golibutp`, `integration/nettest`, `integration/goutp`, `integration/anacrolix` -- neither at the root enters them | every push |
+| Each nested module | `go test ./...` and `go test -race ./...` in `compat/golibutp`, `internal/integration/nettest`, `internal/integration/goutp`, `internal/integration/anacrolix` -- neither at the root enters them | every push |
 | Vulnerabilities | `govulncheck ./...` in the root and each nested module, on the current Go release | every push |
 | Transport tests on macOS and Windows | `go test -short ./...` | every push |
 | Full root suite | `go test -timeout 120m ./...` | nightly |

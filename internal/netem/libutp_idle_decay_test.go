@@ -12,7 +12,7 @@ import (
 	"time"
 
 	utp "github.com/arxodeus/utp"
-	"github.com/arxodeus/utp/native/libutp"
+	"github.com/arxodeus/utp/internal/libutp"
 )
 
 // What real libutp does to its congestion window while a connection sits idle.

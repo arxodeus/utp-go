@@ -1,4 +1,4 @@
-module github.com/arxodeus/utp/integration/nettest
+module github.com/arxodeus/utp/internal/integration/nettest
 
 go 1.24.2
 
@@ -13,4 +13,4 @@ require (
 	golang.org/x/sys v0.38.0 // indirect
 )
 
-replace github.com/arxodeus/utp => ../..
+replace github.com/arxodeus/utp => ../../..

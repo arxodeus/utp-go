@@ -9,7 +9,7 @@ import (
 	"time"
 
 	utp "github.com/arxodeus/utp"
-	"github.com/arxodeus/utp/native/libutp"
+	"github.com/arxodeus/utp/internal/libutp"
 )
 
 // spinUntil waits for t without sleeping past it: Go timers wake about 1.1 ms

@@ -1,4 +1,4 @@
-module github.com/arxodeus/utp/integration/goutp
+module github.com/arxodeus/utp/internal/integration/goutp
 
 go 1.24.2
 
@@ -13,4 +13,4 @@ require (
 	golang.org/x/sys v0.28.0 // indirect
 )
 
-replace github.com/arxodeus/utp => ../..
+replace github.com/arxodeus/utp => ../../..

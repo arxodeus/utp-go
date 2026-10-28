@@ -11,7 +11,7 @@ import (
 	"time"
 
 	utp "github.com/arxodeus/utp"
-	"github.com/arxodeus/utp/native/libutp"
+	"github.com/arxodeus/utp/internal/libutp"
 )
 
 // TestAsymmetricAckPath measures what each receiver's acknowledgements cost a

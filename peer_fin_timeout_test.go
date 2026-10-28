@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arxodeus/utp/native/libutp"
+	"github.com/arxodeus/utp/internal/libutp"
 )
 
 // When the peer's stream ends, libutp arms its retransmission timeout

@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/arxodeus/utp/native/libutp"
+	"github.com/arxodeus/utp/internal/libutp"
 )
 
 // The driver's clock can be read after the driver is closed, and from another

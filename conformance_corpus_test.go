@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arxodeus/utp/native/libutp"
+	"github.com/arxodeus/utp/internal/libutp"
 )
 
 // The M2 corpus.
