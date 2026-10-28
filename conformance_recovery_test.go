@@ -13,20 +13,15 @@ import (
 	"github.com/arxodeus/utp/internal/libutp"
 )
 
-// Loss recovery, compared against libutp on a virtual clock.
+// Loss recovery, compared with the reference implementation on a virtual
+// clock: when each side resends, and which packets.
 //
-// COMPATIBILITY.md rated four of these "cited": read against utp_internal.cpp
-// and matched by hand, which is how the selective-ack bit reversal survived.
-// These drive both implementations through the same situations and compare
-// what each does -- when it resends, and which packets.
-//
-// The corpus compares transcripts field by field, and cannot here: libutp's
-// window opens at one packet and ours at two (DEVIATIONS.md), so after the
-// first round trip the two are sending different numbers of packets, and
-// every packet after that has a different sequence number on each side.
+// Transcripts cannot be compared field by field here: the reference window
+// opens at one packet and ours at two, so after the first round trip the
+// sides send different numbers of packets with different sequence numbers.
 // These cases drive each side separately, in lockstep on the clock, and
-// compare the decision, not the bytes: how long until a resend, and which
-// packet it was relative to that side's own oldest outstanding one.
+// compare decisions rather than bytes: how long until a resend, and which
+// packet relative to that side's own oldest outstanding one.
 
 // recoveryRun is both implementations after the handshake, driven separately.
 type recoveryRun struct {
@@ -45,8 +40,8 @@ func newRecoveryRun(t *testing.T, synDelay time.Duration) *recoveryRun {
 	return newRecoveryRunMTU(t, synDelay, 0)
 }
 
-// newRecoveryRunMTU is newRecoveryRun with libutp's reported MTU set; see
-// newInitiatorRunMTU.
+// newRecoveryRunMTU is newRecoveryRun with the reference driver's reported
+// MTU set; see newInitiatorRunMTU.
 func newRecoveryRunMTU(t *testing.T, synDelay time.Duration, udpMTU uint16) *recoveryRun {
 	t.Helper()
 	r, _, _ := newInitiatorRunMTU(t, udpMTU)
@@ -63,7 +58,7 @@ func newRecoveryRunMTU(t *testing.T, synDelay time.Duration, udpMTU uint16) *rec
 	return rr
 }
 
-// sentPacket is one data packet a side emitted.
+// sentData is one data packet a side emitted.
 type sentData struct {
 	seq    uint16
 	resend bool
@@ -104,8 +99,8 @@ func (rr *recoveryRun) takeOurs() []sentData {
 	return rr.data(rr.conn.takeEmitted(), rr.oursSent, &rr.oursHigh)
 }
 
-// advance moves both clocks by the same amount, giving libutp its timeout
-// pass as an embedder would.
+// advance moves both clocks by the same amount, giving the reference its
+// timeout pass as an embedding application would.
 func (rr *recoveryRun) advance(d time.Duration) {
 	if d <= 0 {
 		return
@@ -176,15 +171,13 @@ func (rr *recoveryRun) untilResend(seq uint16, limit, step time.Duration) (libut
 	return
 }
 
-// libutpRTO measures libutp's retransmission timeout after a chain of round
-// trips, to within step.
+// libutpRTO measures the reference implementation's retransmission timeout
+// after a chain of round trips, to within step.
 //
-// libutp acts on timeouts only every TIMEOUT_CHECK_INTERVAL, 500ms
-// (utp_internal.cpp:37, :3284), so the moment it resends lies up to 500ms
-// after its deadline, not on it. The deadline itself is recovered by moving
-// the phase of those checks: the last check before the write is placed delta
-// earlier, for every delta across the interval, and the shortest time from
-// write to resend is the timeout. Each run is microseconds of real time.
+// It acts on timeouts only every 500ms, so it resends up to 500ms after its
+// deadline. The deadline is recovered by shifting the phase of those checks
+// across the interval: the shortest time from write to resend is the
+// timeout.
 func libutpRTO(t *testing.T, samples []time.Duration, step time.Duration) time.Duration {
 	t.Helper()
 	best := time.Duration(-1)
@@ -209,8 +202,8 @@ func libutpRTO(t *testing.T, samples []time.Duration, step time.Duration) time.D
 			return out
 		}
 		// No timeout pass while the samples are taken: every wait is shorter
-		// than the timeout in force, so none would fire, and passes here
-		// would only move the phase this is trying to control.
+		// than the timeout in force, so none would fire, and passes would only
+		// move the phase being controlled.
 		drv.Advance(uint64(samples[0].Microseconds()))
 		drv.Inject(initiatorSynAck())
 		take()
@@ -255,7 +248,7 @@ func libutpRTO(t *testing.T, samples []time.Duration, step time.Duration) time.D
 }
 
 // oursRTO measures ours after the same chain. Our retransmission wheel arms
-// to whole 25ms ticks, so what is measured is the timeout rounded up to one.
+// to whole 25ms ticks, so the measurement is the timeout rounded up to one.
 func oursRTO(t *testing.T, samples []time.Duration) time.Duration {
 	t.Helper()
 	rr := newRecoveryRun(t, samples[0])
@@ -285,25 +278,19 @@ func oursRTO(t *testing.T, samples []time.Duration) time.Duration {
 	return oursAt
 }
 
-// The retransmission timeout is computed as libutp computes it.
+// The retransmission timeout is computed as the reference computes it: rtt
+// and rtt_var in milliseconds, the first sample taken as rtt with half of it
+// as rtt_var, later ones smoothed by 1/8 and 1/4, and
+// rto = max(rtt + rtt_var*4, 1000). A zero first sample leaves the next to be
+// taken as first. The SYN's round trip counts.
 //
-// libutp keeps rtt and rtt_var in milliseconds, takes the first sample as
-// rtt with half of it as rtt_var, smooths later ones by 1/8 and 1/4, and sets
-// rto = max(rtt + rtt_var*4, 1000) (utp_internal.cpp:1362-1380). Its
-// first-sample test is `rtt == 0`, so a zero first sample leaves the next one
-// to be taken as first again. The SYN counts: the SYN-ACK acknowledges it
-// through the same ack_packet.
-//
-// Each case feeds both sides the same chain of round trips -- the SYN-ACK
-// after the first, then one data packet acknowledged after each of the rest,
-// every wait shorter than the timeout in force -- then leaves one packet
-// unacknowledged. libutp's timeout is measured to within 10ms (libutpRTO);
-// ours is measured to its wheel's 25ms tick. The tolerance is the sum, and
-// ours may not be earlier than libutp's by more than the 10ms.
+// Each case feeds both sides the same chain of round trips, then leaves one
+// packet unacknowledged. The reference timeout is measured to within 10ms
+// (libutpRTO) and ours to the wheel's 25ms tick; the tolerance is the sum,
+// and ours may not be earlier by more than 10ms.
 func TestConformanceRetransmissionTimeoutComputation(t *testing.T) {
-	// This pins libutp's retransmission-timeout schedule. The loss probe is
-	// not libutp's and would add one packet before the first timeout; it is
-	// measured on its own in loss_probe_test.go.
+	// The loss probe would add one packet before the first timeout; it is
+	// tested on its own in loss_probe_test.go.
 	withoutLossProbe(t)
 	const step = 10 * time.Millisecond
 	cases := []struct {
@@ -332,26 +319,16 @@ func TestConformanceRetransmissionTimeoutComputation(t *testing.T) {
 	}
 }
 
-// The zero-window probe fires when libutp's does -- where libutp's fires at all.
+// The zero-window probe fires when the reference's does, where the
+// reference's fires at all.
 //
-// An acknowledgement advertising a zero window arms a timer, `zerowindow_time
-// = current_ms + 15000` (utp_internal.cpp:2149-2151). When a timeout pass
-// finds it expired with the window still zero, libutp opens the window to one
-// PACKET_SIZE (:1142-1145), and the next flush sends a packet.
-//
-// PACKET_SIZE is 1435 (:57). The flush charges a whole get_packet_size()
-// against it (is_full with no argument, :933-936, :974), and that is the MTU
-// the embedder reports less the 20-byte header. With libutp's own default MTU
-// callback, 1402 on IPv4 (utp_utils.cpp:228), a packet is 1382 bytes and fits.
-// With an embedder reporting a real Ethernet interface, 1472, a packet is 1452
-// bytes and never fits: libutp's probe never fires, and a connection whose
-// peer advertised a zero window and then went quiet stays stalled until it
-// dies. Ours opens the window to MaxPacketSize, which the payload never
-// exceeds, so it probes at any MTU.
-//
-// Both are asserted, so a change on either side shows. libutp's probe waits
-// for a timeout pass, which it runs only every 500ms (:37, :3284); ours fires
-// on the interval exactly.
+// An acknowledgement advertising a zero window arms a 15-second timer; when
+// it expires with the window still zero, the window is opened to one packet
+// and the next flush sends one. The reference opens it to a fixed 1435
+// bytes, while a packet at an Ethernet MTU of 1472 is 1452 bytes, so at that
+// MTU its probe never fires. Ours opens the window to MaxPacketSize, so it
+// probes at any MTU. Both are asserted. The reference also waits for a
+// timeout pass, which runs every 500ms; ours fires on the interval exactly.
 func TestConformanceZeroWindowProbeTiming(t *testing.T) {
 	t.Run("libutp's default MTU, 1402", func(t *testing.T) {
 		libutpAt, oursAt := zeroWindowProbeTimes(t, 1402)
@@ -421,10 +398,9 @@ type grown struct {
 
 // growWindows writes a large buffer to both sides and acknowledges everything
 // each sends, a round trip at a time, until both have at least want packets
-// in flight. libutp's window opens at one packet and grows by about one a
-// round trip in slow start (utp_internal.cpp:1691-1702); ours opens at two
-// and grows faster, so ours will have more in flight. That does not matter:
-// each scenario is expressed relative to each side's own oldest packet.
+// in flight. Ours grows faster and will have more in flight, which does not
+// matter: each scenario is expressed relative to each side's own oldest
+// packet.
 func (rr *recoveryRun) growWindows(want int) grown {
 	rr.t.Helper()
 	payload := make([]byte, 2<<20)
@@ -432,14 +408,11 @@ func (rr *recoveryRun) growWindows(want int) grown {
 		payload[i] = byte(i)
 	}
 	rr.writeBoth(payload)
-	// Ours is written from a goroutine that is not on the virtual clock, and
-	// on a loaded machine it can start late. Each round below moves libutp's
-	// clock 50 ms and acknowledges only the side still short, so rounds spent
-	// waiting for our writer left libutp unacknowledged until its
-	// retransmission timeout fired -- it resent its oldest packet, and the
-	// scenario compared a timeout with a fast retransmit. Under six busy
-	// loops on four cores that failed TestConformanceFastRetransmitDecisions
-	// about one run in two. No virtual time passes until ours has started.
+	// Ours is written from a goroutine that is not on the virtual clock and
+	// may start late on a loaded machine. Rounds spent waiting for it would
+	// leave the reference unacknowledged until its timeout fired, comparing a
+	// timeout with a fast retransmit, so no virtual time passes until ours
+	// has started.
 	for deadline := time.Now().Add(10 * time.Second); rr.oursHigh == initiatorConnSeed; {
 		if time.Now().After(deadline) {
 			rr.t.Fatal("our side sent no data within 10s of the write")
@@ -496,17 +469,13 @@ func resentOffsets(sent []sentData, oldest uint16) []int {
 	return out
 }
 
-// Fast retransmission decides what libutp decides.
-//
-// libutp's selective_ack walks the bits from the top down, counting packets
-// acknowledged past each one; an unacknowledged packet with at least
-// DUPLICATE_ACKS_BEFORE_RESEND (3) past it, and not below fast_resend_seq_nr,
-// is resent, and so is the packet the cumulative ack is waiting for, on the
-// same count. At most four per acknowledgement, oldest first, each moving
-// fast_resend_seq_nr past it so it is not fast resent again
-// (utp_internal.cpp:1480-1610). A duplicate acknowledgement with no selective
-// ack resends nothing: libutp's duplicate count feeds only its MTU search
-// (:1921-1941).
+// Fast retransmission decides what the reference decides. Walking the
+// selective ack from the top down, an unacknowledged packet with at least 3
+// packets acknowledged past it, and not below the fast-retransmit floor, is
+// resent, as is the packet the cumulative ack is waiting for on the same
+// count. At most four per acknowledgement, oldest first, each moving the
+// floor past it. A duplicate acknowledgement without a selective ack resends
+// nothing.
 //
 // Each scenario starts from a fresh connection with at least 14 packets in
 // flight on both sides, and compares which packets each resent, as offsets
@@ -518,7 +487,7 @@ func TestConformanceFastRetransmitDecisions(t *testing.T) {
 	cases := []struct {
 		name string
 		acks []ack
-		want [][]int // per acknowledgement, what libutp's source says it resends
+		want [][]int // per acknowledgement, the packets the reference rules resend
 	}{
 		{"two acknowledged past a gap: below the threshold",
 			[]ack{{[]int{2, 3}}}, [][]int{nil}},
@@ -565,9 +534,8 @@ func TestConformanceFastRetransmitDecisions(t *testing.T) {
 	}
 }
 
-// ccEntry is one line of libutp's congestion-control log: the inputs
-// apply_ccontrol acted on and the window that resulted
-// (utp_internal.cpp:1713-1730).
+// ccEntry is one line of the reference implementation's congestion-control
+// log: the inputs it acted on and the resulting window.
 type ccEntry struct {
 	raw        string
 	actualUs   int64 // the delay the acknowledgement reported, unfiltered
@@ -615,25 +583,22 @@ func parseCCLog(t *testing.T, lines []string) []ccEntry {
 	return out
 }
 
-// ccPhase is a stretch of acknowledgements with one queueing delay.
+// ccPhase is a stretch of acknowledgements with one queuing delay.
 type ccPhase struct {
 	name    string
 	acks    int
-	delayMs uint32        // queueing delay the peer reports, over a fixed base
+	delayMs uint32        // queuing delay the peer reports, over a fixed base
 	gap     time.Duration // between acknowledgements
 	// appLimited writes 100 bytes before each acknowledgement instead of
 	// keeping a large write queued, so the window is never full.
 	appLimited bool
 }
 
-// libutpCCTrace drives libutp alone through the phases, acknowledging its
-// oldest outstanding packet one at a time with the given delays, and returns
-// its congestion-control log. initialWrite bytes are written before the first
-// phase.
-//
-// Delays are whole milliseconds over a whole-millisecond base, and the clock
-// moves in whole milliseconds, so every delay libutp acts on is a whole
-// number of milliseconds -- which the log prints exactly.
+// libutpCCTrace drives the reference implementation alone through the
+// phases, acknowledging its oldest outstanding packet one at a time with the
+// given delays, and returns its congestion-control log. initialWrite bytes
+// are written before the first phase. Delays, base and clock steps are whole
+// milliseconds, so the log, which prints milliseconds, is exact.
 func libutpCCTrace(t *testing.T, initialWrite int, phases []ccPhase) []ccEntry {
 	t.Helper()
 	drv, err := libutp.NewDriver(1_000_000)
@@ -695,32 +660,28 @@ func libutpCCTrace(t *testing.T, initialWrite int, phases []ccPhase) []ccEntry {
 	return parseCCLog(t, drv.CCLog())
 }
 
-// ccReplay is what replaying a libutp trace into our controller found.
+// ccReplay is what replaying a reference trace into our controller found.
 type ccReplay struct {
 	mismatches []string
-	// slowStartEnd is the entry at which our controller, fed libutp's
-	// inputs, left slow start, and -1 if it never did.
+	// slowStartEnd is the entry at which our controller, fed the reference's
+	// inputs, left slow start, or -1 if it never did.
 	slowStartEnd int
 }
 
-// replayCC feeds libutp's logged inputs, one acknowledgement at a time, to our
-// classic-LEDBAT update, and records every entry where the window we compute
-// differs from the window libutp logged.
+// replayCC feeds the reference's logged inputs, one acknowledgement at a
+// time, to our classic LEDBAT update, and records every entry where our
+// window differs from the logged one.
 //
-// Our controller starts, at entry `from`, from libutp's state: the window
-// libutp had before that entry (its first window is one packet_size), its
-// target, its opt_sndbuf as both ssthresh and ceiling, and slow start on
-// (utp_internal.cpp:2567, :2620-2621). From there it evolves by its own rules;
-// only the inputs come from libutp. The delay is fed as the delay libutp acted
-// on, after its clamp to the round trip, with no clamp of our own;
-// last_maxed_out_window and the clock come from the log, 0 included.
+// At entry from, our controller starts from the reference's state: its
+// window before that entry, its target, its window ceiling as both ssthresh
+// and ceiling, and slow start on. From there it follows its own rules; only
+// the inputs come from the log. The delay fed is the one the reference acted
+// on, after its clamp to the round trip.
 //
-// One documented deviation has to be neutralised for the rules to be
-// compared at all. Our slow-start step is half our window floor, and libutp's
-// is one current packet_size; setting our floor to two of libutp's packets
-// makes the steps equal. The floor itself then differs from libutp's 10 bytes
-// (DEVIATIONS.md), so the replay fails the case if libutp's window is ever
-// below it, where the floor rather than the rules would decide.
+// Our slow-start step is half our window floor, the reference's one packet,
+// so the floor is set to two of the reference's packets to make the steps
+// equal. The replay fails the case if the reference's window ever falls
+// below that floor, where the floor rather than the rules would decide.
 func replayCC(t *testing.T, entries []ccEntry, from int) ccReplay {
 	t.Helper()
 	if len(entries) <= from {
@@ -765,29 +726,26 @@ func replayCC(t *testing.T, entries []ccEntry, from int) ccReplay {
 			r.mismatches = append(r.mismatches, fmt.Sprintf(
 				"entry %d: from %d, delay %dms, acked %d, last full at %dms, now %dms: libutp -> %d (gain %.1f), ours -> %d",
 				i, before, e.ourDelayMs, e.acked, e.lastMaxed, e.nowMs, e.maxWindow, e.gain, c.maxWindowSizeBytes))
-			// Carry on from libutp's window, so one difference does not
-			// show up as every later entry differing.
+			// Continue from the reference's window, so one difference does not show
+			// up as every later entry differing.
 			c.maxWindowSizeBytes = e.maxWindow
 		}
 	}
 	return r
 }
 
-// LEDBAT's window adjustment, rule by rule, against libutp.
+// LEDBAT's window adjustment, rule by rule, against the reference. It is
+// driven through phases that each exercise a rule, and every update it makes
+// is replayed into ours (replayCC).
 //
-// COMPATIBILITY.md rated these rules "partly measured": the controller's
-// overall response to a queue was compared against libutp's, but each rule
-// in apply_ccontrol (utp_internal.cpp:1615-1712) was only read. Here libutp
-// is driven through phases that each exercise a rule, and every update it
-// makes is replayed into ours (replayCC). A delay registers with libutp only
-// once three acknowledgements carry it, since it acts on the least of its
-// last three samples (CUR_DELAY_SIZE, :75), so each phase is longer than
-// that. The first phase carries no queueing delay, so libutp's base delay is
-// the fixed one and each later phase's delay is the queueing delay it names.
-// The round trip must exceed that delay or libutp's clamp to the minimum
-// round trip (:1617-1621) decides it instead; with the window full the queue
-// of unacknowledged packets makes the round trip long, and with it never
-// full the gap between acknowledgements is the round trip.
+// A delay registers only once three acknowledgements carry it, since the
+// least of the last three samples is used, so each phase is longer than
+// that. The first phase carries no queuing delay, so the base delay is the
+// fixed one and each later phase's delay is the queuing delay it names. The
+// round trip must exceed that delay or the clamp to the minimum round trip
+// decides instead; with the window full the queue of unacknowledged packets
+// makes the round trip long, and with it never full the gap between
+// acknowledgements is the round trip.
 func TestConformanceLedbatRules(t *testing.T) {
 	t.Run("window full: slow start, delay exit, increase, decrease", func(t *testing.T) {
 		entries := libutpCCTrace(t, 4<<20, []ccPhase{
@@ -804,11 +762,9 @@ func TestConformanceLedbatRules(t *testing.T) {
 		}
 	})
 
-	// The application never fills the window, so libutp's is_full never
-	// records a time (utp_internal.cpp:945, :957) and last_maxed_out_window
-	// keeps its initial 0 (:2603). Slow start grows the window regardless
-	// (:1691-1702 do not look at scaled_gain); after it, the gain is zeroed
-	// by the application-limited guard (:1681-1686).
+	// The application never fills the window, so the time it was last full
+	// is never recorded and stays 0. Slow start grows the window regardless;
+	// after it, the application-limited guard zeroes the gain.
 	t.Run("never full: the guard from the start", func(t *testing.T) {
 		entries := libutpCCTrace(t, 0, []ccPhase{
 			{name: "slow start past our floor", acks: 30, delayMs: 0, gap: 30 * time.Millisecond, appLimited: true},
@@ -851,16 +807,16 @@ func TestConformanceLedbatRules(t *testing.T) {
 		}
 	})
 
-	// The window fills, the write drains, and the application then trickles.
-	// is_full records the time the window was last full (:957); a second
-	// later the guard zeroes the gain (:1681).
+	// The window fills, the write drains, and the application then
+	// trickles. A second after the window was last full, the guard zeroes
+	// the gain.
 	t.Run("full, then application-limited for over a second", func(t *testing.T) {
 		entries := libutpCCTrace(t, 40000, []ccPhase{
 			{name: "slow start with the window full", acks: 20, delayMs: 0, gap: 30 * time.Millisecond},
 			{name: "the write drains, then a trickle", acks: 25, delayMs: 20, gap: 150 * time.Millisecond, appLimited: true},
 		})
-		// libutp's window starts at one packet, below our floor: start where
-		// it has passed it.
+		// The reference window starts at one packet, below our floor: start
+		// once it has passed it.
 		floor := 2 * entries[0].packetSize
 		from := -1
 		for i := 1; i < len(entries); i++ {
@@ -897,8 +853,8 @@ func TestConformanceLedbatRules(t *testing.T) {
 }
 
 // checkCCCoverage fails the case if the trace did not exercise the rules it
-// was built for, so a harness change cannot quietly turn it into a
-// comparison of nothing.
+// was built for, so a harness change cannot turn it into a comparison of
+// nothing.
 func checkCCCoverage(t *testing.T, entries []ccEntry, r ccReplay) {
 	t.Helper()
 	var grewAfterSS, shrank int
