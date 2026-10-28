@@ -8,18 +8,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Behaviours matched to libutp, with the reference line numbers in the
-// assertions so a future change can be checked against the same source.
+// Protocol behaviors checked against the reference implementation's rules.
 
 // --- Zero-length ST_DATA ----------------------------------------------------
 //
-// libutp guards only the delivery to the application with `count > 0` and
-// advances ack_nr unconditionally (utp_internal.cpp:2342-2355). It therefore
-// acks a zero-length ST_DATA like any other packet.
-//
-// This implementation used to reject such a packet in the decoder, so it was
-// dropped before the connection saw it, never acked, and the peer would
-// retransmit it forever.
+// A zero-length ST_DATA is acknowledged like any other packet and advances
+// the acknowledgement number; only delivery is skipped.
 
 func TestDecoderAcceptsZeroLengthData(t *testing.T) {
 	pkt := newPacketBuilder(st_data, 4242, 12345, 100_000, 7).
@@ -58,8 +52,8 @@ func TestZeroLengthDataAdvancesTheAckNumber(t *testing.T) {
 	require.Equal(t, before+1, conn.state.RecvBuf.AckNum(),
 		"a zero-length ST_DATA must still advance the ack number, as libutp does at utp_internal.cpp:2354")
 
-	// And the sequence space must keep moving afterwards, so a following
-	// packet with real data is delivered rather than treated as a gap.
+	// The sequence space keeps moving afterwards, so a following packet with
+	// real data is delivered rather than treated as a gap.
 	require.NoError(t, conn.onData(syn+2, []byte("hello")))
 	require.Equal(t, before+2, conn.state.RecvBuf.AckNum())
 
@@ -71,11 +65,8 @@ func TestZeroLengthDataAdvancesTheAckNumber(t *testing.T) {
 
 // --- SYN retransmission backoff ---------------------------------------------
 //
-// libutp doubles retransmit_timeout on every retransmission timeout
-// (utp_internal.cpp:1179, applied at :1203), starting from 3000ms
-// (utp_internal.cpp:2762). This implementation previously computed
-// InitialTimeout * 1.5^attempts, which grows from the initial value rather
-// than the current one, with a different factor.
+// The SYN's retransmission timeout doubles on every expiry, starting from
+// 3000ms.
 
 func TestSynRetransmissionBackoffDoubles(t *testing.T) {
 	conn := newRecordingConn()
@@ -115,8 +106,8 @@ func TestSynRetransmissionBackoffDoubles(t *testing.T) {
 	for i := 1; i < len(gaps); i++ {
 		ratio := float64(gaps[i]) / float64(gaps[i-1])
 		// Doubling is 2.0; 1.5^n growth would give about 1.5. The timer wheel
-		// has 25ms resolution and the scheduler adds noise, so the band is
-		// wide enough to separate the two hypotheses without flaking.
+		// and the scheduler add noise, so the band is wide enough to separate
+		// the two without flaking.
 		if ratio < 1.7 || ratio > 2.4 {
 			t.Errorf("gap %d/%d ratio %.2f (%v then %v); libutp doubles, so expected about 2.0",
 				i, i-1, ratio, gaps[i-1], gaps[i])
@@ -137,9 +128,7 @@ func TestConnectGivesUpAfterMaxAttempts(t *testing.T) {
 	cfg := NewConnectionConfig()
 	cfg.InitialTimeout = 100 * time.Millisecond
 
-	// libutp gives up on a connection attempt once retransmit_count reaches 2
-	// in CS_SYN_SENT, which is three transmissions of the SYN in total
-	// (utp_internal.cpp:1191).
+	// The attempt is abandoned after the SYN has been sent three times.
 	require.Equal(t, 3, cfg.MaxConnAttempts,
 		"default should match libutp's three SYN transmissions")
 
@@ -175,20 +164,16 @@ func relativeStamps(stamps []time.Time) []time.Duration {
 
 // --- RTT estimator and RTO ---------------------------------------------------
 //
-// libutp, at utp_internal.cpp:1362-1380:
+// For a packet sent once:
 //
-//	if (pkt->transmissions == 1) {
-//	    ertt = (now_micros - pkt->time_sent) / 1000;   // milliseconds
-//	    if (rtt == 0) { rtt = ertt; rtt_var = ertt / 2; }
-//	    else {
-//	        delta   = rtt - ertt;
-//	        rtt_var = rtt_var + (abs(delta) - rtt_var) / 4;
-//	        rtt     = rtt - rtt/8 + ertt/8;
-//	    }
-//	    rto = max(rtt + rtt_var * 4, 1000);
+//	ertt = (now_micros - time_sent) / 1000   // milliseconds
+//	if rtt == 0 { rtt = ertt; rtt_var = ertt / 2 }
+//	else {
+//	    delta   = rtt - ertt
+//	    rtt_var = rtt_var + (abs(delta) - rtt_var) / 4
+//	    rtt     = rtt - rtt/8 + ertt/8
 //	}
-//
-// This implementation keeps the same quantities in microseconds.
+//	rto = max(rtt + rtt_var*4, 1000)
 
 func ackAfter(seqNum uint16, rtt time.Duration) ackSample {
 	return ackSample{Delay: 10 * time.Millisecond, RTT: rtt, ReceivedAt: time.Now()}
@@ -249,10 +234,9 @@ func TestSubsequentRTTSamplesFollowLibutp(t *testing.T) {
 	require.Equal(t, 1090*time.Millisecond, st.Timeout)
 }
 
-// libutp's estimator works in whole milliseconds: the sample is truncated
-// (`ertt = (now - time_sent) / 1000`, utp_internal.cpp:1364) and rtt and
-// rtt_var are integer millisecond counts. Fractions of a millisecond are
-// dropped, not carried, and the RTO is libutp's to the millisecond.
+// The estimator works in whole milliseconds: the sample is truncated and rtt
+// and rtt_var are integer millisecond counts, so fractions are dropped, not
+// carried.
 func TestRTTSamplesAreWholeMilliseconds(t *testing.T) {
 	ctrl := newDefaultController(defaultCtrlConfig())
 
@@ -261,17 +245,17 @@ func TestRTTSamplesAreWholeMilliseconds(t *testing.T) {
 	require.NoError(t, ctrl.OnTransmit(2, transmitInitial, 500))
 	require.NoError(t, ctrl.OnAck(2, ackAfter(2, 480*time.Millisecond+700*time.Microsecond)))
 
-	// As TestSubsequentRTTSamplesFollowLibutp: ertt 400 then 480 give
-	// rtt 410, rtt_var 170, rto 1090. Carried in microseconds they give
+	// As TestSubsequentRTTSamplesFollowLibutp: ertt 400 then 480 give rtt
+	// 410, rtt_var 170, rto 1090. Carried in microseconds they would give
 	// 410.875, 170.288 and 1092.
 	st := ctrl.Stats()
 	require.Equal(t, 410*time.Millisecond, st.RTT)
 	require.Equal(t, int64(170000), st.RTTVarianceMicros)
 	require.Equal(t, 1090*time.Millisecond, st.Timeout)
 
-	// On a path faster than a millisecond libutp's estimate stays 0, and
-	// every sample is taken as the first (:1365). The loss probe, which is
-	// not libutp's, needs the round trip anyway, and has its own.
+	// On a path faster than a millisecond the estimate stays 0, and every
+	// sample is taken as the first. The loss probe keeps its own microsecond
+	// estimate.
 	fast := newDefaultController(defaultCtrlConfig())
 	require.NoError(t, fast.OnTransmit(1, transmitInitial, 500))
 	require.NoError(t, fast.OnAck(1, ackAfter(1, 300*time.Microsecond)))
@@ -279,9 +263,8 @@ func TestRTTSamplesAreWholeMilliseconds(t *testing.T) {
 	require.Equal(t, 300*time.Microsecond, fast.Stats().FineRTT)
 }
 
-// A retransmitted packet's ack cannot be attributed to a particular
-// transmission, so it must not move the estimate. libutp guards on
-// `pkt->transmissions == 1` (utp_internal.cpp:1362); this is Karn's algorithm.
+// A retransmitted packet's ack cannot be attributed to one transmission, so
+// it does not move the estimate (Karn's algorithm).
 func TestRetransmittedPacketDoesNotUpdateRTT(t *testing.T) {
 	ctrl := newDefaultController(defaultCtrlConfig())
 

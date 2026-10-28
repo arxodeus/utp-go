@@ -6,13 +6,9 @@ import (
 	"time"
 )
 
-// GAIN = 1 / min(16, ceil(2*TARGET/base)), draft §4.2.
-//
-// The point of the formula is that a background flow grows more slowly than
-// Reno on a short path -- where it can do the most damage to an interactive
-// flow -- and at up to Reno's rate on a long one, where growing any slower
-// would mean never using the link. The cases below pin both ends and the
-// boundary between them.
+// GAIN = 1 / min(16, ceil(2*TARGET/base)), draft §4.2. A background flow
+// grows more slowly than Reno on a short path and at up to Reno's rate on a
+// long one. The cases cover both ends and the boundary between them.
 func TestLedbatPPGain(t *testing.T) {
 	const target = 60 * time.Millisecond
 
@@ -60,10 +56,9 @@ func TestLedbatPPWindowDeltaPerRTT(t *testing.T) {
 	})
 
 	t.Run("below the target the increase is the full gain, whatever the delay", func(t *testing.T) {
-		// "the per RTT window when delay is less than target is: W += GAIN".
-		// Not RFC 6817's GAIN * (1 - delay/target), which fades to nothing
-		// near the target and with it the pressure that makes two flows
-		// converge.
+		// "the per RTT window when delay is less than target is: W += GAIN",
+		// not RFC 6817's GAIN * (1 - delay/target), which fades to nothing
+		// near the target and with it the pressure that makes flows converge.
 		for _, delay := range []time.Duration{target / 4, target / 2, target * 9 / 10, target} {
 			got := ledbatPPWindowDeltaPerRTT(gain, 100, delay, target)
 			if math.Abs(got-gain) > 1e-9 {
@@ -124,13 +119,10 @@ func TestLedbatPPWindowDeltaPerRTT(t *testing.T) {
 	})
 }
 
-// A LEDBAT++ connection runs slowdowns: it periodically drops to two packets
-// for two round trips so the queue drains and the base-delay estimate is
-// taken against an empty path rather than against its own standing queue.
-//
-// That mechanism is what LEDBAT++ exists for -- without it a long-running
-// flow measures its own queue as the path and stops yielding at all -- so it
-// is tested directly rather than inferred from a transfer.
+// A LEDBAT++ connection periodically drops to two packets for two round
+// trips, so the queue drains and the base delay is measured against an empty
+// path rather than its own standing queue. Without slowdowns a long-running
+// flow measures its own queue as the path and stops yielding.
 func TestLedbatPPSlowdownCycle(t *testing.T) {
 	config := defaultCtrlConfig()
 	config.Algorithm = AlgorithmLEDBATPP
@@ -204,7 +196,7 @@ func TestLedbatPPSlowdownCycle(t *testing.T) {
 	}
 
 	// When the ramp finishes, the next slowdown is nine slowdown-durations
-	// out, so slowdowns cost about a tenth of the link.
+	// later, so slowdowns cost about a tenth of the link.
 	endAt := rampAt.Add(3 * rtt)
 	ctrl.exitLedbatPPSlowStart(endAt)
 	if ctrl.ppPhase != ppCongestionAvoidance {
@@ -218,9 +210,8 @@ func TestLedbatPPSlowdownCycle(t *testing.T) {
 			ledbatPPSlowdownPeriodFactor, duration)
 	}
 
-	// Which is to say: at most about a tenth of the time is spent slowed
-	// down. That is the property the constant exists to give, so assert it
-	// rather than only the constant.
+	// At most about a tenth of the time is spent slowed down, the property
+	// the constant exists for.
 	cycle := duration + ctrl.ppNextSlowdownAt.Sub(endAt)
 	if fraction := float64(duration) / float64(cycle); fraction > 0.11 {
 		t.Errorf("slowdowns occupy %.1f%% of the cycle, want no more than about 10%%",
@@ -228,14 +219,10 @@ func TestLedbatPPSlowdownCycle(t *testing.T) {
 	}
 }
 
-// Slow start ends when the queueing delay reaches three quarters of the
-// target, not when it reaches the target. draft §4.1.
-//
-// The round trips passed in below are the *measured* ones, so they include
-// the queue: a 48ms standing queue means a round trip of at least 48ms. Using
-// a smaller RTT would be physically impossible, and the clamp that says so
-// would swallow the delay -- which is the clamp doing its job, not the
-// slow-start rule failing.
+// Slow start ends when the queuing delay reaches three quarters of the
+// target, not the target (draft §4.1). The round trips passed in are
+// measured ones, so they include the queue: a 48ms standing queue means a
+// round trip of at least 48ms, and a smaller one would be clamped.
 func TestLedbatPPSlowStartExitsAtThreeQuartersTarget(t *testing.T) {
 	config := defaultCtrlConfig()
 	config.Algorithm = AlgorithmLEDBATPP
@@ -253,7 +240,7 @@ func TestLedbatPPSlowStartExitsAtThreeQuartersTarget(t *testing.T) {
 		t.Fatalf("left slow start at half the target delay, phase %v", ctrl.ppPhase)
 	}
 
-	// Four fifths of it: over the three-quarter line, so out.
+	// Four fifths of it: past the three-quarter line, so slow start ends.
 	fourFifths := target * 4 / 5
 	ctrl.applyLedbatPP(0, uint32(fourFifths.Microseconds()), 1024, 0, ctrl.minRTT+fourFifths, now)
 	if ctrl.ppPhase != ppCongestionAvoidance {
@@ -261,10 +248,9 @@ func TestLedbatPPSlowStartExitsAtThreeQuartersTarget(t *testing.T) {
 	}
 }
 
-// The queueing delay a peer reports is clamped to the round trip actually
-// measured, in LEDBAT++ as in classic LEDBAT. A peer claiming a queue longer
-// than the round trip is reporting a broken clock or lying, and acting on it
-// would end slow start -- or collapse the window -- on nothing.
+// The queuing delay a peer reports is clamped to the measured round trip in
+// LEDBAT++ as in classic LEDBAT; a larger figure is a broken clock or a lie,
+// and acting on it would end slow start or collapse the window.
 func TestLedbatPPClampsDelayToRoundTrip(t *testing.T) {
 	config := defaultCtrlConfig()
 	config.Algorithm = AlgorithmLEDBATPP
@@ -283,9 +269,8 @@ func TestLedbatPPClampsDelayToRoundTrip(t *testing.T) {
 	}
 }
 
-// Classic LEDBAT is the default, and selecting it changes nothing about the
-// controller's shape. A connection that does not ask for LEDBAT++ must not
-// get any of it.
+// Classic LEDBAT is the default, and a connection that does not ask for
+// LEDBAT++ gets none of it.
 func TestClassicLedbatIsTheDefault(t *testing.T) {
 	cfg := NewConnectionConfig()
 	if cfg.CongestionAlgorithm != AlgorithmLEDBAT {
@@ -311,9 +296,8 @@ func TestClassicLedbatIsTheDefault(t *testing.T) {
 	}
 }
 
-// The window ceiling must never be below the window floor. It was, for any
-// caller that did not set WindowSize, which was every direct user of
-// defaultCtrlConfig -- and a ceiling of zero clamps the window shut on the
+// The window ceiling is never below the window floor, including when
+// WindowSize is unset; a ceiling of zero would clamp the window shut on the
 // first ack.
 func TestWindowCeilingIsNeverBelowTheFloor(t *testing.T) {
 	for _, tc := range []struct {
@@ -360,10 +344,7 @@ func newPPTestController(t0 time.Time) (*defaultController, *ppStepClock) {
 
 // A packet sent before a slowdown and declared lost during the ramp out of
 // it was sent from the window the slowdown saved. Its loss halves that
-// window, where the ramp is going, and leaves the ramp where it is. Charged
-// to the ramp's partial window instead, it ended the ramp at a fraction of
-// what the connection had been using, and two LEDBAT++ flows through a
-// shallow bottleneck split it as unevenly as 37/63 (KNOWN-LIMITATIONS.md).
+// window, where the ramp is going, and leaves the ramp where it is.
 func TestLedbatPPLossFromBeforeASlowdownHalvesTheSavedWindow(t *testing.T) {
 	t0 := time.Now()
 	ctrl, clk := newPPTestController(t0)
@@ -404,8 +385,7 @@ func TestLedbatPPLossFromBeforeASlowdownHalvesTheSavedWindow(t *testing.T) {
 
 // One congestion event is charged once. A packet sent before the window was
 // last cut belongs to the event that cut it, however much later its loss is
-// detected; a packet sent after the cut is a new event. The 100ms rate limit
-// alone charged one overflow twice when a slowdown fell between its losses.
+// detected; a packet sent after the cut is a new event.
 func TestLedbatPPLossIsChargedOncePerCongestionEvent(t *testing.T) {
 	t0 := time.Now()
 	ctrl, clk := newPPTestController(t0)
@@ -449,15 +429,9 @@ func TestLedbatPPLossIsChargedOncePerCongestionEvent(t *testing.T) {
 }
 
 // A round trip of acknowledgements below the target grows LEDBAT++'s window
-// by the draft's figure for a round trip: GAIN packets (§4.2).
-//
-// Each acknowledgement earns its share of the round trip's change. Two things
-// took some of it: the share was reckoned against the window as it stood,
-// which the round trip's earlier acknowledgements had already grown, and
-// each update was truncated to whole bytes -- a few bytes apiece when the
-// gain is small and the window large, so up to a byte of each was lost.
-// Measured before: 2-14% short, worst at the 20 ms gain of a sixth of a
-// packet and a hundred-packet window.
+// by GAIN packets (§4.2), whatever the gain and window size: each
+// acknowledgement's share is reckoned against the window it was sent in,
+// and fractions of a byte are carried rather than truncated.
 func TestLedbatPPRoundTripGrowth(t *testing.T) {
 	for _, rtt := range []time.Duration{20 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond} {
 		for _, packets := range []int{4, 10, 30, 100} {
@@ -473,7 +447,7 @@ func TestLedbatPPRoundTripGrowth(t *testing.T) {
 			c.maxWindowSizeBytes = window
 			now := time.Now()
 			for i := 0; i < packets; i++ {
-				// A millisecond of queueing, well under the target.
+				// A millisecond of queuing, well under the target.
 				c.applyLedbatPP(0, 1000, packet, window, rtt, now)
 			}
 			got := float64(c.maxWindowSizeBytes-window) / float64(packet)
