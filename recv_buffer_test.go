@@ -25,7 +25,7 @@ func TestRecvBufferAvailable(t *testing.T) {
 		data[i] = 0xef
 	}
 
-	// Write out-of-order packet.
+	// Write an out-of-order packet.
 	seqNum := initSeqNum + 2
 	err := buf.Write(data, seqNum)
 	require.NoError(t, err, "failed to write data")
@@ -33,7 +33,7 @@ func TestRecvBufferAvailable(t *testing.T) {
 		t.Errorf("expected available size to be %d, got %d", RECV_SIZE-DATA_LEN, buf.Available())
 	}
 
-	// Write in-order packet.
+	// Write an in-order packet.
 	seqNum = initSeqNum + 1
 	err = buf.Write(data, seqNum)
 	require.NoError(t, err, "failed to write data")
@@ -79,7 +79,7 @@ func TestRecvBufferWrite(t *testing.T) {
 
 	const DATA_LEN = 256
 
-	// Write out-of-order packet.
+	// Write an out-of-order packet.
 	dataSecond := make([]byte, DATA_LEN)
 	for i := range dataSecond {
 		dataSecond[i] = 0xef
@@ -93,7 +93,7 @@ func TestRecvBufferWrite(t *testing.T) {
 	require.NotNil(t, data)
 	require.True(t, bytes.Equal(dataSecond, data.data))
 
-	// Write in-order packet.
+	// Write an in-order packet.
 	dataFirst := make([]byte, DATA_LEN)
 	for i := range dataFirst {
 		dataFirst[i] = 0xfe
@@ -109,9 +109,9 @@ func TestRecvBufferWrite(t *testing.T) {
 	require.True(t, bytes.Equal(dataSecond, buf.buf[DATA_LEN:DATA_LEN*2]))
 }
 
-// Refused while the buffer holds something to read: the reader will free the
-// room. With nothing readable, the next packet is taken whatever its size (see
-// receiveBuffer.Admits), so this holds one byte first.
+// Refused while the buffer holds something to read: the reader will free
+// room. With nothing readable the next packet is taken whatever its size
+// (receiveBuffer.Admits), so this holds one byte first.
 func TestRecvBufferWriteExceedsAvailable(t *testing.T) {
 
 	initSeqNum := uint16(0xFFFF)
@@ -133,7 +133,7 @@ func TestRecvBufferRead(t *testing.T) {
 
 	const DATA_LEN = 256
 
-	// Write out-of-order packet.
+	// Write an out-of-order packet.
 	dataSecond := make([]byte, DATA_LEN)
 	for i := range dataSecond {
 		dataSecond[i] = 0xef
@@ -148,7 +148,7 @@ func TestRecvBufferRead(t *testing.T) {
 		t.Errorf("expected to read 0 bytes, got %d", n)
 	}
 
-	// Write in-order packet.
+	// Write an in-order packet.
 	dataFirst := make([]byte, DATA_LEN)
 	for i := range dataFirst {
 		dataFirst[i] = 0xfe
@@ -188,7 +188,7 @@ func TestAckNum(t *testing.T) {
 		data[i] = 0xef
 	}
 
-	// Write out-of-order packet.
+	// Write an out-of-order packet.
 	secondSeqNum := initSeqNum + 2
 	err := buf.Write(data, secondSeqNum)
 	require.NoError(t, err, "failed to write data to receive buffer")
@@ -197,7 +197,7 @@ func TestAckNum(t *testing.T) {
 		t.Errorf("expected ackNum to be %d, got %d", initSeqNum, buf.AckNum())
 	}
 
-	// Write in-order packet.
+	// Write an in-order packet.
 	firstSeqNum := initSeqNum + 1
 	err = buf.Write(data, firstSeqNum)
 	require.NoError(t, err, "failed to write data to receive buffer")
@@ -222,7 +222,7 @@ func TestSelectiveAck(t *testing.T) {
 		data[i] = 0xef
 	}
 
-	// Write out-of-order packet.
+	// Write an out-of-order packet.
 	seqNum := initSeqNum + 2
 	err := buf.Write(data, seqNum)
 	require.NoError(t, err, "failed to write data to receive buffer")
@@ -232,7 +232,7 @@ func TestSelectiveAck(t *testing.T) {
 		t.Errorf("expected selective ack with first packet acked, got %v", selectiveAck)
 	}
 
-	// Write in-order packet.
+	// Write an in-order packet.
 	seqNum = initSeqNum + 1
 	err = buf.Write(data, seqNum)
 	require.NoError(t, err, "failed to write data to receive buffer")
@@ -247,7 +247,7 @@ func TestSelectiveACKOverflow(t *testing.T) {
 	initSeqNum := uint16(math.MaxUint16) - 2
 	buf := newReceiveBuffer(RECV_SIZE, initSeqNum)
 
-	// 初始时无选择性ACK
+	// Initially there is no selective ack.
 	nilSelectiveAck := buf.SelectiveAck()
 	require.Nil(t, nilSelectiveAck, "Expected no selective ACK initially")
 
@@ -256,7 +256,7 @@ func TestSelectiveACKOverflow(t *testing.T) {
 		data[i] = 0xef
 	}
 
-	// 写入乱序包（注意Go中uint16自动处理溢出）
+	// Write out-of-order packets; uint16 arithmetic wraps.
 	seqNum := uint16(initSeqNum + 2) // 65533 + 2 = 65535 (overflow)
 	buf.Write(data, seqNum)
 
@@ -266,25 +266,24 @@ func TestSelectiveACKOverflow(t *testing.T) {
 	seqNum = initSeqNum + 5 // 65534 + 5 = 2 (overflow)
 	buf.Write(data, seqNum)
 
-	// 验证选择性ACK
+	// Check the selective ack.
 	notNilSelectiveAck := buf.SelectiveAck()
 	require.NotNil(t, notNilSelectiveAck, "Expected a selective ACK initially")
 	acked := notNilSelectiveAck.Acked()
 	require.NotNil(t, acked, "Expected a acked list")
 
-	// 构造期望的确认位图
+	// The expected bitmap.
 	expected := make([]bool, 32)
-	expected[0] = true // 对应序列号0（起始0+0）
-	expected[1] = true // 对应序列号1（起始0+1）
-	expected[3] = true // 对应序列号3（起始0+3）
+	expected[0] = true // sequence number 0
+	expected[1] = true // sequence number 1
+	expected[3] = true // sequence number 3
 
 	require.True(t, reflect.DeepEqual(notNilSelectiveAck.Acked(), expected),
 		"Expected acked %v, got %v", expected, notNilSelectiveAck.Acked())
 }
 
 // The selective-ack bitfield is a fixed 30-entry window starting at
-// `ack_nr + 2`, and encodes to exactly four bytes, whatever is pending.
-// libutp: utp_internal.cpp:797 (`ext_len = 4`), :805 (`min(14+16, ...)`).
+// ack_nr+2, and encodes to exactly four bytes, whatever is pending.
 func TestSelectiveAckWindowIsBounded(t *testing.T) {
 	buf := newReceiveBuffer(2*1024*1024, 100)
 
@@ -318,9 +317,8 @@ func TestSelectiveAckWindowIsBounded(t *testing.T) {
 	}
 }
 
-// A packet pending beyond the window produces an all-zero bitfield rather
-// than a wider one. libutp does the same: it scans a fixed window and emits
-// four bytes regardless of what lies past it.
+// A packet pending beyond the window gives an all-zero bitfield rather than a
+// wider one.
 func TestSelectiveAckIgnoresPacketsPastTheWindow(t *testing.T) {
 	buf := newReceiveBuffer(2*1024*1024, 100)
 	far := 100 + 2 + uint16(selectiveAckWindow) + 1

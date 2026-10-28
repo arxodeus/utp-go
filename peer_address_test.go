@@ -6,19 +6,11 @@ import (
 	"time"
 )
 
-// Connections are keyed by the peer's address rendered as a string
-// (UdpPeer.Hash, cid.go), so two renderings of the same address must produce
-// the same key and two different addresses must not.
-//
-// The case that matters is a dual-stack socket. A caller resolving
-// "127.0.0.1:9000" may get a 4-byte IP, while a packet arriving on a socket
-// bound to "::" may be reported with the same address in its 16-byte
-// v4-mapped form. If those hashed differently, the connection the dialler
-// created and the connection the inbound packet looks up would be two
-// different entries and nothing would ever match.
-//
-// net.IP.String renders a v4-mapped address as dotted quad, so they agree.
-// That is load-bearing rather than incidental, which is why it is pinned here.
+// Connections are keyed by the peer's address as a string (UdpPeer.Hash), so
+// two renderings of the same address must give the same key and different
+// addresses must not. On a dual-stack socket an address may arrive in its
+// 16-byte v4-mapped form while the caller resolved a 4-byte one;
+// net.IP.String renders both as a dotted quad, which this relies on.
 func TestUdpPeerHashIdentifiesTheAddressNotItsEncoding(t *testing.T) {
 	v4 := &net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: 9000}
 	v4in6 := &net.UDPAddr{IP: net.IP{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 127, 0, 0, 1}, Port: 9000}
@@ -42,8 +34,8 @@ func TestUdpPeerHashIdentifiesTheAddressNotItsEncoding(t *testing.T) {
 	seen := make(map[string]string, len(distinct))
 	for name, addr := range distinct {
 		h := NewUdpPeer(addr).Hash()
-		// "2001:db8::1" and "2001:db8:0:0:0:0:0:1" are the same address in
-		// two spellings, and must land on the same key.
+		// "2001:db8::1" and "2001:db8:0:0:0:0:0:1" are one address in two
+		// spellings and must give the same key.
 		if name == "v6 full address" {
 			if want := NewUdpPeer(distinct["v6 other host"]).Hash(); h != want {
 				t.Errorf("%q hashed to %q, but the same address spelled short hashed to %q",
@@ -58,10 +50,9 @@ func TestUdpPeerHashIdentifiesTheAddressNotItsEncoding(t *testing.T) {
 	}
 }
 
-// A v6 peer has to key a connection id the same way a v4 one does: the id
-// hashes send, recv and the peer together (cid.go genHash), and a peer whose
-// hash is empty or unstable would collapse every connection to one peer into
-// a single entry.
+// An IPv6 peer keys a connection id as an IPv4 one does: the key combines
+// send, recv and the peer, and an empty or unstable peer key would collapse
+// every connection to the peer into one entry.
 func TestConnectionIdHashDistinguishesIPv6Peers(t *testing.T) {
 	peerA := NewUdpPeer(&net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 6881})
 	peerB := NewUdpPeer(&net.UDPAddr{IP: net.ParseIP("2001:db8::2"), Port: 6881})
@@ -81,16 +72,9 @@ func TestConnectionIdHashDistinguishesIPv6Peers(t *testing.T) {
 	}
 }
 
-// A peer type this package did not create must still receive packets.
-//
-// udpConn.WriteTo switches on *UdpPeer and *ConnectionId and used to end in
-// `return 0, nil` for anything else: the packet was dropped and the caller was
-// told it had been sent. A connection built on such a peer would then time out
-// with nothing anywhere to say why. Neither half of that is acceptable -- a
-// send that did not happen is not a success -- so the address is parsed from
-// the peer's Hash, which is the contract the rest of this repository already
-// relies on (utpnet's peerUDPAddr), and a Hash that is not an address is an
-// error rather than silence.
+// A peer type this package did not create still receives packets: the
+// address is parsed from its Hash. A Hash that is not an address is an
+// error, not a silently dropped packet.
 func TestUdpConnWritesToForeignPeerTypes(t *testing.T) {
 	listener, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IP{127, 0, 0, 1}})
 	if err != nil {

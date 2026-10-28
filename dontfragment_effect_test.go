@@ -8,26 +8,15 @@ import (
 	"testing"
 )
 
-// The socket option has an effect, on a real socket, observed rather than
-// assumed.
-//
-// Every other test in this area checks that the *request* travels: that a
-// probe is marked, that the mark reaches the Conn, that a Conn which cannot
-// honour it still sends. None of them can tell whether setDontFragment
-// actually does anything, and a setsockopt that silently succeeded on the
-// wrong option would pass all of them.
-//
-// This one puts a datagram larger than the outbound interface's MTU on a real
-// socket. Without the bit the kernel fragments it and the send succeeds. With
-// the bit there is nothing the kernel may do but refuse, and the send fails
-// with EMSGSIZE. The contrast is the assertion: both halves must hold, so
-// the test fails if the option stops working *or* if the environment stops
-// being one where the difference is visible.
+// The socket option has a real effect on a real socket. A datagram larger
+// than the outbound interface's MTU is sent: without the bit the kernel
+// fragments it and the send succeeds; with the bit the send fails with
+// EMSGSIZE. Both halves must hold, so the test fails if the option stops
+// working or if the environment stops showing the difference.
 func TestDontFragmentActuallySetsTheBit(t *testing.T) {
-	// A destination off-link, so the route leaves by a real interface rather
-	// than loopback. Nothing has to be listening: the send either is refused
-	// by the local kernel or is handed to the interface, and both answers
-	// arrive before anything leaves the machine.
+	// An off-link destination, so the route uses a real interface rather
+	// than loopback. Nothing need be listening: the local kernel either
+	// refuses the send or hands it to the interface.
 	dst := &net.UDPAddr{IP: net.IPv4(203, 0, 113, 7), Port: 9}
 
 	mtu, ok := pathMTUFor(dst)
@@ -76,9 +65,8 @@ func TestDontFragmentActuallySetsTheBit(t *testing.T) {
 		t.Errorf("a %d-byte datagram was refused with don't-fragment set: %v", len(fits), err)
 	}
 
-	// Clearing it must restore fragmentation, or every later packet on this
-	// socket would be unfragmentable -- the thing libutp is explicit about
-	// not wanting (utp_internal.cpp:898-905).
+	// Clearing it must restore fragmentation, or every later packet on the
+	// socket would be unfragmentable.
 	if err := setDontFragment(base, false); err != nil {
 		t.Fatalf("clearing the bit again: %v", err)
 	}

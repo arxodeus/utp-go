@@ -6,9 +6,8 @@ import (
 	"time"
 )
 
-// The search must converge on a size the path carries, never above it, and
-// then stop. Simulated against a range of true path MTUs, including the
-// awkward ones.
+// The search converges on a size the path carries, never above it, and then
+// stops, for a range of true path MTUs.
 func TestMtuSearchConverges(t *testing.T) {
 	for _, truth := range []uint32{576, 577, 900, 1280, 1400, 1492, 1500, 9000} {
 		truth := truth
@@ -47,7 +46,7 @@ func TestMtuSearchConverges(t *testing.T) {
 				t.Errorf("took %d rounds to converge; a binary search over 9000 bytes needs about 14", rounds)
 			}
 
-			// Never above the truth: that is the whole safety property.
+			// Never above the truth: the safety property.
 			if m.current > truth {
 				t.Errorf("settled on %d, above the path's %d -- every packet would be dropped",
 					m.current, truth)
@@ -98,8 +97,8 @@ func TestMtuPayloadLeavesRoomForHeaderAndExtension(t *testing.T) {
 	}
 }
 
-// Probe eligibility, which is what stops the search sending a probe it cannot
-// learn anything from. libutp: utp_internal.cpp:906-911.
+// Probe eligibility, which stops the search sending a probe it cannot learn
+// from.
 func TestMtuProbeEligibility(t *testing.T) {
 	now := time.Now()
 	m := newMtuSearch(1500, now)
@@ -131,7 +130,6 @@ func TestMtuProbeEligibility(t *testing.T) {
 }
 
 // A converged search is redone after the interval, because paths change.
-// libutp: 30 minutes (utp_internal.cpp:1310).
 func TestMtuSearchIsRedoneAfterTheInterval(t *testing.T) {
 	now := time.Now()
 	m := newMtuSearch(1500, now)
@@ -155,8 +153,8 @@ func TestMtuSearchIsRedoneAfterTheInterval(t *testing.T) {
 	if m.done() {
 		t.Error("the re-search left the search already finished")
 	}
-	// The size stays where it settled, as libutp's does -- mtu_reset does not
-	// touch mtu_last -- and the next packet at that size is the first probe.
+	// The size stays where it settled, and the next packet at that size is
+	// the first probe.
 	if m.current != settled {
 		t.Errorf("the re-search moved packets from the settled %d to %d", settled, m.current)
 	}
@@ -213,13 +211,8 @@ func sizeName(n uint32) string {
 	}
 }
 
-// A fresh connection sends at the ceiling, as libutp does (`mtu_last =
-// mtu_ceiling`, utp_internal.cpp:2561-2562), and a lost first probe brings it
+// A fresh connection sends at the ceiling, and a lost first probe brings it
 // down to the midpoint.
-//
-// This test used to assert the opposite: a start at the midpoint, growing
-// only on evidence. libutp's start was faster on every healthy path measured
-// (DEVIATIONS.md, "The MTU search starts at the ceiling").
 func TestConnectionStartsAtTheCeiling(t *testing.T) {
 	cfg := NewConnectionConfig()
 

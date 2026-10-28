@@ -11,14 +11,10 @@ import (
 	utp "github.com/arxodeus/utp"
 )
 
-// quotedHeader builds the twenty bytes a router quotes back: the front of a
-// uTP datagram this side sent, carrying connId.
-//
-// Written out by hand rather than through the encoder, because this is the
-// one place the library reads bytes it did not produce in this process -- the
-// kernel hands them over from an ICMP message -- and a test that encoded them
-// with the same code that decodes them would agree with itself whatever the
-// layout was.
+// quotedHeader builds the twenty bytes a router quotes back: the start of a
+// uTP datagram this side sent, carrying connId. It is written out by hand,
+// since a test that encoded it with the code that decodes it would agree
+// with itself whatever the layout.
 //
 //	0        type<<4 | version
 //	1        first extension
@@ -42,13 +38,9 @@ func quotedHeader(t *testing.T, connId uint16) []byte {
 	return b
 }
 
-// The ICMP entry points reach the connection through this layer too. A
-// BitTorrent client reading IP_RECVERR off its UDP socket has a net.Addr and a
-// quoted payload, and this is where it hands them in.
-//
-// The connection ids are the socket's own, so the test asks the socket what
-// they are rather than guessing: any live connection to the peer will do,
-// which is what a real caller has as well.
+// The ICMP entry points reach the connection through this package. A caller
+// reading IP_RECVERR off its UDP socket has a net.Addr and a quoted payload,
+// and hands them in here. The connection ids are taken from the socket.
 func TestSocketProcessICMPError(t *testing.T) {
 	server, client := listenPair(t)
 
@@ -73,7 +65,7 @@ func TestSocketProcessICMPError(t *testing.T) {
 	}
 	defer srvConn.Close()
 
-	// The dialled connection's send id is what its data packets carry.
+	// The dialed connection's send id is what its data packets carry.
 	uc, ok := conn.(*Conn)
 	if !ok {
 		t.Fatalf("Dial returned %T, want *Conn", conn)
@@ -107,7 +99,7 @@ func TestSocketProcessICMPError(t *testing.T) {
 }
 
 // The fragmentation entry point, and what it refuses. A nil address must not
-// be turned into a peer that matches something.
+// become a peer that matches something.
 func TestSocketProcessICMPFragmentation(t *testing.T) {
 	server, client := listenPair(t)
 
@@ -149,8 +141,8 @@ func TestSocketProcessICMPFragmentation(t *testing.T) {
 		t.Error("a runt quote matched a connection")
 	}
 
-	// The connection is still usable: a fragmentation report changes the size
-	// of what is sent, not whether anything is sent.
+	// The connection is still usable: a fragmentation report changes the
+	// size of what is sent, not whether anything is sent.
 	payload := []byte("after the report")
 	if _, err := conn.Write(payload); err != nil {
 		t.Fatalf("write after the report: %v", err)

@@ -7,25 +7,22 @@ import (
 	"time"
 )
 
-// A loss probe that fired because the round trip jumped, not because anything
-// was lost, resends the probe and nothing else.
+// A loss probe that fired because the round trip jumped, not because
+// anything was lost, resends the probe and nothing else.
 //
-// A queue filling in slow start can take the round trip from 10 ms to 33 ms
-// faster than the smoothed estimate the probe's timer runs on. The probe then
-// resends the oldest packet while it, and everything behind it, is still in
-// the queue, and the first acknowledgement after the probe is the original's.
-// Taken for the probe's answer, it declared every packet sent before the probe
-// lost: 86-101 needless retransmissions on a lossless 100 Mb/s link over the
-// emulated network, about one run in three. Here the scripted peer reports
-// its delay as a real one does, so its acknowledgements say which packet drew
-// them, and one round's are held four round trips by a queue.
+// A queue filling in slow start can raise the round trip faster than the
+// smoothed estimate the probe's timer uses. The probe then resends the oldest
+// packet while it is still queued, and the first acknowledgement after the
+// probe is the original's, which must not be taken as evidence that earlier
+// packets were lost. Here the scripted peer reports its delay as a real one
+// does, so its acknowledgements identify the packet that drew them, and one
+// round's acknowledgements are held for four round trips.
 func TestSpuriousLossProbeResendsOnlyItself(t *testing.T) {
 	t.Run("queue", func(t *testing.T) { spuriousProbe(t, false) })
-	// The same with a peer that reports no delay, so no timestamps to go on,
-	// and the acknowledgements held until the probe has gone and then let
-	// through together, as when this process stalls: the original's arrives
-	// 5 ms after the probe, under the path's 50 ms minimum round trip, which
-	// is RFC 8985's test and the one left when there is no delay to read.
+	// The same with a peer that reports no delay, and the acknowledgements
+	// held until the probe has gone and then released together, as when this
+	// process stalls: the original's arrives 5 ms after the probe, under the
+	// path's 50 ms minimum round trip, which is RFC 8985's test.
 	t.Run("stall, no delay reported", func(t *testing.T) { spuriousProbe(t, true) })
 }
 
@@ -76,15 +73,15 @@ func spuriousProbe(t *testing.T, stall bool) {
 	})
 
 	// The peer: what it holds, and the send timestamp of the last packet it
-	// received. Its acknowledgement carries its own clock, half a round trip
-	// before the acknowledgement arrives here, and the delay it measured for
-	// that packet -- so their difference is that packet's send timestamp, as
-	// with a real peer.
+	// received. Its acknowledgement carries its own clock, half a round
+	// trip before the acknowledgement arrives, and the delay it measured,
+	// so their difference is that packet's send timestamp, as with a real
+	// peer.
 	got := map[uint16]bool{}
 	cum := uint16(ourSeq - 1)
-	// The stalled case's peer stops reporting a delay for the spiked round
-	// only: LEDBAT leaves a window where it is without delay samples, so the
-	// window could not grow first.
+	// In the stalled case the peer stops reporting a delay only for the
+	// spiked round: LEDBAT holds the window without delay samples, so it
+	// could not grow first otherwise.
 	noDelay := false
 	ack := func(lastStamp uint32) []byte {
 		for got[cum+1] {
@@ -145,9 +142,9 @@ func spuriousProbe(t *testing.T, stall bool) {
 	resentBefore := resent
 	noDelay = stall
 
-	// This round's packets all arrive, and each is acknowledged when it
-	// does, but a queue holds them for four round trips. Whatever is sent
-	// meanwhile -- the probe among it -- comes after them.
+	// This round's packets all arrive and each is acknowledged on arrival,
+	// but a queue holds them for four round trips. Whatever is sent
+	// meanwhile, the probe included, comes after them.
 	const step = 5 * time.Millisecond
 	pending := append([]sent(nil), spikeRound...)
 	var probes []sent

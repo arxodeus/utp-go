@@ -47,13 +47,8 @@ func writevPair(t *testing.T, ctx context.Context, cid uint16) (client, server *
 	return client, server
 }
 
-// A vectored write, libutp's utp_writev: several buffers written as one stream
-// write.
-//
-// What must be true is that the peer sees exactly the concatenation, with
-// nothing lost between the pieces and no framing implied by the split -- uTP
-// is a byte stream, and a caller that split its data into a header and a body
-// must not be able to tell afterwards how it split it.
+// A vectored write sends several buffers as one stream write. The peer sees
+// exactly the concatenation, with no framing implied by the split.
 func TestWriteVDeliversTheConcatenation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -108,9 +103,7 @@ func TestWriteVDeliversTheConcatenation(t *testing.T) {
 }
 
 // A vectored write is indistinguishable on the wire from the same bytes
-// written whole. Asserted because the saving it exists for is a copy, not a
-// change in what is sent, and a framing difference would be a bug rather than
-// an optimisation.
+// written whole.
 func TestWriteVMatchesASingleWrite(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -179,10 +172,8 @@ func TestWriteVEdges(t *testing.T) {
 	}
 }
 
-// WriteV must not retain the caller's buffers, for the same reason Write must
-// not: a write that hit its deadline leaves its entry in the connection's
-// pending list, and a caller is free to reuse its buffers the moment the call
-// returns. Run this under -race.
+// WriteV must not retain the caller's buffers, which the caller may reuse
+// as soon as the call returns. Run under -race.
 func TestWriteVDoesNotRetainCallerBuffers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -216,17 +207,11 @@ func TestWriteVDoesNotRetainCallerBuffers(t *testing.T) {
 	<-readDone
 }
 
-// What WriteV is actually worth, measured rather than asserted.
+// benchmarkVectored compares WriteV with joining the buffers and calling
+// Write. WriteV should copy once rather than twice, which shows in the
+// allocated bytes per operation. Run both together and compare B/op:
 //
-// The claim is one copy rather than two: a caller with several buffers either
-// joins them (allocate the total, copy into it) and calls Write (which
-// allocates the total again and copies again), or calls WriteV (allocate
-// once, copy once). Allocated bytes per operation is the figure that shows
-// it, and it is far more robust to a noisy loopback than nanoseconds are.
-//
-// Run both together -- `go test -bench 'WriteV|WriteJoined' -benchmem` -- and
-// compare B/op. Cross-run comparisons in this harness are not worth having;
-// see BENCHMARKS.md.
+//	go test -bench 'WriteV|WriteJoined' -benchmem
 func benchmarkVectored(b *testing.B, vectored bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()

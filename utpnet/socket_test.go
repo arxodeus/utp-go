@@ -37,8 +37,7 @@ func listenPair(t *testing.T) (server, client *Socket) {
 	return server, client
 }
 
-// The whole point of the package: a uTP connection that behaves like any
-// other net.Conn, over a real UDP socket.
+// A uTP connection behaves like any other net.Conn over a real UDP socket.
 func TestDialAcceptTransfer(t *testing.T) {
 	server, client := listenPair(t)
 
@@ -92,8 +91,7 @@ func TestDialAcceptTransfer(t *testing.T) {
 	}
 }
 
-// The addresses a caller sees have to be the real ones, or a BitTorrent
-// client cannot tell its peers apart.
+// A caller sees the real addresses.
 func TestConnAddresses(t *testing.T) {
 	server, client := listenPair(t)
 
@@ -131,9 +129,8 @@ func TestConnAddresses(t *testing.T) {
 	}
 }
 
-// A BitTorrent client runs the DHT on the same UDP port as uTP. Datagrams
-// that are not uTP have to come back out of ReadFrom rather than being
-// swallowed or answered.
+// Datagrams that are not uTP come out of ReadFrom rather than being
+// swallowed or answered, as for a DHT sharing the port.
 func TestNonUtpDatagramsPassThrough(t *testing.T) {
 	sock, _ := listenPair(t)
 
@@ -143,7 +140,7 @@ func TestNonUtpDatagramsPassThrough(t *testing.T) {
 	}
 	defer raw.Close()
 
-	// Shaped like a DHT query, which is what would really be sharing the port.
+	// Shaped like a DHT query.
 	msg := []byte("d1:ad2:id20:abcdefghij0123456789e1:q4:ping1:t2:aa1:y1:qe")
 	if _, err := raw.WriteToUDP(msg, sock.Addr().(*net.UDPAddr)); err != nil {
 		t.Fatal(err)
@@ -164,7 +161,7 @@ func TestNonUtpDatagramsPassThrough(t *testing.T) {
 		t.Errorf("datagram came from %q, want %q", from, raw.LocalAddr())
 	}
 
-	// And the reverse direction, which is how the DHT would reply.
+	// And the reverse direction, as a DHT reply.
 	reply := []byte("d1:rd2:id20:mnopqrstuvwxyz123456e1:t2:aa1:y1:re")
 	if _, err := sock.WriteTo(reply, raw.LocalAddr()); err != nil {
 		t.Fatalf("writing a non-uTP datagram: %v", err)
@@ -179,8 +176,7 @@ func TestNonUtpDatagramsPassThrough(t *testing.T) {
 	}
 }
 
-// uTP traffic must not leak out of ReadFrom. If it did, a caller sharing the
-// port would try to parse uTP packets as its own protocol.
+// uTP traffic does not leak out of ReadFrom.
 func TestUtpPacketsDoNotLeakToReadFrom(t *testing.T) {
 	server, client := listenPair(t)
 
@@ -217,8 +213,8 @@ func TestUtpPacketsDoNotLeakToReadFrom(t *testing.T) {
 	}
 }
 
-// The sniff decides what the uTP machinery ever sees, so it is tested on its
-// own rather than only through a transfer.
+// The classification decides what the uTP connections see, so it is tested
+// directly.
 func TestIsUtpPacket(t *testing.T) {
 	// An ST_DATA header, version 1, no extension: connection id 1234,
 	// timestamp 200000, window 1 MiB, sequence number 42 (BEP 29).
@@ -258,9 +254,8 @@ func TestIsUtpPacket(t *testing.T) {
 	})
 }
 
-// Deadlines have to work the way net.Conn's do, including being movable from
-// another goroutine while a call is blocked. Callers rely on that to unblock
-// readers.
+// Deadlines work like net.Conn's, including being moved from another
+// goroutine while a call is blocked.
 func TestReadDeadline(t *testing.T) {
 	server, client := listenPair(t)
 
@@ -306,7 +301,7 @@ func TestReadDeadline(t *testing.T) {
 	}
 
 	// A deadline set from another goroutine unblocks a Read already in
-	// progress: the standard library behaves this way and callers use it.
+	// progress.
 	if err := in.SetReadDeadline(time.Time{}); err != nil {
 		t.Fatal(err)
 	}
@@ -333,8 +328,7 @@ func TestReadDeadline(t *testing.T) {
 	wg.Wait()
 }
 
-// Close has to be safe to call twice and from several goroutines: net.Conn
-// callers do both.
+// Close is safe to call twice and from several goroutines.
 func TestCloseIsIdempotent(t *testing.T) {
 	server, _ := listenPair(t)
 	if err := server.Close(); err != nil {
@@ -356,12 +350,7 @@ func min(a, b int) int {
 }
 
 // Many simultaneous connections on one port, each exchanging data in both
-// directions: the traffic shape a BitTorrent client produces.
-//
-// This is what found the send buffer retaining the caller's slice. A
-// unidirectional transfer never touches its buffer again after writing, so
-// every test in this repository passed while any echo loop corrupted its own
-// data.
+// directions, as a BitTorrent client does.
 func TestConcurrentFullDuplexConnections(t *testing.T) {
 	if testing.Short() {
 		t.Skip("not a -short test")

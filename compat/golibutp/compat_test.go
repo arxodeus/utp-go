@@ -72,17 +72,15 @@ func TestAsyncFirewallRefuses(t *testing.T) {
 	require.Equal(t, context.DeadlineExceeded, err)
 }
 
-// Context options are libutp's: set and read back, refused outside what
-// utp_context_set_option takes, and given to connections made afterwards --
-// including one accepted by an Accept that was already waiting when the
-// option changed, since libutp copies the options into a socket when its
-// SYN arrives.
+// Context options can be set and read back, invalid ones are refused, and
+// they apply to connections created afterwards, including one accepted by an
+// Accept that was already waiting when the option changed.
 func TestOptionsReachNewConnections(t *testing.T) {
 	a, b := udpPair(t)
 	require.Equal(t, 1<<20, b.WriteBufferLen())
 	require.Equal(t, 1<<20, b.ReadBufferLen())
-	// One connection first, so that b's accept loop is surely waiting in a
-	// fresh Accept, called with the defaults, when the options change.
+	// One connection first, so that b's accept loop is waiting in a fresh
+	// Accept, called with the defaults, when the options change.
 	_, first := dialAccept(t, a, b)
 	require.Equal(t, 1<<20, first.WriteBufferLen())
 	time.Sleep(50 * time.Millisecond)
@@ -122,8 +120,7 @@ func TestConnSetWriteBufferLen(t *testing.T) {
 }
 
 // A send the operating system says can never succeed fails a dial at once,
-// as go-libutp's sendto callback makes it, rather than after libutp's
-// 21 seconds of retransmitted SYNs.
+// rather than after 21 seconds of retransmitted SYNs.
 func TestUnsendableDialFailsAtOnce(t *testing.T) {
 	s, err := NewSocket("udp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -136,7 +133,7 @@ func TestUnsendableDialFailsAtOnce(t *testing.T) {
 }
 
 // The Socket is a PacketConn for everything that is not uTP, alongside its
-// connections, with working deadlines where go-libutp panics.
+// connections, with working deadlines.
 func TestNonUtpDatagramsShareThePort(t *testing.T) {
 	s, err := NewSocket("udp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -211,7 +208,7 @@ func TestWriteStatus(t *testing.T) {
 	assert.Contains(t, out.String(), "listening at "+b.Addr().String()+"\nhas 1 conns\nbacklog: 0\n")
 }
 
-// Log options open the logger up as libutp's do.
+// Log options enable more verbose logging.
 func TestLogOptions(t *testing.T) {
 	s, err := NewSocket("udp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -224,10 +221,9 @@ func TestLogOptions(t *testing.T) {
 	require.False(t, h.Enabled(context.Background(), -4))
 }
 
-// A dial completes whether or not anything is waiting in Accept, as it does
-// against libutp, and Accept then returns the connection: the engine answers
-// a SYN as it arrives on a socket with a configuration of its own, which
-// utpnet's always has (utp.WithAcceptConfig).
+// A dial completes whether or not anything is waiting in Accept, and Accept
+// then returns the connection: the engine answers a SYN as it arrives on a
+// socket with its own configuration (utp.WithAcceptConfig).
 func TestDialCompletesBeforeAccept(t *testing.T) {
 	a, b := udpPair(t)
 	d, err := a.DialTimeout(b.Addr().String(), 5*time.Second)

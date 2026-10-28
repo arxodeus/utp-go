@@ -8,27 +8,13 @@ import (
 	"time"
 )
 
-// TestConformanceAckCoalescing compares how many STATE packets each stack
-// emits for a batch of ST_DATA packets delivered back to back.
-//
-// libutp does not acknowledge a packet at the point it processes it. It calls
-// schedule_ack() (utp_internal.cpp:2377), which only sets a flag, and the
-// embedder later calls utp_issue_deferred_acks() once per read batch
-// (utp.h:512-517, utp_internal.cpp:3796-3808). An entire batch therefore costs
-// libutp exactly one STATE packet, however many data packets it holds — and
-// that is asserted here on every run rather than hard-coded, so the test fails
-// if the reference ever changes instead of pinning a stale assumption.
-//
-// We match it. The socket's reader handles each packet as it reads it and
-// sends the acknowledgement once nothing more is waiting (UtpSocket.readLoop,
-// QueuedReader), which is libutp's embedder loop.
-//
-// This used to be unmatchable, and asserted only "no more acks than data
-// packets": the packets crossed three goroutines -- read loop, dispatcher,
-// connection event loop -- so how many shared a pass depended on the
-// scheduler. A fixed bound of two held on a plain run and failed under -race.
-// Handled on the reader, the batch is what was queued, not what the scheduler
-// happened to group.
+// TestConformanceAckCoalescing compares how many STATE packets each
+// implementation emits for a batch of ST_DATA packets delivered back to back.
+// The reference implementation defers acknowledgements and flushes them once
+// per read batch, so a batch costs exactly one STATE packet; that is checked
+// on every run rather than assumed. This library does the same: the socket's
+// reader sends the acknowledgement once nothing more is waiting
+// (UtpSocket.readLoop, QueuedReader).
 func TestConformanceAckCoalescing(t *testing.T) {
 	for _, batch := range []int{1, 2, 4, 8, 16} {
 		t.Run(fmt.Sprintf("%d-packets", batch), func(t *testing.T) {
@@ -48,9 +34,9 @@ func TestConformanceAckCoalescing(t *testing.T) {
 	}
 }
 
-// libutpAcksForBatch drives a real libutp responder through the handshake,
+// libutpAcksForBatch drives the reference responder through the handshake,
 // injects batch ST_DATA packets, and returns the number of packets it emits
-// when the embedder flushes deferred acks.
+// when deferred acks are flushed.
 func libutpAcksForBatch(t *testing.T, batch int) int {
 	t.Helper()
 	drv, err := libutpNewDriverForCorpus()
@@ -89,16 +75,15 @@ func ourAcksForBatch(t *testing.T, batch int) int {
 	conn.settle()
 	conn.takeEmitted()
 
-	// Queue the whole batch before any of it is delivered, so what is measured
-	// is our coalescing and not the test goroutine's injection speed. This is
-	// the same starting position libutp's embedder gives it.
+	// Queue the whole batch before any of it is delivered, so the test
+	// measures coalescing rather than injection speed.
 	conn.hold()
 	for _, pkt := range ackBatchPackets(batch) {
 		conn.inject(pkt)
 	}
 	conn.release()
 
-	// settle() returns after one quiet period; a batch may still span two
+	// settle returns after one quiet period; a batch may still span two
 	// passes, so wait long enough that a third would have happened.
 	time.Sleep(200 * time.Millisecond)
 	return len(conn.takeEmitted())
