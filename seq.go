@@ -1,13 +1,14 @@
 package utp
 
-// circularRangeInclusive represents a range bounded inclusively below and above that supports wrapping arithmetic.
+// circularRangeInclusive is an inclusive range of sequence numbers in the
+// wrapping uint16 space.
 type circularRangeInclusive struct {
 	start     uint16
 	end       uint16
 	exhausted bool
 }
 
-// newCircularRangeInclusive returns a new circularRangeInclusive.
+// newCircularRangeInclusive returns the range [start, end].
 func newCircularRangeInclusive(start, end uint16) *circularRangeInclusive {
 	return &circularRangeInclusive{
 		start:     start,
@@ -26,7 +27,7 @@ func (r *circularRangeInclusive) End() uint16 {
 	return r.end
 }
 
-// Contains returns true if item is contained in the range.
+// Contains reports whether item lies in the range.
 func (r *circularRangeInclusive) Contains(item uint16) bool {
 	if r.end >= r.start {
 		return item >= r.start && item <= r.end
@@ -52,15 +53,9 @@ func (r *circularRangeInclusive) Next() (uint16, bool) {
 	}
 }
 
-// wrappingLessThan reports whether a precedes b in the uint16 sequence space,
-// where "precedes" means the forward distance from a to b is less than half
-// the space. It is the analogue of libutp's `wrapping_compare_less`
-// (utp_utils.cpp), which this fork needs wherever two sequence numbers are
-// ordered without knowing which side of a wrap either is on.
-//
-// Equal values are not less than one another, and a pair exactly half the
-// space apart is not ordered either -- there is no correct answer for
-// (0, 32768), so it reports false in both directions rather than pretending.
+// wrappingLessThan reports whether a precedes b in the uint16 sequence space:
+// the forward distance from a to b is less than half the space. Equal values,
+// and values exactly half the space apart, are unordered and report false.
 func wrappingLessThan(a, b uint16) bool {
 	const half = 1 << 15
 	return a != b && uint16(b-a) < half

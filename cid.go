@@ -6,16 +6,16 @@ import (
 	"strconv"
 )
 
-// ConnectionPeer is an interface representing a remote peer.
+// ConnectionPeer identifies the remote end of a connection. Hash must return
+// a stable string that distinguishes peers.
 type ConnectionPeer interface {
 	Hash() string
 }
 
-// SocketAddr is a simple implementation of the ConnectionPeer interface using net.UDPAddr.
+// UdpPeer is a ConnectionPeer for a UDP address.
 type UdpPeer struct {
 	addr *net.UDPAddr
-	// hash is addr.String(), computed when the peer is made, so a peer the
-	// socket's reader routes many datagrams for formats its address once.
+	// hash caches addr.String().
 	hash string
 }
 
@@ -30,9 +30,7 @@ func (p *UdpPeer) Hash() string {
 	return p.addr.String()
 }
 
-// Addr returns the UDP address this peer names. It exists so callers that
-// need a net.Addr -- anything presenting a uTP stream as a net.Conn -- can
-// get one back out without reparsing the hash.
+// Addr returns the peer's UDP address.
 func (p *UdpPeer) Addr() *net.UDPAddr {
 	return p.addr
 }
@@ -53,7 +51,8 @@ func (p *tcpPeer) String() string {
 	return p.addr.String()
 }
 
-// ConnectionId represents a connection identifier with send and receive IDs and a peer.
+// ConnectionId identifies a connection by its send and receive ids and its
+// peer.
 type ConnectionId struct {
 	Send uint16
 	Recv uint16
@@ -71,24 +70,15 @@ func NewConnectionId(peer ConnectionPeer, recvId uint16, sendId uint16) *Connect
 	return connId
 }
 
-// genHash is the connection's key: its two ids and its peer's key, as text.
-// Two connections share a key exactly when all three match -- the ids come
-// first and hold no colon, so the peer's key, whatever it contains, cannot
-// make two different triples spell the same string.
-//
-// It was a SHA3-256 of that same text, cut to 20 bytes and hex-encoded, which
-// bought nothing a map needs and cost most of the time a packet took: the
-// socket's reader builds up to three candidate ids for every datagram it
-// routes, and with the hash that was 27us of a 37us path from read to
-// acknowledgement (10 Mb/s from libutp, TestAckTurnaround).
+// genHash returns the connection's key: its ids and its peer's key, as text.
+// The ids contain no colon, so distinct triples give distinct keys.
 func genHash(connId *ConnectionId) string {
 	peer := connId.Peer.Hash()
 	return string(appendConnKey(make([]byte, 0, len(peer)+12), connId.Send, connId.Recv, peer))
 }
 
-// appendConnKey appends the key genHash makes for these ids and peer key. The
-// socket's reader builds keys with it into a reused buffer, so a lookup
-// allocates nothing.
+// appendConnKey appends the key genHash returns for these ids and peer key,
+// so a lookup can build it in a reused buffer.
 func appendConnKey(b []byte, send, recv uint16, peer string) []byte {
 	b = strconv.AppendUint(b, uint64(send), 10)
 	b = append(b, ':')
@@ -97,16 +87,9 @@ func appendConnKey(b []byte, send, recv uint16, peer string) []byte {
 	return append(b, peer...)
 }
 
-// Hash returns the key this connection is tracked under.
-//
-// The value is cached by NewConnectionId. ConnectionId is exported with
-// exported fields, so callers legitimately build one as a struct literal --
-// and such a value has an empty cached hash. Returning that empty string made
-// every literal-built ConnectionId hash to "" and therefore collide with
-// every other one, silently breaking connection lookup. Fall back to
-// computing it rather than handing back a key that is wrong.
-//
-// Prefer NewConnectionId: it caches, and this fallback does not.
+// Hash returns the key the connection is tracked under. NewConnectionId
+// caches it; for a ConnectionId built as a struct literal it is computed on
+// each call.
 func (id *ConnectionId) Hash() string {
 	if id.hash == "" {
 		return genHash(id)

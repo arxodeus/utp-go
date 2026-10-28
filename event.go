@@ -5,42 +5,34 @@ type streamEventType int
 const (
 	streamIncoming streamEventType = iota
 	streamShutdown
-	// streamCloseWrite wakes the event loop for a half-close. It is separate
-	// from streamShutdown because that one means "finished entirely" and sets
-	// the flag to prove it; CloseWrite only needs the loop to notice that the
-	// sending side is done, and must not be mistaken for a full close.
+	// streamCloseWrite wakes the event loop for a half-close of the sending
+	// side. It is distinct from streamShutdown, which closes both sides.
 	streamCloseWrite
-	// streamCloseRead wakes the event loop for the other half-close: this end
-	// has finished reading. libutp's utp_shutdown(SHUT_RD), which sets
-	// read_shutdown (utp_internal.cpp:3409-3411).
+	// streamCloseRead wakes the event loop for a half-close of the
+	// receiving side.
 	streamCloseRead
 	// streamICMP carries an ICMP report about a packet this connection sent.
-	// The socket parses the quoted uTP header and finds the connection; the
-	// connection decides what the report means, which is where libutp puts
-	// the decision too (utp_process_icmp_fragmentation and
-	// utp_process_icmp_error, utp_internal.cpp:3079-3150).
+	// The socket finds the connection from the quoted header; the
+	// connection decides what the report means.
 	streamICMP
 )
 
-// icmpKind distinguishes libutp's two ICMP entry points.
+// icmpKind is the kind of an ICMP report.
 type icmpKind int
 
 const (
 	// icmpFragmentationNeeded is ICMP type 3 code 4, or ICMPv6 "packet too
-	// big": the datagram was larger than some hop would carry.
-	// utp_process_icmp_fragmentation.
+	// big": the datagram was larger than a hop would carry.
 	icmpFragmentationNeeded icmpKind = iota
-	// icmpUnreachable is any ICMP error that should tear the connection
-	// down. utp_process_icmp_error.
+	// icmpUnreachable is any ICMP error that ends the connection.
 	icmpUnreachable
 )
 
 // icmpNotice is one ICMP report, already matched to a connection.
 type icmpNotice struct {
 	Kind icmpKind
-	// NextHopMTU is the router's figure from a fragmentation-needed message:
-	// the largest IP datagram the next hop will carry. Zero when the router
-	// did not supply one, which older routers do not.
+	// NextHopMTU is the largest IP datagram the next hop will carry, from a
+	// fragmentation-needed message, or zero if the router did not supply it.
 	NextHopMTU uint32
 }
 
@@ -58,15 +50,14 @@ type streamEvent struct {
 	ICMP *icmpNotice
 }
 
-// socketEvent represents events related to a socket.
+// socketEvent is a request from a connection to its socket.
 type socketEvent struct {
 	Type         socketEventType
 	Packet       *packet
 	ConnectionId ConnectionPeer
-	// DontFragment marks this datagram as an MTU probe, to be sent with
-	// fragmentation disabled if the Conn can do that. libutp carries the same
-	// bit from send_packet to its embedder's sendto callback as
-	// UTP_UDP_DONTFRAG (utp_internal.cpp:928). See DontFragmentWriter.
+	// DontFragment marks the datagram as an MTU probe, to be sent with
+	// fragmentation disabled if the Conn supports it. See
+	// DontFragmentWriter.
 	DontFragment bool
 }
 
@@ -78,8 +69,7 @@ func newOutgoingSocketEvent(p *packet, cid ConnectionPeer) *socketEvent {
 	}
 }
 
-// newOutgoingProbeSocketEvent is newOutgoingSocketEvent for a datagram the
-// path-MTU search is using as a probe.
+// newOutgoingProbeSocketEvent is newOutgoingSocketEvent for an MTU probe.
 func newOutgoingProbeSocketEvent(p *packet, cid ConnectionPeer) *socketEvent {
 	return &socketEvent{
 		Type:         outgoing,
@@ -91,10 +81,8 @@ func newOutgoingProbeSocketEvent(p *packet, cid ConnectionPeer) *socketEvent {
 
 // newShutdownSocketEvent tells the socket to forget a connection.
 //
-// lingerAck, when non-nil, is the acknowledgement to re-send if the peer keeps
-// retransmitting its FIN after this connection has gone. Without it the socket
-// answers that retransmission with a RESET, and a transfer that arrived whole
-// ends as a connection reset for the peer. See UtpSocket.rememberLingerAck.
+// lingerAck, if non-nil, is the acknowledgement the socket sends if the peer
+// retransmits its FIN after the connection has gone, instead of a RESET.
 func newShutdownSocketEvent(cid ConnectionPeer, lingerAck *packet) *socketEvent {
 	return &socketEvent{
 		Type:         socketShutdown,

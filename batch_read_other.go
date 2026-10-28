@@ -2,11 +2,11 @@
 
 package utp
 
-// udpConnReader keeps nothing: there are no batched reads here.
+// udpConnReader is empty on platforms without batched reads.
 type udpConnReader struct{}
 
-// readBatch is unsupported here; UtpSocket.readLoop falls back to one
-// datagram per read, each its own batch.
+// readBatch is not supported on this platform; the read loop falls back to
+// one datagram per read.
 func (udpConnReader) readBatch() ([]datagram, error) {
 	return nil, errBatchReadUnsupported
 }

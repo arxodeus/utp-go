@@ -5,19 +5,17 @@ import (
 	"syscall"
 )
 
-// Windows' don't-fragment options, which the standard library's syscall
-// package does not define. Both are from ws2ipdef.h: IP_DONTFRAGMENT at the
-// IPPROTO_IP level and IPV6_DONTFRAG at IPPROTO_IPV6. They share the value 14
-// at their respective levels, which looks like a typo and is not.
+// Don't-fragment socket options from ws2ipdef.h, which package syscall does
+// not define. Both have the value 14, at the IPPROTO_IP and IPPROTO_IPV6
+// levels respectively.
 const (
 	windowsIPDontFragment = 14
 	windowsIPv6DontFrag   = 14
 )
 
-// setDontFragment turns the don't-fragment bit on or off for the next
-// datagram sent on this socket. See the Linux file for why this is a socket
-// option toggled around a single send, and why succeeding if either address
-// family works is the right test.
+// setDontFragment sets or clears the don't-fragment bit for the next
+// datagram sent on the socket. It succeeds if either address family accepts
+// the option.
 func setDontFragment(c *net.UDPConn, on bool) error {
 	rc, err := c.SyscallConn()
 	if err != nil {

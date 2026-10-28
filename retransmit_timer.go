@@ -8,18 +8,13 @@ import (
 
 const (
 	// defaultRetransmitTickInterval is the resolution of the retransmission
-	// timer wheel: how late a retransmission can be. A timer is never early
-	// (timeWheel.put).
-	//
-	// 25 ms is fine enough that quantisation is negligible against any
-	// realistic RTO. It is affordable only because the wheel is shared across
-	// the whole socket: one ticker, not one per connection. History:
-	// HISTORY.md, "defaultRetransmitTickInterval".
+	// timer wheel: how late a retransmission can fire. A timer never fires
+	// early. The wheel is shared by every connection on a socket, so this
+	// costs one ticker per socket.
 	defaultRetransmitTickInterval = 25 * time.Millisecond
 
-	// defaultRetransmitSlots gives one revolution of 1.6s at the default
-	// interval. Longer delays are handled by the wheel's rounds counter, so
-	// this is a distribution parameter, not a ceiling.
+	// defaultRetransmitSlots gives one revolution of 1.6 s at the default
+	// interval. Longer delays wrap; this does not bound the delay.
 	defaultRetransmitSlots = 64
 )
 
@@ -30,24 +25,19 @@ type retransmitKey struct {
 	seq   uint16
 }
 
-// retransmitTimer is what the shared wheel stores: the packet to resend and
-// where to deliver the expiry.
+// retransmitTimer is an entry in the wheel: the packet to resend and where
+// to deliver the expiry.
 type retransmitTimer struct {
 	packet  *packet
 	deliver chan *packet
 	ctx     context.Context
-	// wake starts the connection's loop if it is resting (dormant.go): a
-	// timeout delivered to a loop that has gone would wait for ever.
+	// wake starts the connection's event loop if it is resting.
 	wake func()
 }
 
-// retransmitTimers is a socket-wide retransmission timer wheel.
-//
-// One wheel per socket rather than one per connection. A 25 ms interval with
-// a wheel per connection meant 40 timer wake-ups per second per connection --
-// 40,000/s at a thousand connections, which cost about 25% of throughput.
-// Shared, the tick rate is constant regardless of connection count and the
-// per-tick work is proportional to the number of timers actually expiring.
+// retransmitTimers is a retransmission timer wheel shared by every
+// connection on a socket, so the tick rate does not grow with the number of
+// connections.
 type retransmitTimers struct {
 	wheel     *timeWheel[retransmitKey, retransmitTimer]
 	nextScope atomic.Uint64
@@ -57,8 +47,7 @@ func newRetransmitTimers(interval time.Duration, slots int) *retransmitTimers {
 	return newRetransmitTimersWithClock(interval, slots, RealClock)
 }
 
-// newRetransmitTimersWithClock is the socket-wide retransmission wheel on a
-// given clock. See newTimeWheelWithClock.
+// newRetransmitTimersWithClock returns a retransmission wheel driven by clk.
 func newRetransmitTimersWithClock(interval time.Duration, slots int, clk Clock) *retransmitTimers {
 	r := &retransmitTimers{}
 	barrier, _ := clk.(idleBarrier)
@@ -80,10 +69,9 @@ func newRetransmitTimersWithClock(interval time.Duration, slots int, clk Clock) 
 			if barrier != nil {
 				barrier.TakeHandoff()
 			}
-			// This connection's event loop is behind. Re-arm for the next
-			// tick rather than blocking every other connection's timers
-			// behind it, or dropping the timeout and stalling this
-			// connection permanently.
+			// The connection's event loop is behind. Re-arm for the next tick
+			// rather than blocking the other connections' timers or dropping
+			// the timeout.
 			r.wheel.put(key, t, 0)
 		}
 	})

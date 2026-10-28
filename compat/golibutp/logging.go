@@ -15,11 +15,9 @@ import (
 // WithLogger.
 var Logger = log.Default.WithContextText("go-libutp")
 
-// logHandler carries this library's logging to a Socket's anacrolix logger.
-//
-// What reaches it is set by the Socket's log options, as libutp's are:
-// warnings and errors always, LogNormal adds the informational, LogMtu the
-// path-MTU search's and everything else at debug level, LogDebug the
+// logHandler forwards the engine's logging to a Socket's anacrolix logger.
+// Warnings and errors always pass; LogNormal adds informational messages,
+// LogMtu adds path-MTU and other debug messages, and LogDebug adds the
 // per-packet trace.
 type logHandler struct {
 	s     *Socket
@@ -59,8 +57,7 @@ func (h *logHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 
 func (h *logHandler) WithGroup(string) slog.Handler { return h }
 
-// levelCrit is the level the engine logged at for what go-libutp calls
-// critical, go-ethereum's crit: above slog's error.
+// levelCrit is the level used for critical messages, above slog.LevelError.
 const levelCrit = slog.LevelError + 4
 
 func anacrolixLevel(l slog.Level) log.Level {
@@ -78,7 +75,7 @@ func anacrolixLevel(l slog.Level) log.Level {
 	}
 }
 
-// logLevelFor is the least level a Socket with these options passes on.
+// logLevelFor returns the lowest level a Socket with these options passes on.
 func logLevelFor(o contextOptions) slog.Level {
 	switch {
 	case o.logDebug:

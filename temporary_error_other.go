@@ -2,6 +2,6 @@
 
 package utp
 
-// isPacketTooBig is Windows' alone: elsewhere a datagram larger than the
-// buffer is truncated, not an error.
+// isPacketTooBig reports false: outside Windows an oversized datagram is
+// truncated rather than reported as an error.
 func isPacketTooBig(error) bool { return false }

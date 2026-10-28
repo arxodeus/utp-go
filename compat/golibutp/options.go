@@ -6,8 +6,8 @@ import (
 	utp "github.com/arxodeus/utp"
 )
 
-// Option names a libutp context or socket option, for Socket.SetOption. The
-// values are libutp's (utp.h).
+// Option identifies a context or socket option for Socket.SetOption. The
+// values match go-libutp's.
 type Option int32
 
 const (
@@ -18,12 +18,11 @@ const (
 	RecvBuffer  Option = 20 // UTP_RCVBUF
 	TargetDelay Option = 21 // UTP_TARGET_DELAY
 
-	// TimedOut is libutp's UTP_ETIMEDOUT error code.
+	// TimedOut is the error code reported for a connection that timed out.
 	TimedOut = 2
 )
 
-// contextOptions is libutp's per-context option set, with its defaults
-// (utp_api.cpp:74, :91).
+// contextOptions holds a Socket's options and their defaults.
 type contextOptions struct {
 	logNormal, logMtu, logDebug bool
 	sndbuf, rcvbuf              int
@@ -38,7 +37,7 @@ func defaultContextOptions() contextOptions {
 	}
 }
 
-// set is utp_context_set_option (utp_internal.cpp:2640-2673).
+// set stores an option value and reports the result SetOption returns.
 func (o *contextOptions) set(opt Option, val int) int {
 	switch opt {
 	case LogNormal:
@@ -51,7 +50,7 @@ func (o *contextOptions) set(opt Option, val int) int {
 		o.targetDelay = val
 	case SendBuffer:
 		if val < 1 {
-			return -1 // libutp asserts val >= 1
+			return -1 // A buffer must hold at least one byte.
 		}
 		o.sndbuf = val
 	case RecvBuffer:
@@ -65,7 +64,7 @@ func (o *contextOptions) set(opt Option, val int) int {
 	return 0
 }
 
-// get is utp_context_get_option.
+// get returns an option's current value.
 func (o *contextOptions) get(opt Option) int {
 	b := func(v bool) int {
 		if v {
@@ -90,15 +89,14 @@ func (o *contextOptions) get(opt Option) int {
 	return -1
 }
 
-// connectionConfig is what a connection made now gets: libutp copies the
-// context's options into each socket it creates (utp_internal.cpp:2616-2621).
+// connectionConfig returns the configuration for a connection created now.
 func (o *contextOptions) connectionConfig() *utp.ConnectionConfig {
 	c := utp.NewConnectionConfig()
 	c.WindowSize = uint32(o.sndbuf)
 	c.BufferSize = o.rcvbuf
 	target := o.targetDelay
 	if target <= 0 {
-		target = 100000 // apply_ccontrol's own fallback (:1633-1634)
+		target = 100000 // Fall back to the default target delay.
 	}
 	c.TargetDelay = time.Duration(target) * time.Microsecond
 	return c

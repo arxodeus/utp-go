@@ -5,27 +5,17 @@ import (
 	"syscall"
 )
 
-// Darwin's don't-fragment options, which the standard library's syscall
-// package does not define. The values are golang.org/x/sys/unix's, generated
-// from the system headers: IP_DONTFRAG in netinet/in.h and IPV6_DONTFRAG in
-// netinet6/in6.h.
-//
-// They are spelled out here rather than taken from x/sys so that this stays a
-// module with no dependency added for one integer -- the same reasoning
-// path_mtu.go records for not reaching for getsockopt(IP_MTU).
-//
-// Note that Darwin's IP_DONTFRAG is not FreeBSD's. Darwin uses 0x1c and
-// FreeBSD 0x43, which is why these are separate files rather than one shared
-// "BSD" one.
+// Don't-fragment socket options from Darwin's netinet/in.h and
+// netinet6/in6.h, which package syscall does not define. Darwin's
+// IP_DONTFRAG differs from FreeBSD's.
 const (
 	darwinIPDontFrag   = 0x1c
 	darwinIPv6DontFrag = 0x3e
 )
 
-// setDontFragment turns the don't-fragment bit on or off for the next
-// datagram sent on this socket. See the Linux file for why this is a socket
-// option toggled around a single send rather than a per-datagram flag, and
-// why succeeding if either address family works is the right test.
+// setDontFragment sets or clears the don't-fragment bit for the next
+// datagram sent on the socket. It succeeds if either address family accepts
+// the option.
 func setDontFragment(c *net.UDPConn, on bool) error {
 	rc, err := c.SyscallConn()
 	if err != nil {

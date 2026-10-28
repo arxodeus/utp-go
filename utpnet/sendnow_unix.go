@@ -9,20 +9,15 @@ import (
 	"syscall"
 )
 
-// sendNow makes one attempt to send p to to on c without waiting: the
-// common case, which the kernel takes at once. It reports sent false only
-// when the send would have had to wait -- a full send buffer -- or cannot be
-// made this way, and then the caller hands the datagram to the writer, whose
-// wait the write deadline can end.
+// sendNow makes one non-blocking attempt to send p to to. It reports sent
+// false when the send would block, or cannot be made this way; the caller
+// then hands the datagram to the writer, whose wait the write deadline can
+// end.
 //
-// A Go socket is non-blocking underneath, so one sendto on its descriptor
-// cannot wait. It is made under RawConn.Control, which only keeps the
-// descriptor open, and not RawConn.Write: Write takes the descriptor's write
-// lock first (internal/poll, FD.RawWrite), and waits for it while any other
-// write on the port -- the uTP sender's, or the writer blocked on a full send
-// buffer -- is under way, which is a wait no deadline can end either. The
-// lock orders writes on a stream; a UDP datagram goes to the kernel whole, so
-// concurrent sends need nothing of it. Release review of 224c363, finding 1.
+// The send runs under RawConn.Control, not RawConn.Write: Write first takes
+// the descriptor's write lock, which another write on the port may hold
+// indefinitely. A UDP datagram is sent whole, so concurrent sends need no
+// lock.
 func (r *rawSender) sendNow(p []byte, to *net.UDPAddr) (n int, sent bool, err error) {
 	if r == nil {
 		return 0, false, nil
@@ -39,7 +34,7 @@ func (r *rawSender) sendNow(p []byte, to *net.UDPAddr) (n int, sent bool, err er
 	if cerr != nil {
 		return 0, true, cerr
 	}
-	// Interrupted, too, goes to the writer, which retries as net does.
+	// An interrupted send also goes to the writer, which retries it.
 	if errors.Is(serr, syscall.EAGAIN) || errors.Is(serr, syscall.EWOULDBLOCK) || errors.Is(serr, syscall.EINTR) {
 		return 0, false, nil
 	}
@@ -49,9 +44,8 @@ func (r *rawSender) sendNow(p []byte, to *net.UDPAddr) (n int, sent bool, err er
 	return len(p), true, nil
 }
 
-// sendAttempt is one sendNow's state, pooled with the function RawConn.Control
-// calls bound to it once, so that an attempt allocates nothing: a closure or
-// a sockaddr made per datagram cost four allocations a send.
+// sendAttempt is one sendNow call's state. It is pooled together with the
+// function bound to it, so an attempt does not allocate.
 type sendAttempt struct {
 	p   []byte
 	err error
@@ -69,8 +63,8 @@ var sendAttempts = sync.Pool{New: func() any {
 	return a
 }}
 
-// address sets a.sa to to as the socket of the given family addresses it. A
-// zoned address is left to the writer, which has net's interface lookup.
+// address sets a.sa to to in the socket's address family. A zoned address
+// is left to the writer, which can resolve the zone.
 func (a *sendAttempt) address(family int, to *net.UDPAddr) bool {
 	if to == nil || to.Zone != "" || to.Port < 0 || to.Port > 0xffff {
 		return false
@@ -98,16 +92,15 @@ func (a *sendAttempt) address(family int, to *net.UDPAddr) bool {
 	return false
 }
 
-// rawSender is a UDP socket as sendNow uses it, its RawConn made once.
+// rawSender sends directly on a UDP socket through its RawConn.
 type rawSender struct {
 	c      *net.UDPConn
 	rc     syscall.RawConn
 	family int
 }
 
-// newRawSender is c ready for sendNow, or nil if its address family cannot
-// be told: an IPv6 socket may be dual-stack, and then an IPv4 destination
-// goes to it IPv4-mapped.
+// newRawSender returns a rawSender for c, or nil if c's address family
+// cannot be determined.
 func newRawSender(c *net.UDPConn) *rawSender {
 	rc, err := c.SyscallConn()
 	if err != nil {

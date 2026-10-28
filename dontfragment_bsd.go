@@ -7,20 +7,12 @@ import (
 	"syscall"
 )
 
-// setDontFragment turns the don't-fragment bit on or off for the next
-// datagram sent on this socket.
+// setDontFragment sets or clears the don't-fragment bit for the next
+// datagram sent on the socket.
 //
-// NetBSD and OpenBSD are IPv6-only here. Both define IPV6_DONTFRAG, and
-// neither defines an IPv4 IP_DONTFRAG: on those systems the bit is not
-// settable per socket for IPv4 at all. Guessing a number for it would be
-// worse than not offering it -- socket option numbers are not shared across
-// these kernels, as Darwin's 0x1c against FreeBSD's 0x43 shows, and a wrong
-// guess would quietly set some unrelated option.
-//
-// So an IPv4 socket here returns ErrDontFragmentUnsupported and the probe
-// goes out fragmentable, exactly as it did before any of this existed. An
-// IPv6 socket gets the real thing, which is the case that needs it least,
-// since IPv6 routers do not fragment in the first place.
+// NetBSD and OpenBSD define IPV6_DONTFRAG but no IPv4 equivalent, so an IPv4
+// socket returns ErrDontFragmentUnsupported and its MTU probes are sent
+// fragmentable.
 func setDontFragment(c *net.UDPConn, on bool) error {
 	rc, err := c.SyscallConn()
 	if err != nil {

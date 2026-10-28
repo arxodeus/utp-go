@@ -28,9 +28,8 @@ type Conn struct {
 
 	// Guarded by mu.
 	//
-	// us is the engine's stream while the connection lives, and nil once
-	// it has ended or its Socket has closed: go-libutp's field of that name,
-	// which is nil once libutp has destroyed the socket.
+	// us is the connection's stream while it is open, and nil once it has
+	// ended or its Socket has closed.
 	us          *utpgo.UtpStream
 	closed      bool
 	err         error
@@ -39,9 +38,8 @@ type Conn struct {
 
 var _ net.Conn = (*Conn)(nil)
 
-// testHookConnPublished, when set, runs in newConn just after the connection
-// is published to its socket: the moment a concurrent Socket.Close can reach
-// it.
+// testHookConnPublished, if set, runs in newConn just after the connection
+// is registered with its socket.
 var testHookConnPublished func(*Socket)
 
 func (s *Socket) newConn(nc *utpnet.Conn) (*Conn, error) {
@@ -55,8 +53,8 @@ func (s *Socket) newConn(nc *utpnet.Conn) (*Conn, error) {
 	if c.remoteAddr != nil {
 		c.remoteKey = c.remoteAddr.String()
 	}
-	// Taken from the stream before c is published: once it is in s.conns,
-	// c.us is mu's, and Socket.Close sets it to nil.
+	// Read before c is registered: from then on c.us is guarded by mu, and
+	// Socket.Close may clear it.
 	done := nc.Stream().Done()
 	mu.Lock()
 	if s.closed {
@@ -89,9 +87,9 @@ func (c *Conn) fail(err error) {
 	c.nc.Close()
 }
 
-// translate turns what the engine returned into what go-libutp returns:
-// a failure's own error, ErrConnClosed after Close, and otherwise the
-// engine's -- io.EOF at the end of the stream, a net.Error on a deadline.
+// translate maps an error from the stream to the one go-libutp returns: the
+// connection's failure, ErrConnClosed after Close, or otherwise the
+// stream's own (io.EOF at end of stream, a net.Error on a deadline).
 func (c *Conn) translate(err error) error {
 	if err == nil || err == io.EOF {
 		return err
@@ -148,14 +146,14 @@ func (c *Conn) SetDeadline(t time.Time) error      { return c.nc.SetDeadline(t) 
 func (c *Conn) SetReadDeadline(t time.Time) error  { return c.nc.SetReadDeadline(t) }
 func (c *Conn) SetWriteDeadline(t time.Time) error { return c.nc.SetWriteDeadline(t) }
 
-// WriteBufferLen is this connection's SendBuffer: libutp's opt_sndbuf, the
-// ceiling on its congestion window (utp_getsockopt).
+// WriteBufferLen returns the connection's SendBuffer setting, the ceiling on
+// its congestion window.
 func (c *Conn) WriteBufferLen() int {
 	return int(c.nc.Stream().WindowSize())
 }
 
-// SetWriteBufferLen sets this connection's SendBuffer, with effect at once
-// (utp_setsockopt). It panics on a value libutp refuses, as go-libutp does.
+// SetWriteBufferLen sets the connection's SendBuffer, taking effect
+// immediately. It panics on a value that is out of range, as go-libutp does.
 func (c *Conn) SetWriteBufferLen(len int) {
 	if len < 1 {
 		panic(-1)
