@@ -24,18 +24,11 @@ func awaitSyn(t *testing.T, conn *scriptedConn) *packet {
 }
 
 // A packet is delivered to the connection whose receive id it carries, and
-// only to that one.
-//
-// A uTP packet carries the receiving end's id: each side sends with its send
-// id, which is the other's receive id. The socket looked a packet up three
-// ways in turn, the first of them as if the id were our *send* id. Two
-// connections to the same peer whose ids are adjacent -- one receiving on R
-// and sending on R+1, the next receiving on R+1 -- then share a number, and
-// a packet for the second, carrying R+1, matched the first. Here that is the
-// second connection's SYN-ACK: it went into the first, as an acknowledgement
-// outside its window, and the second never connected. Found by the long soak,
-// which drew such a pair once every few thousand connections; libutp looks a
-// packet up by its receive id alone (utp_internal.cpp:2884-2892).
+// only to that one. Each side sends with its send id, the other's receive
+// id. Two connections to one peer with adjacent ids, one receiving on R and
+// sending on R+1, the next receiving on R+1, share a number; a packet for the
+// second must not match the first. Here that packet is the second
+// connection's SYN-ACK.
 func TestPacketReachesTheConnectionItIsFor(t *testing.T) {
 	const (
 		recv     = 7000
@@ -81,12 +74,10 @@ func TestPacketReachesTheConnectionItIsFor(t *testing.T) {
 }
 
 // Receive ids are unique per peer, whichever side opened the connection, so
-// that a packet's id names one connection. Two rules keep them so, both
-// libutp's.
+// that a packet's id names one connection. Two rules keep them so.
 
-// A SYN whose connection would receive on an id a connection we dialled
-// already receives on is refused, without an answer: "rejected incoming
-// connection, connection already exists" (utp_internal.cpp:2957-2965).
+// A SYN whose connection would receive on an id that a connection we dialed
+// already receives on is refused without an answer.
 func TestSynForATakenReceiveIdIsRefused(t *testing.T) {
 	const recv = 7000
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -119,8 +110,7 @@ func TestSynForATakenReceiveIdIsRefused(t *testing.T) {
 }
 
 // A connection we dial does not take a receive id an accepted one already
-// receives on. libutp draws until the (address, receive id) key is free
-// (utp_internal.cpp:2533-2538); the check here was for the exact pair alone.
+// receives on.
 func TestDialledConnectionAvoidsAReceiveIdInUse(t *testing.T) {
 	const taken = 7000
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -165,9 +155,8 @@ func TestDialledConnectionAvoidsAReceiveIdInUse(t *testing.T) {
 }
 
 // A connection that has just ended does not lend its ids to the next one to
-// the same peer. Whatever was still in flight for it -- here, the RESET the
-// peer sent -- would reach the new connection; in the long soak a RESET for
-// the old connection refused the new one while it dialled.
+// the same peer, or whatever was still in flight for it, here a RESET from
+// the peer, would reach the new connection.
 func TestClosedConnectionIdsAreNotReusedAtOnce(t *testing.T) {
 	const recv = 7000
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -220,11 +209,9 @@ func TestClosedConnectionIdsAreNotReusedAtOnce(t *testing.T) {
 	}
 }
 
-// A dialled connection does not send on an id another connection to the
-// peer receives on. A RESET is matched on the receive id first, as libutp
-// matches it, so the first connection would take the second's RESETs: in the
-// long soak, one dialling was refused by a RESET meant for one that sent on
-// its receive id.
+// A dialed connection does not send on an id another connection to the peer
+// receives on: a RESET is matched on the receive id first, so the other
+// connection would take its RESETs.
 func TestDialledConnectionDoesNotSendOnAnIdInUse(t *testing.T) {
 	const recv = 7000
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

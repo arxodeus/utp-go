@@ -16,9 +16,8 @@ func icmpQuietLog() *slog.Logger {
 }
 
 // quotedDatagram builds the bytes an ICMP message would quote: a uTP datagram
-// this side sent, carrying connId in its header. Routers quote the front of
-// the offending datagram, so 20 bytes of header is all a caller can rely on
-// having.
+// this side sent, carrying connId. Routers quote the start of the offending
+// datagram, so 20 bytes of header is all a caller can rely on.
 func quotedDatagram(t *testing.T, pktType packetType, connId uint16) []byte {
 	t.Helper()
 	p := newPacketBuilder(pktType, connId, uint32(time.Now().UnixMicro()), 1024*1024, 1).Build()
@@ -61,9 +60,8 @@ func newICMPPair(t *testing.T, ctx context.Context) *icmpPair {
 	cidA := NewConnectionId(NewUdpPeer(bAddr), 2000, 2001)
 	cidB := NewConnectionId(NewUdpPeer(aAddr), 2001, 2000)
 
-	// The observer runs on the connection's own goroutine, so it must not
-	// block; a buffered channel with the oldest sample dropped keeps the
-	// latest without ever stalling the connection.
+	// The observer runs on the connection's goroutine, so it must not block;
+	// a buffered channel that drops the oldest sample keeps the latest.
 	samples := make(chan ConnectionMetrics, 256)
 	cfg := NewConnectionConfig()
 	cfg.Metrics = func(m ConnectionMetrics) {
@@ -135,17 +133,16 @@ func latestCeiling(t *testing.T, samples <-chan ConnectionMetrics, want func(uin
 	}
 }
 
-// A router's fragmentation-needed report must reach the connection that sent
-// the offending datagram and lower its path-MTU ceiling. libutp's
-// utp_process_icmp_fragmentation.
+// A router's fragmentation-needed report reaches the connection that sent the
+// offending datagram and lowers its path-MTU ceiling.
 func TestProcessICMPFragmentationLowersTheCeiling(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	p := newICMPPair(t, ctx)
 	defer p.shutdown()
 
-	// Establish what the ceiling was before the report, so a test that
-	// asserts a drop cannot pass on a ceiling that was already low.
+	// Record the ceiling before the report, so the test cannot pass on a
+	// ceiling that was already low.
 	before, ok := latestCeiling(t, p.metrics, func(c uint32) bool { return c > 0 }, 5*time.Second)
 	if !ok {
 		t.Fatalf("no metrics sample with an MTU ceiling in 5s")
@@ -190,7 +187,7 @@ func TestProcessICMPFragmentationLowersTheCeiling(t *testing.T) {
 }
 
 // An ICMP error for an established connection ends it, and the application
-// finds out. libutp's utp_process_icmp_error, UTP_ECONNRESET half.
+// learns of it.
 func TestProcessICMPErrorResetsAnEstablishedConnection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -220,12 +217,8 @@ func TestProcessICMPErrorResetsAnEstablishedConnection(t *testing.T) {
 }
 
 // An ICMP error while only the SYN has been sent means nothing is listening,
-// which is a different thing to tell the caller than a reset. libutp:
-// `(conn->state == CS_SYN_SENT) ? UTP_ECONNREFUSED : UTP_ECONNRESET`.
-//
-// Without the ICMP path the caller waits out three SYN attempts and is told
-// it timed out, so the test also asserts the timing: the answer arrives long
-// before the connection attempts would have run out.
+// which is reported as a refusal rather than a reset, and arrives long before
+// the connection attempts would have run out.
 func TestProcessICMPErrorRefusesAPendingConnect(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -237,9 +230,8 @@ func TestProcessICMPErrorRefusesAPendingConnect(t *testing.T) {
 	}
 	defer sa.Close()
 
-	// A plain UDP socket that is bound and silent: the SYN reaches it and
-	// nothing ever answers, which is the state a real connect to a closed
-	// port sits in until ICMP arrives.
+	// A bound, silent UDP socket: the SYN reaches it and nothing answers, as
+	// with a connect to a closed port until ICMP arrives.
 	silent, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
@@ -281,8 +273,8 @@ func TestProcessICMPErrorRefusesAPendingConnect(t *testing.T) {
 		if !errors.Is(err, ErrConnRefused) {
 			t.Fatalf("connect returned %v after %v, want %v", err, elapsed, ErrConnRefused)
 		}
-		// Three SYN attempts at the default timeout is a good deal longer
-		// than this; if the answer took that long the ICMP path did nothing.
+		// Three SYN attempts at the default timeout take far longer; if the
+		// answer took that long the ICMP path did nothing.
 		if elapsed > 2*time.Second {
 			t.Errorf("connect took %v to be refused; the ICMP report should end it at once", elapsed)
 		}
@@ -292,9 +284,8 @@ func TestProcessICMPErrorRefusesAPendingConnect(t *testing.T) {
 	}
 }
 
-// What must be ignored. Each of these would otherwise be a way to tear down
-// or shrink somebody else's connection from off the path, since ICMP is
-// trivially forged.
+// What must be ignored. ICMP is trivially forged, so each of these would
+// otherwise let an off-path sender tear down or shrink a connection.
 func TestProcessICMPIgnoresWhatItCannotMatch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -340,9 +331,8 @@ func TestProcessICMPIgnoresWhatItCannotMatch(t *testing.T) {
 		})
 	}
 
-	// And after all that the connection is still alive and still carrying
-	// data -- otherwise "ignored" would be indistinguishable from "acted on
-	// and the test did not look".
+	// The connection is still alive and carrying data, so "ignored" is
+	// distinguishable from "acted on".
 	payload := []byte("still here")
 	if _, err := p.client.Write(ctx, payload); err != nil {
 		t.Fatalf("write after the ignored reports: %v", err)
@@ -355,9 +345,7 @@ func TestProcessICMPIgnoresWhatItCannotMatch(t *testing.T) {
 	}
 }
 
-// The acceptor's side of the lookup: a datagram quoted from a connection this
-// socket accepted has to match too. libutp's second lookup,
-// `Lookup(UTPSocketKey(addr, id + 1)) && conn_id_send == id`.
+// A datagram quoted from a connection this socket accepted matches too.
 func TestProcessICMPMatchesAnAcceptedConnection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

@@ -9,8 +9,7 @@ import (
 )
 
 // fakePathMTU is a Conn that answers PathMTU, so the composition rule can be
-// tested without depending on whatever interfaces this machine happens to
-// have.
+// tested independently of this machine's interfaces.
 type fakePathMTU struct {
 	Conn
 	mtu   int
@@ -20,12 +19,12 @@ type fakePathMTU struct {
 
 func (f *fakePathMTU) PathMTU(ConnectionPeer) (int, bool) { return f.mtu, f.ok }
 
-// LocalAddr is forwarded explicitly: UtpSocket.LocalAddr duck-types for it,
-// and embedding the Conn interface promotes only the methods Conn declares.
+// LocalAddr is forwarded explicitly: UtpSocket.LocalAddr checks for it, and
+// embedding the Conn interface promotes only Conn's methods.
 func (f *fakePathMTU) LocalAddr() net.Addr { return f.local }
 
-// A Conn with no PathMTU method at all: the ordinary case, and the one that
-// must be completely unaffected.
+// plainConn is a Conn with no PathMTU method: the ordinary case, which must
+// be unaffected.
 type plainConn struct{ Conn }
 
 func pathMTUTestPeer(t *testing.T) ConnectionPeer {
@@ -37,14 +36,9 @@ func pathMTUTestPeer(t *testing.T) ConnectionPeer {
 	return NewUdpPeer(addr)
 }
 
-// The composition rule, which is the whole of the design decision: a
-// discovered path MTU may lower the configured ceiling and may never raise
-// it.
-//
-// libutp takes get_udp_mtu as the ceiling outright. Loopback reports 65536
-// and a jumbo-frame link 9000, and adopting either would put this library on
-// a probe schedule nothing has measured it at. Raising the ceiling is a
-// separate decision from fixing the case where 1400 is too big.
+// A discovered path MTU may lower the configured ceiling and never raise it.
+// Loopback reports 65536 and jumbo-frame links 9000, which are not ceilings
+// the search should start from.
 func TestPathMTUCeilingOnlyLowers(t *testing.T) {
 	peer := pathMTUTestPeer(t)
 	const configured = uint16(1400)
@@ -81,15 +75,13 @@ func TestPathMTUCeilingOnlyLowers(t *testing.T) {
 		})
 	}
 
-	// A nil peer is not a reason to guess.
+	// A nil peer is no reason to guess.
 	if got := pathMTUCeiling(&fakePathMTU{ok: true, mtu: 900}, nil, configured); got != configured {
 		t.Errorf("ceiling %d for a nil peer, want %d", got, configured)
 	}
 }
 
-// With MaxPacketSize raised, the report sets the ceiling, as libutp's
-// get_udp_mtu does (mtu_reset, utp_internal.cpp:1316): how an embedder gets
-// libutp's behaviour with a callback that reports the interface.
+// With MaxPacketSize raised, the reported path MTU sets the ceiling.
 func TestPathMTUSetsTheCeilingUnderARaisedMaximum(t *testing.T) {
 	peer := pathMTUTestPeer(t)
 	if got := pathMTUCeiling(&fakePathMTU{ok: true, mtu: 1472}, peer, 65535); got != 1472 {
@@ -97,7 +89,7 @@ func TestPathMTUSetsTheCeilingUnderARaisedMaximum(t *testing.T) {
 	}
 }
 
-// The header arithmetic, stated once rather than inferred from behaviour.
+// The header arithmetic.
 func TestDatagramSizeForInterfaceMTU(t *testing.T) {
 	v4 := net.ParseIP("192.0.2.1")
 	v6 := net.ParseIP("2001:db8::1")
@@ -127,9 +119,8 @@ func TestDatagramSizeForInterfaceMTU(t *testing.T) {
 	}
 }
 
-// Discovery against this machine, whatever it has. The value cannot be
-// asserted -- it depends on the host -- but its relationship to the interface
-// it came from can.
+// Discovery against this machine. The value depends on the host, but its
+// relationship to the interface it came from can be checked.
 func TestPathMTUDiscoveryAgreesWithTheInterface(t *testing.T) {
 	loopback, err := net.ResolveUDPAddr("udp", "127.0.0.1:9")
 	if err != nil {
@@ -167,20 +158,17 @@ func TestPathMTUDiscoveryAgreesWithTheInterface(t *testing.T) {
 	t.Logf("loopback carries %d-byte datagrams", got)
 }
 
-// End to end: a socket whose Conn reports a narrow path must build its
-// connections with a correspondingly narrow ceiling, and must still work.
-//
-// The ceiling is read back through ConnectionMetrics, which is the only view
-// of the search from outside.
+// A socket whose Conn reports a narrow path builds its connections with a
+// correspondingly narrow ceiling, read back through ConnectionMetrics, and
+// still works.
 func TestNarrowPathLowersTheConnectionCeiling(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	lg := duplexQuietLog()
 
-	// The narrow-path answer is stood in front of a real UDP socket before
-	// the uTP socket is built over it. Wrapping s.socket afterwards would be
-	// a write racing the read loop that is already reading it -- which the
-	// race detector duly reported when this test did that.
+	// Put the narrow-path answer in front of a real UDP socket before the
+	// uTP socket is built over it; wrapping it afterwards would race the
+	// read loop.
 	const narrow = 1232 // an IPv6 minimum link
 	base, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -207,10 +195,9 @@ func TestNarrowPathLowersTheConnectionCeiling(t *testing.T) {
 	cidA := NewConnectionId(NewUdpPeer(bAddr), 5000, 5001)
 	cidB := NewConnectionId(NewUdpPeer(aAddr), 5001, 5000)
 
-	// Collected under a lock rather than through a channel: the observer runs
-	// on the connection's goroutine for as long as the connection lives, so
-	// there is no moment at which the test can safely close a channel it is
-	// still writing to.
+	// Collected under a lock rather than through a channel: the observer
+	// runs on the connection's goroutine for its whole life, so there is no
+	// safe moment to close a channel.
 	var (
 		mu       sync.Mutex
 		ceilings []uint32
@@ -244,8 +231,8 @@ func TestNarrowPathLowersTheConnectionCeiling(t *testing.T) {
 	defer server.Close()
 	defer client.Close()
 
-	// The caller's config must come back untouched: it is theirs, and may be
-	// reused for the next connection.
+	// The caller's config comes back unmodified: it may be reused for the
+	// next connection.
 	if cfg.MaxPacketSize != configured {
 		t.Errorf("the caller's config was modified: MaxPacketSize is now %d, was %d",
 			cfg.MaxPacketSize, configured)
@@ -298,8 +285,8 @@ func TestNarrowPathLowersTheConnectionCeiling(t *testing.T) {
 	}
 }
 
-// An IPv6 peer gets libutp's IPv6 ceiling, 1232 (UDP_TEREDO_MTU,
-// utp_utils.cpp:230-235); anything else keeps what was configured.
+// An IPv6 peer gets the IPv6 ceiling, 1232; anything else keeps what was
+// configured.
 func TestIPv6PeersGetTheIPv6SafeCeiling(t *testing.T) {
 	v6 := &net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 6881}
 	for _, tc := range []struct {

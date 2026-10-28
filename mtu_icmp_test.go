@@ -5,9 +5,8 @@ import (
 	"time"
 )
 
-// A router that says how big the next hop is should be believed, and believed
-// exactly: the point of honouring ICMP at all is to skip the round trip that
-// discovering the same limit by losing a probe would cost.
+// A router's next-hop figure is used exactly, saving the round trip that
+// losing a probe would cost to discover the same limit.
 func TestMtuIcmpFragmentationNeededUsesTheRoutersFigure(t *testing.T) {
 	now := time.Now()
 	m := newMtuSearch(1472, now)
@@ -22,8 +21,8 @@ func TestMtuIcmpFragmentationNeededUsesTheRoutersFigure(t *testing.T) {
 	if m.ceiling >= before {
 		t.Errorf("ceiling did not come down: %d then %d", before, m.ceiling)
 	}
-	// libutp is explicit that this is the one case where the next size sent
-	// is the ceiling rather than the midpoint below it (utp_internal.cpp:3088-3093).
+	// The next size sent is the ceiling itself rather than the midpoint
+	// below it.
 	if m.current != m.ceiling {
 		t.Errorf("current %d, want the ceiling %d: the router's own figure is what should be tried next",
 			m.current, m.ceiling)
@@ -33,8 +32,8 @@ func TestMtuIcmpFragmentationNeededUsesTheRoutersFigure(t *testing.T) {
 	}
 }
 
-// The ceiling only ever comes down. A router quoting something larger than
-// what is already known must not raise it -- libutp's min().
+// The ceiling only comes down: a router quoting something larger than what
+// is already known does not raise it.
 func TestMtuIcmpFragmentationNeededNeverRaisesTheCeiling(t *testing.T) {
 	now := time.Now()
 	m := newMtuSearch(1472, now)
@@ -49,10 +48,8 @@ func TestMtuIcmpFragmentationNeededNeverRaisesTheCeiling(t *testing.T) {
 	}
 }
 
-// "It might not be initialized or sent properly": routers predating RFC 1191
-// send zero, and anything outside libutp's window is not to be trusted. The
-// fallback is the binary search, with the gap halved so a probe finds the
-// truth.
+// Routers that predate RFC 1191 send zero, and figures outside the plausible
+// range are not trusted. The fallback halves the gap so a probe can decide.
 func TestMtuIcmpFragmentationNeededFallsBackWhenTheFigureIsUnusable(t *testing.T) {
 	for _, linkMTU := range []uint16{0, 1, 575, 0x2000, 0xffff} {
 		t.Run(sizeName(uint32(linkMTU)), func(t *testing.T) {
@@ -74,9 +71,8 @@ func TestMtuIcmpFragmentationNeededFallsBackWhenTheFigureIsUnusable(t *testing.T
 	}
 }
 
-// The bounds themselves, stated once rather than inferred from the search's
-// behaviour. 576 is IPv4's guaranteed reassembly size and the lowest libutp
-// will act on; 0x2000 is where it stops believing the router.
+// The bounds: 576 is IPv4's guaranteed reassembly size and the lowest figure
+// acted on; at 0x2000 and above the router is not believed.
 func TestUdpPayloadForLinkMTUBounds(t *testing.T) {
 	cases := []struct {
 		link uint32
@@ -100,10 +96,9 @@ func TestUdpPayloadForLinkMTUBounds(t *testing.T) {
 	}
 }
 
-// The conversion is the one deliberate difference from libutp, so assert what
-// it buys: a datagram of the size the search settles on must fit inside the
-// link the router named, headers included. libutp's figure does not -- it is
-// 28 bytes over, and the packet it sends next is dropped by the same router.
+// The router quotes a link MTU, so the IP and UDP headers are subtracted: a
+// datagram of the size the search settles on fits inside the link the router
+// named, headers included.
 func TestMtuIcmpFragmentationNeededLeavesRoomForTheHeaders(t *testing.T) {
 	const linkMTU = 1400
 	now := time.Now()
@@ -121,9 +116,8 @@ func TestMtuIcmpFragmentationNeededLeavesRoomForTheHeaders(t *testing.T) {
 	}
 }
 
-// An ICMP report that lands inside the convergence threshold ends the search
-// rather than leaving it probing forever: the same mtu_search_update tail the
-// probe path uses.
+// An ICMP report that lands within the convergence threshold ends the search
+// rather than leaving it probing.
 func TestMtuIcmpFragmentationNeededCanFinishTheSearch(t *testing.T) {
 	now := time.Now()
 	m := newMtuSearch(1472, now)
@@ -140,17 +134,9 @@ func TestMtuIcmpFragmentationNeededCanFinishTheSearch(t *testing.T) {
 	}
 }
 
-// A figure below the floor must not invert the search. libutp asserts
-// mtu_floor <= mtu_ceiling and then computes a midpoint that would sit above
-// the ceiling; with assertions off, that sends packets the path just said it
-// cannot carry.
-//
-// It also settles below the 576-byte floor, which libutp never does: its
-// floor is 576 of UDP payload and its ceiling is the router's link MTU, so on
-// a link this narrow it keeps sending 576-byte payloads into a hop that
-// carries 572. Going below the floor here is the consequence of converting
-// the router's figure honestly, and 572 is what the link actually carries.
-// The floor is a heuristic -- "less would not pass TCP" -- not a guarantee.
+// A figure below the floor does not invert the search: the floor drops with
+// the ceiling. The search may settle below 576 bytes, since that is what the
+// link actually carries.
 func TestMtuIcmpFragmentationNeededBelowTheFloor(t *testing.T) {
 	const linkMTU = 600
 	now := time.Now()
@@ -175,9 +161,8 @@ func TestMtuIcmpFragmentationNeededBelowTheFloor(t *testing.T) {
 	}
 }
 
-// What the mechanism is for, stated as a saving: against a path that silently
-// drops anything over 1300 bytes but whose router says so, the ICMP-informed
-// search reaches a usable size without losing probes to find it.
+// Against a path that silently drops anything over 1300 bytes but whose
+// router reports it, the search reaches a usable size without losing probes.
 func TestMtuIcmpFragmentationNeededSavesProbes(t *testing.T) {
 	const linkMTU = 1300
 	const truth = linkMTU - ipv4HeaderAndUDPOverhead

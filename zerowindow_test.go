@@ -6,26 +6,16 @@ import (
 	"time"
 )
 
-// A peer that advertises a zero receive window stops this sender. Something
-// has to start it again.
-//
-// The peer will send a window update when its application drains its buffer,
-// but that update is a single packet on an unreliable path. If it is lost,
-// the sender has nothing outstanding -- so no retransmission timer -- and no
-// reason of its own to transmit. The connection stops dead until the idle
-// timeout kills it, with data still queued and a peer waiting for it.
-//
-// libutp answers this with a probe: when an acknowledgement reports a zero
-// window it arms a timer, and when that expires it forces the peer's window
-// up to one packet (utp_internal.cpp:2145-2151 and :1142-1145). One packet
-// goes out, the peer acknowledges it, and the acknowledgement carries a fresh
-// window. Recovery costs one packet per interval and needs nothing from the
-// peer beyond an ack.
+// A peer that advertises a zero receive window stops this sender, and
+// something must start it again. The peer's window update is a single
+// packet; if it is lost, the sender has nothing outstanding and no reason to
+// send. When an acknowledgement reports a zero window a timer is armed, and
+// when it expires one packet is let through; the peer's acknowledgement
+// carries a fresh window.
 func TestZeroWindowProbe(t *testing.T) {
 	cfg := NewConnectionConfig()
-	// libutp's interval is 15 seconds. Testing that honestly would mean a
-	// 15-second test, so the interval is configurable -- as InitialTimeout,
-	// MinTimeout and MaxTimeout already are -- and defaults to libutp's.
+	// The default interval is 15 seconds; a shorter one keeps the test
+	// short.
 	cfg.ZeroWindowProbeInterval = 150 * time.Millisecond
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -105,22 +95,14 @@ func TestZeroWindowProbe(t *testing.T) {
 		"until its idle timeout", 4*cfg.ZeroWindowProbeInterval)
 }
 
-// An established connection that goes quiet must say something occasionally.
-//
-// libutp sends a keep-alive after 29 seconds of silence
-// (utp_internal.cpp:74, :1271-1274), chosen to sit under the 30-second UDP
-// mapping timeout common in NATs. A connection quiet for longer than that
-// loses its mapping and cannot be reached from outside again -- and a peer
-// with an idle timeout shorter than ours eventually tears it down while we
-// still believe it is alive.
-//
-// This library sent nothing at all. It relied entirely on the peer speaking
-// first, which against another copy of this library means neither side ever
-// does.
+// An established connection that goes quiet sends a keep-alive after 29
+// seconds, below the 30-second UDP mapping timeout common in NATs, so its
+// mapping survives and a peer with a shorter idle timeout does not tear it
+// down.
 func TestKeepAlive(t *testing.T) {
 	cfg := NewConnectionConfig()
-	// libutp's interval is 29 seconds; configurable so this is not a
-	// half-minute test.
+	// The default interval is 29 seconds; a shorter one keeps the test
+	// short.
 	cfg.KeepAliveInterval = 120 * time.Millisecond
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -167,7 +149,7 @@ func TestKeepAlive(t *testing.T) {
 			if pkt.Header.PacketType != st_state {
 				t.Errorf("keep-alive was %s, libutp sends a STATE", pkt.Header.PacketType.String())
 			}
-			// libutp acks one behind, so the packet reads as a stale
+			// The keep-alive acknowledges one behind, so it reads as a stale
 			// acknowledgement and the peer answers it.
 			if want := uint16(899 - 1); pkt.Header.AckNum != want {
 				t.Errorf("keep-alive acked %d, want %d -- one behind, so the peer answers it",

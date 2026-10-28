@@ -13,28 +13,14 @@ import (
 
 // Concurrent teardown, every way a connection can end, all at once.
 //
-// This exists for one recorded observation: a data race seen once, years of
-// runs ago in this repository's terms, in an early -race pass of
-// TestManyConcurrentTransfers, "under conditions where many connections were
-// hitting the 60s idle timeout". The report was never captured and it has not
-// reproduced since, so there is nothing to fix -- only a hypothesis to press
-// on until it either produces a race or stops being worth suspecting.
+// Each cycle runs a batch of connections whose ends are deliberately mixed:
+// closed, abandoned, silent until the idle timeout, canceled mid-transfer,
+// and the sockets closed underneath them. The socket's connection table, the
+// shared retransmission wheel and the per-connection event loops are torn
+// down from several directions at once. It is most useful under the race
+// detector.
 //
-// What that observation implies, and what this concentrates:
-//
-//   - many connections ending at once, not one at a time
-//   - the *idle timeout* path specifically, which no other test drives in
-//     bulk: there is no idle timeout by default, and the ones tests set are
-//     long, so reaching it in bulk takes the short timeout set here
-//   - teardown overlapping teardown -- a close racing an idle expiry racing a
-//     cancelled context racing the socket going away underneath all of them
-//
-// Each cycle runs a batch of connections whose ends are deliberately mixed, so
-// the socket's connection table, the shared retransmission wheel and the
-// per-connection event loops are all being torn down from several directions
-// at the same moment.
-//
-// Longer runs, which is the point of it:
+// Longer runs:
 //
 //	UTP_SOAK_CYCLES=200 go test -race -run TestTeardownRace -timeout 60m
 func TestTeardownRace(t *testing.T) {
@@ -43,11 +29,9 @@ func TestTeardownRace(t *testing.T) {
 	}
 	cycles := soakCycles(8)
 
-	// Per cycle. Enough that teardowns genuinely overlap rather than queue.
-	//
-	// Overridable because a race is a timing accident: running the same shape
-	// repeatedly explores one interleaving landscape, and varying the
-	// concurrency between runs explores several.
+	// Per cycle: enough that teardowns overlap rather than queue. It can be
+	// overridden, since varying the concurrency explores different
+	// interleavings.
 	conns := 24
 	if v := os.Getenv("UTP_SOAK_CONNS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -78,8 +62,7 @@ func TestTeardownRace(t *testing.T) {
 
 		cfg := func() *ConnectionConfig {
 			c := NewConnectionConfig()
-			// The condition the original observation named. At the default of
-			// 60s no test reaches this path in bulk.
+			// A short idle timeout, so that path is reached in bulk.
 			c.MaxIdleTimeout = 400 * time.Millisecond
 			c.InitialTimeout = 100 * time.Millisecond
 			c.MinTimeout = 100 * time.Millisecond
@@ -101,7 +84,7 @@ func TestTeardownRace(t *testing.T) {
 			cidClient := NewConnectionId(NewUdpPeer(serverAddr), recv, send)
 			cidServer := NewConnectionId(NewUdpPeer(clientAddr), send, recv)
 
-			// Each connection gets its own context so mode 3 can cancel one
+			// Each connection gets its own context so one can be canceled
 			// mid-flight without disturbing the others.
 			connCtx, connCancel := context.WithCancel(cycleCtx)
 
@@ -114,9 +97,7 @@ func TestTeardownRace(t *testing.T) {
 				}
 				switch mode {
 				case 2:
-					// Abandoned: accepted, never read, then closed. This is
-					// the path that used to deadlock Close against its own
-					// event loop.
+					// Abandoned: accepted, never read, then closed.
 					time.Sleep(time.Duration(30+mode*10) * time.Millisecond)
 					stream.Close()
 					abandoned.Add(1)
@@ -147,7 +128,7 @@ func TestTeardownRace(t *testing.T) {
 					idled.Add(1)
 					stream.Close()
 				case 3:
-					// Cancelled mid-transfer.
+					// Canceled mid-transfer.
 					go func() {
 						time.Sleep(time.Duration(20+mode*5) * time.Millisecond)
 						cancelConn()
@@ -164,9 +145,9 @@ func TestTeardownRace(t *testing.T) {
 			}(mode, connCancel)
 		}
 
-		// Close the sockets while connections are still winding down. This is
-		// the overlap the observation pointed at: the socket's table and the
-		// shared timer wheel going away underneath live event loops.
+		// Close the sockets while connections are still winding down, so the
+		// socket's table and the shared timer wheel go away underneath
+		// live event loops.
 		go func() {
 			time.Sleep(500 * time.Millisecond)
 			client.Close()
@@ -182,9 +163,7 @@ func TestTeardownRace(t *testing.T) {
 	t.Logf("%d cycles x %d connections: %d completed, %d idled out, %d abandoned, %d cancelled",
 		cycles, conns, completed.Load(), idled.Load(), abandoned.Load(), cancelled.Load())
 
-	// Every mode must actually have been exercised. A soak test that silently
-	// stopped reaching the idle-timeout path would look like evidence and be
-	// worth nothing.
+	// Every mode must have been exercised, or the test proves nothing.
 	if idled.Load() == 0 {
 		t.Error("no connection reached its idle timeout; the path this test exists for was never taken")
 	}

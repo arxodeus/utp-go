@@ -8,14 +8,9 @@ import (
 	"time"
 )
 
-// The net.PacketConn side of a Socket, held to its contract.
-//
-// This is not a decorative interface. A BitTorrent client runs its DHT on the
-// same UDP port as its uTP connections, and ReadFrom/WriteTo are how it does
-// that: every DHT query and reply the client sends passes through here. The
-// uTP side of the socket has the standard library's own conformance suite
-// behind it now (integration/nettest); this side had four tests and no
-// contract.
+// The net.PacketConn side of a Socket, held to its contract. A BitTorrent
+// client sends every DHT query and reply on its uTP port through ReadFrom
+// and WriteTo.
 
 // goroutinesSettle returns the goroutine count once it has stopped moving, so
 // a count is not taken while an unrelated goroutine is still winding down.
@@ -33,32 +28,22 @@ func goroutinesSettle() int {
 	return runtime.NumGoroutine()
 }
 
-// Sending and receiving on the shared port must not accumulate goroutines.
+// Sending and receiving on the shared port does not accumulate goroutines.
+// With no deadline set, the normal case for a DHT, a per-call goroutine
+// serving the deadline would park forever.
 //
-// Each ReadFrom and WriteTo asked the deadline for a timer channel, and the
-// deadline started a goroutine to serve it. With no deadline set -- which is
-// the normal case, and the only case for a DHT -- that goroutine parks until
-// the deadline is next *changed*, which for most callers is never. WriteTo
-// discarded the channel outright and leaked one per call regardless.
-//
-// A client doing a few hundred DHT messages a second accumulates a few hundred
-// parked goroutines a second, for the life of the process. Nothing here would
-// have noticed: every existing test sends a handful of datagrams.
-//
-// Two details of the measurement matter, and both were got wrong first.
-// Sending in bulk and draining afterwards loses datagrams, because the
-// passthrough queue is bounded and a UDP socket is entitled to drop -- so the
-// send and the read are interleaved, each read satisfied by the datagram just
-// sent. And no deadline is set anywhere in this test, because SetReadDeadline
-// releases every goroutine parked on the old deadline: a drain loop bounded by
-// a deadline would free the very leak it was there to count.
+// Two details of the measurement matter. Sending in bulk and draining
+// afterwards loses datagrams, since the passthrough queue is bounded, so
+// sends and reads are interleaved. And no deadline is set anywhere, since
+// SetReadDeadline releases goroutines parked on the old deadline and would
+// hide the leak being counted.
 func TestSharedPortDoesNotLeakGoroutines(t *testing.T) {
 	server, client := listenPair(t)
 	dst := server.LocalAddr()
 	buf := make([]byte, 2048)
 
-	// Warm up: the first calls create the socket's own machinery, which is not
-	// what is being counted.
+	// Warm up: the first calls create the socket's own goroutines, which
+	// are not being counted.
 	for i := 0; i < 10; i++ {
 		if _, err := client.WriteTo([]byte("warmup"), dst); err != nil {
 			t.Fatal(err)
@@ -82,7 +67,7 @@ func TestSharedPortDoesNotLeakGoroutines(t *testing.T) {
 
 	after := goroutinesSettle()
 
-	// A handful either way is scheduling noise. Hundreds is the leak.
+	// A handful either way is scheduling noise; hundreds would be a leak.
 	if grew := after - before; grew > 20 {
 		t.Errorf("%d datagrams each way left %d extra goroutines (%d -> %d); the shared port "+
 			"leaks one per call, and a DHT would run the process out of them",
@@ -204,13 +189,9 @@ func isTimeout(err error) bool {
 	return ok && ne.Timeout()
 }
 
-// The connection side has its own deadline path, and it must not leak either.
-//
-// Conn.Read and Conn.Write go through withDeadline/deadline.context rather
-// than deadline.wait, which also starts a goroutine per call. That one is
-// cancelled by the caller on every path, so it should be clean -- but it is
-// the same class of defect as the one above, in the code next door, so it is
-// checked rather than assumed.
+// The connection side's deadline path does not leak goroutines either.
+// Conn.Read and Conn.Write use withDeadline and deadline.context, which also
+// start a goroutine per call.
 func TestConnIODoesNotLeakGoroutines(t *testing.T) {
 	server, client := listenPair(t)
 

@@ -6,16 +6,9 @@ import (
 	"time"
 )
 
-// The keep-alive leaves one interval after the last packet, not up to two.
-//
-// libutp checks `current_ms - last_sent_packet >= KEEPALIVE_INTERVAL` on every
-// timeout pass (utp_internal.cpp:1271-1274). This library checked the same
-// condition only on a ticker at the interval, counted from connection start,
-// so a connection that went quiet 5 seconds after a tick failed the check at
-// the next one and sent at the one after: 53 seconds of silence where libutp
-// allows 29. TestKeepAlive could not see that -- it gives the keep-alive six
-// intervals to turn up -- so this runs on the virtual clock at libutp's real
-// interval and asserts the instant.
+// The keep-alive leaves one interval after the last packet sent, not up to
+// two. It runs on the virtual clock at the real 29-second interval and checks
+// the instant.
 func TestKeepAliveLeavesOneIntervalAfterTheLastPacket(t *testing.T) {
 	const (
 		ourSeq    = 0x4321
@@ -23,8 +16,8 @@ func TestKeepAliveLeavesOneIntervalAfterTheLastPacket(t *testing.T) {
 		peerSeq   = 900
 		interval  = defaultKeepAliveInterval
 		quietFrom = 5 * time.Second // well away from any multiple of the interval
-		// The instant is exact on the virtual clock; this only has to be
-		// finer than the gap between right and wrong, which is 24 seconds.
+		// The instant is exact on the virtual clock; the tolerance need only be
+		// finer than the 24-second gap between right and wrong.
 		slack = time.Millisecond
 	)
 
@@ -125,18 +118,11 @@ func TestKeepAliveLeavesOneIntervalAfterTheLastPacket(t *testing.T) {
 	}
 }
 
-// A keep-alive sent while a gap is open names the packets that really arrived.
-//
-// libutp's keep-alive is an acknowledgement one behind the real one, built by
-// decrementing ack_nr before send_ack (utp_internal.cpp:834-844), so its
-// selective ack is computed from the decremented ack_nr as well (:804-808)
-// and the peer, reading bit i as ack_nr + 2 + i against the header (:1441-),
-// finds the right packets. This library built the state packet first, with
-// its selective ack computed from the real ack number, and then decremented
-// the header: every bit was read one packet early, so the peer would have
-// taken a packet it still owed as delivered, freed it, and never sent it
-// again -- and this end would have waited for it forever. Found reading
-// send_keep_alive line by line (the audit in LIBUTP-AUDIT.md).
+// A keep-alive sent while a gap is open names the packets that really
+// arrived. It acknowledges one behind the real acknowledgement number, so
+// its selective ack must be computed against that decremented number; read
+// against the header, every bit would otherwise be one packet early, and the
+// peer would free a packet it still owed.
 func TestKeepAliveSelectiveAckMatchesItsAckNumber(t *testing.T) {
 	const (
 		ourSeq   = 0x4321
@@ -209,13 +195,9 @@ func TestKeepAliveSelectiveAckMatchesItsAckNumber(t *testing.T) {
 	}
 }
 
-// The idle timeout runs from the last packet heard, to the instant.
-//
-// Activity used to reset the idle timer on every packet. It now only records
-// the time, and the timer, when it fires, arms again for what is left
-// (connection.lastActivity). So the timer set at the handshake fires at 10
-// seconds, finds a packet heard at 6, and must neither close the connection
-// then nor let it outlive 16.
+// The idle timeout runs from the last packet heard, to the instant. The
+// timer set at the handshake fires at 10 seconds, finds a packet heard at 6,
+// and must neither close the connection then nor let it outlive 16.
 func TestIdleTimeoutRunsFromTheLastPacketHeard(t *testing.T) {
 	const (
 		ourSeq      = 0x4321

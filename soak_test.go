@@ -13,13 +13,10 @@ import (
 	"time"
 )
 
-// Soak tests: the defects that only appear after something has been running
-// for a while.
-//
-// Everything else in this repository measures a transfer or a packet. These
-// measure what is left behind afterwards -- goroutines, map entries, heap --
-// because a library that leaks a goroutine per connection works perfectly in
-// every test and dies in production after a day.
+// Soak tests: defects that appear only after something has been running for
+// a while. These measure what is left behind (goroutines, map entries,
+// heap), since a library that leaks per connection passes every functional
+// test.
 //
 // Longer runs:
 //
@@ -57,10 +54,8 @@ func settleGoroutines(d time.Duration) int {
 	return runtime.NumGoroutine()
 }
 
-// A connection opened and closed leaves nothing behind. Repeatedly.
-//
-// This is the shape of leak that matters most for the target use: a
-// BitTorrent client opens and drops peer connections continuously for days.
+// A connection opened and closed leaves nothing behind, repeatedly, as when
+// a BitTorrent client opens and drops peer connections for days.
 func TestSoakConnectionChurn(t *testing.T) {
 	if testing.Short() {
 		t.Skip("soak tests are not -short tests")
@@ -164,11 +159,9 @@ func TestSoakConnectionChurn(t *testing.T) {
 	runtime.GC()
 	runtime.ReadMemStats(&endMem)
 	endConns := server.NumConnections() + client.NumConnections()
-	// Split by socket, because which side leaks says what the leak is: the
-	// side that closes second is a teardown that never fires, the side that
-	// closes first is one that fires and does not clean up. Chasing a
-	// half-close regression here, the split was the difference between a guess
-	// and a diagnosis.
+	// Split by socket, since which side leaks indicates the cause: the side
+	// that closes second points to a teardown that never fires, the side
+	// that closes first to one that fires and does not clean up.
 	t.Logf("still tracked at the end: %d on the accepting socket, %d on the dialling one",
 		server.NumConnections(), client.NumConnections())
 
@@ -234,8 +227,7 @@ func TestSoakAbandonedConnections(t *testing.T) {
 }
 
 // A socket answering packets for connections it does not have must not
-// accumulate state for them. This is the amplification surface: a peer that
-// sends to torn-down connections should cost the socket a bounded amount.
+// accumulate state for them: such a peer must cost a bounded amount.
 func TestSoakUnknownConnectionFlood(t *testing.T) {
 	if testing.Short() {
 		t.Skip("soak tests are not -short tests")
@@ -275,10 +267,8 @@ func TestSoakUnknownConnectionFlood(t *testing.T) {
 		t.Errorf("goroutines grew by %d while answering packets for unknown connections", grew)
 	}
 
-	// The RESET rate limiting is what should hold this down: libutp remembers
-	// what it has already answered and stops entirely past a limit
-	// (utp_internal.cpp:2907-2945). Without it a peer draws one RESET per
-	// packet, which is both an amplification vector and unbounded state.
+	// RESET rate limiting holds this down: what has been answered is
+	// remembered, and nothing is answered past a limit.
 	if emitted := conn.emittedCount(); emitted > packets/2 {
 		t.Errorf("answered %d of %d packets for unknown connections; the RESET rate limit is not holding",
 			emitted, packets)
