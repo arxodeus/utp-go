@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -23,17 +24,49 @@ import (
 const (
 	test_socket_data_len = 1_000_000
 	defaultNumTransfers  = 1000
+	// raceNumTransfers is the default under the race detector. All the
+	// transfers share one receiving socket, whose buffer the kernel caps at
+	// net.core.rmem_max, 208 KB on a stock Linux host: about 150 packets,
+	// against 2000 in flight from 1000 connections even at their minimum
+	// window. With the reader slowed by the race detector the socket then
+	// drops a large share of what arrives, and a connection down to one
+	// packet can lose every retransmission and give up, as the protocol
+	// says it should. 250 completes there with room to spare.
+	raceNumTransfers = 250
 )
 
-// numTransfers is the concurrency this test runs at. It is overridable
-// because the default does not fit everywhere: 1000 concurrent 1 MB transfers
-// peaked at 7.7 GB RSS without the race detector when last measured (the whole
-// package at 9.5 GB, enough for the kernel to kill it when other packages'
-// tests run beside it on a 16 GB host), and the race detector's
-// shadow memory puts that well past what a typical CI container allows. Set
-// UTP_TEST_TRANSFERS to run the same test at a size that fits.
+// numTransfers is the concurrency this test runs at. Set UTP_TEST_TRANSFERS
+// to run the same test at another size: 1000 concurrent 1 MB transfers take
+// several GB of memory, and much more under the race detector.
 func numTransfers() int {
+	if raceEnabled {
+		return envInt("UTP_TEST_TRANSFERS", raceNumTransfers)
+	}
 	return envInt("UTP_TEST_TRANSFERS", defaultNumTransfers)
+}
+
+// udpReceiveBufferErrors returns the kernel's count of UDP datagrams dropped
+// for want of socket buffer space, system-wide, where the platform reports
+// it (Linux).
+func udpReceiveBufferErrors() (int64, bool) {
+	b, err := os.ReadFile("/proc/net/snmp")
+	if err != nil {
+		return 0, false
+	}
+	lines := strings.Split(string(b), "\n")
+	for i := 0; i+1 < len(lines); i++ {
+		names, values := strings.Fields(lines[i]), strings.Fields(lines[i+1])
+		if len(names) == 0 || names[0] != "Udp:" || len(values) != len(names) {
+			continue
+		}
+		for j, name := range names {
+			if name == "RcvbufErrors" {
+				n, err := strconv.ParseInt(values[j], 10, 64)
+				return n, err == nil
+			}
+		}
+	}
+	return 0, false
 }
 
 func TestManyConcurrentTransfers(t *testing.T) {
@@ -118,6 +151,7 @@ func TestManyConcurrentTransfers(t *testing.T) {
 	// Create wait group for all transfers
 	var wg sync.WaitGroup
 	start := time.Now()
+	dropsBefore, haveDrops := udpReceiveBufferErrors()
 
 	data := make([]byte, test_socket_data_len)
 	_, _ = io.ReadFull(rand.Reader, data)
@@ -157,6 +191,10 @@ func TestManyConcurrentTransfers(t *testing.T) {
 
 	t.Logf("finished high concurrency load test of %d simultaneous transfers, in %v, at a rate of %.0f Mbps",
 		n, elapsed, transferRate)
+	if dropsAfter, ok := udpReceiveBufferErrors(); ok && haveDrops {
+		t.Logf("the kernel dropped %d UDP datagrams for want of socket buffer space meanwhile",
+			dropsAfter-dropsBefore)
+	}
 
 	// A connection's event queue carries packets only until its event loop
 	// is ready, and here a thousand set up at once. Anything it dropped would
