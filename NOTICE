@@ -1,0 +1,21 @@
+utp
+Copyright (c) 2026 arxodeus
+
+This project is a fork of zen-eth/utp-go
+(https://github.com/zen-eth/utp-go), forked at commit 0508310
+(2025-06-01). Parts of its code remain here, chiefly the packet format,
+sequence-number arithmetic, connection IDs, and the sent-packet and
+receive-buffer structures. That code is used under the MIT License:
+
+    Copyright (c) 2024 zeneth
+
+The full license text is in LICENSE.
+
+Other third-party material, each under the MIT License with its own
+notice:
+
+- compat/golibutp reproduces the API of anacrolix/go-libutp; see
+  compat/golibutp/LICENSE.go-libutp.
+- internal/libutp vendors BitTorrent's libutp as a reference
+  implementation for tests only; it is not part of the published
+  packages. See internal/libutp/LICENSE.libutp.

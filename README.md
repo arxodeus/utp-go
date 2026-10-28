@@ -80,8 +80,8 @@ Notes for contributors are in [docs/dev](docs/dev).
 ## Origin
 
 This project began as a fork of
-[zen-eth/utp-go](https://github.com/zen-eth/utp-go).
+[zen-eth/utp-go](https://github.com/zen-eth/utp-go). See [NOTICE](NOTICE).
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
