@@ -157,43 +157,22 @@ func icmpTransfer(t *testing.T, linkMTU int, payloadLen int, cid uint16, withICM
 	return res
 }
 
-// What the router's report is worth on a path narrower than the search's own
-// ceiling: the search ends up at a size the path carries, instead of parked
-// above it sending datagrams that can never arrive.
-//
+// What the router's report is worth on a path narrower than the search's
+// ceiling: the search ends with its ceiling at the path rather than above it.
 // The control is the same transfer with the router silent.
 //
-// What that control demonstrates has narrowed, and this comment used to
-// overstate it. It said the ceiling never comes down without a report,
-// because it only falls when a probe times out as the *sole* outstanding
-// packet (utp_internal.cpp:1152-1160), which a connection whose every packet
-// is too big never reaches. libutp's other route -- three duplicate
-// acknowledgements pointing at the packet before the probe (:1927-1940) -- is
-// implemented now and works with the window full, so the silent search does
-// come down: measured repeatedly at floor=982 current=1083 ceiling=1184
-// against this 1100-byte link.
+// Without a report the search still comes down through duplicate
+// acknowledgements (floor=982 current=1083 ceiling=1184 against this
+// 1100-byte link), but its ceiling stays above the path and it may climb
+// back. With the report the ceiling is exactly 1100 every run, so the
+// assertion is on the ceiling.
 //
-// It comes down to a workable *size* and not to a workable *ceiling*. 1184 is
-// still above the path, so the search is free to climb back above it. The
-// report is what ends that, because it names the next hop's MTU instead of
-// bisecting towards it: with the router reporting, the ceiling is exactly
-// 1100 every run. That is the difference this case now measures, and it is
-// asserted on the ceiling rather than on the size.
-//
-// **This does not rescue the transfer, and the test says so rather than
-// pretending otherwise.** uTP numbers packets, not bytes, so a packet that has
-// already been built cannot be re-cut smaller -- doing that would renumber
-// every packet behind it. libutp has the same constraint and gets away with it
-// by not setting don't-fragment on ordinary data ("now we need it to fragment
-// just to get it through", utp_internal.cpp:898-905), leaving the router to
-// fragment what it cannot forward whole. This emulated link refuses oversized
-// datagrams outright, which is what an IPv6 path does and what Linux's default
-// IP_PMTUDISC_WANT makes an IPv4 path do, so the packets already in the window
-// stay stuck under either implementation.
-//
-// So what ICMP fixes here is the search's ceiling, not the window: every
-// packet built from the report onwards fits the path, and the search cannot
-// wander back above it. That is what this asserts.
+// The report does not rescue the transfer. uTP numbers packets, not bytes,
+// so a packet already built cannot be re-cut smaller without renumbering
+// everything behind it. libutp leaves don't-fragment off for ordinary data
+// and lets the router fragment; this link refuses oversized datagrams, as an
+// IPv6 path does, so packets already in the window stay stuck under either
+// implementation. Every packet built after the report fits the path.
 func TestIcmpBringsTheSearchWithinThePath(t *testing.T) {
 	const linkMTU = 1100
 	const payloadLen = 1 << 20

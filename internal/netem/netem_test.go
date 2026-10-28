@@ -10,10 +10,9 @@ import (
 	"time"
 )
 
-// The M1 gate. A harness you have not validated is worse than no harness: it
-// produces numbers that look like measurements. These tests prove the three
-// properties congestion results depend on -- configured bandwidth, configured
-// delay and configured loss are what actually happens.
+// Validation of the emulator itself. An unvalidated harness produces numbers
+// that look like measurements. These tests check that the configured
+// bandwidth, delay and loss are what actually happens.
 
 const testPayload = 1000
 

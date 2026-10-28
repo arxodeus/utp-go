@@ -13,29 +13,22 @@ import (
 )
 
 // TestLibutpOverEmulatedNetwork runs real libutp over the emulated network and
-// compares it against this library on identical links.
+// compares it with this library on identical links. Four flows go over each
+// link, every sender against every receiver:
 //
-// This is the gap COMPATIBILITY.md named as its largest: every congestion
-// control row there was *cited* — code read against utp_internal.cpp and
-// matched by hand — and every number in BENCHMARKS.md compared this library
-// against a previous version of itself, because libutp had never been run over
-// the emulated network. Four flows go over each link, every sender against
-// every receiver:
-//
-//	go->go          both ends this library, the BENCHMARKS.md configuration
+//	go->go          both ends this library
 //	libutp->go      libutp's congestion controller, our receiver
 //	go->libutp      our congestion controller, libutp's receiver
 //	libutp->libutp  the reference against itself
 //
-// Comparing the first two is the point: same link, same payload, same clock,
-// different sender. The other two are the controls: each sender against the
-// other receiver, so that a difference can be put on the end that makes it.
-// Every flow is timed from the moment before the SYN to the receiver holding
-// the last byte.
+// The first two compare senders on the same link, payload and clock; the
+// other two are controls, so a difference can be attributed to one end.
+// Every flow is timed from just before the SYN to the receiver holding the
+// last byte.
 //
-// What this is not: a claim that either implementation is better. The links
-// are emulated, the machine is one machine, and libutp is being driven by the
-// loop in libutp_flow_test.go rather than by a production embedder.
+// This is not a claim that either implementation is better: the links are
+// emulated, it is one machine, and libutp is driven by the loop in
+// libutp_flow_test.go rather than a production embedder.
 func TestLibutpOverEmulatedNetwork(t *testing.T) {
 	profiles := []struct {
 		name  string
@@ -142,16 +135,10 @@ func runComparisonFlow(t *testing.T, mode string, cfg Config, payload []byte) (f
 	return float64(len(payload)) * 8 / elapsed.Seconds() / 1e6, nil
 }
 
-// TestLibutpTransfersOverEmulatedNetwork is the cheap gate: libutp completes a
-// verified transfer over the emulated network in both directions. It runs on
-// every `go test ./netem`, where the comparison table above is the expensive
-// part.
-//
-// Its value is not the throughput number. It is that the harness driving
-// libutp — clock, packet delivery, read draining, MTU — is wired up correctly,
-// which is not something to take on trust: three defects in it were found by
-// measuring, and all three made libutp look worse than it is. See
-// KNOWN-LIMITATIONS.md.
+// TestLibutpTransfersOverEmulatedNetwork is the cheap gate: libutp completes
+// a verified transfer over the emulated network in both directions. It checks
+// that the harness driving libutp (clock, packet delivery, read draining,
+// MTU) is wired correctly; it runs on every `go test ./internal/netem`.
 func TestLibutpTransfersOverEmulatedNetwork(t *testing.T) {
 	payload := make([]byte, 256*1024)
 	for i := range payload {

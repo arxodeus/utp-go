@@ -11,31 +11,17 @@ import (
 	utp "github.com/arxodeus/utp"
 )
 
-// What Close waits for, measured on a link whose conditions can be changed.
+// What Close waits for, on a link whose conditions can be changed.
 //
-// Close used to wait for the connection's event loop to exit, full stop. A
-// loop with unacknowledged data does not exit until its retransmission ladder
-// runs out -- 1 + 2 + 4 + 8 + 16 seconds -- and where that is not enough, the
-// 60-second idle timeout behind it. Closing a connection whose peer had gone
-// took 31 seconds in one shape and 60 in another, with the caller held for all
-// of it. The standard library's net.Conn suite found it: the eleven subtests
-// that kernel TCP finishes in 0.43s took 140 seconds here, and almost all of
-// that was Close.
+// Write returns once data is in the send buffer, so a write followed by a
+// close has a tail to flush, which on a slow link can take longer than any
+// useful fixed timeout. A peer that has vanished, on the other hand, would
+// hold a Close that waited for the retransmission ladder for a minute. Close
+// therefore waits while the peer is still answering.
 //
-// The obvious fix, a flat timeout, breaks the opposite case. Write returns
-// once the data is in the send buffer rather than once it is acknowledged
-// (conn_send.go, processWrites), so a write followed by a close has a tail still to
-// flush -- and on a slow link that tail takes longer than any timeout short
-// enough to be worth having. A clock cannot tell the two apart. Whether the
-// peer is still answering can, and that is what Close now watches.
-//
-// These two tests hold each end of that. Both need a link that can be changed
-// underneath a live connection, which is why they are here and not beside the
-// socket: on loopback the tail flushes in milliseconds and a closed peer
-// politely sends a FIN, so neither case can be staged at all. Written against
-// real sockets first, both passed while measuring nothing -- Close returned in
-// 8ms with nothing left to send, and in 0s against a "vanished" peer that had
-// in fact said goodbye.
+// These two tests hold each end of that. Both need a link that can be
+// changed underneath a live connection: on loopback the tail flushes in
+// milliseconds and a closed peer sends a FIN, so neither case can be staged.
 
 // A close on a link too slow to have flushed must still deliver every byte.
 //

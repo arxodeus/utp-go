@@ -247,9 +247,8 @@ func TestSameSeedReproducesSameDrops(t *testing.T) {
 	}
 }
 
-// Two flows over one link must contend for the same bottleneck. This is the
-// mechanism the M5 fairness gates depend on; if flows did not actually share
-// a queue, those gates would measure nothing.
+// Two flows over one link contend for the same bottleneck; if they did not
+// share a queue, the fairness tests would measure nothing.
 func TestTwoFlowsShareBottleneck(t *testing.T) {
 	const bw = 8_000_000
 	n := NewNetwork(15)

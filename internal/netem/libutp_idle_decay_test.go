@@ -362,16 +362,10 @@ func libutpFirstFlightAfterIdle(t *testing.T, idle time.Duration) (flight int, w
 	}
 
 	// The burst. libutp sends from inside the write that queues it, as much
-	// as its window allows (utp_writev, utp_internal.cpp:3200-3212), and no
-	// acknowledgement can arrive while the driver is in that call -- so what
-	// the write emits is the first flight, exactly. It is counted before the
-	// pump sends it.
-	//
-	// It used to be timed instead: everything emitted within 40 ms of the
-	// burst's first packet. Under load -- the race detector, or another test
-	// binary on the machine -- the pump could stall past that window between
-	// the first packet and the rest, and the flight read as one packet:
-	// 1,452 bytes where libutp's window, read directly, was 16,534.
+	// as its window allows, and no acknowledgement can arrive during that
+	// call, so what the write emits is exactly the first flight. It is
+	// counted before the pump sends it, rather than timed, so a stalled pump
+	// under load cannot split it.
 	pumpMu.Lock()
 	defer pumpMu.Unlock()
 	// Where the build can read the window itself, it is read as libutp first

@@ -138,15 +138,11 @@ func roleName(oursDials bool) string {
 	return "purego dials"
 }
 
-// helloFirst makes the dialler speak first when purego accepted and is to
-// send: libutp completes an incoming connection only on the first data packet
-// (utp_internal.cpp:2158-2161) and writes nothing before that
-// (utp_writev, :3181), and purego, its port, likewise holds every write until
-// the dialler has sent something -- measured, its Write still blocked after
-// 10 s. Protocols over uTP have the dialler speak first, as BitTorrent's
-// handshake does. This library completes the connection on the handshake
-// instead (DEVIATIONS.md, "Completing an incoming connection"), so when ours
-// accepts it may send first, and the tests let it.
+// helloFirst makes the dialer speak first when purego accepted and is to
+// send: libutp and purego complete an incoming connection only on the first
+// data packet and write nothing before it. Protocols over uTP, such as
+// BitTorrent, have the dialer speak first. This library completes the
+// connection on the handshake, so when it accepts it may send first.
 func helloFirst(ctx context.Context, ours *utp.UtpStream, theirs net.Conn, oursDials, oursSends bool) error {
 	if !oursDials || oursSends {
 		return nil

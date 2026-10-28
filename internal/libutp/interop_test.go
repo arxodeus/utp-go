@@ -16,15 +16,10 @@ import (
 	"github.com/arxodeus/utp/internal/libutp"
 )
 
-// The M7 interoperability gate.
-//
-// Everything else in this repository is conformance by citation: code read
-// against utp_internal.cpp and matched by hand. These tests are the only
-// evidence that a real libutp peer -- the thing every BitTorrent client in the
-// wild actually runs -- will complete a transfer with this implementation.
-//
-// Both directions matter. A bug in connection-id allocation, for instance,
-// can leave one role working and the other unroutable.
+// Interoperability with a real libutp peer, the implementation most
+// BitTorrent clients run: a transfer completes in both directions. A bug in
+// connection-id allocation, for instance, can leave one role working and the
+// other unroutable.
 
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 4}))

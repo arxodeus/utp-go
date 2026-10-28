@@ -37,12 +37,7 @@ func numTransfers() int {
 }
 
 func TestManyConcurrentTransfers(t *testing.T) {
-	// NOTE: this test used to register an fgprof handler on
-	// http.DefaultServeMux, start an HTTP server on a fixed port, and write
-	// CPU/trace profiles into the source tree. TestManyTimeHugeData registered
-	// the same mux pattern, so running the package's tests together panicked
-	// with "multiple registrations for /debug/fgprof". Profiling belongs
-	// behind `go test -cpuprofile`, not baked into the test.
+	// Profile with go test -cpuprofile rather than from inside the test.
 
 	// profile name: allocs
 	// profile name: block
@@ -171,15 +166,8 @@ func TestManyConcurrentTransfers(t *testing.T) {
 	}
 }
 
-// TestUdpTransfer performs a single large transfer over uTP carried on real
-// UDP sockets -- the path a BitTorrent client uses.
-//
-// NOTE: this test previously did not touch the uTP library at all. It opened
-// two net.UDPConns and blasted raw datagrams between them, and its send loop
-// never advanced `offset` (the increment was commented out), so it looped
-// forever and the test could only ever end at the timeout. It was a scratch
-// benchmark of UDP loopback, not a test of this package. It has been rewritten
-// to exercise what its name claims. See KNOWN-LIMITATIONS.md.
+// TestUdpTransfer performs a single large transfer over uTP on real UDP
+// sockets, the path a BitTorrent client uses.
 func TestUdpTransfer(t *testing.T) {
 	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 4})
 	logger := slog.New(handler)

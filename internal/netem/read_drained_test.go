@@ -9,17 +9,14 @@ import (
 	utp "github.com/arxodeus/utp"
 )
 
-// utp_read_drained, end to end (utp_internal.cpp:3242-3261).
+// Reopening a window on read, end to end.
 //
-// A reader pauses long enough for the sender to fill its 32KB receive buffer.
-// The window falls below a packet but not to zero, so the zero-window probe
-// never arms, and nothing is in flight, so no retransmission timer runs. When
-// the reader drains, only this end speaking can restart the sender.
-//
-// Measured, 10 runs an arm: 2.158-2.163s with the mechanism; 29.698-29.702s
-// without it, with the keep-alive checked every 500ms as libutp checks it,
-// the keep-alive being the only thing that recovered the control. See KNOWN-LIMITATIONS.md, M4b sweep,
-// section 2. The budget below sits between them with room on both sides.
+// A reader pauses long enough for the sender to fill its 32KB receive
+// buffer. The window falls below a packet but not to zero, so the zero-window
+// probe never arms, and nothing is in flight, so no retransmission timer
+// runs. When the reader drains, only this end speaking can restart the
+// sender. With the mechanism the transfer takes about 2.2s; without it, the
+// keep-alive recovers it after about 30s. The budget sits between them.
 func TestReadDrainedRestartsASenderBlockedBySubPacketWindow(t *testing.T) {
 	const readerPause = 2 * time.Second
 	const budget = 10 * time.Second

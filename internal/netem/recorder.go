@@ -65,7 +65,7 @@ func (r *Recorder) Last() (utp.ConnectionMetrics, bool) {
 	return r.samples[len(r.samples)-1], true
 }
 
-// Summary condenses a recorded series into the numbers the M5 gates report.
+// Summary condenses a recorded series into the numbers the gates report.
 type Summary struct {
 	Samples int
 	Span    time.Duration

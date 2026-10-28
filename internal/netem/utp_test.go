@@ -14,9 +14,9 @@ func quiet() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 4}))
 }
 
-// The harness has to actually carry uTP, and the connection-level metrics
-// have to record something. Without this, the M5 gates would be measuring an
-// emulator nobody had run a real flow over.
+// The harness carries uTP, and the connection-level metrics record
+// something; otherwise the gates would measure an emulator nobody had run a
+// real flow over.
 
 func TestUtpTransferOverEmulatedLink(t *testing.T) {
 	n := NewNetwork(21)
@@ -58,9 +58,8 @@ func TestUtpTransferOverEmulatedLink(t *testing.T) {
 	}
 }
 
-// The window has to move. A congestion controller whose window never changes
-// is not controlling anything -- which is exactly the failure this fork
-// already found once, and the reason the harness records cwnd at all.
+// The window moves. A congestion controller whose window never changes is
+// not controlling anything.
 func TestCongestionWindowRespondsOverEmulatedLink(t *testing.T) {
 	n := NewNetwork(22)
 	defer n.Close()
@@ -150,9 +149,8 @@ func TestUtpSurvivesLossOverEmulatedLink(t *testing.T) {
 	}
 }
 
-// Two flows over one bottleneck, and the capacity split reported. This is the
-// mechanism the M5 fairness gate needs; here it only has to work, not to be
-// fair -- judging the split is M5's job.
+// Two flows over one bottleneck, and the capacity split reported. Here it
+// only has to work; whether the split is fair is tested elsewhere.
 func TestTwoUtpFlowsShareBottleneck(t *testing.T) {
 	n := NewNetwork(24)
 	defer n.Close()
@@ -205,8 +203,8 @@ func TestTwoUtpFlowsShareBottleneck(t *testing.T) {
 	t.Logf("link a->b: %s", n.Link("sender", "receiver").Stats())
 
 	// The harness gate is only that both flows complete and the split is
-	// reportable. Whether the split is *fair* is an M5 question about the
-	// congestion controller, not about this emulator.
+	// reportable. Fairness is a question about the congestion controller,
+	// not this emulator.
 	if rates[0] == 0 || rates[1] == 0 {
 		t.Errorf("a flow achieved zero goodput: %v", rates)
 	}

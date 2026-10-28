@@ -11,16 +11,11 @@ import (
 	utp "github.com/arxodeus/utp"
 )
 
-// Data both ways at once over a lossy path.
-//
-// Nothing else in the suite sends in both directions on one connection, and
-// that is where the peer's acknowledgements stop arriving as ST_STATE: they
-// ride on its data packets instead. The writer used to wake only for an
-// ST_STATE, so in about one run in five one direction sat with a megabyte
-// queued, nothing in flight and room in its window, until a timer happened to
-// fire some 30 seconds later. libutp wakes on any packet (utp_internal.cpp:
-// 2302-2308). With eight runs, a one-in-five stall shows in about five
-// attempts out of six.
+// Data both ways at once over a lossy path, where the peer's
+// acknowledgements ride on its data packets rather than arriving as
+// ST_STATE. The writer must wake for those too, or one direction can sit with
+// data queued, nothing in flight and room in its window until some timer
+// fires. Eight runs make an intermittent stall likely to show.
 func TestTwoWayTransferOverLoss(t *testing.T) {
 	if testing.Short() {
 		t.Skip("not a -short test")

@@ -280,8 +280,8 @@ func TestClockSkewCorrectionCancelsThePhantomQueue(t *testing.T) {
 	}
 	var points []point
 
-	// Back to back, because cross-run comparisons in this harness are not
-	// worth having -- see BENCHMARKS.md.
+	// Back to back, since comparisons across runs of this harness are not
+	// reliable.
 	for i, ppm := range []float64{0, -5000, -10000, -20000} {
 		r := runDrifted(t, ppm, runFor, uint16(900+i*10), window)
 		points = append(points, point{

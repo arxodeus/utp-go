@@ -12,7 +12,7 @@ import (
 )
 
 // UtpPair is two uTP sockets joined by an emulated network, ready to carry
-// flows. It is the thing M5's gates are run against.
+// flows.
 type UtpPair struct {
 	Net          *Network
 	A, B         *Endpoint

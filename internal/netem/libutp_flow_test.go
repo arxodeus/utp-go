@@ -17,20 +17,13 @@ import (
 	"github.com/arxodeus/utp/internal/libutp"
 )
 
-// Real libutp, running as an endpoint on the emulated network.
+// Real libutp as an endpoint on the emulated network: the same links,
+// payload and measurements, with the reference implementation at one end.
 //
-// Everything in BENCHMARKS.md compares this library against a previous version
-// of itself, and every congestion-control row in COMPATIBILITY.md is *cited* —
-// code read against utp_internal.cpp and matched by hand — because libutp had
-// never been run over the emulated network. This is what closes that gap: the
-// same links, the same payload, the same measurements, with the reference
-// implementation at one end.
-//
-// libutp.Driver is deliberately inert: no socket, no clock, no threads. That
-// is what makes this possible. The loop below supplies all three — it hands
-// the driver packets from a netem Endpoint, moves its clock to match the real
-// one the rest of the harness runs on, and writes whatever it emits back to
-// the link.
+// libutp.Driver has no socket, clock or threads. The loop below supplies all
+// three: it hands the driver packets from a netem Endpoint, moves its clock to
+// match the real one the harness runs on, and writes what it emits to the
+// link.
 
 // libutpTickInterval is how often the loop advances libutp's clock and calls
 // utp_check_timeouts when no packet has arrived.
@@ -260,15 +253,11 @@ func (r libutpRole) String() string {
 
 // --- flows joining libutp to this library -----------------------------------
 
-// libutpToGo runs a transfer with real libutp sending and this library
-// receiving. It returns the elapsed time and the bytes the receiver read.
-//
-// The elapsed time runs from the moment before libutp's SYN to the moment our
-// receiver holds the last byte, as for every other flow. It used to
-// run to libutp's tearing the connection down, and libutp only does that on
-// one of its 500ms timeout passes (utp_internal.cpp:37, :3284-3285) after the
-// FIN is acknowledged: a 256 KB transfer delivered in 344ms was timed at
-// 502ms. That rounding is libutp's teardown cadence, not its sending.
+// libutpToGo runs a transfer with libutp sending and this library receiving.
+// It returns the elapsed time and the bytes the receiver read. The time runs
+// from just before libutp's SYN to our receiver holding the last byte, as for
+// every other flow, not to libutp's teardown, which happens only on one of
+// its 500ms timeout passes.
 func libutpToGo(ctx context.Context, n *Network, from, to *Endpoint, payload []byte, connSeed uint32) (time.Duration, []byte, error) {
 	sender, err := newLibutpEndpoint(from, to.Addr(), connSeed, libutpSender)
 	if err != nil {

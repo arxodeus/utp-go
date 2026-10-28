@@ -9,23 +9,12 @@ import (
 	utp "github.com/arxodeus/utp"
 )
 
-// ConnectionMetrics.QueueingDelay must measure a queue, on the path this
-// sender is sending into. An asymmetric path is what tells the difference.
-//
-// The two directions here are given very different propagation delays and no
-// bottleneck at all, so neither direction has a standing queue: the right
-// answer is approximately zero, whatever the delays are.
-//
-// It used to be the difference between the two directions. BaseDelay comes
-// from the peer's measurement of our *outbound* path (libutp's `our_hist`,
-// utp_internal.cpp:2016-2021) and PeerTsDiff is our own measurement of the
-// *inbound* one (`their_delay`, :2000-2001); subtracting one from the other
-// gives the path asymmetry, with any real queue buried inside it. On this
-// link that produced about 90ms of queue on a path with none.
-//
-// The congestion controller was never affected -- it compares a sample
-// against the base of the same series, which it has in hand. What this fed
-// was the queueing delay Recorder reports.
+// ConnectionMetrics.QueueingDelay measures a queue on the path this sender
+// sends into. The two directions here have very different propagation delays
+// and no bottleneck, so neither has a standing queue and the right answer is
+// about zero. BaseDelay and CurrentDelay both measure the outbound path;
+// subtracting the inbound PeerTsDiff instead would report the path
+// asymmetry, about 90ms here, as queue.
 func TestQueueingDelayMeasuresTheOutboundQueue(t *testing.T) {
 	// One direction slow, the other fast, and nothing to queue behind.
 	const outbound = 10 * time.Millisecond

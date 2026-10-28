@@ -15,48 +15,33 @@ import (
 	utp "github.com/arxodeus/utp"
 )
 
-// The M5 benchmark suite: one fixed set of link profiles, run the same way
-// every time, so a congestion-control change can be judged rather than
-// guessed at.
+// The benchmark suite: one fixed set of link profiles, run the same way every
+// time, so a congestion-control change can be judged.
 //
-// Every profile is deterministic -- a fixed seed per link, and the emulator's
-// loss, reordering and jitter all draw from it -- so two runs of the same
-// binary produce the same numbers, and a difference between two binaries is
-// the change and not the weather. What is *not* deterministic is our side's
-// timing: it runs on the real clock with real goroutines, so single runs vary
-// by a few percent. Numbers below are one run each unless stated; treat
-// differences under about 5% as noise.
+// Every profile is deterministic, with a fixed seed per link from which the
+// emulator draws its loss, reordering and jitter. Our side's timing is not:
+// it runs on the real clock with real goroutines, so single runs vary by a
+// few percent. Treat differences under about 5% as noise.
 //
-// Each profile is run benchmarkRepeats times and the median reported, because
-// our side's run-to-run variance is real: a single retransmission timeout
-// costs a full RTO and can halve a short transfer's goodput. The spread is
-// reported alongside the median so a reader can see how much to trust it.
+// Each profile runs benchmarkRepeats times and the median is reported with
+// the spread, since a single retransmission timeout can halve a short
+// transfer's goodput.
 //
 // Run with:
 //
-//	go test ./netem -run TestBenchmarkSuite -v
+//	go test ./internal/netem -run TestBenchmarkSuite -v
 //
 // It is skipped under -short.
 
 // benchmarkRepeats is how many times each profile runs by default: once.
+// One run is a gate, not a measurement: everything asserted is per run (the
+// transfer completed and the bytes are correct), which catches a congestion
+// controller that has stopped working, and keeps `go test ./internal/netem`
+// within Go's default timeout.
 //
-// One run is a gate, not a measurement. Everything this suite asserts is
-// per-run -- the transfer completed, and the bytes that arrived are the bytes
-// that were sent -- so a single pass catches a congestion controller that has
-// stopped working. What it cannot do is produce a number worth quoting.
-//
-// It used to be three, and together with the libutp comparison that put
-// `go test ./netem` at 634 seconds against Go's 600-second default per-package
-// timeout: the harness gate failed unless you knew to pass -timeout, which is
-// a poor way to greet anyone running the suite for the first time. Two
-// measurement suites were most of that, and neither needs to run repeatedly to
-// act as a gate.
-//
-// Set UTP_BENCHMARK_REPEATS to take a measurement. The tables in
-// BENCHMARKS.md and KNOWN-LIMITATIONS.md are medians of seven, which is what
-// the loss profiles need: their results are bimodal, one retransmission
-// timeout dominating a short transfer, and three runs cannot separate the two
-// modes.
+// Set UTP_BENCHMARK_REPEATS to take a measurement. The loss profiles need
+// about seven: their results are bimodal, one retransmission timeout
+// dominating a short transfer.
 const benchmarkRepeats = 1
 
 // benchmarkRepeatCount is the repeat count, overridable for measurement runs.

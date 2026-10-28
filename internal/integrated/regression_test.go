@@ -15,9 +15,8 @@ import (
 	utp "github.com/arxodeus/utp"
 )
 
-// Regression tests for the transfer-path defects fixed in this fork.
-// Each test names the defect it covers; see the root-cause notes in
-// KNOWN-LIMITATIONS.md and the commit history.
+// Regression tests for transfer-path defects. Each test names the defect it
+// covers.
 
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 4}))
@@ -87,8 +86,7 @@ func TestReaderUnblocksWhenPeerGoesAway(t *testing.T) {
 	}
 	// The initiator disappears. The acceptor must not block forever.
 	bLink.Close()
-	// Close must also be idempotent -- this second call used to panic closing
-	// an already-closed channel.
+	// Close is idempotent.
 	bLink.Close()
 
 	select {
@@ -195,10 +193,9 @@ func TestConcurrentTransfersScale(t *testing.T) {
 	}
 }
 
-// TestAbortedTransfersTearDown hammers the teardown paths concurrently: idle
-// timeout, RESET and local close all racing. It guards the time-wheel change
-// (the expiry callback used to run while holding the wheel's lock, which could
-// deadlock against the connection event loop) and the socket shutdown fan-out.
+// TestAbortedTransfersTearDown exercises the teardown paths concurrently:
+// idle timeout, RESET and local close racing, and the socket's shutdown
+// fan-out.
 func TestAbortedTransfersTearDown(t *testing.T) {
 	logger := quietLogger()
 	aAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4700}
@@ -459,13 +456,10 @@ func TestCloseReturnsPromptly(t *testing.T) {
 	<-readDone
 }
 
-// A read that ends without error has everything the peer sent.
-//
-// The consumer here closes its stream part way through a transfer and then
-// reads what reached it. Teardown drops the bytes still on their way, since
-// they are owed to nobody, and ReadToEOF used to report the end of that
-// truncated stream as a clean one: a nil error and short data. It reports
-// ErrReadClosed now.
+// A read that ends without error has everything the peer sent. Here the
+// consumer closes its stream partway through a transfer and then reads what
+// reached it; teardown drops bytes still on their way, so ReadToEOF reports
+// ErrReadClosed rather than a clean end.
 func TestReadAfterLocalCloseIsNotACleanEnd(t *testing.T) {
 	aLink, aCid, bLink, bCid := buildConnectedPair()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

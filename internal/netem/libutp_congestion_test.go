@@ -10,42 +10,19 @@ import (
 
 // How each implementation's congestion control responds to a queue it caused.
 //
-// Everything comparing this library to libutp so far has compared *goodput*:
-// how fast a transfer finished on five links. That is a coarse instrument, and
-// COMPATIBILITY.md says so -- two controllers can reach the same throughput by
-// different routes, and every mechanism inside the controller is still recorded
-// there as *cited*, matched by reading utp_internal.cpp rather than by running
-// it.
+// The bottleneck is cut to 40% of its rate partway through a transfer, so a
+// sender filling the old capacity suddenly overdrives the new one and a queue
+// builds. A delay-based controller should notice it in the one-way delay and
+// back off until the standing queue is small; a loss-based one would push
+// until the queue overflowed. The measurement is the queuing delay the link
+// reports, the quantity LEDBAT controls, measured the same way for both.
 //
-// This measures the mechanism that defines LEDBAT: what it does about queueing
-// delay of its own making. The bottleneck is cut to 40% of its rate part-way
-// through a transfer, so a sender already filling the old capacity is suddenly
-// overdriving the new one. A queue builds. A delay-based controller is supposed
-// to notice that in the one-way delay and back off until the standing queue is
-// small; a loss-based one would keep pushing until the queue overflowed.
+// Stepping the propagation delay instead would measure nothing: tripling the
+// RTT cuts the rate of any fixed window, whatever the controller does.
 //
-// The measurement is the queueing delay the link actually reports, which is the
-// quantity LEDBAT exists to control, and it is measured the same way for both
-// implementations.
-//
-// An earlier version of this test stepped the *propagation* delay instead and
-// asserted the sending rate fell. Both implementations passed it, and it was
-// measuring nothing: tripling the RTT cuts the rate of any fixed window
-// mechanically, so the assertion held whatever the controller did. Working the
-// rates back into windows showed both had in fact *grown* their window across
-// the step -- correctly, because a permanent propagation change is not
-// queueing, and LEDBAT relearns it as the new base delay. The test was
-// confounded in the direction that made it pass.
-//
-// Reading the window directly would be better and is not available: libutp
-// keeps max_window private to UTPSocket, utp_socket_stats does not report it,
-// and reaching in would mean modifying the vendored copy REFERENCE.md pins.
-//
-// What this does not establish: that the two controllers agree on how *much*
-// queue to leave. They demonstrably do not -- BENCHMARKS.md records this fork's
-// classic LEDBAT leaving 33ms of standing queue on a 40ms path -- so the
-// numbers are reported for comparison and the assertion is only that each
-// keeps the queue bounded rather than filling it until it overflows.
+// The two controllers need not agree on how much queue to leave, so the
+// numbers are reported and the assertion is only that each keeps the queue
+// bounded.
 func TestCongestionRespondsToSelfInflictedQueue(t *testing.T) {
 	const (
 		fullRate    = 10_000_000
@@ -134,21 +111,14 @@ func TestCongestionRespondsToSelfInflictedQueue(t *testing.T) {
 		results["go->libutp"].queueAfter.Round(time.Microsecond))
 }
 
-// How fast each implementation ramps up from a standing start.
-//
-// Slow start is recorded in COMPATIBILITY.md as *cited* -- and it was absent
-// from this fork entirely until M5, so it is worth knowing that what replaced
-// nothing behaves like the reference rather than merely existing. The shape is
-// the claim: slow start doubles the window each round trip, so a sender
-// reaches a bottleneck in a time that grows with the logarithm of the window,
-// not linearly.
+// How fast each implementation ramps up from a standing start. Slow start
+// doubles the window each round trip, so a sender reaches the bottleneck in a
+// time that grows with the logarithm of the window.
 //
 // Measured as the time to first carry 90% of the link rate in a sampling
-// interval, on an idle path with no loss, which is the condition slow start is
-// for. Both numbers are reported; the assertion is only that neither takes
-// absurdly long, because the two do not have to agree exactly -- this fork's
-// slow start is gain-scaled per the LEDBAT++ draft when that algorithm is
-// selected, and libutp has no such notion.
+// interval, on an idle path with no loss. Both numbers are reported; the
+// assertion is only that neither takes absurdly long, since LEDBAT++'s slow
+// start is gain-scaled and the two need not agree exactly.
 func TestCongestionSlowStartRamp(t *testing.T) {
 	const (
 		rate        = 10_000_000

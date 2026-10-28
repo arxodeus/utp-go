@@ -31,10 +31,8 @@ func (c *failingConn) ReadFrom(b []byte) (int, utp.ConnectionPeer, error) {
 	return c.Endpoint.ReadFrom(b)
 }
 
-// A read error that does not say it is temporary no longer stops the
-// socket from reading. go-libutp, go-utp and rust-utp each tolerate a run of
-// 100. This one stopped at the first: every connection on the socket then
-// retransmitted into silence until it timed out.
+// A read error that does not say it is temporary does not stop the socket
+// reading; a run of up to 100 is tolerated.
 func TestSocketReadsOnAfterAReadError(t *testing.T) {
 	n := NewNetwork(91)
 	defer n.Close()

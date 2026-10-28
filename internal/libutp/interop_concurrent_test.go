@@ -17,17 +17,13 @@ import (
 	"github.com/arxodeus/utp/internal/libutp"
 )
 
-// Interop with more than one libutp peer at a time.
-//
-// The M7 gate proves a single connection completes in each direction. That is
-// not the shape a BitTorrent client runs: it holds tens of connections on one
-// UDP port, all live at once, and every packet arriving on that port has to be
-// routed to the right one by connection id alone. A demultiplexing bug, an
-// accept that starves under inbound load, or state shared between connections
-// that should not be, shows up here and nowhere in the single-connection gate.
+// Interop with several libutp peers at once on one UDP port, where every
+// packet must be routed to the right connection by its id alone. A
+// demultiplexing bug, an accept that starves under inbound load, or state
+// shared between connections shows up here and not with a single connection.
 //
 // Each peer gets a payload stamped with its own index, so a byte delivered to
-// the wrong connection is a failure with a name rather than a length mismatch.
+// the wrong connection is a named failure rather than a length mismatch.
 
 const (
 	concurrentPeers       = 16

@@ -101,15 +101,10 @@ func TestAsymmetricAckPath(t *testing.T) {
 		}
 		if !c.thin {
 			if o, r := medianCount(acks[true]), medianCount(acks[false]); float64(o) > asymmetricAckShare*float64(r) {
-				// Gated as the times are, and only without the race detector.
-				// A count, but of acknowledgements, one per read batch, and a
-				// batch is however many datagrams the reader finds waiting:
-				// it follows the reader's timing, which the race detector
-				// changes for ours and not for libutp's, uninstrumented C.
-				// Under it our receiver sent 0.65 of libutp's here and 1.054
-				// and 1.057 on CI's runners, where plain runs, CI's included,
-				// are at parity: 0.90-1.05 here. This used to hold it under
-				// the race detector too, as a count independent of speed.
+				// Gated as the times are, and only without the race detector. The
+				// count is of acknowledgements, one per read batch, so it follows
+				// the reader's timing, which the race detector slows for ours and
+				// not for libutp's uninstrumented C.
 				gate("%s: our receiver sent %d packets back, libutp's %d; want under %.2f of it", c.name, o, r, asymmetricAckShare)
 			}
 		}

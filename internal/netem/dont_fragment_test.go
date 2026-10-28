@@ -201,19 +201,13 @@ func dontFragmentNarrowsTheSearch(t *testing.T, batched bool, cid uint16) {
 	}
 	// The search must come down, and by more than a rounding.
 	//
-	// Not "down to at or below the path MTU", though it usually gets there --
-	// six consecutive runs converged on 996 with floor and ceiling equal. Each
+	// Not necessarily to the path MTU, though it usually gets there. Each
 	// halving of the search range costs one dropped probe, and each dropped
-	// probe costs three duplicate acknowledgements from the peer, which
-	// deferred and coalesced acks do not guarantee for every hole. Roughly one
-	// run in fourteen gets three narrowings instead of four and stops around
-	// 1185, still above the path.
-	//
-	// So convergence inside one transfer is a property of the receiver's ack
-	// cadence, not of the mechanism under test, and asserting it here would
-	// make this case fail for a reason it is not about. What is asserted is
-	// what the mechanism is responsible for: the ceiling moves, and it moves
-	// only when the bit is set. See KNOWN-LIMITATIONS.md.
+	// probe needs three duplicate acknowledgements, which deferred and
+	// coalesced acks do not guarantee for every hole; occasionally the search
+	// stops one narrowing short. Convergence within one transfer depends on
+	// the receiver's ack cadence, so what is asserted is the mechanism: the
+	// ceiling moves, and only when the bit is set.
 	const minimumNarrowing = 100
 	if withoutDF < withDF+minimumNarrowing {
 		t.Errorf("the search barely moved: %d with the bit against %d without, less than "+
