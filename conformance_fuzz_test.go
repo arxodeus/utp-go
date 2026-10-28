@@ -10,49 +10,32 @@ import (
 	"github.com/arxodeus/utp/internal/libutp"
 )
 
-// Differential fuzzing: the fuzzer generating input, and libutp deciding
-// whether the answer was right.
-//
-// The two halves existed separately. M2's harness can drive both
-// implementations through the same packets and compare what each emits, field
-// by field -- but only on cases someone wrote down. M8's fuzzer generates
-// packet sequences nobody wrote down -- but could only tell that this
-// implementation had crashed, hung, or died, because it had nothing to compare
-// against. Neither half can find a *behavioural* divergence on input nobody
-// thought of. Together they can.
-//
-// This is the target that turns "libutp would have answered differently" into
-// a fuzz failure.
+// Differential fuzzing: the fuzzer generates packet sequences, and the
+// reference implementation decides whether the answer was right.
 //
 // # The property
 //
-// Not "the two agree". They deliberately do not, in ways CONFORMANCE.md and
-// DEVIATIONS.md set out, and a fuzzer that failed on those would be useless.
-// The property is the direction rule those documents already use:
+// Not that the two agree, since they deliberately differ in places. The
+// property is a direction rule:
 //
 //	Being stricter than the reference is an interoperability risk.
 //	Being more permissive is an attack surface.
 //
 // So:
 //
-//   - **We must never answer more than libutp does.** Emitting a packet where
-//     the reference stays silent is the dangerous direction: it is the
-//     amplification surface, and it is what a malformed-input attack looks
-//     for. This is asserted strictly.
-//   - **Where both answer, the significant fields must agree.** Timestamps and
-//     the advertised window are exempt for the reasons in
-//     `allowedToDiffer`; everything a peer's state machine depends on is not.
-//   - **Answering less than libutp is permitted**, and is where the documented
-//     divergences live (the selective-ack length check, the FIN duplicate
-//     ack). Being quieter cannot be exploited; it can only cost
-//     interoperability, which the M2 corpus pins case by case.
+//   - We must never answer more than the reference does. Emitting a packet
+//     where it stays silent is the amplification surface a malformed-input
+//     attack looks for. This is asserted strictly.
+//   - Where both answer, the significant fields must agree. Timestamps and
+//     the advertised window are exempt for the reasons in allowedToDiffer.
+//   - Answering less is permitted, and is where the known differences lie,
+//     such as the selective-ack length check and the single FIN
+//     acknowledgement. The curated corpus pins those case by case.
 //
 // # Speed
 //
-// This runs at a few executions per second, against ~50,000 for the decoder
-// fuzzers, because each execution builds two implementations and waits for
-// ours to go quiet. That is the price of an oracle. Run it for minutes, not
-// seconds:
+// Each execution builds two implementations and waits for ours to go quiet,
+// so this runs at a few executions per second. Run it for minutes:
 //
 //	go test -tags cgo -run xxx -fuzz FuzzDifferentialResponder -fuzztime 10m
 
@@ -61,13 +44,9 @@ import (
 func (c *scriptedConn) settleQuick() {
 	const quiet = 25 * time.Millisecond
 	const limit = 600 * time.Millisecond
-	// Wait for our socket to actually take the packet before timing anything.
-	// Without this the quiet window could elapse while the packet was still
-	// queued, so settleQuick returned before our side had reacted at all --
-	// and the reaction then landed in the *next* step's transcript, or was
-	// coalesced into the next acknowledgement and never appeared. That showed
-	// up only under full-suite load, as FuzzDifferentialInitiator reporting
-	// one packet against libutp's two on a reordered pair.
+	// Wait for our socket to take the packet before timing anything, or the
+	// quiet period could elapse while the packet was still queued and the
+	// reaction land in the next step's transcript.
 	c.awaitDelivered(limit)
 	deadline := time.Now().Add(limit)
 	last := c.emittedCount()
@@ -87,31 +66,23 @@ func (c *scriptedConn) settleQuick() {
 }
 
 // fuzzPrimingPacket is one in-order data packet, injected after the handshake
-// and before anything the fuzzer generated.
-//
-// It exists to remove a state difference that is documented elsewhere and is
-// not what this target is hunting. libutp completes an incoming connection
-// only on an ST_DATA packet (utp_internal.cpp:2158-2161); until one arrives it
-// sits in CS_SYN_RECV and drops everything (:2314). We treat the connection as
-// established once the handshake completes. Without priming, every generated
-// sequence starting with anything but data reports that one known divergence
-// instead of finding a new one.
-//
-// The divergence itself is pinned by TestConformanceFinBeforeAnyData, so
-// removing it here does not hide it.
+// and before anything the fuzzer generated. The reference implementation's
+// acceptor is established only by an ST_DATA and drops everything before
+// one, while this library is established after the handshake. Priming
+// removes that known difference, pinned by TestConformanceFinBeforeAnyData,
+// so generated sequences can find new ones.
 func fuzzPrimingPacket() []byte {
 	return newPacketBuilder(st_data, corpusSynConnID+1, 190000, corpusWindow, corpusSynSeq+1).
 		WithAckNum(corpusPinnedSeq - 1).WithPayload([]byte("prime")).Build().Encode()
 }
 
-// seedDifferentialCorpus adds conversations that reach the interesting states,
-// so the fuzzer starts from something that has completed a handshake rather
-// than having to rediscover one.
+// seedDifferentialCorpus adds conversations that reach the interesting
+// states, so the fuzzer starts from a completed handshake.
 //
-// connID is the id a peer addresses packets to, which is always the
-// recipient's *receive* id: corpusSynConnID+1 for the responder,
-// initiatorConnSeed for the initiator. (A SYN is the exception -- it carries
-// the sender's own receive id -- but no seed here is a SYN.)
+// connID is the id a peer addresses packets to, always the recipient's
+// receive id: corpusSynConnID+1 for the responder, initiatorConnSeed for the
+// initiator. (A SYN carries the sender's own receive id, but no seed is a
+// SYN.)
 func seedDifferentialCorpus(f *testing.F, connID uint16) {
 	seed := func(pkts ...[]byte) {
 		var out []byte
@@ -133,8 +104,8 @@ func seedDifferentialCorpus(f *testing.F, connID uint16) {
 	switch connID {
 	case initiatorConnSeed:
 		// We sent a SYN numbered initiatorConnSeed and nothing since. The
-		// SYN-ACK carried sequence number 900, so our ack_nr is 899 and the
-		// next packet we expect is 900.
+		// SYN-ACK carried sequence number 900, so ack_nr is 899 and 900 is
+		// next.
 		ack = initiatorConnSeed
 		firstInOrder = 900
 	default:
@@ -192,20 +163,13 @@ func FuzzDifferentialResponder(f *testing.F) {
 	})
 }
 
-// The initiator role: this implementation opens the connection and the fuzzer
-// plays the peer that answers.
-//
-// The responder target above covers a malicious *client*. This covers a
-// malicious *server* -- the side that answers a SYN we sent. That is the
-// direction a BitTorrent client is exposed to every time it dials a peer
-// address it got from a tracker or the DHT, which is to say constantly, and
-// nothing in this repository modelled it: the M2 corpus is responder-only too.
+// The initiator role: this implementation opens the connection and the
+// fuzzer plays the peer that answers, a malicious server rather than a
+// malicious client. A BitTorrent client faces this on every dial.
 //
 // The connection ids and the SYN's sequence number are pinned to the same
-// value on both sides. libutp derives conn_id_recv from one random draw and
-// its SYN sequence number from another (utp_internal.cpp:2535 and :2768), and
-// its driver's random source repeats its last value once exhausted -- the same
-// behaviour as pinRandom here -- so a single pinned value gives both
+// value on both sides: the reference driver's random source repeats its last
+// value once exhausted, as pinRandom does, so one pinned value gives both
 // implementations identical connection ids and an identical SYN.
 func FuzzDifferentialInitiator(f *testing.F) {
 	seedDifferentialCorpus(f, initiatorConnSeed)
@@ -230,12 +194,10 @@ func FuzzDifferentialInitiator(f *testing.F) {
 	})
 }
 
-// maxDifferentialSteps caps how many packets one execution injects.
-//
-// Each step waits for our side to go quiet, so the cost is linear in this and
-// the exec rate is what limits coverage. Eight is a compromise: long enough to
-// reach a reordering or a close, short enough that the fuzzer gets thousands
-// of executions in a run rather than hundreds.
+// maxDifferentialSteps caps how many packets one execution injects. Each
+// step waits for our side to go quiet, so cost is linear in this. Eight is
+// long enough to reach a reordering or a close and short enough for
+// thousands of executions per run.
 const maxDifferentialSteps = 8
 
 type differentialRole int
@@ -246,26 +208,18 @@ const (
 )
 
 const (
-	// initiatorConnSeed is libutp's conn_seed for the initiator target: the
-	// SYN carries it as the connection id, the peer answers on conn_seed+1,
-	// and it doubles as the SYN's sequence number.
+	// initiatorConnSeed is the reference's conn_seed for the initiator
+	// target: the SYN carries it as the connection id, the peer answers on
+	// conn_seed+1, and it is also the SYN's sequence number.
 	initiatorConnSeed = uint16(7000)
 )
 
-// differentialRun drives both implementations in lockstep so a divergence can
-// be attributed to the packet that caused it.
+// differentialRun drives both implementations in lockstep, comparing after
+// every step, so a divergence is attributed to the packet that caused it.
 //
-// The previous version drove libutp to completion, then ours, and compared the
-// two transcripts at the end. That could say *that* they disagreed but not
-// *where*, and a divergence that appeared at one step and was undone by a
-// later one was invisible. Comparing after every step is strictly stronger.
-//
-// The comparison is cumulative rather than per-step-in-isolation, and
-// deliberately so: our side is goroutine-driven on a real clock, so an
-// emission can land just after the settle that was meant to catch it.
-// Comparing cumulative transcripts means such an emission is counted at the
-// next step instead of producing a spurious "we emitted more than libutp"
-// at this one. It still catches the divergence, one step later at worst.
+// The comparison is of cumulative transcripts: our side runs goroutines, so
+// an emission can land just after the settle meant to catch it, and is then
+// counted at the next step rather than producing a spurious failure here.
 type differentialRun struct {
 	t    *testing.T
 	role differentialRole
@@ -308,10 +262,9 @@ func newDifferentialRun(t *testing.T, role differentialRole) *differentialRun {
 		drv.Listen()
 		cid := NewConnectionId(r.conn.peer, corpusSynConnID+1, corpusSynConnID)
 		go func() { _, _ = r.sock.AcceptWithCid(ctx, cid, pinnedClockConfig(drv)) }()
-		// The acceptor emits nothing until a SYN arrives, so the only thing
-		// to wait for is the request being registered to receive one. A
-		// cid-specific Accept parks in the awaiting map until its SYN
-		// arrives, so that is where it becomes visible.
+		// The acceptor emits nothing until a SYN arrives, so wait for the
+		// request to be registered: a cid-specific Accept waits in the
+		// awaiting map until its SYN arrives.
 		r.waitFor(t, "the acceptor to register", func() bool {
 			_, ok := r.sock.getAwaiting(cid.Hash())
 			return ok
@@ -322,16 +275,8 @@ func newDifferentialRun(t *testing.T, role differentialRole) *differentialRun {
 		}
 		cid := NewConnectionId(r.conn.peer, initiatorConnSeed, initiatorConnSeed+1)
 		go func() { _, _ = r.sock.ConnectWithCid(ctx, cid, pinnedClockConfig(drv)) }()
-		// Wait for the SYN itself, not for a fixed interval.
-		//
-		// This used to sleep 20ms and assume the connection goroutine had run
-		// by then. Under load it had not, and the SYN -- emitted before any
-		// injection and cleared by prime() -- instead landed in the first
-		// step's transcript, where it read as this implementation answering a
-		// packet libutp ignored. Seen as a full-suite-only failure of
-		// FuzzDifferentialInitiator/seed#2, passing whenever the test ran on
-		// its own, which is exactly the shape of a timing assumption rather
-		// than a defect in what is under test.
+		// Wait for the SYN itself rather than a fixed interval, so it cannot
+		// land in the first step's transcript.
 		r.waitFor(t, "our SYN", func() bool {
 			return r.conn.emittedCount() > 0
 		})
@@ -340,8 +285,8 @@ func newDifferentialRun(t *testing.T, role differentialRole) *differentialRun {
 }
 
 // waitFor polls until cond holds, and fails the test if it never does. The
-// deadline is generous because it only bounds a failure: the common case
-// returns on the first or second poll.
+// deadline only bounds a failure; the common case returns on the first or
+// second poll.
 func (r *differentialRun) waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	const limit = 10 * time.Second
@@ -363,17 +308,9 @@ func (r *differentialRun) close() {
 }
 
 // prime brings both implementations to the same established state and
-// discards everything emitted getting there.
-//
-// For the responder that means a SYN followed by one in-order data packet:
-// libutp completes an incoming connection only on an ST_DATA
-// (utp_internal.cpp:2158-2161) and drops everything else until one arrives,
-// while we treat it as established after the handshake. That divergence is
-// pinned by TestConformanceFinBeforeAnyData; priming past it here stops every
-// generated sequence from reporting it instead of finding something new.
-//
-// For the initiator it means the SYN-ACK, which is what moves libutp from
-// CS_SYN_SENT to CS_CONNECTED (utp_internal.cpp:2164).
+// discards everything emitted on the way: for the responder a SYN and one
+// in-order data packet (see fuzzPrimingPacket), for the initiator the
+// SYN-ACK.
 func (r *differentialRun) prime() {
 	r.t.Helper()
 	switch r.role {
@@ -417,12 +354,11 @@ func (r *differentialRun) compare(step int, injected [][]byte) {
 			describePackets(injected), describePackets(r.ours), describePackets(r.theirs))
 	}
 
-	// Per connection id, not by position. Order between packets for different
-	// connections is not observable by any peer, and ours falls out
-	// differently because a RESET for a connection we do not have is answered
-	// on the socket's goroutine while a connection's own STATE goes through
-	// that connection's. Order *within* one connection is observable, and is
-	// what is compared.
+	// Group per connection id, not by position. Order between packets for
+	// different connections is not observable by a peer and can differ, since
+	// a RESET for an unknown connection is sent from the socket's goroutine
+	// and a connection's STATE from that connection's. Order within one
+	// connection is observable and is compared.
 	ourByConn := groupByConnection(t, r.ours)
 	theirByConn := groupByConnection(t, r.theirs)
 
@@ -462,8 +398,8 @@ func groupByConnection(t *testing.T, raws [][]byte) map[uint16][]*packet {
 		pkt, err := decodePacket(raw, false)
 		if err != nil {
 			// Either side emitting something this decoder rejects is a real
-			// finding: our own output must be parseable by us, and libutp's
-			// output is what a real peer sends.
+			// finding: our own output must parse, and the reference's output
+			// is what a real peer sends.
 			t.Fatalf("emitted packet does not decode (%v): %x", err, raw)
 		}
 		out[pkt.Header.ConnectionId] = append(out[pkt.Header.ConnectionId], pkt)
@@ -471,10 +407,9 @@ func groupByConnection(t *testing.T, raws [][]byte) map[uint16][]*packet {
 	return out
 }
 
-// A differential target that drives nothing would pass forever: two empty
-// transcripts agree. These assert the harness actually reaches a live
-// connection on both sides and that both answer, so a regression that made
-// the fuzzing vacuous is caught rather than celebrated.
+// A differential target that drives nothing would pass forever, since two
+// empty transcripts agree. These check that the harness reaches a live
+// connection on both sides and that both answer.
 func TestDifferentialHarnessIsLive(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -522,7 +457,7 @@ func TestDifferentialHarnessIsLive(t *testing.T) {
 	}
 }
 
-// The handshake itself has to happen, or priming is hiding a dead connection.
+// The handshake must happen, or priming would hide a dead connection.
 func TestDifferentialHandshakeIsEmitted(t *testing.T) {
 	t.Run("initiator sends a SYN", func(t *testing.T) {
 		run := newDifferentialRun(t, differentialInitiator)
