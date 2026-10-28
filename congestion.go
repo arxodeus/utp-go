@@ -958,7 +958,7 @@ func (c *defaultController) applyCongestionControl(
 
 	target := int64(c.targetDelayMicros)
 	if target <= 0 {
-		// utp_internal.cpp:1635-1636.
+		// Default target: 100 ms.
 		target = 100000
 	}
 
