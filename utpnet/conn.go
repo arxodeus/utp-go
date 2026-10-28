@@ -31,8 +31,8 @@ func newConn(sock *Socket, stream *utp.UtpStream) *Conn {
 	var remote net.Addr
 	if cid := stream.Cid(); cid != nil {
 		if addr, err := peerUDPAddr(cid.Peer); err == nil {
-			// Kept for as long as the uTP socket has the connection, from
-			// before this was made (demuxConn.HoldPeer).
+			// Held for as long as the uTP socket has the connection
+			// (demuxConn.HoldPeer).
 			remote = sock.nativeAddr(addr)
 		}
 	}
@@ -55,32 +55,25 @@ func (c *Conn) Read(b []byte) (int, error) {
 	})
 }
 
-// Write writes all of b, or reports how much of it was written.
-//
-// When the deadline moves while it waits, it carries on with what is left:
-// the stream reports what it had already taken (see UtpStream.Write), and
-// those bytes will be sent. It used to start over from the beginning on any
-// write that came back with nothing reported -- and the stream reported
-// nothing even when it had taken bytes -- so a deadline moved during a
-// blocked write sent its bytes twice. From the release review of 9c44c4f
-// (R1).
+// Write writes all of b, or reports how much was written. If the write
+// deadline moves while it waits, it continues with the remainder.
 func (c *Conn) Write(b []byte) (int, error) {
 	return c.writeContinuing(func(ctx context.Context, from int) (int, error) {
 		return c.stream.Write(ctx, b[from:])
 	})
 }
 
-// writeContinuing runs a write under the write deadline, carrying on from
-// what has been written when the deadline moves: op writes what is left from
-// byte from, and reports how much of it the stream took.
+// writeContinuing runs a write under the write deadline, continuing from
+// what has been written if the deadline moves. op writes the bytes from
+// offset from on and reports how many the stream accepted.
 func (c *Conn) writeContinuing(op func(ctx context.Context, from int) (int, error)) (int, error) {
 	written := 0
 	_, err := c.withDeadline(c.writeDeadline, func(ctx context.Context) (int, error) {
 		n, err := op(ctx, written)
 		written += n
 		if err != nil {
-			// Nothing reported, so that withDeadline goes on with the rest
-			// if the deadline moved.
+			// Nothing reported, so withDeadline retries the rest if the
+			// deadline moved.
 			return 0, err
 		}
 		return n, nil
@@ -88,16 +81,13 @@ func (c *Conn) writeContinuing(op func(ctx context.Context, from int) (int, erro
 	return written, err
 }
 
-// withDeadline runs op under a context derived from d, and translates what
-// comes back into what a net.Conn caller expects.
+// withDeadline runs op under a context derived from d and translates the
+// result into what a net.Conn caller expects.
 //
-// The loop is there because a deadline can move while op is blocked, which
-// the standard library supports and callers use -- one goroutine blocked in
-// Read, another calling SetReadDeadline to unblock it. Moving the deadline
-// cancels op's context; this then re-reads the deadline and either retries
-// against the new one or reports the timeout. Without the loop, moving a
-// deadline surfaced as "context canceled", which no net.Conn caller checks
-// for and every one of them would treat as fatal.
+// A deadline may move while op is blocked; a common pattern is one goroutine
+// blocked in Read while another calls SetReadDeadline to unblock it. Moving
+// the deadline cancels op's context, and the loop then retries against the
+// new deadline or reports a timeout.
 func (c *Conn) withDeadline(d *deadline, op func(context.Context) (int, error)) (int, error) {
 	for {
 		ctx, cancel, expired, changed := d.context(c.sock.ctx)
@@ -111,9 +101,9 @@ func (c *Conn) withDeadline(d *deadline, op func(context.Context) (int, error)) 
 		if err != nil && errors.Is(err, context.Canceled) {
 			select {
 			case <-changed:
-				// The deadline moved rather than the socket closing. Try
-				// again against the deadline as it now stands; if that has
-				// already passed, the next pass returns a timeout.
+				// The deadline moved; the socket did not close. Retry against
+				// the new deadline, which returns a timeout if it has
+				// passed.
 				if n == 0 {
 					continue
 				}
@@ -124,13 +114,9 @@ func (c *Conn) withDeadline(d *deadline, op func(context.Context) (int, error)) 
 	}
 }
 
-// translateDeadlineError maps a context expiry onto the net.Error a caller
-// expects, and leaves everything else alone.
-//
-// Without this, a Read that timed out would return "context deadline
-// exceeded", which no net.Conn caller checks for -- they check
-// err.(net.Error).Timeout() -- and would be treated as a fatal error that
-// tears the connection down.
+// translateDeadlineError maps a context expiry to a net.Error whose Timeout
+// method reports true, which is what net.Conn callers check for, and leaves
+// other errors unchanged.
 func translateDeadlineError(err error) error {
 	if err == nil {
 		return nil
@@ -166,14 +152,9 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
-// deadline is a net-style deadline: settable at any time, from any goroutine,
-// affecting calls already in progress.
-//
-// The standard library's deadlines have that property and callers rely on it
-// -- a common pattern is one goroutine blocked in Read and another calling
-// SetReadDeadline(time.Now()) to unblock it. A context captured when Read
-// started cannot do that, so the deadline is kept here and a fresh context is
-// derived per call.
+// deadline is a net-style deadline: it can be set at any time, from any
+// goroutine, and affects calls already in progress. A fresh context is
+// derived from it for each call.
 type deadline struct {
 	mu sync.Mutex
 	at time.Time
@@ -195,10 +176,9 @@ func (d *deadline) set(t time.Time) {
 }
 
 // context derives a context that expires at the deadline, and returns the
-// channel that closes if the deadline is moved.
-//
-// It reports true if the deadline has already passed, in which case the
-// caller should not attempt the operation at all.
+// channel that is closed if the deadline moves. It reports true if the
+// deadline has already passed, in which case the caller should not attempt
+// the operation.
 func (d *deadline) context(parent context.Context) (context.Context, context.CancelFunc, bool, <-chan struct{}) {
 	d.mu.Lock()
 	at := d.at
@@ -220,8 +200,8 @@ func (d *deadline) context(parent context.Context) (context.Context, context.Can
 	go func() {
 		select {
 		case <-changed:
-			// The deadline moved while the operation was in flight. Cancel so
-			// the caller re-evaluates against the new one.
+			// The deadline moved during the operation. Cancel, so the caller
+			// re-evaluates against the new one.
 			cancel()
 		case <-ctx.Done():
 		}
@@ -229,13 +209,7 @@ func (d *deadline) context(parent context.Context) (context.Context, context.Can
 	return ctx, cancel, false, changed
 }
 
-// expired reports whether the deadline has already passed.
-//
-// It exists for callers that want only that answer. wait starts a goroutine to
-// serve its channel; a caller that discards the channel would leak it, which
-// is what WriteTo used to do -- once per datagram, for the life of the
-// process. See TestSharedPortDoesNotLeakGoroutines.
-// snapshot is the deadline as it stands, and the channel that closes when it
+// snapshot returns the deadline and the channel that is closed when it
 // moves.
 func (d *deadline) snapshot() (time.Time, <-chan struct{}) {
 	d.mu.Lock()
@@ -243,6 +217,8 @@ func (d *deadline) snapshot() (time.Time, <-chan struct{}) {
 	return d.at, d.changed
 }
 
+// expired reports whether the deadline has passed, without starting the
+// goroutine wait would.
 func (d *deadline) expired() bool {
 	d.mu.Lock()
 	at := d.at
@@ -250,17 +226,10 @@ func (d *deadline) expired() bool {
 	return !at.IsZero() && !time.Now().Before(at)
 }
 
-// wait returns a channel that fires at the deadline, reports whether the
-// deadline has already passed, and returns a stop function the caller must
-// call when it is done with the channel. A zero deadline gives a channel that
-// never fires until the deadline is changed.
-//
-// The stop function is the whole point of the signature. Serving the channel
-// takes a goroutine, and until this returned one there was no way to end that
-// goroutine early: it parked until the deadline was next *changed*, which for
-// a caller that never sets one is never. Every ReadFrom left one behind.
-//
-// Call stop exactly once, on every path out.
+// wait returns a channel that fires at the deadline, whether the deadline
+// has already passed, and a stop function. A zero deadline gives a channel
+// that fires only once the deadline is changed. Serving the channel takes a
+// goroutine, which stop ends; call stop exactly once on every path.
 func (d *deadline) wait() (<-chan time.Time, bool, func()) {
 	d.mu.Lock()
 	at := d.at
@@ -301,33 +270,17 @@ func (d *deadline) wait() (<-chan time.Time, bool, func()) {
 	return ch, false, stop
 }
 
-// CloseWrite finishes the sending side and leaves the reading side open, as
-// net.TCPConn.CloseWrite does.
-//
-// It is here because callers type-assert for it: anything holding a net.Conn
-// that wants a half-close looks for `interface{ CloseWrite() error }` rather
-// than for a concrete type. A BitTorrent client uses it to say it has finished
-// uploading while it is still downloading.
+// CloseWrite shuts down the sending side and leaves the receiving side open,
+// like net.TCPConn.CloseWrite. Callers can detect it with a type assertion
+// to interface{ CloseWrite() error }.
 func (c *Conn) CloseWrite() error {
 	return c.stream.CloseWrite()
 }
 
-// WriteBuffers writes several buffers as one stream write, without joining
-// them first. It mirrors net.Buffers' shape, and libutp's utp_writev.
-//
-// The saving is one copy. Writing a header and a payload separately costs two
-// Write calls (and two packets' worth of framing decisions); joining them
-// first costs a copy into the joined slice and another inside Write. This
-// costs one.
-//
-// net.Buffers.WriteTo cannot reach this on its own -- the standard library
-// dispatches to an unexported interface only *net.TCPConn satisfies -- so a
-// caller that wants the saving calls it directly.
-//
-// A deadline moved while it waits is carried on from, as Write does: it went
-// straight to withDeadline, which retries only a write that took nothing, so
-// one that had taken part of the buffers returned "context canceled" on an
-// ordinary deadline extension. Review of 294cc2e, finding 3.
+// WriteBuffers writes several buffers as one stream write without joining
+// them first, saving a copy. net.Buffers.WriteTo does not use it, so call it
+// directly. If the write deadline moves while it waits, it continues with
+// the remainder, as Write does.
 func (c *Conn) WriteBuffers(bufs net.Buffers) (int64, error) {
 	n, err := c.writeContinuing(func(ctx context.Context, from int) (int, error) {
 		return c.stream.WriteV(ctx, buffersFrom(bufs, from))
@@ -335,7 +288,7 @@ func (c *Conn) WriteBuffers(bufs net.Buffers) (int64, error) {
 	return int64(n), err
 }
 
-// buffersFrom is bufs without its first n bytes, sharing their storage.
+// buffersFrom returns bufs without their first n bytes, sharing storage.
 func buffersFrom(bufs net.Buffers, n int) [][]byte {
 	for i, b := range bufs {
 		if n < len(b) {
@@ -347,13 +300,9 @@ func buffersFrom(bufs net.Buffers, n int) [][]byte {
 	return nil
 }
 
-// CloseRead finishes the receiving side and leaves the sending side open, as
-// net.TCPConn.CloseRead does. What the peer sends afterwards is still
-// acknowledged -- so the peer is never stalled and can finish its own close --
-// and then discarded.
-//
-// Type-asserted for in the same way as CloseWrite:
-// `interface{ CloseRead() error }`.
+// CloseRead shuts down the receiving side and leaves the sending side open,
+// like net.TCPConn.CloseRead. Data the peer sends afterwards is acknowledged,
+// so the peer is not stalled and can finish its close, and then discarded.
 func (c *Conn) CloseRead() error {
 	return c.stream.CloseRead()
 }

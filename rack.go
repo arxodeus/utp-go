@@ -2,35 +2,30 @@ package utp
 
 import "time"
 
-// RACK loss detection: RFC 8985's time-based rule, behind
-// ConnectionConfig.RACK and off by default. Off, nothing here runs and loss
-// detection is libutp's: a packet is lost once three packets after it have
-// been acknowledged, and each is fast-retransmitted once (DetectLostPackets,
-// fastResendSeqNum). See DEVIATIONS.md, "RACK loss detection (opt-in)".
+// RACK loss detection: the time-based rule of RFC 8985, enabled by
+// ConnectionConfig.RACK and off by default. When off, nothing here runs and
+// a packet is lost once three packets sent after it have been acknowledged;
+// each is fast-retransmitted once (DetectLostPackets, fastResendSeqNum).
 //
-// On, it replaces that rule. A packet is lost once a packet sent after it
-// has been delivered and a round trip plus a reordering window has passed
-// since it was sent (RFC 8985 section 6.2). It differs from the count in
-// three ways that matter here:
+// When on, a packet is lost once a packet sent after it has been delivered
+// and a round trip plus a reordering window has passed since it was sent
+// (RFC 8985 section 6.2). Compared with the count:
 //
-//   - reordering within the window is not taken for loss, where three later
-//     packets arriving first was enough;
-//   - a retransmission can be declared lost too, a round trip after it was
-//     sent, where libutp leaves a lost fast retransmission to its timeout;
-//   - the decision is by time, so it is made by a timer when no
-//     acknowledgement arrives to make it.
+//   - reordering within the window is not mistaken for loss;
+//   - a retransmission can itself be declared lost a round trip after it
+//     was sent, rather than waiting for the retransmission timeout;
+//   - the decision is time-based, so a timer makes it when no
+//     acknowledgement arrives.
 //
 // uTP has no DSACK, which RFC 8985 uses to widen the reordering window after
-// a spurious retransmission. The undo's detection stands in for it: a cut
-// shown to be for a packet that was only late (checkSpuriousLoss) widens the
-// window the same way.
+// a spurious retransmission. Spurious-loss detection (checkSpuriousLoss)
+// widens the window instead.
 
 // rackReoWndPersist is how many recoveries the reordering window stays
-// widened for after a spurious retransmission: RFC 8985's
-// RACK.reo_wnd_persist.
+// widened after a spurious retransmission (RACK.reo_wnd_persist).
 const rackReoWndPersist = 16
 
-// rackState is RFC 8985's per-connection state, kept by sentPackets.
+// rackState is the per-connection RACK state, kept by sentPackets.
 type rackState struct {
 	active bool
 
@@ -41,27 +36,21 @@ type rackState struct {
 	xmitTs    time.Time
 	endSeq    uint16
 	rtt       time.Duration
-	// xmitOrder is the same packet's place in the send order
-	// (sentPacket.sentOrder), which decides what was sent before it. Not
-	// the send times: those come from clocks read at different points of
-	// an event-loop pass, so a packet sent after a resend could carry an
-	// earlier time than it, and be taken for one sent before it and lost.
-	// Measured on a slow-start overflow: the two packets at the top of the
-	// selective ack declared lost in flight, every time a resend was
-	// acknowledged.
+	// xmitOrder is the same packet's position in send order
+	// (sentPacket.sentOrder), which decides what was sent before it. Send
+	// times are not used for this, since they are read at different points
+	// of an event-loop pass and need not be monotonic in send order.
 	xmitOrder uint64
 
 	// minRTT is the lowest round trip from a packet sent once.
 	minRTT time.Duration
 
-	// fack is the highest sequence number delivered without having been
-	// retransmitted (RACK.fack) by earlier acknowledgements; a packet
-	// delivered below it arrived out of order, and reorderingSeen records
-	// that it has happened. ackFack is the same for the acknowledgement
-	// being processed, folded into fack when it is done: one
-	// acknowledgement retires the packets it covers in no particular
-	// order (the cumulative ack number before the packets under it), and
-	// those are not reordered.
+	// fack is the highest sequence number delivered without retransmission
+	// (RACK.fack) by earlier acknowledgements; a packet delivered below it
+	// arrived out of order, and reorderingSeen records that. ackFack is the
+	// same for the acknowledgement being processed, folded into fack once it
+	// is done, since packets retired by one acknowledgement are not
+	// reordered relative to each other.
 	fack           uint16
 	haveFack       bool
 	ackFack        uint16
@@ -80,22 +69,18 @@ type rackState struct {
 	recoveryEnd uint16
 
 	// coverEnd is the highest sequence number the last acknowledgement
-	// reported delivered: its ack number, or its highest selective-ack bit.
-	// Below it the acknowledgement speaks for every packet; past it a packet
-	// may well have arrived and not been said. uTP's selective ack is a
-	// fixed window past the ack number -- 30 packets in libutp's and ours,
-	// in a 32-bit field whose last two bits are padding, and fewer from a
-	// libutp peer with a small receive buffer -- where TCP's blocks reach
-	// anywhere, and RFC 8985 assumes they do. Without the bound, a two-flow
-	// slow-start overflow that dropped 22 packets had 101 declared lost:
-	// everything past the window sent before a delivered resend.
+	// reported on: its ack number or its highest selective-ack bit. Below it
+	// the acknowledgement accounts for every packet; beyond it a packet may
+	// have arrived unreported. uTP's selective ack covers a fixed window past
+	// the ack number, whereas RFC 8985 assumes TCP's SACK blocks, which can
+	// reach anywhere, so packets past coverEnd are not declared lost.
 	coverEnd uint16
 
 	// pending counts packets declared lost and not yet resent.
 	pending int
 
 	// timeout is how long until the next packet still inside its reordering
-	// window would pass it; zero when none is. Set by rackDetect, for the
+	// window leaves it, or zero if none is. Set by rackDetect for the
 	// connection to arm its timer.
 	timeout time.Duration
 
@@ -103,7 +88,7 @@ type rackState struct {
 	relosts uint64 // of those, retransmissions declared lost again
 }
 
-// rackOnDelivered is RFC 8985's RACK_update (section 6.2, steps 1-3) for a
+// rackOnDelivered is RACK_update (RFC 8985 section 6.2, steps 1-3) for a
 // packet this acknowledgement delivered for the first time.
 func (s *sentPackets) rackOnDelivered(p *sentPacket, now time.Time) {
 	r := &s.rack
@@ -123,9 +108,9 @@ func (s *sentPackets) rackOnDelivered(p *sentPacket, now time.Time) {
 			r.ackFack, r.haveAckFack = p.seqNum, true
 		}
 	} else if r.minRTT > 0 && now.Sub(p.retransmission) < r.minRTT {
-		// Acknowledged sooner after the resend than any round trip has
-		// taken: the original's acknowledgement, most likely, and no
-		// evidence about when the resend was delivered (step 2).
+		// Acknowledged sooner after the resend than any round trip: most
+		// likely the original's acknowledgement, so no evidence about the
+		// resend (step 2).
 		return
 	}
 	if !r.delivered || p.sentOrder > r.xmitOrder {
@@ -144,16 +129,10 @@ func (s *sentPackets) rackOnAckNum(ackNum uint16) {
 }
 
 // rackOnSpuriousLoss widens the reordering window, as RFC 8985 does on a
-// DSACK (section 6.2, step 4), and records that the path reorders: a loss
-// shown to be spurious is a packet that arrived after later ones.
-//
-// Without the second, RACK could go a whole transfer without a window. Its
-// other evidence of reordering is an original transmission acknowledged
-// below one sent after it (rackOnDelivered), and on a path that reorders
-// every packet past three others, each was declared lost and resent before
-// its original arrived, so no original ever counted: one run in ten of
-// netem.TestRackResendsLessUnderReordering resent 25 packets, as libutp's
-// rule does, against 3 in the others.
+// DSACK (section 6.2, step 4), and records that the path reorders, since a
+// spurious loss is a packet that arrived after later ones. Without the
+// latter, a path that reorders past the threshold could have every original
+// resent before it arrived, and RACK would never see reordering.
 func (s *sentPackets) rackOnSpuriousLoss() {
 	if !s.rack.active {
 		return
@@ -163,12 +142,11 @@ func (s *sentPackets) rackOnSpuriousLoss() {
 	s.rack.reoWndPersist = rackReoWndPersist
 }
 
-// rackReoWnd is RFC 8985's RACK_update_reo_wnd (section 6.2, step 4): no
-// window until reordering has been seen, once three packets have been
-// selectively acknowledged or a recovery is under way -- which makes the
-// rule libutp's count until the path is seen to reorder -- and otherwise a
-// quarter of the minimum round trip, widened after spurious losses, never
-// more than the smoothed round trip.
+// rackReoWnd is RACK_update_reo_wnd (RFC 8985 section 6.2, step 4). The
+// window is zero until reordering has been seen, once three packets have
+// been selectively acknowledged or a recovery is under way; otherwise it is
+// a quarter of the minimum round trip, widened after spurious losses and
+// capped at the smoothed round trip.
 func (s *sentPackets) rackReoWnd(sacked int) time.Duration {
 	r := &s.rack
 	if !r.reorderingSeen && (r.inRecovery || sacked >= lossThreshold) {
@@ -181,8 +159,8 @@ func (s *sentPackets) rackReoWnd(sacked int) time.Duration {
 	return w
 }
 
-// rackDetect is RFC 8985's RACK_detect_loss (section 6.2, step 5): the
-// outstanding packets now lost, and in rack.timeout how long until the next
+// rackDetect is RACK_detect_loss (RFC 8985 section 6.2, step 5). It returns
+// the outstanding packets now lost and sets rack.timeout to when the next
 // would be.
 func (s *sentPackets) rackDetect(now time.Time) []*sentPacket {
 	r := &s.rack
@@ -260,7 +238,7 @@ func (s *sentPackets) rackMarkLost(p *sentPacket, now time.Time) {
 	_ = s.OnLost(p.seqNum, true, now)
 }
 
-// rackDetectAndMark declares what RACK finds lost now. It reports whether
+// rackDetectAndMark marks what RACK finds lost now and reports whether
 // anything was.
 func (s *sentPackets) rackDetectAndMark(now time.Time) bool {
 	lost := s.rackDetect(now)
@@ -294,7 +272,7 @@ func (s *sentPackets) rackTakeLost() []*lostPacket {
 	return result
 }
 
-// rackOnAck notes how far an acknowledgement reports: see coverEnd.
+// rackOnAck records how far an acknowledgement reports; see coverEnd.
 func (s *sentPackets) rackOnAck(ackNum uint16, sack *selectiveAck) {
 	s.rack.coverEnd = ackNum
 	if sack == nil {
