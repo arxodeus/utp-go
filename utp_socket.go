@@ -73,8 +73,11 @@ var (
 // ReleasePeer. They are called with the socket's connection table locked and
 // must not call back into the socket.
 type Conn interface {
+	// ReadFrom reads one datagram into b and returns its length and sender.
 	ReadFrom(b []byte) (int, ConnectionPeer, error)
+	// WriteTo sends b as one datagram to dst.
 	WriteTo(b []byte, dst ConnectionPeer) (int, error)
+	// Close closes the transport, ending a ReadFrom in progress.
 	Close() error
 }
 
@@ -85,6 +88,8 @@ type peerHolder interface {
 	ReleasePeer(peer ConnectionPeer)
 }
 
+// UtpSocket is a uTP endpoint: one datagram transport carrying any number of
+// connections. Create one with Bind or WithSocket.
 type UtpSocket struct {
 	// dispatchMu serializes the routing of incoming packets with everything
 	// that changes the routing tables: registering a new connection and
@@ -434,6 +439,7 @@ func (s *UtpSocket) LocalAddr() net.Addr {
 	return nil
 }
 
+// NumConnections returns how many connections the socket currently tracks.
 func (s *UtpSocket) NumConnections() int {
 	s.connsMutex.Lock()
 	defer s.connsMutex.Unlock()

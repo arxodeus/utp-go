@@ -21,7 +21,11 @@ const (
 )
 
 var (
-	ErrReset    = errors.New("reset")
+	// ErrReset means the peer reset the connection.
+	ErrReset = errors.New("reset")
+	// ErrTimedOut means the connection was abandoned after repeated
+	// retransmission timeouts, the handshake was not answered, or the idle
+	// timeout expired.
 	ErrTimedOut = errors.New("timed out")
 	// ErrConnRefused means an ICMP error arrived for a connection that had
 	// only sent its SYN, so nothing is listening. Otherwise an ICMP error,

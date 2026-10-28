@@ -72,6 +72,10 @@ func (s *UtpSocket) generateCid(peer ConnectionPeer, isInitiator bool, eventCh c
 	return nil, errNoFreeConnectionId
 }
 
+// Connect dials peer with newly chosen connection ids and returns the stream
+// once the handshake completes. ctx bounds the dial only; the connection
+// lives until it is closed or the socket closes. A nil config means the
+// defaults.
 func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *ConnectionConfig) (*UtpStream, error) {
 	// Create channels for connection status and events.
 	connectedCh := make(chan error, 1)
@@ -131,6 +135,7 @@ func (s *UtpSocket) Connect(ctx context.Context, peer ConnectionPeer, config *Co
 	}
 }
 
+// ConnectWithCid is Connect with the connection ids given by cid.
 func (s *UtpSocket) ConnectWithCid(
 	ctx context.Context,
 	cid *ConnectionId,

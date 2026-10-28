@@ -9,6 +9,7 @@ import (
 // ConnectionPeer identifies the remote end of a connection. Hash must return
 // a stable string that distinguishes peers.
 type ConnectionPeer interface {
+	// Hash returns the peer's key, conventionally its address as text.
 	Hash() string
 }
 
@@ -19,10 +20,12 @@ type UdpPeer struct {
 	hash string
 }
 
+// NewUdpPeer returns a peer for addr.
 func NewUdpPeer(addr *net.UDPAddr) *UdpPeer {
 	return &UdpPeer{addr: addr, hash: addr.String()}
 }
 
+// Hash returns the peer's address as text.
 func (p *UdpPeer) Hash() string {
 	if p.hash != "" {
 		return p.hash
@@ -35,6 +38,7 @@ func (p *UdpPeer) Addr() *net.UDPAddr {
 	return p.addr
 }
 
+// String returns the peer's address.
 func (p *UdpPeer) String() string {
 	return p.addr.String()
 }
@@ -54,12 +58,17 @@ func (p *tcpPeer) String() string {
 // ConnectionId identifies a connection by its send and receive ids and its
 // peer.
 type ConnectionId struct {
+	// Send is the id this end sends with: the peer's receive id.
 	Send uint16
+	// Recv is the id this end receives on.
 	Recv uint16
+	// Peer is the remote end.
 	Peer ConnectionPeer
 	hash string
 }
 
+// NewConnectionId returns the connection id for peer with the given receive
+// and send ids.
 func NewConnectionId(peer ConnectionPeer, recvId uint16, sendId uint16) *ConnectionId {
 	connId := &ConnectionId{
 		Peer: peer,
@@ -97,6 +106,7 @@ func (id *ConnectionId) Hash() string {
 	return id.hash
 }
 
+// String returns a description of the id for logging.
 func (id *ConnectionId) String() string {
 	return fmt.Sprintf("send_id: %d recv_id:%d peer:%v hash: %s", id.Send, id.Recv, id.Peer, id.hash)
 }

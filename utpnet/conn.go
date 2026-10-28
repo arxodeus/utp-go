@@ -49,6 +49,7 @@ func newConn(sock *Socket, stream *utp.UtpStream) *Conn {
 // context-taking API or the connection id.
 func (c *Conn) Stream() *utp.UtpStream { return c.stream }
 
+// Read reads data from the connection, honoring the read deadline.
 func (c *Conn) Read(b []byte) (int, error) {
 	return c.withDeadline(c.readDeadline, func(ctx context.Context) (int, error) {
 		return c.stream.Read(ctx, b)
@@ -127,26 +128,34 @@ func translateDeadlineError(err error) error {
 	return err
 }
 
+// Close closes the connection and returns at once; what has been written is
+// still delivered in the background.
 func (c *Conn) Close() error {
 	c.closeOnce.Do(func() { c.stream.Close() })
 	return nil
 }
 
+// LocalAddr returns the local address.
 func (c *Conn) LocalAddr() net.Addr { return c.sock.LocalAddr() }
 
+// RemoteAddr returns the peer's address.
 func (c *Conn) RemoteAddr() net.Addr { return c.remote }
 
+// SetDeadline sets the read and write deadlines. Moving a deadline affects
+// calls already waiting.
 func (c *Conn) SetDeadline(t time.Time) error {
 	c.readDeadline.set(t)
 	c.writeDeadline.set(t)
 	return nil
 }
 
+// SetReadDeadline sets the read deadline.
 func (c *Conn) SetReadDeadline(t time.Time) error {
 	c.readDeadline.set(t)
 	return nil
 }
 
+// SetWriteDeadline sets the write deadline.
 func (c *Conn) SetWriteDeadline(t time.Time) error {
 	c.writeDeadline.set(t)
 	return nil

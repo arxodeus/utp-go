@@ -316,6 +316,9 @@ func (s *UtpSocket) AcceptBacklog() int {
 	return n
 }
 
+// Accept waits for an incoming connection from any peer and returns it once
+// connected. config applies to the connection; nil means the socket's accept
+// configuration (WithAcceptConfig) or the defaults.
 func (s *UtpSocket) Accept(ctx context.Context, config *ConnectionConfig) (*UtpStream, error) {
 	accept := newAccept(ctx, nil, config)
 	select {
@@ -328,6 +331,9 @@ func (s *UtpSocket) Accept(ctx context.Context, config *ConnectionConfig) (*UtpS
 	return accept.wait(ctx, s.ctx)
 }
 
+// AcceptWithCid waits for the incoming connection with the given id and
+// returns it once connected. It fails with ErrAcceptTimedOut if no matching
+// SYN arrives within 20 seconds.
 func (s *UtpSocket) AcceptWithCid(ctx context.Context, cid *ConnectionId, config *ConnectionConfig) (*UtpStream, error) {
 	accept := newAccept(ctx, cid, config)
 	select {

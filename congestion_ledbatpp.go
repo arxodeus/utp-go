@@ -35,6 +35,7 @@ const (
 	AlgorithmLEDBATPP
 )
 
+// String returns the algorithm's name.
 func (a CongestionAlgorithm) String() string {
 	switch a {
 	case AlgorithmLEDBAT:

@@ -110,11 +110,13 @@ func (c *Conn) translate(err error) error {
 	return err
 }
 
+// Read reads data from the connection.
 func (c *Conn) Read(b []byte) (int, error) {
 	n, err := c.nc.Read(b)
 	return n, c.translate(err)
 }
 
+// Write writes data to the connection.
 func (c *Conn) Write(b []byte) (int, error) {
 	mu.Lock()
 	err := c.err
@@ -139,11 +141,19 @@ func (c *Conn) Close() error {
 	return c.nc.Close()
 }
 
-func (c *Conn) LocalAddr() net.Addr  { return c.localAddr }
+// LocalAddr returns the local address.
+func (c *Conn) LocalAddr() net.Addr { return c.localAddr }
+
+// RemoteAddr returns the peer's address.
 func (c *Conn) RemoteAddr() net.Addr { return c.remoteAddr }
 
-func (c *Conn) SetDeadline(t time.Time) error      { return c.nc.SetDeadline(t) }
-func (c *Conn) SetReadDeadline(t time.Time) error  { return c.nc.SetReadDeadline(t) }
+// SetDeadline sets the read and write deadlines.
+func (c *Conn) SetDeadline(t time.Time) error { return c.nc.SetDeadline(t) }
+
+// SetReadDeadline sets the read deadline.
+func (c *Conn) SetReadDeadline(t time.Time) error { return c.nc.SetReadDeadline(t) }
+
+// SetWriteDeadline sets the write deadline.
 func (c *Conn) SetWriteDeadline(t time.Time) error { return c.nc.SetWriteDeadline(t) }
 
 // WriteBufferLen returns the connection's SendBuffer setting, the ceiling on

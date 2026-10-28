@@ -12,6 +12,8 @@ import (
 )
 
 var (
+	// ErrNotConnected is returned by Write after CloseWrite or Close, and
+	// for a connection that ended without an error of its own.
 	ErrNotConnected = errors.New("not connected")
 	// ErrReadClosed is returned by Read after CloseRead. The connection is
 	// still alive and may still send; this end has stopped taking delivery.
@@ -246,6 +248,7 @@ func (s *UtpStream) shutErr(ctx context.Context) error {
 	return s.writeErr()
 }
 
+// Cid returns the stream's connection id.
 func (s *UtpStream) Cid() *ConnectionId {
 	return s.cid
 }
