@@ -351,7 +351,7 @@ func TestConformanceZeroWindowProbeTiming(t *testing.T) {
 		if libutpAt >= 0 {
 			t.Errorf("libutp probed after %v. At this MTU its 1452-byte packet does not "+
 				"fit the 1435-byte PACKET_SIZE its probe opens, and it never has; if it "+
-				"now does, the vendored libutp has changed and DEVIATIONS.md should say so",
+				"now does, the vendored libutp has changed and this difference must be re-examined",
 				libutpAt)
 		}
 	})

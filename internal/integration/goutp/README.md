@@ -51,6 +51,6 @@ seconds. go-libutp fixed the same hang in v1.5.0; purego, at
 `v0.0.0-20260908033909-9f1664acf866`, still has it. So where purego accepts
 and is to send, this library dials and sends one byte first, as BitTorrent's
 handshake does (`helloFirst`). This library completes a connection on the
-handshake instead (DEVIATIONS.md, "Completing an incoming connection"), so
+handshake instead, so
 where it accepts it sends first, and the tests let it: against purego, which
 dialled and said nothing, it delivered.

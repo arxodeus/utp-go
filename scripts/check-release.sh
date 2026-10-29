@@ -7,7 +7,10 @@
 #
 #   scripts/check-release.sh v0.1.0
 #
-# Run it after pushing the tags (docs/dev/RELEASING.md). It fails if either tag is
+# Release order: every CI gate, including the on-demand full run, passes on
+# the commit; compat/golibutp/go.mod requires github.com/arxodeus/utp at the
+# version being released; tag the root vX.Y.Z, then compat/golibutp/vX.Y.Z,
+# on that commit and push both; then run this. It fails if either tag is
 # missing, if compat/golibutp requires a root version that does not exist,
 # or if anything advertised does not compile.
 set -euo pipefail

@@ -44,7 +44,7 @@ being slow at anything.
 
 - **`Close` waited out the retransmission ladder.** `RacyRead` took 31.15s,
   `PresentTimeout` 75.10s, and almost all of it was in `Close` rather than in
-  the test body. See KNOWN-LIMITATIONS.md.
+  the test body.
 - **`Write` retained the caller's buffer past a deadline.** Found by
   `RacyWrite` under `-race`, which is the only subtest that mutates the write
   buffer immediately after the call returns.

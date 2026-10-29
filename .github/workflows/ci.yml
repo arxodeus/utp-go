@@ -1,5 +1,5 @@
-# The release gates in docs/dev/RELEASING.md: the quick ones on every push and pull
-# request, the long ones nightly.
+# The release gates: the quick ones on every push and pull request, the long
+# ones nightly or on demand. All of them pass on a commit before it is tagged.
 name: ci
 
 on:

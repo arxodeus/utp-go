@@ -29,8 +29,7 @@ each exchanging data in both directions.
 That test is why this module exists rather than only a compile-time
 assertion. It found a defect nothing else had: the send buffer retained the
 caller's slice, so any full-duplex exchange corrupted its own data. Every
-unidirectional test in the repository passed throughout. See
-[KNOWN-LIMITATIONS.md](../../../docs/dev/KNOWN-LIMITATIONS.md).
+unidirectional test in the repository passed throughout.
 
 `TestTorrentTransferOverUTP` runs a real torrent: two `torrent.Client`s, a
 generated 4 MiB torrent in 128 pieces, and BitTorrent's own piece hashes

@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-# --- pinned references (see docs/dev/REFERENCE.md) ------------------------------------
+# --- pinned references ----------------------------------------------------------
 LIBUTP_URL="https://github.com/bittorrent/libutp.git"
 LIBUTP_COMMIT="2b364cbb0650bdab64a5de2abb4518f9f228ec44"   # 2018-05-15
 
@@ -143,6 +143,6 @@ echo
 if [ "$status" -eq 0 ]; then
   echo "PASS: the two copies are protocol-identical."
 else
-  echo "FAIL: protocol-affecting difference detected. See docs/dev/REFERENCE.md."
+  echo "FAIL: protocol-affecting difference detected. See internal/libutp/VENDOR.md."
 fi
 exit "$status"

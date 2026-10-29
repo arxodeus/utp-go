@@ -17,9 +17,8 @@ libutp peer will complete a transfer with us. These tests are.
 | Date | 2018-05-15 |
 | Licence | MIT, in [`LICENSE.libutp`](LICENSE.libutp) |
 
-This is the same commit [`REFERENCE.md`](../../docs/dev/REFERENCE.md) pins as the
-normative text, and `scripts/check-libutp-reference.sh` checks it against the
-copy vendored in `anacrolix/go-libutp`.
+`scripts/check-libutp-reference.sh` pins the same commit and checks it
+against the copy vendored in `anacrolix/go-libutp`.
 
 ## What was vendored
 
@@ -56,8 +55,8 @@ cp utp_internal.cpp utp_utils.cpp utp_hash.cpp utp_callbacks.cpp \
 mv <this directory>/LICENSE <this directory>/LICENSE.libutp
 ```
 
-Then update the commit above, and `REFERENCE.md` if the normative pin moves
-with it. libutp's last commit is from 2018, so this should not come up.
+Then update the commit above and the pin in
+`scripts/check-libutp-reference.sh`. libutp's last commit is from 2018, so this should not come up.
 
 ## The bridge
 

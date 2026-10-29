@@ -85,6 +85,9 @@ This is a 0.x release: the API may still change before 1.0.
   dropped and counted in `Socket.PacketsDroppedFullConnQueue`.
 - The full test suite, the race detector and fuzzing run on Linux only;
   macOS and Windows run the short suite.
+- The Go version in go.mod is the minimum, not a recommendation: older
+  standard libraries have known vulnerabilities this code reaches. Build
+  with a current Go release.
 
 ## Testing
 
@@ -93,8 +96,6 @@ go test ./...          # full suite; the libutp comparisons need cgo
 go test -short ./...   # quick run
 go test -race ./...
 ```
-
-Notes for contributors are in [docs/dev](docs/dev).
 
 ## Origin
 

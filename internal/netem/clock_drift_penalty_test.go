@@ -5,8 +5,7 @@ import (
 	"time"
 )
 
-// The clock-drift penalty: libutp's second drift mechanism, and the one this
-// library was missing until the M4b sweep found it.
+// The clock-drift penalty: libutp's second drift mechanism.
 //
 // libutp watches the long-run slope of the delay the peer reports for its
 // packets, and past a threshold adds a penalty to the delay its congestion
