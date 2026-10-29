@@ -26,7 +26,8 @@
 // # Congestion control
 //
 // Classic LEDBAT (RFC 6817) is the default. LEDBAT++ and RACK loss detection
-// (RFC 8985) can be selected per connection in ConnectionConfig.
+// (RFC 8985) can be selected per connection in ConnectionConfig; both are
+// experimental. See AlgorithmLEDBATPP for LEDBAT++'s known limitation.
 //
 // # Path MTU
 //

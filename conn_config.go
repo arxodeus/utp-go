@@ -100,7 +100,8 @@ type ConnectionConfig struct {
 	// reason to transmit. The default is 15 seconds.
 	ZeroWindowProbeInterval time.Duration
 	// CongestionAlgorithm selects the congestion controller. The zero value
-	// is AlgorithmLEDBAT; AlgorithmLEDBATPP selects LEDBAT++.
+	// is AlgorithmLEDBAT; AlgorithmLEDBATPP selects LEDBAT++, which is
+	// experimental.
 	CongestionAlgorithm CongestionAlgorithm
 	// RACK replaces the default loss detection, under which a packet is lost
 	// once three packets sent after it are acknowledged, with the

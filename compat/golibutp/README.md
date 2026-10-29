@@ -34,12 +34,6 @@ it belongs in the application's go.mod.
   `SetWriteBufferLen` read and set it on a live connection.
 - expvar counters are not published.
 
-## Tests
-
-go-libutp v1.5.1's own tests are included unchanged, except
-`accept_write_test.go`, which is adapted because an accepted connection here
-can write immediately. `compat_test.go` covers the differences above.
-
 ## Versioning
 
 This module is tagged `compat/golibutp/vX.Y.Z` and requires the matching
@@ -47,6 +41,6 @@ release of `github.com/arxodeus/utp`.
 
 ## License
 
-The test files taken from go-libutp are under its license,
+The test files taken from go-libutp v1.5.1 are under its license,
 [LICENSE.go-libutp](LICENSE.go-libutp) (MIT). Everything else is under this
 repository's [LICENSE](../../LICENSE).

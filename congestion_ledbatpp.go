@@ -31,7 +31,9 @@ type CongestionAlgorithm int
 const (
 	// AlgorithmLEDBAT is classic LEDBAT (RFC 6817), the default.
 	AlgorithmLEDBAT CongestionAlgorithm = iota
-	// AlgorithmLEDBATPP is LEDBAT++.
+	// AlgorithmLEDBATPP is LEDBAT++. Experimental: a LEDBAT++ flow that
+	// joins a link another LEDBAT++ flow already fills takes about 70% of
+	// it while both run, rather than an even share.
 	AlgorithmLEDBATPP
 )
 

@@ -1,6 +1,8 @@
 # Development notes
 
-Engineering notes for contributors. None of this is needed to use the library.
+Engineering notes for contributors. The limitations that affect users are
+summarized in the main [README](../../README.md#status-and-limitations); the
+detail behind them is here, in KNOWN-LIMITATIONS.md.
 
 | Document | Contents |
 | --- | --- |
