@@ -12,11 +12,8 @@ import (
 // implementation. It is copied from that package's unexported `utpSocket`
 // (utp.go), which cannot be referred to from outside it.
 //
-// Copying an interface is normally a way to be wrong quietly: the copy drifts
-// and the check keeps passing. That is why NewUtpSocket below is written to
-// be assignable to the real thing -- see the compile-time assertion in
-// adapter_check.go, which uses torrent.NewUtpSocket's own signature and so
-// fails if the real interface changes shape.
+// TestSatisfiesTorrentsUTPSocketInterface checks utpnet.Socket against the
+// real interface, found by reflection, so a drift in this copy is caught.
 type Socket interface {
 	net.PacketConn
 	Accept() (net.Conn, error)
@@ -24,9 +21,8 @@ type Socket interface {
 	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
-// NewSocket has the signature torrent.NewSocket has, so it can replace
-// it. The firewall callback is accepted and ignored; see the note in
-// adapter_check.go.
+// NewSocket has the signature of torrent.NewUtpSocket, so it can replace
+// it.
 func NewSocket(network, addr string, fw FirewallCallback, logger alog.Logger) (Socket, error) {
 	// The firewall callback is honored: torrent uses it to refuse
 	// connections before any state exists for them.

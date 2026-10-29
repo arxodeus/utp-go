@@ -30,6 +30,9 @@ import (
 // emulated, it is one machine, and libutp is driven by the loop in
 // libutp_flow_test.go rather than a production embedder.
 func TestLibutpOverEmulatedNetwork(t *testing.T) {
+	if testing.Short() {
+		t.Skip("a measurement of 20 transfers; TestLibutpTransfersOverEmulatedNetwork covers interop")
+	}
 	profiles := []struct {
 		name  string
 		cfg   Config

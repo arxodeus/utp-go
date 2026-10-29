@@ -1,111 +1,27 @@
 # anacrolix/torrent integration
 
-This is a separate Go module. Its only job is to check, against the real
-thing rather than against a copy of it, that
-[`utpnet.Socket`](../../../utpnet) can stand in for a uTP implementation in
-[github.com/anacrolix/torrent](https://github.com/anacrolix/torrent).
-
-It is separate because the interface being satisfied is unexported, so proving
-the claim means importing the torrent package, and that pulls in a large
-dependency tree. Keeping it here means nothing a caller of this library
-depends on grows because the check exists.
+A separate Go module that tests [`utpnet.Socket`](../../../utpnet) and
+[compat/golibutp](../../../compat/golibutp) inside
+[github.com/anacrolix/torrent](https://github.com/anacrolix/torrent). It is
+kept apart so that torrent's dependencies stay out of the library's module
+graph.
 
 ```
-cd integration/anacrolix && go test ./...
+cd internal/integration/anacrolix && go test ./...
 ```
 
-## What is checked
+- `TestSatisfiesTorrentsUTPSocketInterface` asserts that `*utpnet.Socket`
+  implements torrent's unexported uTP socket interface, found by reflection,
+  so a change to that interface fails the test.
+- `TestNewUTPSocket` and `TestConcurrentPeerConnections` check `NewSocket`,
+  which has the signature of torrent's own constructor, under many
+  bidirectional streams on one port.
+- `TestTorrentTransferOverUTP` transfers and hash-verifies a 4 MiB torrent
+  between two clients whose only transport is this library, through
+  `Client.AddListener` and `Client.AddDialer`.
+- `TestTorrentOverTheGoLibutpDropIn` does the same through torrent's own
+  socket layer, with go-libutp replaced by compat/golibutp in this module's
+  go.mod, and checks that the DHT shares the socket.
 
-`TestSatisfiesTorrentsUTPSocketInterface` reaches torrent's unexported
-`utpSocket` interface through `reflect.TypeOf(torrent.NewUtpSocket).Out(0)`
-and asserts that `*utpnet.Socket` implements it. Ten methods, all present.
-If torrent changes the interface, this fails — which a hand-written interface
-declaration would not.
-
-`TestConcurrentPeerConnections` runs the traffic shape a torrent client
-produces: many simultaneous streams multiplexed on one UDP port per side,
-each exchanging data in both directions.
-
-That test is why this module exists rather than only a compile-time
-assertion. It found a defect nothing else had: the send buffer retained the
-caller's slice, so any full-duplex exchange corrupted its own data. Every
-unidirectional test in the repository passed throughout.
-
-`TestTorrentTransferOverUTP` runs a real torrent: two `torrent.Client`s, a
-generated 4 MiB torrent in 128 pieces, and BitTorrent's own piece hashes
-deciding whether what arrived is what was sent. Both clients have TCP,
-torrent's built-in uTP and the DHT disabled, so the only transport between
-them is this library.
-
-It too found a defect on its first run, and a worse one: `utp.Socket.Connect`
-made the caller's dial context the *connection's* lifetime, so the standard
-`defer cancel()` after a dial killed the connection it had just returned.
-torrent does exactly that, and the result was a BitTorrent connection that
-completed its handshake and then died mid-stream. Every test in the repository
-dials with a context it keeps alive for the whole transfer, so none of them
-could see it.
-
-## Wiring it into a torrent client
-
-**The one-line way:** replace go-libutp, which torrent's default build uses,
-with [compat/golibutp](../../../compat/golibutp), its API on this library:
-
-```
-replace github.com/anacrolix/go-libutp => github.com/arxodeus/utp/compat/golibutp <version>
-```
-
-in the application's go.mod. Nothing else changes: no fork, no build tag, and
-torrent's own socket layer makes the socket, installs its firewall on it and
-runs its DHT on it. This module does exactly that (its go.mod), and
-`TestTorrentOverTheGoLibutpDropIn` checks it: torrent's uTP listener is the
-drop-in's socket with torrent's firewall installed, a 4 MiB torrent transfers
-and hash-verifies, and one client's DHT answers the other's ping over the same
-socket. With the line removed, so that real go-libutp is used, it fails.
-
-The rest of this section is how it was done before the drop-in existed.
-
-torrent chooses its uTP implementation at **build time**, not at run time:
-`utp_go.go` (`//go:build !cgo`) uses `github.com/anacrolix/utp`, and
-`utp_libutp.go` (`//go:build cgo`) uses `github.com/anacrolix/go-libutp`.
-There is no injection point, so a client cannot be handed this socket without
-one of:
-
-1. **A `replace` on the uTP module.** Point `github.com/anacrolix/utp` at a
-   shim whose `NewSocket` returns a `*utpnet.Socket`. The pure-Go path is
-   already what a `CGO_ENABLED=0` build selects, so nothing else changes.
-2. **A patched `utp_go.go`** in a fork of torrent, calling
-   `anacrolix.NewUtpSocket` from this package.
-3. **Bypassing torrent's socket layer**, by giving the client its own
-   `Dialer` and `Listener` built on `utpnet.Socket`. This is the least
-   invasive, and works because torrent accepts both as configuration.
-
-`NewUtpSocket` in this package has the signature `torrent.NewUtpSocket` has,
-so options 1 and 2 are a one-line substitution.
-
-## What is not covered
-
-- ~~**The firewall callback.**~~ Honoured now. `utpnet.Options.Firewall` reaches
-  `utp.WithFirewall`, which is asked about every SYN for a connection the
-  socket does not have, before any state exists for it, and refuses by dropping
-  the packet without an answer — libutp's `UTP_ON_FIREWALL` in the same
-  position (`utp_internal.cpp:2975-2982`).
-
-  It used to be accepted and ignored, which is the worst of the three options
-  available: a caller that passed a blocklist got no blocking and no sign that
-  it was not happening.
-- **A torrent through torrent's own socket layer.** `TestTorrentTransferOverUTP`
-  takes option 3 above -- `Client.AddListener` and `Client.AddDialer`, both
-  exported, both taking what `utpnet.Socket` already provides -- so it needs
-  neither a fork nor a `replace`. What it does not exercise is options 1 and 2:
-  torrent choosing this implementation through its own `listenUtp`, which is
-  selected at build time and cannot be reached from here.
-
-  This entry previously said a real transfer was not covered because wiring it
-  up required a fork. That was true of torrent's built-in socket layer and not
-  of the client's exported hooks; the gap was in the reading of the API.
-- **Trackers, the DHT, PEX and holepunching**, all disabled: the leecher is
-  handed the seeder's address directly. What is tested is the transport, not
-  peer discovery.
-- **Encryption.** `HeaderObfuscationPolicy` is left at its default, so what the
-  two clients negotiate is whatever they would negotiate over TCP. Nothing here
-  pins it.
+Trackers, PEX and holepunching are disabled; what is tested is the
+transport.

@@ -92,7 +92,7 @@ This is a 0.x release: the API may still change before 1.0.
 ## Testing
 
 ```sh
-go test ./...          # full suite; the libutp comparisons need cgo
+go test ./...          # full suite; the reference-comparison tests need cgo
 go test -short ./...   # quick run
 go test -race ./...
 ```
