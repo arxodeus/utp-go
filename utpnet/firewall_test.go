@@ -84,9 +84,8 @@ func TestFirewallRefusesBeforeAnyStateExists(t *testing.T) {
 			"allocate, or a blocklist becomes a way to make a node allocate", n)
 	}
 	if n := server.sock.PacketsResetSent(); n != 0 {
-		t.Errorf("the refusing socket sent %d RESET(s); libutp refuses with a bare return "+
-			"(utp_internal.cpp:2981), because answering tells a refused peer that something "+
-			"is listening", n)
+		t.Errorf("the refusing socket sent %d RESET(s); a refused SYN gets no answer, "+
+			"because answering tells a refused peer that something is listening", n)
 	}
 	if n := server.sock.ConnectionsRefusedByFirewall(); n == 0 {
 		t.Error("the socket counted no refusals")

@@ -70,7 +70,6 @@ func TestMaxConnectionsRefusesPastTheCap(t *testing.T) {
 		t.Error("the socket counted no refusals at capacity")
 	}
 	if n := server.sock.PacketsResetSent(); n != 0 {
-		t.Errorf("the socket sent %d RESET(s) at capacity; libutp refuses with a bare "+
-			"`return 1` (utp_internal.cpp:2973)", n)
+		t.Errorf("the socket sent %d RESET(s) at capacity; a refused SYN gets no answer", n)
 	}
 }

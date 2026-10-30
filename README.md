@@ -63,10 +63,11 @@ same port.
 
 ## Compatibility
 
-With the default configuration the library is wire-compatible with the
-reference uTP implementation, libutp, and with implementations built on it.
-The experimental options change only how this side paces and detects loss;
-they need nothing from the peer.
+The library speaks the uTP wire protocol of BEP 29. Every change is tested
+for interoperability with BitTorrent's own uTP implementation and with the
+pure-Go one in anacrolix/go-utp, and against anacrolix/torrent. The
+experimental options change only how this side paces and detects loss; they
+need nothing from the peer.
 
 ## Status and limitations
 
@@ -78,9 +79,8 @@ This is a 0.x release: the API may still change before 1.0.
   LEDBAT++ flow is already running takes about 70% of the link while both
   run, rather than an even share.
 - RACK loss detection is experimental.
-- Classic LEDBAT, like libutp's, does not yield fully to loss-based TCP
-  traffic: it keeps about 69% of a shared bottleneck, by design of the
-  protocol.
+- Classic LEDBAT does not yield fully to loss-based TCP traffic: it keeps
+  about 69% of a shared bottleneck, by design of the protocol.
 - When a connection's event queue is full, further packets for it are
   dropped and counted in `Socket.PacketsDroppedFullConnQueue`.
 - The full test suite, the race detector and fuzzing run on Linux only;
@@ -92,7 +92,7 @@ This is a 0.x release: the API may still change before 1.0.
 ## Testing
 
 ```sh
-go test ./...          # full suite; the reference-comparison tests need cgo
+go test ./...          # full suite; the interoperability tests need cgo
 go test -short ./...   # quick run
 go test -race ./...
 ```
