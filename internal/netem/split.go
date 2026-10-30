@@ -13,17 +13,17 @@ type DeliverySample struct {
 	Bytes uint64
 }
 
-// deliverySampleInterval bounds how often a deliveryTimeline records.
+// deliverySampleInterval bounds how often a DeliveryTimeline records.
 const deliverySampleInterval = 5 * time.Millisecond
 
-// deliveryTimeline records a DeliverySample at most every
+// DeliveryTimeline records a DeliverySample at most every
 // deliverySampleInterval, and always the latest count.
-type deliveryTimeline struct {
+type DeliveryTimeline struct {
 	mu      sync.Mutex
 	samples []DeliverySample
 }
 
-func (d *deliveryTimeline) record(at time.Time, bytes uint64) {
+func (d *DeliveryTimeline) Record(at time.Time, bytes uint64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if n := len(d.samples); n > 0 && at.Sub(d.samples[n-1].At) < deliverySampleInterval {
@@ -34,7 +34,7 @@ func (d *deliveryTimeline) record(at time.Time, bytes uint64) {
 	d.samples = append(d.samples, DeliverySample{At: at, Bytes: bytes})
 }
 
-func (d *deliveryTimeline) snapshot() []DeliverySample {
+func (d *DeliveryTimeline) Snapshot() []DeliverySample {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return append([]DeliverySample(nil), d.samples...)

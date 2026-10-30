@@ -84,7 +84,7 @@ func runLatecomer(t *testing.T, algo utp.CongestionAlgorithm) (incumbentMbps, la
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
-	pair := NewUtpPair(ctx, n, sender, receiver, quiet())
+	pair := NewUtpPair(ctx, n, sender, receiver, Quiet())
 
 	data := make([]byte, 4*1024*1024)
 	for i := range data {
@@ -186,7 +186,7 @@ func TestBaseDelayTracking(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 			defer cancel()
-			pair := NewUtpPair(ctx, n, a, b, quiet())
+			pair := NewUtpPair(ctx, n, a, b, Quiet())
 
 			data := make([]byte, 4*1024*1024)
 			cfgConn := utp.NewConnectionConfig()

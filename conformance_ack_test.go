@@ -1,5 +1,3 @@
-//go:build cgo
-
 package utp
 
 import (
@@ -39,7 +37,7 @@ func TestConformanceAckCoalescing(t *testing.T) {
 // when deferred acks are flushed.
 func libutpAcksForBatch(t *testing.T, batch int) int {
 	t.Helper()
-	drv, err := libutpNewDriverForCorpus()
+	drv, err := libutpNewDriverForCorpus(t)
 	if err != nil {
 		t.Fatal(err)
 	}

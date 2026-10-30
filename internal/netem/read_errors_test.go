@@ -44,9 +44,9 @@ func TestSocketReadsOnAfterAReadError(t *testing.T) {
 
 	fa := &failingConn{Endpoint: a}
 	fa.pending.Store(5)
-	sa := utp.NewSocket(ctx, fa, quiet())
+	sa := utp.NewSocket(ctx, fa, Quiet())
 	defer sa.Close()
-	sb := utp.NewSocket(ctx, b, quiet())
+	sb := utp.NewSocket(ctx, b, Quiet())
 	defer sb.Close()
 	go func() {
 		s, err := sb.Accept(ctx, utp.NewConnectionConfig())
@@ -82,7 +82,7 @@ func TestSocketThatCannotReadCloses(t *testing.T) {
 
 	fa := &failingConn{Endpoint: a}
 	fa.broken.Store(true)
-	sa := utp.NewSocket(ctx, fa, quiet())
+	sa := utp.NewSocket(ctx, fa, Quiet())
 	defer sa.Close()
 
 	start := time.Now()

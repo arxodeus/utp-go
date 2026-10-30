@@ -1,5 +1,3 @@
-//go:build cgo
-
 package utp
 
 import (
@@ -9,8 +7,6 @@ import (
 	"strconv"
 	"testing"
 	"time"
-
-	"github.com/arxodeus/utp/internal/libutp"
 )
 
 // Loss recovery, compared with the reference implementation on a virtual
@@ -182,7 +178,7 @@ func libutpRTO(t *testing.T, samples []time.Duration, step time.Duration) time.D
 	t.Helper()
 	best := time.Duration(-1)
 	for delta := time.Duration(0); delta < 500*time.Millisecond; delta += step {
-		drv, err := libutp.NewDriver(1_000_000)
+		drv, err := newRefDriver(t, 1_000_000)
 		if err != nil {
 			t.Skipf("libutp driver unavailable: %v", err)
 		}
@@ -601,7 +597,7 @@ type ccPhase struct {
 // milliseconds, so the log, which prints milliseconds, is exact.
 func libutpCCTrace(t *testing.T, initialWrite int, phases []ccPhase) []ccEntry {
 	t.Helper()
-	drv, err := libutp.NewDriver(1_000_000)
+	drv, err := newRefDriver(t, 1_000_000)
 	if err != nil {
 		t.Skipf("libutp driver unavailable: %v", err)
 	}

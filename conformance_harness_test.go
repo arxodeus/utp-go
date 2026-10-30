@@ -1,18 +1,14 @@
-//go:build cgo
-
 package utp
 
 import (
 	"fmt"
-
-	"github.com/arxodeus/utp/internal/libutp"
 )
 
 // The conformance harness.
 //
 // Two implementations are driven with identical packet sequences and every
 // emitted packet is compared field by field. The reference implementation is
-// driven through the deterministic driver in internal/libutp: virtual clock,
+// driven through its deterministic driver (refDriver): virtual clock,
 // scripted random source, packets in and out by explicit call. This side is
 // driven through a scripted transport that does the same for our socket.
 //
@@ -36,7 +32,7 @@ func (d fieldDiff) String() string {
 // driver's virtual clock, so the timestamp fields can be compared.
 // nowMicros governs only what is stamped and measured, not scheduling, so
 // such a connection still retransmits on real timers.
-func pinnedClockConfig(drv *libutp.Driver) *ConnectionConfig {
+func pinnedClockConfig(drv *refDriver) *ConnectionConfig {
 	cfg := NewConnectionConfig()
 	cfg.nowMicros = func() uint32 { return uint32(drv.Now()) }
 	return cfg

@@ -1,5 +1,3 @@
-//go:build cgo
-
 package utp
 
 import (
@@ -7,8 +5,6 @@ import (
 	"fmt"
 	"testing"
 	"time"
-
-	"github.com/arxodeus/utp/internal/libutp"
 )
 
 // Retransmission timing, compared with the reference implementation.
@@ -32,7 +28,7 @@ const scheduleLateness = defaultRetransmitTickInterval
 func libutpRetransmitSchedule(t *testing.T, afterHandshake bool) (resends []int64, gaveUpAt int64) {
 	t.Helper()
 
-	drv, err := libutp.NewDriver(1_000_000)
+	drv, err := newRefDriver(t, 1_000_000)
 	if err != nil {
 		t.Skipf("libutp driver unavailable: %v", err)
 	}
@@ -68,7 +64,7 @@ func libutpRetransmitSchedule(t *testing.T, afterHandshake bool) (resends []int6
 			resends = append(resends, elapsed)
 			drv.ClearEmitted()
 		}
-		if st := drv.State(); st == libutp.StateError || st == libutp.StateDestroyed {
+		if st := drv.State(); st == refStateError || st == refStateDestroyed {
 			gaveUpAt = elapsed
 			return resends, gaveUpAt
 		}

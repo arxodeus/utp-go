@@ -52,7 +52,7 @@ func twoWayTransfer(seed int64, cfg Config, size int) (time.Duration, error) {
 	n.ConnectAsymmetric(a, b, cfg, cfg)
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	pair := NewUtpPair(ctx, n, a, b, quiet())
+	pair := NewUtpPair(ctx, n, a, b, Quiet())
 
 	var sa, sb *utp.Stream
 	var errA, errB error

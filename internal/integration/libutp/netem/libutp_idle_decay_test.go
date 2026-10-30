@@ -1,0 +1,444 @@
+//go:build cgo
+
+package netem_test
+
+import (
+	"context"
+	"math"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	. "github.com/arxodeus/utp/internal/netem"
+
+	utp "github.com/arxodeus/utp"
+	"github.com/arxodeus/utp/internal/integration/libutp"
+)
+
+// What real libutp does to its congestion window while a connection sits idle.
+//
+// libutp checks one retransmission deadline per socket rather than one timer
+// per packet, and `rto_timeout` is never cleared when the window empties: it
+// is set when a packet goes into an empty window (utp_internal.cpp:997), reset
+// on every acknowledged packet (:1389), and re-armed on every expiry (:1204).
+// So once the last packet is acknowledged the deadline keeps ticking, and when
+// it passes with nothing outstanding the idle branch runs:
+//
+//	if ((cur_window_packets == 0) && ((int)max_window > packet_size)) {
+//	    // we don't have any packets in-flight, even though
+//	    // we could. This implies that the connection is just
+//	    // idling. No need to be aggressive about resetting the
+//	    // congestion window. Just let it decay by a 3:rd.
+//	    max_window = max(max_window * 2 / 3, size_t(packet_size));
+//	                                        (utp_internal.cpp:1216-1222)
+//
+// `retransmit_count` is only incremented when something *is* outstanding
+// (:1240), so this repeats without ever killing the connection: the window
+// decays by a third at each expiry while the RTO doubles, so the decays land
+// at one, three, seven, fifteen RTOs and the window falls geometrically.
+//
+// This library cannot do that. Its retransmission timers are armed per packet
+// and there is none to arm when nothing is outstanding, so an idle connection
+// keeps whatever window it last had. Whether that is worth changing depends on
+// what libutp actually does rather than on what its source appears to say,
+// which is what this measures.
+//
+// The window is not readable from outside libutp in an ordinary build --
+// `max_window` is private and `utp_socket_stats` does not report it -- so it
+// is measured the way a peer would see it: idle for a while, then write a
+// burst, and count what comes out before anything is acknowledged. That
+// first flight is the window, rounded down to whole packets. A
+// libutp_debuglog build also reads the window itself, and checks the two
+// agree.
+func TestLibutpIdleWindowDecay(t *testing.T) {
+	const idle = 8 * time.Second
+
+	busy, busyWindow, direct := libutpFirstFlightAfterIdle(t, 0)
+	idled, idledWindow, _ := libutpFirstFlightAfterIdle(t, idle)
+	if direct {
+		// The first flight is how this test reads libutp's window without
+		// the debug build. libutp sends a packet only while the whole of it
+		// fits (is_full, utp_internal.cpp:956), so the flight is the window
+		// rounded down to whole packets: within one packet of it, never over.
+		for _, c := range []struct {
+			name   string
+			flight int
+			window uint32
+		}{{"no idle", busy, busyWindow}, {"after idle", idled, idledWindow}} {
+			t.Logf("libutp %s: window %d bytes read directly, first flight %d", c.name, c.window, c.flight)
+			if c.flight > int(c.window) || int(c.window)-c.flight >= maxLibutpPayload {
+				t.Errorf("libutp %s: first flight %d bytes for a window of %d; the flight is meant to be "+
+					"the window to within a packet (%d), so the inference this test makes is wrong",
+					c.name, c.flight, c.window, maxLibutpPayload)
+			}
+		}
+	}
+	ourBusy, ourIdled := ourWindowAcrossIdle(t, idle)
+
+	t.Logf("libutp first flight: %d bytes with no idle, %d after %v (%.0f%% of it)",
+		busy, idled, idle, 100*float64(idled)/float64(busy))
+	t.Logf("ours, congestion window: %d bytes with no idle, %d after %v (%.0f%% of it)",
+		ourBusy, ourIdled, idle, 100*float64(ourIdled)/float64(ourBusy))
+
+	// libutp has to have decayed, or there is nothing here to compare against
+	// and this test is measuring the harness rather than the reference.
+	if busy == 0 || idled == 0 {
+		t.Fatalf("libutp's first flight measured %d bytes busy and %d idle; a zero is a "+
+			"measurement that did not happen, not a window that was empty", busy, idled)
+	}
+	if float64(idled) > 0.6*float64(busy) {
+		t.Fatalf("libutp kept %d of %d bytes across %v idle; the reference did not decay, so "+
+			"this run says nothing about the divergence it exists to measure", idled, busy, idle)
+	}
+	// Three decays by a third, at one, three and seven RTOs, predicts
+	// (2/3)^3 = 30%. Loose, because which decays land inside the window
+	// depends on where the RTO floor sits.
+	if lo, hi := 0.15*float64(busy), 0.55*float64(busy); float64(idled) < lo || float64(idled) > hi {
+		t.Errorf("libutp's window after %v idle was %d bytes, outside the %0.f-%0.f the "+
+			"decay-by-a-third schedule predicts; the reading of utp_internal.cpp:1216-1222 "+
+			"behind this test may be wrong", idle, idled, lo, hi)
+	}
+
+	// And ours has to decay the same way. This is the assertion the test was
+	// built for: it began by pinning the *divergence* -- ours held 100% of its
+	// window where libutp kept 29% -- and failed, as intended, the moment the
+	// decay was implemented.
+	// Compared as a decay *rule*, not as a ratio.
+	//
+	// Comparing the ratios directly is what a first version did, and it fails
+	// one run in three for a reason that is not a divergence: how many
+	// expiries fit in the idle period depends on where the RTO floor lands,
+	// so a run may take two decays where another takes three -- 44% against
+	// 30% -- while applying exactly the same rule. Converting each ratio to
+	// the number of thirds it represents compares the rule and tolerates the
+	// count, and still fails on a genuinely different rule: three halvings
+	// would read as 5.1 steps against libutp's 3.
+	steps := func(ratio float64) float64 { return math.Log(ratio) / math.Log(2.0/3.0) }
+	ourRatio := float64(ourIdled) / float64(ourBusy)
+	theirRatio := float64(idled) / float64(busy)
+	ourSteps, theirSteps := steps(ourRatio), steps(theirRatio)
+	t.Logf("decays by a third: libutp %.2f, ours %.2f", theirSteps, ourSteps)
+	if d := ourSteps - theirSteps; d > 1.1 || d < -1.1 {
+		t.Errorf("across %v idle libutp kept %.0f%% of its window (%d of %d, %.2f decays by a "+
+			"third) and we kept %.0f%% (%d of %d, %.2f). More than one expiry apart is a "+
+			"different rule, not a different schedule (utp_internal.cpp:1216-1222, :1204)",
+			idle, 100*theirRatio, idled, busy, theirSteps,
+			100*ourRatio, ourIdled, ourBusy, ourSteps)
+	}
+	// Neither should fall below one packet, which is the floor libutp clamps
+	// to in the same expression.
+	if ourIdled < 1000 {
+		t.Errorf("our window decayed to %d bytes, below the one-packet floor", ourIdled)
+	}
+}
+
+// ourWindowAcrossIdle reports this library's congestion window after a bulk
+// transfer and again after `idle` of silence.
+//
+// Ours is read directly from the metrics rather than inferred from a first
+// flight, because it can be: libutp's `max_window` is private and
+// `utp_socket_stats` does not report it, which is the only reason that side is
+// measured the roundabout way.
+func ourWindowAcrossIdle(t *testing.T, idle time.Duration) (busy, idled uint32) {
+	t.Helper()
+
+	n := NewNetwork(7272)
+	defer n.Close()
+	a := n.MustAddEndpoint("a")
+	b := n.MustAddEndpoint("b")
+	n.Connect(a, b, Config{
+		Delay:        20 * time.Millisecond,
+		BandwidthBps: 10_000_000,
+		QueueBytes:   512 * 1024,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	sockA := utp.NewSocket(ctx, a, Quiet())
+	defer sockA.Close()
+	sockB := utp.NewSocket(ctx, b, Quiet())
+	defer sockB.Close()
+
+	var (
+		mu      sync.Mutex
+		samples []utp.ConnectionMetrics
+	)
+	cfg := utp.NewConnectionConfig()
+	cfg.MetricsInterval = 20 * time.Millisecond
+	cfg.Metrics = func(m utp.ConnectionMetrics) {
+		mu.Lock()
+		samples = append(samples, m)
+		mu.Unlock()
+	}
+
+	go func() {
+		stream, err := sockB.Accept(ctx, utp.NewConnectionConfig())
+		if err != nil {
+			return
+		}
+		defer stream.Close()
+		buf := make([]byte, 64*1024)
+		for ctx.Err() == nil {
+			if _, err := stream.Read(ctx, buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cid := utp.NewConnectionID(b.Addr(), 9600, 9601)
+	stream, err := sockA.ConnectWithCID(ctx, cid, cfg)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer stream.Close()
+
+	bulk := make([]byte, 512*1024)
+	rand.New(rand.NewSource(19)).Read(bulk)
+	start := time.Now()
+	if _, err := stream.Write(ctx, bulk); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	WaitForIdle(t, &mu, &samples, start, 120*time.Second)
+
+	mu.Lock()
+	busy = LastSample(samples).CwndBytes
+	mu.Unlock()
+
+	// Idle. An idle connection produces no metrics samples at all, because
+	// nothing wakes its event loop -- which is the mechanism behind the
+	// divergence as much as the missing timer is. So the window afterwards is
+	// read from the first sample the next write produces.
+	time.Sleep(idle)
+
+	mu.Lock()
+	before := len(samples)
+	mu.Unlock()
+	if _, err := stream.Write(ctx, []byte("probe")); err != nil {
+		t.Fatalf("probe write: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(samples)
+		if n > before {
+			idled = samples[before].CwndBytes
+			mu.Unlock()
+			return busy, idled
+		}
+		mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("no metrics sample arrived after the idle period")
+	return 0, 0
+}
+
+// maxLibutpPayload bounds a libutp data packet's payload on these links: an
+// Ethernet frame's worth, larger than any packet libutp sends here.
+const maxLibutpPayload = 1500
+
+// libutpFirstFlightAfterIdle drives real libutp as the sender: a bulk transfer
+// to grow its window, then `idle` of silence, then a burst. It reports how
+// many bytes libutp put on the wire in the burst's first flight.
+//
+// window is libutp's congestion window read directly as the burst began, and
+// direct whether it could be: only in a libutp_debuglog build (see
+// libutp.Driver.EnableWindowLog).
+func libutpFirstFlightAfterIdle(t *testing.T, idle time.Duration) (flight int, window uint32, direct bool) {
+	t.Helper()
+
+	n := NewNetwork(7171)
+	defer n.Close()
+	a := n.MustAddEndpoint("a")
+	b := n.MustAddEndpoint("b")
+	n.Connect(a, b, Config{
+		Delay:        20 * time.Millisecond,
+		BandwidthBps: 10_000_000,
+		QueueBytes:   512 * 1024,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	const connSeed = 7700
+	drv, err := libutp.NewDriver(uint64(time.Now().UnixMicro()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	drv.PushRandom(connSeed)
+
+	// Stop and join the pump before the C driver is freed.
+	stopPump := make(chan struct{})
+	pumped := make(chan struct{})
+	defer func() {
+		close(stopPump)
+		<-pumped
+		drv.Close()
+	}()
+
+	inbox := make(chan []byte, 8192)
+	go func() {
+		buf := make([]byte, 65536)
+		for {
+			nb, _, err := a.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			p := make([]byte, nb)
+			copy(p, buf[:nb])
+			select {
+			case inbox <- p:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// The receiver is one of ours, reading continuously so its advertised
+	// window never becomes the limit.
+	recv := newReceivingEndpoint(t, ctx, b)
+	defer recv.close()
+
+	// pumpMu is held by the pump for each pass and by the test around the
+	// burst, so the burst's packets can be counted before they are sent.
+	var pumpMu sync.Mutex
+
+	go func() {
+		defer close(pumped)
+		tick := time.NewTicker(200 * time.Microsecond)
+		defer tick.Stop()
+		readBuf := make([]byte, 64*1024)
+		for {
+			var pkt []byte
+			select {
+			case <-stopPump:
+				return
+			case <-ctx.Done():
+				return
+			case pkt = <-inbox:
+			case <-tick.C:
+			}
+			pumpMu.Lock()
+			drv.SetTime(uint64(time.Now().UnixMicro()))
+			if pkt != nil {
+				drv.Inject(pkt)
+				drv.IssueAcks()
+			} else {
+				drv.CheckTimeouts()
+			}
+			for {
+				if nr := drv.Read(readBuf); nr == 0 {
+					break
+				}
+			}
+			out := drv.Emitted()
+			drv.ClearEmitted()
+			pumpMu.Unlock()
+			for _, pkt := range out {
+				if _, err := a.WriteTo(pkt, b.Addr()); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	if err := drv.Connect(); err != nil {
+		t.Fatalf("libutp connect: %v", err)
+	}
+
+	bulk := make([]byte, 512*1024)
+	rand.New(rand.NewSource(17)).Read(bulk)
+	if _, err := drv.Write(bulk); err != nil {
+		t.Fatalf("libutp write: %v", err)
+	}
+
+	// Wait for the bulk transfer to be delivered and quiet down.
+	if !recv.waitForBytes(len(bulk), 120*time.Second) {
+		t.Fatalf("libutp delivered only %d of %d bytes", recv.count(), len(bulk))
+	}
+	if idle > 0 {
+		time.Sleep(idle)
+	}
+
+	// The burst. libutp sends from inside the write that queues it, as much
+	// as its window allows, and no acknowledgement can arrive during that
+	// call, so what the write emits is exactly the first flight. It is
+	// counted before the pump sends it, rather than timed, so a stalled pump
+	// under load cannot split it.
+	pumpMu.Lock()
+	defer pumpMu.Unlock()
+	// Where the build can read the window itself, it is read as libutp first
+	// asks whether a packet of the burst fits.
+	direct = drv.EnableWindowLog()
+	drv.ClearWindowLog()
+	probe := make([]byte, 512*1024)
+	if _, err := drv.Write(probe); err != nil {
+		t.Fatalf("libutp probe write: %v", err)
+	}
+	if direct {
+		if log := drv.WindowLog(); len(log) > 0 {
+			window = log[0]
+		} else {
+			direct = false
+		}
+	}
+	for _, pkt := range drv.Emitted() {
+		// Only data packets count towards a flight.
+		if len(pkt) > 20 {
+			flight += len(pkt) - 20
+		}
+	}
+	if flight == 0 {
+		t.Fatal("libutp emitted nothing for the probe write; there is no first flight to measure")
+	}
+	return flight, window, direct
+}
+
+// receivingEndpoint is one of our sockets accepting a connection and reading
+// continuously, used as the far end for a libutp sender.
+type receivingEndpoint struct {
+	sock *utp.Socket
+	got  atomic.Int64
+}
+
+func newReceivingEndpoint(t *testing.T, ctx context.Context, ep *Endpoint) *receivingEndpoint {
+	t.Helper()
+	r := &receivingEndpoint{}
+	r.sock = utp.NewSocket(ctx, ep, Quiet())
+	go func() {
+		stream, err := r.sock.Accept(ctx, utp.NewConnectionConfig())
+		if err != nil {
+			return
+		}
+		defer stream.Close()
+		buf := make([]byte, 64*1024)
+		for ctx.Err() == nil {
+			n, err := stream.Read(ctx, buf)
+			if err != nil {
+				return
+			}
+			r.got.Add(int64(n))
+		}
+	}()
+	return r
+}
+
+func (r *receivingEndpoint) count() int { return int(r.got.Load()) }
+
+func (r *receivingEndpoint) waitForBytes(n int, limit time.Duration) bool {
+	deadline := time.Now().Add(limit)
+	for time.Now().Before(deadline) {
+		if r.count() >= n {
+			// Let the last acknowledgements settle.
+			time.Sleep(300 * time.Millisecond)
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
+func (r *receivingEndpoint) close() { r.sock.Close() }

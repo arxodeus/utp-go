@@ -22,7 +22,7 @@ func rackRetransmissions(t *testing.T, rack bool) uint64 {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	pair := NewUtpPair(ctx, n, a, b, quiet())
+	pair := NewUtpPair(ctx, n, a, b, Quiet())
 	cfg := utp.NewConnectionConfig()
 	cfg.RACK = rack
 	res, err := pair.RunTransfer(ctx, make([]byte, 2<<20), FlowOptions{InitiatorCid: 100, Config: cfg, Verify: true})

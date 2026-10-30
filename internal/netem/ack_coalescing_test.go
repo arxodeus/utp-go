@@ -77,7 +77,7 @@ func ackRatioTransfer(t *testing.T, bps, backBps uint64, delay time.Duration) (d
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	pair := NewUtpPair(ctx, n, a, b, quiet())
+	pair := NewUtpPair(ctx, n, a, b, Quiet())
 
 	payload := make([]byte, 4<<20)
 	for i := range payload {

@@ -54,9 +54,9 @@ func TestApplicationLimitedWindowDoesNotGrow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	sockA := utp.NewSocket(ctx, a, quiet())
+	sockA := utp.NewSocket(ctx, a, Quiet())
 	defer sockA.Close()
-	sockB := utp.NewSocket(ctx, b, quiet())
+	sockB := utp.NewSocket(ctx, b, Quiet())
 	defer sockB.Close()
 
 	var (
@@ -116,7 +116,7 @@ func TestApplicationLimitedWindowDoesNotGrow(t *testing.T) {
 		if _, err := stream.Write(ctx, bulk); err != nil {
 			t.Fatalf("phase A write: %v", err)
 		}
-		phaseAEnd = waitForIdle(t, &mu, &samples, bulkStart, 60*time.Second)
+		phaseAEnd = WaitForIdle(t, &mu, &samples, bulkStart, 60*time.Second)
 		mu.Lock()
 		last := samples[len(samples)-1]
 		mu.Unlock()
@@ -252,42 +252,6 @@ func lastCwnd(samples []utp.ConnectionMetrics, until time.Time) uint32 {
 		last = m.CwndBytes
 	}
 	return last
-}
-
-// waitForIdle blocks until the connection has nothing buffered and nothing in
-// flight, and reports when that happened.
-// waitForIdle blocks until the connection has nothing buffered and nothing in
-// flight, counting only samples taken after since, and reports when that
-// happened.
-//
-// The `since` argument is not decoration. Without it this returned on the
-// stale pre-transfer sample -- pending, in-flight and queued writes all
-// legitimately zero before anything had been written -- so phase A ended
-// before it began and the window it was supposed to grow never appeared.
-func waitForIdle(t *testing.T, mu *sync.Mutex, samples *[]utp.ConnectionMetrics,
-	since time.Time, limit time.Duration) time.Time {
-	t.Helper()
-	deadline := time.Now().Add(limit)
-	started := false
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		var last utp.ConnectionMetrics
-		if n := len(*samples); n > 0 {
-			last = (*samples)[n-1]
-		}
-		mu.Unlock()
-		if last.At.After(since) {
-			busy := last.SendBufferPending > 0 || last.InFlightBytes > 0 || last.PendingWrites > 0
-			if busy {
-				started = true
-			} else if started {
-				return time.Now()
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("the bulk transfer never drained within %v", limit)
-	return time.Time{}
 }
 
 // inSlowStart reports whether any sample in (after, until] was still in slow

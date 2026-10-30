@@ -79,7 +79,7 @@ func idleConnectionMemory(t *testing.T, keepAlive, wait time.Duration) int64 {
 	n.Connect(a, b, Config{Delay: time.Millisecond})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	pair := NewUtpPair(ctx, n, a, b, quiet())
+	pair := NewUtpPair(ctx, n, a, b, Quiet())
 	defer pair.SockA.Close()
 	defer pair.SockB.Close()
 

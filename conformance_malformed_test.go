@@ -1,5 +1,3 @@
-//go:build cgo
-
 package utp
 
 import (
@@ -230,7 +228,7 @@ func runDivergenceStepsAnswered(t *testing.T, raws [][]byte) (ours, libutpOut []
 func runDivergence(t *testing.T, raws [][]byte, answered bool) (ours, libutpOut [][]byte) {
 	t.Helper()
 
-	drv, err := libutpNewDriverForCorpus()
+	drv, err := libutpNewDriverForCorpus(t)
 	if err != nil {
 		t.Fatal(err)
 	}

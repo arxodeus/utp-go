@@ -90,9 +90,9 @@ func runDriftedWith(t *testing.T, ppm float64, runFor time.Duration, cid uint16,
 	if ppm != 0 {
 		sendConn = NewDriftingClock(a, ppm)
 	}
-	sendSock := utp.NewSocket(ctx, sendConn, quiet())
+	sendSock := utp.NewSocket(ctx, sendConn, Quiet())
 	defer sendSock.Close()
-	recvSock := utp.NewSocket(ctx, b, quiet())
+	recvSock := utp.NewSocket(ctx, b, Quiet())
 	defer recvSock.Close()
 
 	acceptCid := utp.NewConnectionID(a.Addr(), cid+1, cid)
@@ -434,9 +434,9 @@ func TestClockDriftYieldsShareAtASharedBottleneck(t *testing.T) {
 		if ppm != 0 {
 			sendConn = NewDriftingClock(src, ppm)
 		}
-		sendSock := utp.NewSocket(ctx, sendConn, quiet())
+		sendSock := utp.NewSocket(ctx, sendConn, Quiet())
 		defer sendSock.Close()
-		recvSock := utp.NewSocket(ctx, dst, quiet())
+		recvSock := utp.NewSocket(ctx, dst, Quiet())
 		defer recvSock.Close()
 
 		var (

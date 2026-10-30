@@ -36,9 +36,9 @@ func TestQueueingDelayMeasuresTheOutboundQueue(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	sendSock := utp.NewSocket(ctx, sender, quiet())
+	sendSock := utp.NewSocket(ctx, sender, Quiet())
 	defer sendSock.Close()
-	recvSock := utp.NewSocket(ctx, receiver, quiet())
+	recvSock := utp.NewSocket(ctx, receiver, Quiet())
 	defer recvSock.Close()
 
 	acceptCid := utp.NewConnectionID(sender.Addr(), 861, 860)
@@ -158,9 +158,9 @@ func TestQueueingDelayTracksARealQueue(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	sendSock := utp.NewSocket(ctx, sender, quiet())
+	sendSock := utp.NewSocket(ctx, sender, Quiet())
 	defer sendSock.Close()
-	recvSock := utp.NewSocket(ctx, receiver, quiet())
+	recvSock := utp.NewSocket(ctx, receiver, Quiet())
 	defer recvSock.Close()
 
 	acceptCid := utp.NewConnectionID(sender.Addr(), 871, 870)

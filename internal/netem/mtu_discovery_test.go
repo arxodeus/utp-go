@@ -23,9 +23,9 @@ func mtuTransfer(t *testing.T, cfg Config, payloadLen int, cid uint16) (floor, c
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	sendSock := utp.NewSocket(ctx, a, quiet())
+	sendSock := utp.NewSocket(ctx, a, Quiet())
 	defer sendSock.Close()
-	recvSock := utp.NewSocket(ctx, b, quiet())
+	recvSock := utp.NewSocket(ctx, b, Quiet())
 	defer recvSock.Close()
 
 	acceptCid := utp.NewConnectionID(a.Addr(), cid+1, cid)
@@ -199,9 +199,9 @@ func TestPathMTUReportPreventsTheStall(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	sendSock := utp.NewSocket(ctx, a, quiet())
+	sendSock := utp.NewSocket(ctx, a, Quiet())
 	defer sendSock.Close()
-	recvSock := utp.NewSocket(ctx, b, quiet())
+	recvSock := utp.NewSocket(ctx, b, Quiet())
 	defer recvSock.Close()
 
 	acceptCid := utp.NewConnectionID(a.Addr(), 761, 760)

@@ -1,13 +1,9 @@
-//go:build cgo
-
 package utp
 
 import (
 	"context"
 	"testing"
 	"time"
-
-	"github.com/arxodeus/utp/internal/libutp"
 )
 
 // Differential fuzzing: the fuzzer generates packet sequences, and the
@@ -224,7 +220,7 @@ type differentialRun struct {
 	t    *testing.T
 	role differentialRole
 
-	drv    *libutp.Driver
+	drv    *refDriver
 	conn   *scriptedConn
 	sock   *Socket
 	cancel context.CancelFunc
@@ -243,7 +239,7 @@ func newDifferentialRun(t *testing.T, role differentialRole) *differentialRun {
 		pinned = initiatorConnSeed
 	}
 
-	drv, err := libutp.NewDriver(1_000_000)
+	drv, err := newRefDriver(t, 1_000_000)
 	if err != nil {
 		t.Skipf("libutp driver unavailable: %v", err)
 	}

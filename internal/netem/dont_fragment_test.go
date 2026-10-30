@@ -17,13 +17,6 @@ import (
 // interface existed, and it is the control these cases are measured against.
 type noDontFragment struct{ utp.Conn }
 
-// batchedReader tells the socket how many datagrams are already waiting, so
-// it reads them all before acknowledging, as it does from a real socket's
-// batched read (utp.QueuedReader). Endpoint itself does not; see there.
-type batchedReader struct{ *Endpoint }
-
-func (b batchedReader) Queued() int { return len(b.inbox) }
-
 // dfTransfer runs one transfer and reports where the sender's MTU search
 // settled, plus the link's stats. wrap is applied to the sender's Conn, and
 // batched makes the receiver read as a real socket does.
@@ -43,13 +36,13 @@ func dfTransfer(t *testing.T, cfg Config, wrap func(utp.Conn) utp.Conn, batched 
 	if wrap != nil {
 		senderConn = wrap(a)
 	}
-	sendSock := utp.NewSocket(ctx, senderConn, quiet())
+	sendSock := utp.NewSocket(ctx, senderConn, Quiet())
 	defer sendSock.Close()
 	var recvConn utp.Conn = b
 	if batched {
-		recvConn = batchedReader{b}
+		recvConn = BatchedReader{b}
 	}
-	recvSock := utp.NewSocket(ctx, recvConn, quiet())
+	recvSock := utp.NewSocket(ctx, recvConn, Quiet())
 	defer recvSock.Close()
 
 	acceptCid := utp.NewConnectionID(a.Addr(), cid+1, cid)

@@ -56,9 +56,9 @@ func TestWindowDecayIsRateLimited(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	sockA := utp.NewSocket(ctx, a, quiet())
+	sockA := utp.NewSocket(ctx, a, Quiet())
 	defer sockA.Close()
-	sockB := utp.NewSocket(ctx, b, quiet())
+	sockB := utp.NewSocket(ctx, b, Quiet())
 	defer sockB.Close()
 
 	var (
@@ -107,7 +107,7 @@ func TestWindowDecayIsRateLimited(t *testing.T) {
 	time.Sleep(1200 * time.Millisecond)
 
 	mu.Lock()
-	before := lastSample(samples)
+	before := LastSample(samples)
 	mu.Unlock()
 	lossAt := time.Now()
 
@@ -137,7 +137,7 @@ func TestWindowDecayIsRateLimited(t *testing.T) {
 	got := append([]utp.ConnectionMetrics(nil), samples...)
 	mu.Unlock()
 
-	after := lastSample(got)
+	after := LastSample(got)
 	lowest, ok := lowestCwndAfter(got, lossAt)
 	if !ok {
 		t.Fatal("no samples after the loss burst")

@@ -45,7 +45,7 @@ func TestQuietConnectionDoesNotTimeOut(t *testing.T) {
 
 	sockA := utp.NewSocket(ctx, a, debugIfSet())
 	defer sockA.Close()
-	sockB := utp.NewSocket(ctx, b, quiet())
+	sockB := utp.NewSocket(ctx, b, Quiet())
 	defer sockB.Close()
 
 	var (
@@ -88,11 +88,11 @@ func TestQuietConnectionDoesNotTimeOut(t *testing.T) {
 	if _, err := stream.Write(ctx, bulk); err != nil {
 		t.Fatalf("bulk write: %v", err)
 	}
-	quietFrom := waitForIdle(t, &mu, &samples, bulkStart, 60*time.Second)
+	quietFrom := WaitForIdle(t, &mu, &samples, bulkStart, 60*time.Second)
 
 	mu.Lock()
-	timeoutsAfterBulk := lastSample(samples).Timeouts
-	cwndAfterBulk := lastSample(samples).CwndBytes
+	timeoutsAfterBulk := LastSample(samples).Timeouts
+	cwndAfterBulk := LastSample(samples).CwndBytes
 	mu.Unlock()
 
 	// Now the quiet phase: one small write every 200ms, each one comfortably
@@ -111,7 +111,7 @@ func TestQuietConnectionDoesNotTimeOut(t *testing.T) {
 	got := append([]utp.ConnectionMetrics(nil), samples...)
 	mu.Unlock()
 
-	final := lastSample(got)
+	final := LastSample(got)
 	timedOut := final.Timeouts - timeoutsAfterBulk
 	retxDuringQuiet := final.PacketsRetransmitted - retxAt(got, quietFrom)
 
@@ -128,16 +128,9 @@ func TestQuietConnectionDoesNotTimeOut(t *testing.T) {
 
 func debugIfSet() *slog.Logger {
 	if os.Getenv("UTP_IDLE_DEBUG") == "" {
-		return quiet()
+		return Quiet()
 	}
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-}
-
-func lastSample(samples []utp.ConnectionMetrics) utp.ConnectionMetrics {
-	if len(samples) == 0 {
-		return utp.ConnectionMetrics{}
-	}
-	return samples[len(samples)-1]
 }
 
 func retxAt(samples []utp.ConnectionMetrics, at time.Time) uint64 {

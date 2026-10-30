@@ -1,13 +1,9 @@
-//go:build cgo
-
 package utp
 
 import (
 	"context"
 	"testing"
 	"time"
-
-	"github.com/arxodeus/utp/internal/libutp"
 )
 
 // emissionInstants reads the instant each packet was built from the packet
@@ -93,7 +89,7 @@ func waitForEmitted(t *testing.T, conn *scriptedConn, n int) {
 func libutpSynRetransmissions(t *testing.T, within time.Duration) []time.Duration {
 	t.Helper()
 
-	drv, err := libutp.NewDriver(1_000_000)
+	drv, err := newRefDriver(t, 1_000_000)
 	if err != nil {
 		t.Skipf("libutp driver unavailable: %v", err)
 	}
@@ -286,7 +282,7 @@ func ourReplyInstant(t *testing.T) (time.Duration, []byte) {
 func libutpReplyInstant(t *testing.T) time.Duration {
 	t.Helper()
 
-	drv, err := libutp.NewDriver(1_000_000)
+	drv, err := newRefDriver(t, 1_000_000)
 	if err != nil {
 		t.Skipf("libutp driver unavailable: %v", err)
 	}

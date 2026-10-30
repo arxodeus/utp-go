@@ -171,7 +171,7 @@ func TestSoakLongRunning(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	pair := NewUtpPair(ctx, n, a, b, quiet())
+	pair := NewUtpPair(ctx, n, a, b, Quiet())
 
 	var (
 		failures  []error

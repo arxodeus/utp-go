@@ -1,6 +1,6 @@
 // Package goutp tests this library against go-utp's pure Go engine
 // (github.com/anacrolix/go-utp/purego), a cgo-free port of libutp, as an
-// interop partner alongside libutp itself (internal/libutp).
+// interop partner alongside libutp itself (internal/integration/libutp).
 //
 // It is a module of its own so that go-utp and its dependencies stay out of
 // the library's module graph. Run it from here:

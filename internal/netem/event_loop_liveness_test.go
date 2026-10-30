@@ -38,9 +38,9 @@ func TestEventLoopRunsWhileReaderIsStalled(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	sendSock := utp.NewSocket(ctx, a, quiet())
+	sendSock := utp.NewSocket(ctx, a, Quiet())
 	defer sendSock.Close()
-	recvSock := utp.NewSocket(ctx, b, quiet())
+	recvSock := utp.NewSocket(ctx, b, Quiet())
 	defer recvSock.Close()
 
 	const initiatorCid, responderCid = 600, 601

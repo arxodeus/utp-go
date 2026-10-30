@@ -33,27 +33,6 @@ import (
 //
 // It is skipped under -short.
 
-// benchmarkRepeats is how many times each profile runs by default: once.
-// One run is a gate, not a measurement: everything asserted is per run (the
-// transfer completed and the bytes are correct), which catches a congestion
-// controller that has stopped working, and keeps `go test ./internal/netem`
-// within Go's default timeout.
-//
-// Set UTP_BENCHMARK_REPEATS to take a measurement. The loss profiles need
-// about seven: their results are bimodal, one retransmission timeout
-// dominating a short transfer.
-const benchmarkRepeats = 1
-
-// benchmarkRepeatCount is the repeat count, overridable for measurement runs.
-func benchmarkRepeatCount() int {
-	if v := os.Getenv("UTP_BENCHMARK_REPEATS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return benchmarkRepeats
-}
-
 // benchmarkAlgorithms is the set of congestion controllers the suite runs.
 // Every profile runs under each, so the tables can be compared directly.
 func benchmarkAlgorithms() []struct {
@@ -168,7 +147,7 @@ func TestBenchmarkSuite(t *testing.T) {
 						qdelayP95 []time.Duration
 						queueP50  []time.Duration
 					)
-					for run := 0; run < benchmarkRepeatCount(); run++ {
+					for run := 0; run < MeasurementRepeats(); run++ {
 						res, sum := runProfileOnce(t, profile, alg.algo)
 						mbps = append(mbps, res.Goodput.Mbps())
 						elapsed = append(elapsed, res.Elapsed)
@@ -181,12 +160,12 @@ func TestBenchmarkSuite(t *testing.T) {
 						queueP50 = append(queueP50, sum.StandingQueueP50)
 						t.Logf("run %d: %s | %s", run+1, res, sum)
 					}
-					lo, hi := minMaxFloat(mbps)
+					lo, hi := MinMaxFloat(mbps)
 					rows = append(rows, fmt.Sprintf("| %s | %.2f Mbps | %.2f-%.2f | %v | %.2f%% | %.0fB | %.0fB | %.1f%% | %v | %v | %v |",
-						profile.name, medianFloat(mbps), lo, hi,
+						profile.name, MedianFloat(mbps), lo, hi,
 						medianDuration(elapsed).Round(time.Millisecond),
-						medianFloat(retx), medianFloat(cwndMean), medianFloat(cwndMax),
-						medianFloat(atFloor),
+						MedianFloat(retx), MedianFloat(cwndMean), MedianFloat(cwndMax),
+						MedianFloat(atFloor),
 						medianDuration(qdelayP50).Round(time.Microsecond),
 						medianDuration(qdelayP95).Round(time.Microsecond),
 						medianDuration(queueP50).Round(time.Microsecond)))
@@ -199,7 +178,7 @@ func TestBenchmarkSuite(t *testing.T) {
 				tp := tp
 				t.Run(tp.name, func(t *testing.T) {
 					var totals, fairnesses, shared, drops []float64
-					for run := 0; run < benchmarkRepeatCount(); run++ {
+					for run := 0; run < MeasurementRepeats(); run++ {
 						r := runTwoFlowBottleneck(t, benchmarkSeed(108), tp, alg.algo)
 						total := r.throughputs[0].Mbps() + r.throughputs[1].Mbps()
 						totals = append(totals, total)
@@ -211,13 +190,13 @@ func TestBenchmarkSuite(t *testing.T) {
 							run+1, r.throughputs[0].Mbps(), r.throughputs[1].Mbps(), total, r.fairness,
 							100*r.shared, 100*(1-r.shared), r.queueDrops)
 					}
-					lo, hi := minMaxFloat(totals)
-					slo, _ := minMaxFloat(shared)
+					lo, hi := MinMaxFloat(totals)
+					slo, _ := MinMaxFloat(shared)
 					rows = append(rows, fmt.Sprintf("| %s | %.2f Mbps total | %.2f-%.2f | | | | | | | | "+
 						"Jain %.3f; split while both ran %.0f/%.0f (worst %.0f/%.0f); %.0f queue drops |",
-						tp.name, medianFloat(totals), lo, hi, medianFloat(fairnesses),
-						100*medianFloat(shared), 100*(1-medianFloat(shared)), 100*slo, 100*(1-slo),
-						medianFloat(drops)))
+						tp.name, MedianFloat(totals), lo, hi, MedianFloat(fairnesses),
+						100*MedianFloat(shared), 100*(1-MedianFloat(shared)), 100*slo, 100*(1-slo),
+						MedianFloat(drops)))
 				})
 			}
 
@@ -245,7 +224,7 @@ func runProfileOnce(t *testing.T, profile linkProfile, algo utp.CongestionAlgori
 
 	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 	defer cancel()
-	pair := NewUtpPair(ctx, n, a, b, quiet())
+	pair := NewUtpPair(ctx, n, a, b, Quiet())
 
 	data := make([]byte, profile.payload)
 	for i := range data {
@@ -269,18 +248,6 @@ func runProfileOnce(t *testing.T, profile linkProfile, algo utp.CongestionAlgori
 		t.Fatalf("%s: payload corrupted", profile.name)
 	}
 	return res, res.Sender.Summary()
-}
-
-func medianFloat(values []float64) float64 {
-	sorted := append([]float64(nil), values...)
-	sort.Float64s(sorted)
-	return sorted[len(sorted)/2]
-}
-
-func minMaxFloat(values []float64) (float64, float64) {
-	sorted := append([]float64(nil), values...)
-	sort.Float64s(sorted)
-	return sorted[0], sorted[len(sorted)-1]
 }
 
 func medianDuration(values []time.Duration) time.Duration {
@@ -343,7 +310,7 @@ func runTwoFlowBottleneck(t *testing.T, seed int64, profile twoFlowProfile, algo
 
 	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 	defer cancel()
-	pair := NewUtpPair(ctx, n, sender, receiver, quiet())
+	pair := NewUtpPair(ctx, n, sender, receiver, Quiet())
 
 	data := make([]byte, profile.payload)
 	for i := range data {
@@ -414,8 +381,3 @@ func benchmarkSeed(profileSeed int64) int64 {
 	}
 	return profileSeed
 }
-
-// benchmarkRACK is whether UTP_BENCHMARK_RACK asks for ConnectionConfig.RACK,
-// so that the suite, deference and latecomer measurements can compare the
-// two loss detectors in one binary, interleaved.
-func benchmarkRACK() bool { return os.Getenv("UTP_BENCHMARK_RACK") == "1" }

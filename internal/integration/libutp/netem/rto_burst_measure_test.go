@@ -1,0 +1,145 @@
+//go:build cgo
+
+package netem_test
+
+import (
+	"context"
+	"encoding/binary"
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	. "github.com/arxodeus/utp/internal/netem"
+)
+
+// What each sender puts on the wire at a retransmission timeout.
+//
+// A 16MB transfer over a 10ms, 20 Mb/s link, with the data direction blacked
+// out for 3 seconds starting 1 second in. Every data packet offered to the
+// link during the blackout is logged, grouped into bursts. The receiver is
+// ours in both modes; only the sender differs. Both should send one packet,
+// the oldest, at the timeout and nothing more before the blackout ends.
+//
+// TestRetransmissionTimeoutResendsOnlyTheOldest is the deterministic test of
+// the same rule. This measurement takes about 25 seconds, so it runs only
+// when UTP_RTO_BURST_MEASURE is set.
+func TestRTOBurstMeasure(t *testing.T) {
+	if os.Getenv("UTP_RTO_BURST_MEASURE") == "" {
+		t.Skip("measurement; set UTP_RTO_BURST_MEASURE=1 to run")
+	}
+	for _, mode := range []string{"libutp->go", "go->go"} {
+		t.Run(mode, func(t *testing.T) { measureRTOBursts(t, mode) })
+	}
+}
+
+type offered struct {
+	at    time.Duration
+	seq   uint16
+	retx  bool
+	bytes int
+}
+
+func measureRTOBursts(t *testing.T, mode string) {
+	const (
+		blackoutAt  = 1 * time.Second
+		blackoutFor = 3 * time.Second
+	)
+	n := NewNetwork(31)
+	defer n.Close()
+	a := n.MustAddEndpoint("a")
+	b := n.MustAddEndpoint("b")
+	base := Config{Delay: 10 * time.Millisecond, BandwidthBps: 20_000_000}
+
+	var mu sync.Mutex
+	var start time.Time
+	var log []offered
+	seen := map[uint16]bool{}
+	fwd := base
+	fwd.OnOffered = func(p []byte, at time.Time) {
+		// An ST_DATA: type 0 in the high nibble, version 1 (BEP 29).
+		if len(p) < 20 || p[0] != 0<<4|1 {
+			return
+		}
+		seq := binary.BigEndian.Uint16(p[16:])
+		mu.Lock()
+		defer mu.Unlock()
+		if start.IsZero() {
+			start = at
+		}
+		log = append(log, offered{at: at.Sub(start), seq: seq, retx: seen[seq], bytes: len(p)})
+		seen[seq] = true
+	}
+	n.ConnectAsymmetric(a, b, fwd, base)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	go func() {
+		// Timed from the first data packet, not from here.
+		for {
+			mu.Lock()
+			s := start
+			mu.Unlock()
+			if !s.IsZero() {
+				time.Sleep(time.Until(s.Add(blackoutAt)))
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		dark := fwd
+		dark.LossRate = 1
+		_ = n.SetConfig("a", "b", dark)
+		time.Sleep(blackoutFor)
+		_ = n.SetConfig("a", "b", fwd)
+	}()
+
+	payload := make([]byte, 16<<20)
+	var err error
+	switch mode {
+	case "libutp->go":
+		_, _, err = libutpToGo(ctx, n, a, b, payload, 7000)
+	case "go->go":
+		pair := NewUtpPair(ctx, n, a, b, Quiet())
+		_, err = pair.RunTransfer(ctx, payload, FlowOptions{InitiatorCid: 100})
+	}
+	if err != nil {
+		t.Fatalf("%s: %v", mode, err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	sort.Slice(log, func(i, j int) bool { return log[i].at < log[j].at })
+	// Bursts during the blackout: packets within 5ms of the previous one.
+	var lines []string
+	var burst []offered
+	flush := func() {
+		if len(burst) == 0 {
+			return
+		}
+		retx := 0
+		for _, o := range burst {
+			if o.retx {
+				retx++
+			}
+		}
+		lines = append(lines, fmt.Sprintf("  +%7.3fs  %3d packets (%3d retransmissions), seqs %d..%d",
+			burst[0].at.Seconds(), len(burst), retx, burst[0].seq, burst[len(burst)-1].seq))
+		burst = nil
+	}
+	for _, o := range log {
+		if o.at < blackoutAt || o.at >= blackoutAt+blackoutFor {
+			continue
+		}
+		if len(burst) > 0 && o.at-burst[len(burst)-1].at > 5*time.Millisecond {
+			flush()
+		}
+		burst = append(burst, o)
+	}
+	flush()
+	t.Logf("%s: data packets offered during the blackout (%v to %v):\n%s",
+		mode, blackoutAt, blackoutAt+blackoutFor, strings.Join(lines, "\n"))
+}

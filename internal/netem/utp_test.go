@@ -2,17 +2,11 @@ package netem
 
 import (
 	"context"
-	"log/slog"
-	"os"
 	"testing"
 	"time"
 
 	utp "github.com/arxodeus/utp"
 )
-
-func quiet() *slog.Logger {
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 4}))
-}
 
 // The harness carries uTP, and the connection-level metrics record
 // something; otherwise the gates would measure an emulator nobody had run a
@@ -31,7 +25,7 @@ func TestUTPTransferOverEmulatedLink(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	pair := NewUtpPair(ctx, n, a, b, quiet())
+	pair := NewUtpPair(ctx, n, a, b, Quiet())
 
 	data := make([]byte, 512*1024)
 	for i := range data {
@@ -73,7 +67,7 @@ func TestCongestionWindowRespondsOverEmulatedLink(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	pair := NewUtpPair(ctx, n, a, b, quiet())
+	pair := NewUtpPair(ctx, n, a, b, Quiet())
 
 	data := make([]byte, 768*1024)
 	res, err := pair.RunTransfer(ctx, data, FlowOptions{
@@ -121,7 +115,7 @@ func TestUTPSurvivesLossOverEmulatedLink(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	pair := NewUtpPair(ctx, n, a, b, quiet())
+	pair := NewUtpPair(ctx, n, a, b, Quiet())
 
 	data := make([]byte, 256*1024)
 	for i := range data {
@@ -164,7 +158,7 @@ func TestTwoUTPFlowsShareBottleneck(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	pair := NewUtpPair(ctx, n, a, b, quiet())
+	pair := NewUtpPair(ctx, n, a, b, Quiet())
 
 	data := make([]byte, 384*1024)
 	type out struct {
@@ -276,7 +270,7 @@ func TestSpuriousRetransmitsOnLosslessLink(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	pair := NewUtpPair(ctx, n, a, b, quiet())
+	pair := NewUtpPair(ctx, n, a, b, Quiet())
 
 	data := make([]byte, 768*1024)
 	res, err := pair.RunTransfer(ctx, data, FlowOptions{
@@ -325,7 +319,7 @@ func TestConnectionGivesUpWhenPeerGoesSilent(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	pair := NewUtpPair(ctx, n, a, b, quiet())
+	pair := NewUtpPair(ctx, n, a, b, Quiet())
 
 	cfg := utp.NewConnectionConfig()
 	// Shorten the RTO so the four retransmissions do not take ten seconds.

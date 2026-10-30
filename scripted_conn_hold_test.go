@@ -1,5 +1,3 @@
-//go:build cgo
-
 package utp
 
 // hold and release are used only by the cgo conformance tests

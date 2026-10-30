@@ -1,5 +1,3 @@
-//go:build cgo
-
 package utp
 
 import (
@@ -10,8 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/arxodeus/utp/internal/libutp"
 )
 
 // The responder corpus.
@@ -83,7 +79,7 @@ func runResponderCorpus(t *testing.T, steps []step) {
 	t.Helper()
 
 	// --- reference side ---
-	drv, err := libutp.NewDriver(1_000_000)
+	drv, err := newRefDriver(t, 1_000_000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,8 +497,8 @@ func (s step) rawBytes() []byte {
 }
 
 // libutpNewDriverForCorpus builds a driver pinned the way the corpus expects.
-func libutpNewDriverForCorpus() (*libutp.Driver, error) {
-	d, err := libutp.NewDriver(1_000_000)
+func libutpNewDriverForCorpus(t testing.TB) (*refDriver, error) {
+	d, err := newRefDriver(t, 1_000_000)
 	if err != nil {
 		return nil, err
 	}

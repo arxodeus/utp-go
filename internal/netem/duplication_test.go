@@ -26,7 +26,7 @@ func TestDuplicatedPacketsCauseNoRetransmission(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	pair := NewUtpPair(ctx, n, a, b, quiet())
+	pair := NewUtpPair(ctx, n, a, b, Quiet())
 	data := make([]byte, 2<<20)
 	for i := range data {
 		data[i] = byte(i*13 + i/1021)

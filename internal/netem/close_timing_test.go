@@ -43,9 +43,9 @@ func TestCloseFlushesASlowTail(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	sockA := utp.NewSocket(ctx, a, quiet())
+	sockA := utp.NewSocket(ctx, a, Quiet())
 	defer sockA.Close()
-	sockB := utp.NewSocket(ctx, b, quiet())
+	sockB := utp.NewSocket(ctx, b, Quiet())
 	defer sockB.Close()
 
 	const size = 512 * 1024
@@ -144,9 +144,9 @@ func TestCloseDoesNotWaitForASilentPeer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	sockA := utp.NewSocket(ctx, a, quiet())
+	sockA := utp.NewSocket(ctx, a, Quiet())
 	defer sockA.Close()
-	sockB := utp.NewSocket(ctx, b, quiet())
+	sockB := utp.NewSocket(ctx, b, Quiet())
 	defer sockB.Close()
 
 	accepted := make(chan *utp.Stream, 1)

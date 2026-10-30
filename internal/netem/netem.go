@@ -279,7 +279,7 @@ func (e *Endpoint) ReadFrom(b []byte) (int, utp.ConnectionPeer, error) {
 // each datagram as a read batch of its own and acknowledges it alone (unless
 // the acknowledgement-rate hold defers it), which is what its measurements
 // were taken with. A test that wants a receiver batching as a real socket
-// does wraps it; see batchedReader in dont_fragment_test.go.
+// does wraps it; see BatchedReader.
 
 // WriteTo sends a packet towards dst, and satisfies utp.Conn.
 //

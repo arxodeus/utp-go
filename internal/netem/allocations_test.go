@@ -24,7 +24,7 @@ func TestAllocationsPerPacket(t *testing.T) {
 	n.Connect(a, b, Config{Delay: time.Millisecond, BandwidthBps: 100_000_000, QueueBytes: 256 * 1024})
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	pair := NewUtpPair(ctx, n, a, b, quiet())
+	pair := NewUtpPair(ctx, n, a, b, Quiet())
 	payload := make([]byte, 4<<20)
 
 	var before, after runtime.MemStats

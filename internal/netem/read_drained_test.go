@@ -32,9 +32,9 @@ func TestReadDrainedRestartsASenderBlockedBySubPacketWindow(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*budget)
 	defer cancel()
-	sendSock := utp.NewSocket(ctx, a, quiet())
+	sendSock := utp.NewSocket(ctx, a, Quiet())
 	defer sendSock.Close()
-	recvSock := utp.NewSocket(ctx, b, quiet())
+	recvSock := utp.NewSocket(ctx, b, Quiet())
 	defer recvSock.Close()
 
 	const cid = 900

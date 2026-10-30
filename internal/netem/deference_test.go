@@ -1,9 +1,7 @@
 package netem
 
 import (
-	"context"
 	"testing"
-	"time"
 
 	utp "github.com/arxodeus/utp"
 )
@@ -29,7 +27,7 @@ func TestDeferenceToLossBasedFlow(t *testing.T) {
 
 	// The competitor alone, to establish what the link gives one greedy flow
 	// with nothing to share it with.
-	solo := runRenoSolo(t)
+	solo := RunRenoSolo(t)
 	t.Logf("baseline: the competitor alone gets %.2f Mbps", solo)
 
 	for _, alg := range []struct {
@@ -41,7 +39,7 @@ func TestDeferenceToLossBasedFlow(t *testing.T) {
 	} {
 		alg := alg
 		t.Run(alg.name, func(t *testing.T) {
-			utpMbps, renoMbps, queue, utpShare := runDeference(t, alg.algo)
+			utpMbps, renoMbps, queue, utpShare := RunDeference(t, alg.algo)
 
 			// The number that matters: how much of the competitor's
 			// bandwidth uTP took. A protocol that yields leaves the
@@ -66,146 +64,4 @@ func TestDeferenceToLossBasedFlow(t *testing.T) {
 			}
 		})
 	}
-}
-
-type queueStats struct {
-	p50, p95, max time.Duration
-}
-
-// deferenceLinkConfig is the shared bottleneck both experiments run over.
-//
-// The queue is 256 KB, about 200ms at this rate. It has to be deeper than
-// either controller's delay target for delay-based control to operate at all:
-// on a queue shallower than the target, the queue overflows before the target
-// is reached and a delay-based controller degenerates into a loss-based one,
-// which would make this experiment measure nothing.
-func deferenceLinkConfig() Config {
-	return Config{
-		Delay:        20 * time.Millisecond,
-		BandwidthBps: 10_000_000,
-		QueueBytes:   256 * 1024,
-	}
-}
-
-const deferencePayload = 4 * 1024 * 1024
-
-// runRenoSolo measures the competitor with the link to itself.
-func runRenoSolo(t *testing.T) float64 {
-	t.Helper()
-	n := NewNetwork(310)
-	defer n.Close()
-	a := n.MustAddEndpoint("reno-sender")
-	b := n.MustAddEndpoint("reno-receiver")
-	cfg := deferenceLinkConfig()
-	n.ConnectShared(cfg, [2]*Endpoint{a, b}, [2]*Endpoint{b, a})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
-	defer cancel()
-
-	res, err := RunRenoFlow(ctx, a, b, deferencePayload, 1024)
-	if err != nil {
-		t.Fatalf("competitor alone: %v", err)
-	}
-	t.Logf("competitor alone: %s, cwnd mean %dB max %dB, retx %d, timeouts %d, fast retransmits %d",
-		res.Goodput, res.CwndMeanBytes, res.CwndMaxBytes, res.Retransmits, res.Timeouts, res.FastRetransmits)
-	return res.Goodput.Mbps()
-}
-
-// runDeference runs a uTP flow and the competitor over one shared bottleneck
-// and returns what each achieved, plus the queue they left at the bottleneck.
-func runDeference(t *testing.T, algo utp.CongestionAlgorithm) (utpMbps, renoMbps float64, queue queueStats, utpShare float64) {
-	t.Helper()
-
-	n := NewNetwork(311)
-	defer n.Close()
-	utpSender := n.MustAddEndpoint("utp-sender")
-	utpReceiver := n.MustAddEndpoint("utp-receiver")
-	renoSender := n.MustAddEndpoint("reno-sender")
-	renoReceiver := n.MustAddEndpoint("reno-receiver")
-
-	// One bottleneck, four directed pairs through it.
-	cfg := deferenceLinkConfig()
-	n.ConnectShared(cfg,
-		[2]*Endpoint{utpSender, utpReceiver},
-		[2]*Endpoint{utpReceiver, utpSender},
-		[2]*Endpoint{renoSender, renoReceiver},
-		[2]*Endpoint{renoReceiver, renoSender},
-	)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
-	defer cancel()
-	pair := NewUtpPair(ctx, n, utpSender, utpReceiver, quiet())
-
-	data := make([]byte, deferencePayload)
-	for i := range data {
-		data[i] = byte(i)
-	}
-
-	type outcome struct {
-		which     string
-		mbps      float64
-		delivered []DeliverySample
-		err       error
-	}
-	results := make(chan outcome, 2)
-
-	// The competitor starts first and is given time to fill the queue, so the
-	// uTP flow arrives at a bottleneck that is already busy -- which is the
-	// situation it is supposed to detect and defer to.
-	go func() {
-		res, err := RunRenoFlow(ctx, renoSender, renoReceiver, deferencePayload, 1024)
-		if err != nil {
-			results <- outcome{"reno", 0, nil, err}
-			return
-		}
-		results <- outcome{"reno", res.Goodput.Mbps(), res.Delivered, nil}
-	}()
-
-	time.Sleep(1500 * time.Millisecond)
-
-	go func() {
-		cfgConn := utp.NewConnectionConfig()
-		cfgConn.CongestionAlgorithm = algo
-		cfgConn.RACK = benchmarkRACK()
-		res, err := pair.RunTransfer(ctx, data, FlowOptions{
-			InitiatorCid:    800,
-			Config:          cfgConn,
-			MetricsInterval: 10 * time.Millisecond,
-		})
-		if err != nil {
-			results <- outcome{"utp", 0, nil, err}
-			return
-		}
-		results <- outcome{"utp", res.Goodput.Mbps(), ReceivedSeries(res.Receiver.Samples()), nil}
-	}()
-
-	var utpDelivered, renoDelivered []DeliverySample
-	for i := 0; i < 2; i++ {
-		out := <-results
-		if out.err != nil {
-			t.Fatalf("%s flow: %v", out.which, out.err)
-		}
-		if out.which == "utp" {
-			utpMbps, utpDelivered = out.mbps, out.delivered
-		} else {
-			renoMbps, renoDelivered = out.mbps, out.delivered
-		}
-	}
-	if share, ok := SplitWhileBothRan(utpDelivered, renoDelivered); ok {
-		utpShare = share
-	} else {
-		t.Errorf("the two flows never overlapped; there is no split to report")
-	}
-
-	// The queue at the bottleneck itself, which is what a third party sharing
-	// this link would experience.
-	link := n.Link("utp-sender", "utp-receiver")
-	if link != nil {
-		st := link.Stats()
-		queue.max = st.QueueDelayMax
-		queue.p50 = link.QueueDelayPercentile(0.50)
-		queue.p95 = link.QueueDelayPercentile(0.95)
-		_ = st
-	}
-	return utpMbps, renoMbps, queue, utpShare
 }

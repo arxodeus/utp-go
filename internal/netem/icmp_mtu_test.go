@@ -74,10 +74,10 @@ func icmpTransfer(t *testing.T, linkMTU int, payloadLen int, cid uint16, withICM
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	sendSocket := utp.NewSocket(ctx, a, quiet())
+	sendSocket := utp.NewSocket(ctx, a, Quiet())
 	defer sendSocket.Close()
 	sendSock.Store(sendSocket)
-	recvSock := utp.NewSocket(ctx, b, quiet())
+	recvSock := utp.NewSocket(ctx, b, Quiet())
 	defer recvSock.Close()
 
 	acceptCid := utp.NewConnectionID(a.Addr(), cid+1, cid)

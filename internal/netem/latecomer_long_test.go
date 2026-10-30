@@ -43,7 +43,7 @@ func TestLatecomerShareOverTime(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Second)
 	defer cancel()
-	pair := NewUtpPair(ctx, n, sender, receiver, quiet())
+	pair := NewUtpPair(ctx, n, sender, receiver, Quiet())
 	megabytes := 16
 	if v := os.Getenv("UTP_LONG_LATECOMER_MB"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {

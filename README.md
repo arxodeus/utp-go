@@ -92,10 +92,14 @@ This is a 0.x release: the API may still change before 1.0.
 ## Testing
 
 ```sh
-go test ./...          # full suite; the interoperability tests need cgo
+go test ./...          # full suite
 go test -short ./...   # quick run
 go test -race ./...
 ```
+
+None of these need cgo. The tests against other uTP implementations are in
+their own modules under [internal/integration](internal/integration); the one
+against BitTorrent's C implementation needs cgo.
 
 ## Origin
 

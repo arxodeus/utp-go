@@ -1,5 +1,3 @@
-//go:build cgo
-
 package utp
 
 import (
@@ -7,8 +5,6 @@ import (
 	"errors"
 	"testing"
 	"time"
-
-	"github.com/arxodeus/utp/internal/libutp"
 )
 
 // The initiator corpus: both implementations open the connection, sending
@@ -23,7 +19,7 @@ import (
 // initiatorRun holds both implementations mid-conversation.
 type initiatorRun struct {
 	t   *testing.T
-	drv *libutp.Driver
+	drv *refDriver
 	clk *virtualClock
 	// streamCh carries the connected stream once the handshake completes. It
 	// is written by the goroutine running ConnectWithCID and read by the
@@ -62,7 +58,7 @@ func newInitiatorRun(t *testing.T) (*initiatorRun, [][]byte, [][]byte) {
 func newInitiatorRunMTU(t *testing.T, udpMTU uint16) (*initiatorRun, [][]byte, [][]byte) {
 	t.Helper()
 
-	drv, err := libutp.NewDriver(1_000_000)
+	drv, err := newRefDriver(t, 1_000_000)
 	if err != nil {
 		t.Skipf("libutp driver unavailable: %v", err)
 	}

@@ -1,13 +1,9 @@
-//go:build cgo
-
 package utp
 
 import (
 	"context"
 	"testing"
 	"time"
-
-	"github.com/arxodeus/utp/internal/libutp"
 )
 
 // When the peer's stream ends, the reference implementation arms its
@@ -26,7 +22,7 @@ import (
 // FIN arriving.
 func libutpFirstResendAfterResponse(t *testing.T, peerFin bool) time.Duration {
 	t.Helper()
-	drv, err := libutp.NewDriver(1_000_000)
+	drv, err := newRefDriver(t, 1_000_000)
 	if err != nil {
 		t.Skipf("libutp driver unavailable: %v", err)
 	}

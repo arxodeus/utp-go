@@ -22,7 +22,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: gofmt
-        run: test -z "$(gofmt -l . | grep -v '^internal/libutp/upstream/' | tee /dev/stderr)"
+        run: test -z "$(gofmt -l . | tee /dev/stderr)"
       - name: vet
         run: go vet ./...
       - name: cross-build
@@ -60,7 +60,7 @@ jobs:
           go-version: stable
       - name: govulncheck
         run: |
-          for m in . compat/golibutp internal/integration/nettest internal/integration/goutp internal/integration/anacrolix; do
+          for m in . compat/golibutp internal/integration/nettest internal/integration/goutp internal/integration/anacrolix internal/integration/libutp; do
             echo "== $m"
             (cd "$m" && go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...)
           done
@@ -111,6 +111,39 @@ jobs:
         run: go test -race -timeout 30m ./...
         working-directory: ${{ matrix.module }}
 
+  # Interoperability with libutp. The root package's conformance tests replay
+  # transcripts recorded from libutp; here they run against libutp itself,
+  # through the libutp-driver program, and the transcripts are re-recorded
+  # and must not have changed.
+  libutp:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: internal/integration/libutp/go.mod
+      - name: build libutp-driver
+        run: go build -o "$RUNNER_TEMP/libutp-driver" ./cmd/libutp-driver
+        working-directory: internal/integration/libutp
+      - name: vet
+        run: go vet ./...
+        working-directory: internal/integration/libutp
+      - name: interoperability tests
+        run: go test -short -timeout 30m ./...
+        working-directory: internal/integration/libutp
+      - name: race
+        run: go test -race -short -timeout 30m ./...
+        working-directory: internal/integration/libutp
+      - name: conformance against libutp
+        run: go test -timeout 60m .
+        env:
+          UTP_LIBUTP_DRIVER: ${{ runner.temp }}/libutp-driver
+          UTP_LIBUTP_RECORD: "1"
+      - name: recorded transcripts are up to date
+        run: |
+          git status --porcelain -- testdata/libutp
+          test -z "$(git status --porcelain -- testdata/libutp)"
 
   platforms:
     if: github.event_name != 'schedule'
@@ -143,9 +176,22 @@ jobs:
         run: go test -race -timeout 120m ./...
         env:
           UTP_TEST_TRANSFERS: "50"
+      - name: build libutp-driver
+        run: go build -o "$RUNNER_TEMP/libutp-driver" ./cmd/libutp-driver
+        working-directory: internal/integration/libutp
+      - name: full libutp suite
+        run: go test -timeout 120m ./...
+        working-directory: internal/integration/libutp
+      - name: full libutp race suite
+        run: go test -race -timeout 120m ./...
+        working-directory: internal/integration/libutp
       - name: pinned libutp reference
-        run: scripts/check-libutp-reference.sh
+        run: internal/integration/libutp/check-reference.sh
+      # The differential targets run against libutp itself: a new input has
+      # no recorded transcript.
       - name: fuzz
+        env:
+          UTP_LIBUTP_DRIVER: ${{ runner.temp }}/libutp-driver
         run: |
           for target in FuzzDecodePacketHeader FuzzDecodePacket FuzzDecodeSelectiveAck FuzzResponderPacketSequence FuzzDifferentialResponder FuzzDifferentialInitiator; do
             echo "== $target at $(git rev-parse HEAD), $(go version)"

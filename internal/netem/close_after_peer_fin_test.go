@@ -25,8 +25,8 @@ func TestCloseAfterThePeersFinDeliversWhatWasWritten(t *testing.T) {
 		n.Connect(a, b, Config{Delay: 10 * time.Millisecond, BandwidthBps: 10_000_000, QueueBytes: 256 * 1024, LossRate: 0.05})
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		sa := utp.NewSocket(ctx, a, quiet())
-		sb := utp.NewSocket(ctx, b, quiet())
+		sa := utp.NewSocket(ctx, a, Quiet())
+		sb := utp.NewSocket(ctx, b, Quiet())
 
 		var wg sync.WaitGroup
 		var got []byte

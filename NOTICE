@@ -16,6 +16,6 @@ notice:
 
 - compat/golibutp reproduces the API of anacrolix/go-libutp; see
   compat/golibutp/LICENSE.go-libutp.
-- internal/libutp vendors BitTorrent's libutp, used as a peer by the
-  interoperability tests. It is included in the distributed module but is
-  not linked into the library. See internal/libutp/LICENSE.libutp.
+- internal/integration/libutp vendors BitTorrent's libutp, used as a peer
+  by the interoperability tests. It is a separate module, not part of the
+  published library. See internal/integration/libutp/LICENSE.libutp.
